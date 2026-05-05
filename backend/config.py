@@ -42,6 +42,9 @@ def get_ollama_openai_base_url() -> str:
 _NEWS_MCP_DIR = (_FIN_US_ROOT / "mcp-news").resolve()
 _TRADING_MCP_DIR = (_FIN_US_ROOT / "mcp-trading").resolve()
 
+# SQLite 데이터베이스 파일 경로 설정 (backend 디렉토리 내 finus.db 생성)
+DATABASE_URL = os.environ.get("DATABASE_URL") or f"sqlite:///{_FIN_US_ROOT}/backend/finus.db"
+
 
 def _stdio_server_params(mcp_dir: Path) -> StdioServerParameters:
     return StdioServerParameters(
