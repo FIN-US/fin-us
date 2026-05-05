@@ -83,11 +83,16 @@ cd mcp-trading && npm install
 pip install -r backend/requirements.txt
 uvicorn backend.main:app --host 0.0.0.0 --port 8787
 
-# 3. Frontend 실행
-cd frontend-react
-npm install
-npm run dev
+# 3. Frontend 실행 (Unity WebGL)
+cd frontend/Build
+python -m http.server 8080
 ```
+
+브라우저에서 `http://localhost:8080`을 엽니다.
+
+Unity WebGL 빌드는 `index.html`을 더블클릭해서 `file://` URL로 실행할 수 없습니다. 브라우저가 `Build/Build.data`, `Build/Build.wasm` 같은 Unity 산출물 다운로드를 차단하므로, 로컬 웹 서버로 `frontend/Build` 폴더를 서빙해야 합니다.
+
+프론트엔드 Unity 프로젝트를 수정하거나 다시 빌드해야 하는 경우에만 Unity Editor가 필요합니다. 단순 실행만 하는 팀원은 위 명령으로 커밋된 WebGL 빌드 결과물을 실행하면 됩니다.
 
 ## 📝 에이전트별 보유 스킬 (MCP Tools)
 

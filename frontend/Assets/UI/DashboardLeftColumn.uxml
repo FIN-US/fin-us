@@ -1,0 +1,15 @@
+<ui:UXML xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:ui="UnityEngine.UIElements" xmlns:uie="UnityEditor.UIElements" noNamespaceSchemaLocation="../../UIElementsSchema/UIElements.xsd" editor-extension-mode="False">
+    <ui:VisualElement name="summary-card" style="flex-grow: 1;">
+        <ui:Label text="요약" name="summary-title-label" style="-unity-text-generator: advanced; -unity-text-auto-size: none; font-size: 24px; white-space: normal; -unity-font-style: bold; -unity-font: url('project://database/Assets/UI/Pretendard-Medium.otf?fileID=12800000&amp;guid=1d1678f6cfd13634ab402b7caa51bc91&amp;type=3#Pretendard-Medium');"/>
+        <ui:Label text="summary-label" name="summary-label" style="-unity-text-generator: advanced; -unity-text-auto-size: none; font-size: 20px; white-space: normal; -unity-font: url('project://database/Assets/UI/Pretendard-Medium.otf?fileID=12800000&amp;guid=1d1678f6cfd13634ab402b7caa51bc91&amp;type=3#Pretendard-Medium');"/>
+    </ui:VisualElement>
+    <ui:VisualElement name="decision-card" style="flex-grow: 1;">
+        <ui:Label text="선택" name="decision-title-label" style="-unity-text-generator: advanced; -unity-text-auto-size: none; font-size: 24px; white-space: normal; -unity-font-style: bold; -unity-font: url('project://database/Assets/UI/Pretendard-Medium.otf?fileID=12800000&amp;guid=1d1678f6cfd13634ab402b7caa51bc91&amp;type=3#Pretendard-Medium');"/>
+        <ui:Label text="decision-badge" name="decision-badge" style="-unity-text-generator: advanced; -unity-text-auto-size: none; font-size: 20px; white-space: normal; -unity-font: url('project://database/Assets/UI/Pretendard-Medium.otf?fileID=12800000&amp;guid=1d1678f6cfd13634ab402b7caa51bc91&amp;type=3#Pretendard-Medium');"/>
+        <ui:Label text="confidence-text-label" name="confidence-text-label" style="-unity-text-generator: advanced; -unity-text-auto-size: none; font-size: 20px; white-space: normal; -unity-font: url('project://database/Assets/UI/Pretendard-Medium.otf?fileID=12800000&amp;guid=1d1678f6cfd13634ab402b7caa51bc91&amp;type=3#Pretendard-Medium');"/>
+    </ui:VisualElement>
+    <ui:VisualElement name="reason-panel" style="flex-grow: 1;">
+        <ui:Label text="이유" name="reason-title-label" style="-unity-text-generator: advanced; -unity-text-auto-size: none; font-size: 24px; white-space: normal; height: 33px; -unity-font-style: bold; -unity-font: url('project://database/Assets/UI/Pretendard-Medium.otf?fileID=12800000&amp;guid=1d1678f6cfd13634ab402b7caa51bc91&amp;type=3#Pretendard-Medium');"/>
+        <ui:Label text="reason-label" name="reason-label" style="-unity-text-generator: advanced; -unity-text-auto-size: none; font-size: 20px; white-space: normal; -unity-font: url('project://database/Assets/UI/Pretendard-Medium.otf?fileID=12800000&amp;guid=1d1678f6cfd13634ab402b7caa51bc91&amp;type=3#Pretendard-Medium');"/>
+    </ui:VisualElement>
+</ui:UXML>

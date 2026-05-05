@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en-us">
+  <head>
+    <meta charset="utf-8">
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+    <meta name="viewport" content="width=device-width, height=device-height, initial-scale=1.0, user-scalable=no, shrink-to-fit=yes">
+    <title>{{{ PRODUCT_NAME }}}</title>
+    <link rel="stylesheet" href="TemplateData/style.css">
+#if SHOW_DIAGNOSTICS
+    <link rel="stylesheet" href="<<<TemplateData/diagnostics.css>>>">
+    <script src="<<<TemplateData/diagnostics.js>>>"></script>
+#endif
+#if DEVELOPMENT_PLAYER
+    <script src="<<<TemplateData/profiler.js>>>"></script>
+#endif
+  </head>
+  <body>
+    <div id="unity-container">
+      <canvas id="unity-canvas" width={{{ WIDTH }}} height={{{ HEIGHT }}} tabindex="-1"></canvas>
+      <div id="unity-loading-bar">
+        <div id="unity-progress-bar-empty">
+          <div id="unity-progress-bar-full"></div>
+        </div>
+      </div>
+      <div id="unity-warning"></div>
+#if SHOW_DIAGNOSTICS
+      <img id="diagnostics-icon" src="TemplateData/webmemd-icon.png">
+#endif
+    </div>
+    <script>
+      var canvas = document.querySelector("#unity-canvas");
+
+      function unityShowBanner(msg, type) {
+        var warningBanner = document.querySelector("#unity-warning");
+        function updateBannerVisibility() {
+          warningBanner.style.display = warningBanner.children.length ? "block" : "none";
+        }
+        var div = document.createElement("div");
+        div.innerHTML = msg;
+        warningBanner.appendChild(div);
+        if (type == "error") div.className = "unity-banner-error";
+        else {
+          if (type == "warning") div.className = "unity-banner-warning";
+          setTimeout(function() {
+            warningBanner.removeChild(div);
+            updateBannerVisibility();
+          }, 5000);
+        }
+        updateBannerVisibility();
+      }
+
+      var buildUrl = "Build";
+      var loaderUrl = buildUrl + "/{{{ LOADER_FILENAME }}}";
+      var config = {
+        arguments: [],
+        dataUrl: buildUrl + "/{{{ DATA_FILENAME }}}",
+        frameworkUrl: buildUrl + "/{{{ FRAMEWORK_FILENAME }}}",
+#if USE_THREADS
+        workerUrl: buildUrl + "/{{{ WORKER_FILENAME }}}",
+#endif
+#if USE_WASM
+        codeUrl: buildUrl + "/{{{ CODE_FILENAME }}}",
+#endif
+#if SYMBOLS_FILENAME
+        symbolsUrl: buildUrl + "/{{{ SYMBOLS_FILENAME }}}",
+#endif
+        streamingAssetsUrl: "StreamingAssets",
+        companyName: {{{ JSON.stringify(COMPANY_NAME) }}},
+        productName: {{{ JSON.stringify(PRODUCT_NAME) }}},
+        productVersion: {{{ JSON.stringify(PRODUCT_VERSION) }}},
+        showBanner: unityShowBanner
+      };
+
+#if BACKGROUND_FILENAME
+      canvas.style.background = "url('" + buildUrl + "/{{{ BACKGROUND_FILENAME.replace(/'/g, '%27') }}}') center / cover";
+#endif
+      document.querySelector("#unity-loading-bar").style.display = "block";
+
+      var script = document.createElement("script");
+      script.src = loaderUrl;
+      script.onload = () => {
+        createUnityInstance(canvas, config, (progress) => {
+          document.querySelector("#unity-progress-bar-full").style.width = 100 * progress + "%";
+        }).then((unityInstance) => {
+          window.finusUnityInstance = unityInstance;
+          document.querySelector("#unity-loading-bar").style.display = "none";
+#if SHOW_DIAGNOSTICS
+          document.getElementById("diagnostics-icon").onclick = () => {
+            unityDiagnostics.openDiagnosticsDiv(unityInstance.GetMetricsInfo);
+          };
+#endif
+#if DEVELOPMENT_PLAYER
+          var profile = unityProfiler.createButton(unityInstance);
+          profile.id = "unity-profiler-button";
+          document.body.appendChild(profile);
+#endif
+        }).catch((message) => {
+          alert(message);
+        });
+      };
+
+      document.body.appendChild(script);
+    </script>
+  </body>
+</html>

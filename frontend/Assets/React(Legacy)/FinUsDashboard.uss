@@ -1,0 +1,107 @@
+.root {
+    flex-grow: 1;
+    padding-left: 24px;
+    padding-right: 24px;
+    padding-top: 20px;
+    padding-bottom: 20px;
+    background-color: rgb(248, 250, 252);
+}
+
+.title {
+    -unity-font-style: bold;
+    font-size: 28px;
+    color: rgb(51, 65, 85);
+    -unity-text-align: middle-center;
+    margin-bottom: 16px;
+}
+
+.search-row {
+    flex-direction: row;
+    align-items: center;
+    justify-content: center;
+    margin-bottom: 14px;
+}
+
+.stock-input {
+    width: 420px;
+    margin-right: 10px;
+}
+
+.provider-dropdown {
+    width: 220px;
+    margin-right: 10px;
+}
+
+.button {
+    height: 36px;
+    min-width: 120px;
+    margin-right: 10px;
+    border-radius: 8px;
+    -unity-font-style: bold;
+}
+
+.button.secondary {
+    background-color: rgb(226, 232, 240);
+    color: rgb(30, 41, 59);
+}
+
+.button.primary {
+    background-color: rgb(79, 70, 229);
+    color: rgb(255, 255, 255);
+}
+
+.status {
+    -unity-text-align: middle-center;
+    font-size: 16px;
+    color: rgb(79, 70, 229);
+    margin-bottom: 8px;
+}
+
+.stock-header {
+    -unity-text-align: middle-center;
+    font-size: 20px;
+    -unity-font-style: bold;
+    color: rgb(15, 23, 42);
+    margin-bottom: 16px;
+}
+
+.content-grid {
+    flex-direction: row;
+    flex-grow: 1;
+}
+
+.card {
+    flex-grow: 1;
+    background-color: rgb(255, 255, 255);
+    border-radius: 12px;
+    padding: 16px;
+    margin-right: 12px;
+}
+
+.no-margin {
+    margin-right: 0;
+}
+
+.card-title {
+    font-size: 14px;
+    -unity-font-style: bold;
+    color: rgb(100, 116, 139);
+    margin-bottom: 8px;
+}
+
+.decision {
+    font-size: 28px;
+    -unity-font-style: bold;
+    color: rgb(30, 41, 59);
+    margin-bottom: 8px;
+}
+
+.body {
+    font-size: 15px;
+    color: rgb(51, 65, 85);
+    margin-bottom: 8px;
+}
+
+.body.multi {
+    white-space: normal;
+}

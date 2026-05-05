@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en-us">
+  <head>
+    <meta charset="utf-8">
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+    <meta name="viewport" content="width=device-width, height=device-height, initial-scale=1.0, user-scalable=no, shrink-to-fit=yes">
+    <title>frontend</title>
+    <link rel="stylesheet" href="TemplateData/style.css">
+    <script src="TemplateData/profiler.js"></script>
+  </head>
+  <body>
+    <div id="unity-container">
+      <canvas id="unity-canvas" width=1920 height=1080 tabindex="-1"></canvas>
+      <div id="unity-loading-bar">
+        <div id="unity-progress-bar-empty">
+          <div id="unity-progress-bar-full"></div>
+        </div>
+      </div>
+      <div id="unity-warning"></div>
+    </div>
+    <script>
+      var canvas = document.querySelector("#unity-canvas");
+
+      function unityShowBanner(msg, type) {
+        var warningBanner = document.querySelector("#unity-warning");
+        function updateBannerVisibility() {
+          warningBanner.style.display = warningBanner.children.length ? "block" : "none";
+        }
+        var div = document.createElement("div");
+        div.innerHTML = msg;
+        warningBanner.appendChild(div);
+        if (type == "error") div.className = "unity-banner-error";
+        else {
+          if (type == "warning") div.className = "unity-banner-warning";
+          setTimeout(function() {
+            warningBanner.removeChild(div);
+            updateBannerVisibility();
+          }, 5000);
+        }
+        updateBannerVisibility();
+      }
+
+      var buildUrl = "Build";
+      var loaderUrl = buildUrl + "/Build.loader.js";
+      var config = {
+        arguments: [],
+        dataUrl: buildUrl + "/Build.data",
+        frameworkUrl: buildUrl + "/Build.framework.js",
+        codeUrl: buildUrl + "/Build.wasm",
+        streamingAssetsUrl: "StreamingAssets",
+        companyName: "DefaultCompany",
+        productName: "frontend",
+        productVersion: "0.1.0",
+        showBanner: unityShowBanner
+      };
+
+      document.querySelector("#unity-loading-bar").style.display = "block";
+
+      var script = document.createElement("script");
+      script.src = loaderUrl;
+      script.onload = () => {
+        createUnityInstance(canvas, config, (progress) => {
+          document.querySelector("#unity-progress-bar-full").style.width = 100 * progress + "%";
+        }).then((unityInstance) => {
+          window.finusUnityInstance = unityInstance;
+          document.querySelector("#unity-loading-bar").style.display = "none";
+          var profile = unityProfiler.createButton(unityInstance);
+          profile.id = "unity-profiler-button";
+          document.body.appendChild(profile);
+        }).catch((message) => {
+          alert(message);
+        });
+      };
+
+      document.body.appendChild(script);
+    </script>
+  </body>
+</html>

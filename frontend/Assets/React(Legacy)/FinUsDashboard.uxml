@@ -1,0 +1,28 @@
+<ui:UXML xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:ui="UnityEngine.UIElements" xmlns:uie="UnityEditor.UIElements" noNamespaceSchemaLocation="../../UIElementsSchema/UIElements.xsd" editor-extension-mode="False">
+    <Style src="project://database/Assets/04_UI/FinUsDashboard.uss?fileID=7433441132597879392&amp;guid=7c01312874b17ad4f806e8a39d51a8c4&amp;type=3#FinUsDashboard"/>
+    <ui:VisualElement name="root" class="root" style="top: 0%; left: 0%; bottom: 0%; right: 0%; align-content: auto;">
+        <ui:Label name="title-label" text="FIN-US AGENT" class="title"/>
+        <ui:VisualElement name="search-row" class="search-row">
+            <ui:TextField name="stock-input" label="종목" class="stock-input"/>
+            <ui:DropdownField name="provider-dropdown" label="모델" class="provider-dropdown"/>
+            <ui:Button name="data-only-button" text="DATA ONLY" class="button secondary"/>
+            <ui:Button name="analyze-button" text="ANALYZE" class="button primary"/>
+        </ui:VisualElement>
+        <ui:Label name="status-label" text="종목명 입력 후 DATA ONLY 또는 ANALYZE를 누르세요." class="status"/>
+        <ui:Label name="stock-header-label" text="Ready to Analyze Market Data" class="stock-header"/>
+        <ui:VisualElement name="content-grid" class="content-grid">
+            <ui:VisualElement name="left-card" class="card">
+                <ui:Label text="AI Strategy" class="card-title"/>
+                <ui:Label name="decision-label" text="결정: -" class="decision"/>
+                <ui:Label name="confidence-label" text="신뢰도: -" class="body"/>
+                <ui:Label name="summary-label" text="요약: 분석 결과가 여기에 표시됩니다." class="body multi"/>
+            </ui:VisualElement>
+            <ui:VisualElement name="right-card" class="card no-margin">
+                <ui:Label text="Context" class="card-title"/>
+                <ui:Label name="reason-label" text="근거: -" class="body multi"/>
+                <ui:Label name="trend-label" text="트렌드: -" class="body multi"/>
+                <ui:Label name="news-label" text="뉴스: -" class="body multi"/>
+            </ui:VisualElement>
+        </ui:VisualElement>
+    </ui:VisualElement>
+</ui:UXML>
