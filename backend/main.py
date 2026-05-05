@@ -1,6 +1,8 @@
 import os
-from fastapi import FastAPI, Query
+import logging
+from fastapi import FastAPI, Query, Depends
 from fastapi.middleware.cors import CORSMiddleware
+from sqlmodel import Session, select
 
 from .config import NAT_BASE_URL, NEWS_MCP_PARAMS, TRADING_MCP_PARAMS
 from .schemas import CommonResponse
@@ -10,12 +12,23 @@ from .services import (
     llm_chat,
     analysis_from_nat_text
 )
+from .database import init_db, get_session
+from .models import Portfolio, TradeHistory, AgentReport, Diary
+
+# 로깅 설정
+logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="Fin-Us + NAT (integrate)",
     description="MCP market data from fin-us; multi-agent analysis via NeMo NAT FastAPI",
     version="1.0.0",
 )
+
+@app.on_event("startup")
+def on_startup():
+    # 앱 시작 시 데이터베이스 테이블 생성
+    init_db()
+    logger.info("Database initialized.")
 
 app.add_middleware(
     CORSMiddleware,
