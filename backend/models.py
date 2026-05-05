@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 from sqlmodel import Field, SQLModel
 
@@ -13,7 +13,7 @@ class Portfolio(SQLModel, table=True):
     quantity: int = Field(default=0, description="보유 수량")
     avg_price: float = Field(default=0.0, description="평균 매입가")
     current_price: Optional[float] = Field(default=None, description="현재가")
-    updated_at: datetime = Field(default_factory=datetime.utcnow, description="최근 업데이트 시간")
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="최근 업데이트 시간")
 
 class TradeHistory(SQLModel, table=True):
     """
@@ -25,7 +25,7 @@ class TradeHistory(SQLModel, table=True):
     trade_type: str = Field(description="매매 구분 (BUY/SELL)")
     quantity: int = Field(description="매매 수량")
     price: float = Field(description="매매 단가")
-    trade_date: datetime = Field(default_factory=datetime.utcnow, description="매매 일시")
+    trade_date: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="매매 일시")
 
 class AgentReport(SQLModel, table=True):
     """
@@ -39,7 +39,7 @@ class AgentReport(SQLModel, table=True):
     decision: str = Field(description="투자 결정 (BUY/SELL/HOLD)")
     confidence_score: float = Field(description="신뢰도 점수 (0.0~1.0)")
     reason: str = Field(description="투자 결정 근거")
-    created_at: datetime = Field(default_factory=datetime.utcnow, description="생성 일시")
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="생성 일시")
 
 class Diary(SQLModel, table=True):
     """
@@ -48,4 +48,4 @@ class Diary(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     title: str = Field(description="일지 제목")
     content: str = Field(description="일지 내용")
-    created_at: datetime = Field(default_factory=datetime.utcnow, description="작성 일시")
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="작성 일시")

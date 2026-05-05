@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlmodel import Session, select
 
 from .config import NAT_BASE_URL, NEWS_MCP_PARAMS, TRADING_MCP_PARAMS
-from .schemas import CommonResponse
+from .schemas import CommonResponse, DiaryCreate
 from .services import (
     run_mcp_tool,
     normalize_llm_provider,
@@ -138,12 +138,11 @@ async def get_db_diary(session: Session = Depends(get_session)):
 
 @app.post("/api/v1/db/diary", response_model=CommonResponse, tags=["Database"])
 async def create_db_diary(
-    title: str,
-    content: str,
+    diary_in: DiaryCreate,
     session: Session = Depends(get_session)
 ):
     """새로운 투자 일지를 작성합니다."""
-    diary = Diary(title=title, content=content)
+    diary = Diary.model_validate(diary_in)
     session.add(diary)
     session.commit()
     session.refresh(diary)
