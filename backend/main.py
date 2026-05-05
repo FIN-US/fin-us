@@ -89,6 +89,48 @@ async def get_account_balance():
     return {"status": "success", "data": {"report": balance_text}}
 
 
+@app.get("/api/v1/db/portfolio", response_model=CommonResponse, tags=["Database"])
+async def get_db_portfolio(session: Session = Depends(get_session)):
+    """저장된 포트폴리오 정보를 조회합니다."""
+    portfolios = session.exec(select(Portfolio)).all()
+    return {"status": "success", "data": portfolios}
+
+
+@app.get("/api/v1/db/trades", response_model=CommonResponse, tags=["Database"])
+async def get_db_trades(session: Session = Depends(get_session)):
+    """저장된 매매 이력을 조회합니다."""
+    trades = session.exec(select(TradeHistory)).all()
+    return {"status": "success", "data": trades}
+
+
+@app.get("/api/v1/db/reports", response_model=CommonResponse, tags=["Database"])
+async def get_db_reports(session: Session = Depends(get_session)):
+    """저장된 에이전트 리포트 목록을 조회합니다."""
+    reports = session.exec(select(AgentReport).order_by(AgentReport.created_at.desc())).all()
+    return {"status": "success", "data": reports}
+
+
+@app.get("/api/v1/db/diary", response_model=CommonResponse, tags=["Database"])
+async def get_db_diary(session: Session = Depends(get_session)):
+    """저장된 투자 일지 목록을 조회합니다."""
+    diaries = session.exec(select(Diary).order_by(Diary.created_at.desc())).all()
+    return {"status": "success", "data": diaries}
+
+
+@app.post("/api/v1/db/diary", response_model=CommonResponse, tags=["Database"])
+async def create_db_diary(
+    title: str,
+    content: str,
+    session: Session = Depends(get_session)
+):
+    """새로운 투자 일지를 작성합니다."""
+    diary = Diary(title=title, content=content)
+    session.add(diary)
+    session.commit()
+    session.refresh(diary)
+    return {"status": "success", "data": diary}
+
+
 @app.get("/health", tags=["System"])
 async def health_check():
     return {"status": "alive", "nat_base_url": NAT_BASE_URL}
