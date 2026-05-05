@@ -62,7 +62,9 @@ async def analyze_stock(
         "답변 마지막에 **다음 JSON 한 개만** 출력하라 (다른 텍스트 없이도 됨):\n"
         '{"summary":"한 줄 요약",'
         '"details":{"decision":"BUY"|"SELL"|"HOLD","confidence_score":0.0-1.0,'
-        f'"reason":"근거","target_stock":"{stock}"}},'
+                '"reason":"근거","target_stock":"'
+        f'{stock}'
+        '"},'
         '"source_news":["헤드라인1","헤드라인2"],'
         '"trading_trend":"수급 한줄 요약 또는 null"}'
     )
