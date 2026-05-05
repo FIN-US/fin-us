@@ -32,6 +32,7 @@ class AgentReport(SQLModel, table=True):
     AI 에이전트가 생성한 종목 분석 리포트 및 투자 제안을 저장합니다.
     """
     id: Optional[int] = Field(default=None, primary_key=True)
+    stock_code: str = Field(index=True, description="분석 종목 코드")
     stock_name: str = Field(index=True, description="분석 종목명")
     provider: str = Field(description="사용된 LLM 제공자 (openai, anthropic 등)")
     summary: str = Field(description="분석 요약")
