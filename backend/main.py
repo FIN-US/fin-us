@@ -55,21 +55,40 @@ async def analyze_stock(
             "nat=NAT multi-agent (still available via API query)"
         ),
     ),
+    session: Session = Depends(get_session),
 ):
     user_msg = (
         f"종목: {stock}. 라우터·서브에이전트를 활용해 투자 관점 분석을 하라. "
         "답변 마지막에 **다음 JSON 한 개만** 출력하라 (다른 텍스트 없이도 됨):\n"
         '{"summary":"한 줄 요약",'
         '"details":{"decision":"BUY"|"SELL"|"HOLD","confidence_score":0.0-1.0,'
-        '"reason":"근거","target_stock":"'
-        f'{stock}'
-        '"},'
+        f'"reason":"근거","target_stock":"{stock}"}},'
         '"source_news":["헤드라인1","헤드라인2"],'
         '"trading_trend":"수급 한줄 요약 또는 null"}'
     )
     key = normalize_llm_provider(provider)
     raw = await llm_chat(key, user_msg)
     data = analysis_from_nat_text(str(raw), stock)
+
+    # 분석 리포트를 데이터베이스에 자동으로 저장
+    try:
+        details = data.get("details", {})
+        report = AgentReport(
+            stock_code="",  # 향후 개선: MCP를 통해 코드를 가져오거나 분석 결과에서 추출
+            stock_name=stock,
+            provider=key,
+            summary=data.get("summary", ""),
+            decision=details.get("decision", "HOLD"),
+            confidence_score=details.get("confidence_score", 0.0),
+            reason=details.get("reason", ""),
+        )
+        session.add(report)
+        session.commit()
+        logger.info(f"AgentReport saved for {stock}")
+    except Exception as e:
+        # DB 저장 실패가 분석 API 응답 전체의 실패로 이어지지 않도록 예외 처리
+        logger.error(f"Failed to save AgentReport for {stock}: {e}")
+
     return {"status": "success", "data": data}
 
 
