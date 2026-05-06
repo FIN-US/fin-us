@@ -1,10 +1,11 @@
 import os
 import logging
-from fastapi import FastAPI, Query, Depends
+from fastapi import FastAPI, Query, Depends, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from sqlmodel import Session, select
 
 from .config import NAT_BASE_URL, NEWS_MCP_PARAMS, TRADING_MCP_PARAMS, ALLOW_ORIGINS
+from .ws_manager import manager
 from .schemas import CommonResponse, DiaryCreate
 from .services import (
     run_mcp_tool,
@@ -154,6 +155,25 @@ async def create_db_diary(
 @app.get("/health", tags=["System"])
 async def health_check():
     return {"status": "alive", "nat_base_url": NAT_BASE_URL}
+
+
+@app.websocket("/api/v1/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    """
+    실시간 알림을 위한 WebSocket 엔드포인트입니다.
+    """
+    await manager.connect(websocket)
+    try:
+        while True:
+            # 연결 유지를 위해 클라이언트의 메시지를 대기함
+            data = await websocket.receive_text()
+            # 에코 응답 (테스트용)
+            await websocket.send_json({"status": "received", "message": data})
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
+    except Exception as e:
+        logger.error(f"WebSocket error: {e}")
+        manager.disconnect(websocket)
 
 
 if __name__ == "__main__":

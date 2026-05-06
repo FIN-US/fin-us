@@ -8,3 +8,5 @@ mcp
 pyyaml
 httpx
 sqlmodel
+websockets
+apscheduler
