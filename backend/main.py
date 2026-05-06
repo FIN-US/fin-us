@@ -6,6 +6,7 @@ from sqlmodel import Session, select
 
 from .config import NAT_BASE_URL, NEWS_MCP_PARAMS, TRADING_MCP_PARAMS, ALLOW_ORIGINS
 from .ws_manager import manager
+from .scheduler import start_scheduler, stop_scheduler
 from .schemas import CommonResponse, DiaryCreate
 from .services import (
     run_mcp_tool,
@@ -29,7 +30,15 @@ app = FastAPI(
 def on_startup():
     # 앱 시작 시 데이터베이스 테이블 생성
     init_db()
-    logger.info("Database initialized.")
+    # 스케줄러 시작
+    start_scheduler()
+    logger.info("Database initialized and scheduler started.")
+
+@app.on_event("shutdown")
+def on_shutdown():
+    # 앱 종료 시 스케줄러 중단
+    stop_scheduler()
+    logger.info("Scheduler stopped.")
 
 app.add_middleware(
     CORSMiddleware,
