@@ -44,6 +44,11 @@ _TRADING_MCP_DIR = (_FIN_US_ROOT / "mcp-trading").resolve()
 
 # SQLite 데이터베이스 파일 경로 설정 (backend 디렉토리 내 finus.db 생성)
 DATABASE_URL = os.environ.get("DATABASE_URL") or f"sqlite:///{_FIN_US_ROOT}/backend/finus.db"
+DB_ECHO = os.getenv("DB_ECHO", "false").lower() == "true"
+
+# CORS 설정
+_ALLOW_ORIGINS_RAW = os.getenv("ALLOW_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173")
+ALLOW_ORIGINS = [origin.strip() for origin in _ALLOW_ORIGINS_RAW.split(",") if origin.strip()]
 
 
 def _stdio_server_params(mcp_dir: Path) -> StdioServerParameters:

@@ -4,7 +4,7 @@ from fastapi import FastAPI, Query, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from sqlmodel import Session, select
 
-from .config import NAT_BASE_URL, NEWS_MCP_PARAMS, TRADING_MCP_PARAMS
+from .config import NAT_BASE_URL, NEWS_MCP_PARAMS, TRADING_MCP_PARAMS, ALLOW_ORIGINS
 from .schemas import CommonResponse, DiaryCreate
 from .services import (
     run_mcp_tool,
@@ -32,7 +32,7 @@ def on_startup():
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOW_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

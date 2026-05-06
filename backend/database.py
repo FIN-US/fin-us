@@ -1,8 +1,8 @@
 from sqlmodel import create_engine, Session, SQLModel
-from .config import DATABASE_URL
+from .config import DATABASE_URL, DB_ECHO
 
 # SQLite 사용 시 connect_args={"check_same_thread": False}가 필요함
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False}, echo=True)
+engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False}, echo=DB_ECHO)
 
 def init_db():
     """
