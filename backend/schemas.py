@@ -17,5 +17,10 @@ class AnalysisReport(BaseModel):
 
 class CommonResponse(BaseModel):
     status: str = "success"
-    data: dict[str, Any] | None = None
+    data: Any | None = None
     message: str | None = None
+
+
+class DiaryCreate(BaseModel):
+    title: str = Field(..., description="일지 제목")
+    content: str = Field(..., description="일지 내용")
