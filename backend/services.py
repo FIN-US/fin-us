@@ -12,7 +12,7 @@ from sqlmodel import Session
 from .config import (
     OPENAI_API_KEY, OPENAI_CHAT_MODEL,
     ANTHROPIC_API_KEY, ANTHROPIC_CHAT_MODEL,
-    OLLAMA_API_KEY, OLLAMA_MODEL, get_ollama_openai_base_url,
+    OLLAMA_API_KEY, OLLAMA_MODEL, OLLAMA_BASE_URL,
     NAT_BASE_URL, NAT_CHAT_MODEL
 )
 from .schemas import TradingSignal, AnalysisReport
@@ -142,10 +142,9 @@ async def _llm_anthropic_chat(user_msg: str) -> str:
 
 
 async def _llm_ollama_chat(user_msg: str) -> str:
-    base = get_ollama_openai_base_url()
     client = AsyncOpenAI(
         api_key=OLLAMA_API_KEY or "ollama",
-        base_url=base,
+        base_url=OLLAMA_BASE_URL,
     )
     try:
         resp = await client.chat.completions.create(
@@ -157,10 +156,10 @@ async def _llm_ollama_chat(user_msg: str) -> str:
         raise HTTPException(
             status_code=503,
             detail=(
-                f"Ollama 호출 실패 ({base}, model={OLLAMA_MODEL}): {exc}. "
+                f"Ollama 호출 실패 ({OLLAMA_BASE_URL}, model={OLLAMA_MODEL}): {exc}. "
                 "호스트에서 `ollama serve` 실행 여부를 확인하세요. "
-                "Docker 백엔드는 기본으로 host.docker.internal을 씁니다; "
-                "직접 지정하려면 backend/.env에 OLLAMA_OPENAI_BASE_URL을 넣으세요."
+                "Docker 백엔드는 기본으로 host.docker.internal:11434를 씁니다; "
+                "직접 지정하려면 backend/.env에 OLLAMA_BASE_URL을 넣으세요."
             ),
         ) from exc
     choice = resp.choices[0].message.content
@@ -317,3 +316,4 @@ async def llm_chat(
     if provider_key == "ollama":
         return await _llm_ollama_chat(user_msg)
     return await _llm_nat_chat(user_msg)
+
