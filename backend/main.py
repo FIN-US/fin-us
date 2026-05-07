@@ -1,5 +1,6 @@
 import os
 import logging
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, Query, Depends, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from sqlmodel import Session, select
@@ -18,28 +19,30 @@ from .services import (
 from .database import init_db, get_session
 from .models import Portfolio, TradeHistory, AgentReport, Diary
 
-# 로깅 설정
+# 로깅 설정: 모든 모듈의 로그를 터미널에 출력하도록 설정
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+)
 logger = logging.getLogger(__name__)
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # 앱 시작 시 실행: DB 초기화 및 스케줄러 가동
+    init_db()
+    start_scheduler()
+    logger.info("Database initialized and scheduler started.")
+    yield
+    # 앱 종료 시 실행: 스케줄러 안전 종료
+    stop_scheduler()
+    logger.info("Scheduler stopped.")
 
 app = FastAPI(
     title="Fin-Us + NAT (integrate)",
     description="MCP market data from fin-us; multi-agent analysis via NeMo NAT FastAPI",
     version="1.0.0",
+    lifespan=lifespan
 )
-
-@app.on_event("startup")
-def on_startup():
-    # 앱 시작 시 데이터베이스 테이블 생성
-    init_db()
-    # 스케줄러 시작
-    start_scheduler()
-    logger.info("Database initialized and scheduler started.")
-
-@app.on_event("shutdown")
-def on_shutdown():
-    # 앱 종료 시 스케줄러 중단
-    stop_scheduler()
-    logger.info("Scheduler stopped.")
 
 app.add_middleware(
     CORSMiddleware,
