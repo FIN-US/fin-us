@@ -15,10 +15,10 @@ llms:
     _type: openai
     api_key: ${OPENAI_API_KEY}
     base_url: ${OPENAI_API_BASE_URL:-https://api.openai.com/v1}
-    model_name: ""
+    model_name: ${OPENAI_CHAT_MODEL:-gpt-5.4-mini}
 
   ollama_llm:
     _type: openai
     api_key: ${OLLAMA_API_KEY:-ollama}
-    base_url: ${OLLAMA_OPENAI_BASE_URL:-http://127.0.0.1:11434/v1}
+    base_url: ${OLLAMA_BASE_URL:-http://127.0.0.1:11434/v1}
     model_name: ""
