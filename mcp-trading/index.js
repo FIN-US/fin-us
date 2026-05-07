@@ -9,6 +9,10 @@ import dotenv from "dotenv";
 import path from "path";
 import { fileURLToPath } from "url";
 
+// Redirect console.log to console.error to prevent breaking MCP JSON-RPC on stdout
+const originalLog = console.log;
+console.log = console.error;
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 dotenv.config({ path: path.join(__dirname, ".env") });
