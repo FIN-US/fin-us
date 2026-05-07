@@ -61,8 +61,13 @@ async def test_monitor_market_task_filtering(monkeypatch):
     
     # 모킹
     async def mock_run_mcp_tool(params, name, args):
+        if name == "get_balance":
+            return "[보유 종목 리스트]\n- 삼성전자 (005930): 10주\n- SK하이닉스 (000660): 2주\n- 현대차 (005380): 1주"
         return f"Latest news for {args['stock_name']}"
     
+    async def mock_check_significance(stock, current, last, provider):
+        return current != last
+
     mock_perform_analysis = MagicMock(return_value=asyncio.Future())
     mock_perform_analysis.return_value.set_result({"summary": "Mocked", "details": {"decision": "BUY"}})
     
@@ -70,6 +75,7 @@ async def test_monitor_market_task_filtering(monkeypatch):
     mock_broadcast.return_value.set_result(None)
     
     monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
+    monkeypatch.setattr("backend.scheduler.check_news_significance", mock_check_significance)
     monkeypatch.setattr("backend.scheduler.perform_stock_analysis", mock_perform_analysis)
     monkeypatch.setattr("backend.scheduler.manager.broadcast", mock_broadcast)
     
@@ -87,9 +93,11 @@ async def test_monitor_market_task_filtering(monkeypatch):
     
     # 3. 세 번째 실행: 뉴스가 변경된 종목이 있으면 해당 종목만 분석
     async def mock_run_mcp_tool_changed(params, name, args):
-        if args['stock_name'] == "삼성전자":
+        if name == "get_balance":
+            return "[보유 종목 리스트]\n- 삼성전자 (005930): 10주\n- SK하이닉스 (000660): 2주\n- 현대차 (005380): 1주"
+        if args.get('stock_name') == "삼성전자":
             return "NEW NEWS for Samsung"
-        return f"Latest news for {args['stock_name']}"
+        return f"Latest news for {args.get('stock_name')}"
         
     monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool_changed)
     await monitor_market_task()

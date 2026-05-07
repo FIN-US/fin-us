@@ -10,3 +10,5 @@ httpx
 sqlmodel
 websockets
 apscheduler
+pytest
+pytest-asyncio

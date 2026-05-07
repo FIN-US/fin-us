@@ -4,9 +4,9 @@ from dotenv import load_dotenv
 from mcp import StdioServerParameters
 
 _FIN_US_ROOT = Path(__file__).resolve().parent.parent
-_BACKEND_ENV = _FIN_US_ROOT / "backend" / ".env"
+_ROOT_ENV = _FIN_US_ROOT / ".env"
 
-load_dotenv(_BACKEND_ENV)
+load_dotenv(_ROOT_ENV)
 load_dotenv()
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -22,7 +22,14 @@ NAT_CHAT_MODEL = os.environ.get(
 
 OLLAMA_API_KEY = os.environ.get("OLLAMA_API_KEY", "ollama")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen3.5:9b")
-OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://host.docker.internal:11434")
+
+def _get_ollama_base_url() -> str:
+    raw = os.environ.get("OLLAMA_BASE_URL", "http://host.docker.internal:11434").strip().rstrip("/")
+    if not raw.endswith("/v1"):
+        return f"{raw}/v1"
+    return raw
+
+OLLAMA_BASE_URL = _get_ollama_base_url()
 
 
 _NEWS_MCP_DIR = (_FIN_US_ROOT / "mcp-news").resolve()

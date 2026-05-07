@@ -62,6 +62,9 @@ async def monitor_market_task():
                         provider=FILTER_PROVIDER
                     )
 
+                    # 상태 업데이트 (유의미성 여부와 상관없이 현재 뉴스를 캐시)
+                    last_analyzed_news_cache[stock] = current_news
+
                     if not is_significant:
                         logger.info(f"[{stock}] 유의미한 변화 없음. 분석을 건너뜁니다.")
                         continue
@@ -69,9 +72,6 @@ async def monitor_market_task():
                     # 3. 유의미한 변화가 있을 때만 고성능 에이전트 분석 실행
                     logger.info(f"[{stock}] 유의미한 변화 감지! 상세 분석을 시작합니다.")
                     analysis_data = await perform_stock_analysis(stock, "nat", session)
-
-                    # 상태 업데이트
-                    last_analyzed_news_cache[stock] = current_news
 
                     # 분석 결과를 WebSocket으로 실시간 전송
                     await manager.broadcast({
