@@ -10,5 +10,3 @@ httpx>=0.28,<0.29
 sqlmodel>=0.0.38,<0.0.39
 websockets>=16,<17
 apscheduler>=3.11,<3.12
-pytest>=9.0,<10
-pytest-asyncio>=1.3,<2
