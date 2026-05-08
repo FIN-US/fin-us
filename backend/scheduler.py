@@ -8,7 +8,7 @@ from .ws_manager import manager
 from .database import engine
 from .config import NEWS_MCP_PARAMS, TRADING_MCP_PARAMS
 from .redis_state import RedisSchedulerState, signal_hash, redis_state
-from .services import perform_stock_analysis, run_mcp_tool, check_news_significance
+from .services import perform_stock_analysis, run_mcp_tool, check_signal_significance
 
 logger = logging.getLogger(__name__)
 
@@ -18,9 +18,10 @@ scheduler = AsyncIOScheduler()
 # 뉴스 필터링에 사용할 모델 제공자 (ollama 또는 openai)
 FILTER_PROVIDER = os.environ.get("NEWS_FILTER_PROVIDER", "ollama")
 
-# 종목별 마지막으로 분석된 뉴스 내용을 저장하는 인메모리 캐시 (LLM 호출 최적화용)
+# 종목별 마지막으로 분석된 signal 내용을 저장하는 인메모리 캐시 (LLM 호출 최적화용)
 # Redis 장애 시에만 사용하는 프로세스 로컬 fallback입니다.
-last_analyzed_news_cache = {}
+last_analyzed_signal_cache = {}
+last_analyzed_news_cache = last_analyzed_signal_cache
 
 
 @dataclass(frozen=True)
@@ -124,7 +125,7 @@ async def _monitor_signal(
         current_digest = signal_hash(current_signal)
         if state is None:
             cache_key = (source.name, stock)
-            last_signal = last_analyzed_news_cache.get(cache_key)
+            last_signal = last_analyzed_signal_cache.get(cache_key)
             if last_signal is not None and signal_hash(last_signal) == current_digest:
                 logger.info(f"[{source.name}:{stock}] 동일 signal입니다. 분석을 건너뜁니다.")
                 return
@@ -146,10 +147,11 @@ async def _monitor_signal(
             last_signal = await state.get_last_signal_text(source.name, stock)
 
         # 2. 유의미성 판단 (Local Model or Mini LLM API)
-        is_significant = await check_news_significance(
+        is_significant = await check_signal_significance(
             stock,
             current_signal,
             last_signal,
+            source=source.name,
             provider=FILTER_PROVIDER,
         )
 
@@ -160,7 +162,13 @@ async def _monitor_signal(
 
         # 3. 유의미한 변화가 있을 때만 고성능 에이전트 분석 실행
         logger.info(f"[{source.name}:{stock}] 유의미한 변화 감지! 상세 분석을 시작합니다.")
-        analysis_data = await perform_stock_analysis(stock, "nat", session)
+        analysis_data = await perform_stock_analysis(
+            stock,
+            "nat",
+            session,
+            trigger_source=source.name,
+            trigger_signal=current_signal,
+        )
         await _set_last_signal_state(state, source.name, stock, current_signal, current_digest)
 
         # 분석 결과를 WebSocket으로 실시간 전송
@@ -193,7 +201,7 @@ async def _set_last_signal_state(
     digest: str,
 ) -> None:
     if state is None:
-        last_analyzed_news_cache[(source, stock)] = signal_text
+        last_analyzed_signal_cache[(source, stock)] = signal_text
     else:
         await state.set_last_signal(source, stock, signal_text, digest)
 

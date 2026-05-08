@@ -23,14 +23,29 @@ logger = logging.getLogger(__name__)
 async def perform_stock_analysis(
     stock: str,
     provider: str,
-    session: Session
+    session: Session,
+    *,
+    trigger_source: str | None = None,
+    trigger_signal: str | None = None,
 ) -> dict[str, Any]:
     """
     종목 분석을 수행하고 결과를 DB에 저장한 뒤 반환합니다.
     API 엔드포인트와 백그라운드 스케줄러에서 공용으로 사용됩니다.
     """
+    trigger_context = ""
+    if trigger_signal:
+        source_label = trigger_source or "signal"
+        trigger_context = (
+            f"\n분석 트리거 데이터 출처: {source_label}\n"
+            f"--- 트리거 데이터 ---\n{trigger_signal[:4000]}\n"
+            "------------------\n"
+            "위 트리거 데이터를 투자 판단의 주요 근거로 반영하라. "
+            "필요하면 라우터·서브에이전트로 보조 시장 데이터를 추가 확인하라.\n"
+        )
+
     user_msg = (
         f"종목: {stock}. 라우터·서브에이전트를 활용해 투자 관점 분석을 하라. "
+        f"{trigger_context}"
         "답변 마지막에 **다음 JSON 한 개만** 출력하라 (다른 텍스트 없이도 됨):\n"
         '{"summary":"한 줄 요약",'
         '"details":{"decision":"BUY"|"SELL"|"HOLD","confidence_score":0.0-1.0,'
@@ -67,32 +82,36 @@ async def perform_stock_analysis(
 
     return data
 
-async def check_news_significance(
+async def check_signal_significance(
     stock: str,
-    news_content: str,
-    last_news_content: Optional[str] = None,
+    signal_content: str,
+    last_signal_content: Optional[str] = None,
+    *,
+    source: str = "signal",
     provider: str = "ollama"
 ) -> bool:
     """
-    뉴스 제목을 분석하여 투자 관점에서 유의미한 변화가 있는지 판단합니다.
+    외부 signal을 분석하여 투자 관점에서 유의미한 변화가 있는지 판단합니다.
     로컬 초경량 모델(예: gemma4) 또는 경량 API 모델(예: gpt-5.4-mini)을 
     1차 필터로 사용하여 비용과 정확도의 균형을 맞출 수 있습니다.
     """
-    if not news_content:
+    if not signal_content:
         return False
     
-    if news_content == last_news_content:
+    if signal_content == last_signal_content:
         return False
 
-    # 뉴스 텍스트 상단(제목 위주) 1000자 사용
-    snip_content = news_content[:1000]
+    # signal 텍스트 상단 1000자 사용
+    snip_content = signal_content[:1000]
 
     prompt = (
-        f"당신은 전문 주식 분석가입니다. 다음은 '{stock}' 종목에 대한 최신 뉴스 데이터입니다.\n\n"
-        f"--- 뉴스 내용 ---\n{snip_content}\n"
+        f"당신은 전문 주식 분석가입니다. 다음은 '{stock}' 종목에 대한 최신 외부 signal입니다.\n"
+        f"signal 출처: {source}\n\n"
+        f"--- signal 내용 ---\n{snip_content}\n"
         "------------------\n\n"
-        "이 뉴스들이 기존 상황을 바꿀 만큼 유의미한 새로운 정보(실적 발표, 계약, M&A 등)를 포함하고 있습니까?\n"
-        "중요한 변화가 있다면 'YES', 사소하거나 반복되는 뉴스라면 'NO'라고만 답하세요.\n"
+        "이 signal이 기존 상황을 바꿀 만큼 유의미한 새로운 투자 정보"
+        "(실적 발표, 계약, M&A, 수급 변화, 평판 리스크, 급격한 여론 변화 등)를 포함하고 있습니까?\n"
+        "중요한 변화가 있다면 'YES', 사소하거나 반복되는 signal이라면 'NO'라고만 답하세요.\n"
         "답변은 반드시 다른 설명 없이 'YES' 또는 'NO' 중 하나로만 대답하십시오."
     )
 
@@ -100,11 +119,32 @@ async def check_news_significance(
         # 설정된 provider(ollama, openai 등)에 따라 경량 모델 호출
         result = await llm_chat(provider, prompt)
         is_significant = "YES" in result.upper()
-        logger.info(f"뉴스 유의미성 확인 [{stock}] (Provider: {provider}): {is_significant}")
+        logger.info(
+            "signal 유의미성 확인 [%s:%s] (Provider: %s): %s",
+            source,
+            stock,
+            provider,
+            is_significant,
+        )
         return is_significant
     except Exception as e:
-        logger.error(f"뉴스 유의미성 확인 중 오류 발생 ({stock}, {provider}): {e}")
+        logger.error(f"signal 유의미성 확인 중 오류 발생 ({source}, {stock}, {provider}): {e}")
         return True
+
+
+async def check_news_significance(
+    stock: str,
+    news_content: str,
+    last_news_content: Optional[str] = None,
+    provider: str = "ollama",
+) -> bool:
+    return await check_signal_significance(
+        stock,
+        news_content,
+        last_news_content,
+        source="news",
+        provider=provider,
+    )
 
 async def _llm_openai_chat(user_msg: str) -> str:
     if not OPENAI_API_KEY:
@@ -316,4 +356,3 @@ async def llm_chat(
     if provider_key == "ollama":
         return await _llm_ollama_chat(user_msg)
     return await _llm_nat_chat(user_msg)
-

@@ -67,7 +67,8 @@ async def test_monitor_market_task_filtering(monkeypatch):
             return "[보유 종목 리스트]\n- 삼성전자 (005930): 10주\n- SK하이닉스 (000660): 2주\n- 현대차 (005380): 1주"
         return f"Latest news for {args['stock_name']}"
     
-    async def mock_check_significance(stock, current, last, provider):
+    async def mock_check_significance(stock, current, last, *, source, provider):
+        _ = source
         return current != last
 
     mock_perform_analysis = MagicMock(return_value=asyncio.Future())
@@ -82,7 +83,7 @@ async def test_monitor_market_task_filtering(monkeypatch):
         yield
     
     monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
-    monkeypatch.setattr("backend.scheduler.check_news_significance", mock_check_significance)
+    monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
     monkeypatch.setattr("backend.scheduler.perform_stock_analysis", mock_perform_analysis)
     monkeypatch.setattr("backend.scheduler.manager.broadcast", mock_broadcast)
     monkeypatch.setattr("backend.scheduler.redis_state", unavailable_redis_state)
@@ -154,7 +155,8 @@ async def test_monitor_market_task_uses_redis_hash_to_skip_duplicate_news(monkey
             return "[보유 종목 리스트]\n- 삼성전자 (005930): 10주"
         return "Latest news for Samsung"
 
-    async def mock_check_significance(stock, current, last, provider):
+    async def mock_check_significance(stock, current, last, *, source, provider):
+        _ = stock, current, last, source, provider
         return True
 
     mock_perform_analysis = MagicMock(return_value=asyncio.Future())
@@ -164,7 +166,7 @@ async def test_monitor_market_task_uses_redis_hash_to_skip_duplicate_news(monkey
 
     monkeypatch.setattr("backend.scheduler.redis_state", fake_redis_state)
     monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
-    monkeypatch.setattr("backend.scheduler.check_news_significance", mock_check_significance)
+    monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
     monkeypatch.setattr("backend.scheduler.perform_stock_analysis", mock_perform_analysis)
     monkeypatch.setattr("backend.scheduler.manager.broadcast", mock_broadcast)
 
@@ -194,7 +196,8 @@ async def test_monitor_market_task_processes_multiple_signal_sources_independent
             return "[보유 종목 리스트]\n- 삼성전자 (005930): 10주"
         return f"{name}: {args['stock_name']}"
 
-    async def mock_check_significance(stock, current, last, provider):
+    async def mock_check_significance(stock, current, last, *, source, provider):
+        _ = stock, current, last, source, provider
         return True
 
     mock_perform_analysis = MagicMock(return_value=asyncio.Future())
@@ -205,13 +208,18 @@ async def test_monitor_market_task_processes_multiple_signal_sources_independent
     monkeypatch.setattr("backend.scheduler.SIGNAL_SOURCES", sources)
     monkeypatch.setattr("backend.scheduler.redis_state", fake_redis_state)
     monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
-    monkeypatch.setattr("backend.scheduler.check_news_significance", mock_check_significance)
+    monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
     monkeypatch.setattr("backend.scheduler.perform_stock_analysis", mock_perform_analysis)
     monkeypatch.setattr("backend.scheduler.manager.broadcast", mock_broadcast)
 
     await monitor_market_task()
 
     assert mock_perform_analysis.call_count == 2
+    assert [call.kwargs["trigger_source"] for call in mock_perform_analysis.call_args_list] == ["news", "sns"]
+    assert [call.kwargs["trigger_signal"] for call in mock_perform_analysis.call_args_list] == [
+        "get_market_news: 삼성전자",
+        "get_stock_mentions: 삼성전자",
+    ]
     assert [call.args[0]["source"] for call in mock_broadcast.call_args_list] == ["news", "sns"]
 
 
