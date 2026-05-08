@@ -43,6 +43,7 @@ async def test_last_news_hash_round_trip():
     await state.set_last_news("삼성전자", "삼성전자 신규 뉴스", digest)
 
     assert await state.get_last_news_hash("삼성전자") == digest
+    assert await state.get_last_news_text("삼성전자") == "삼성전자 신규 뉴스"
 
 
 @pytest.mark.asyncio

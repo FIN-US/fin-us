@@ -3,6 +3,7 @@ import logging
 import re
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, AsyncIterator
 from uuid import uuid4
 
@@ -38,6 +39,9 @@ class RedisKeys:
     def last_text(self, stock: str) -> str:
         return f"{self.prefix}:news:last_text:{stock}"
 
+    def last_analyzed_at(self, stock: str) -> str:
+        return f"{self.prefix}:news:last_analyzed_at:{stock}"
+
     def analysis_lock(self, stock: str) -> str:
         return f"{self.prefix}:analysis:lock:{stock}"
 
@@ -68,6 +72,14 @@ class RedisSchedulerState:
 
     async def get_last_news_hash(self, stock: str) -> str | None:
         value = await self.redis.get(self.keys.last_hash(stock))
+        return self._decode(value)
+
+    async def get_last_news_text(self, stock: str) -> str | None:
+        value = await self.redis.get(self.keys.last_text(stock))
+        return self._decode(value)
+
+    @staticmethod
+    def _decode(value: Any) -> str | None:
         if value is None:
             return None
         if isinstance(value, bytes):
@@ -77,6 +89,11 @@ class RedisSchedulerState:
     async def set_last_news(self, stock: str, news_text: str, digest: str) -> None:
         await self.redis.set(self.keys.last_hash(stock), digest, ex=self.news_hash_ttl_sec)
         await self.redis.set(self.keys.last_text(stock), news_text, ex=self.news_hash_ttl_sec)
+        await self.redis.set(
+            self.keys.last_analyzed_at(stock),
+            datetime.now(UTC).isoformat(),
+            ex=self.news_hash_ttl_sec,
+        )
 
     async def in_cooldown(self, stock: str) -> bool:
         return bool(await self.redis.exists(self.keys.analysis_cooldown(stock)))
