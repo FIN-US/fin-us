@@ -54,4 +54,5 @@ Thumbs.db
 .gemini/
 .claude/
 .cursor/
+.codex/
 *.db
