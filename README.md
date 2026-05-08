@@ -71,12 +71,12 @@ cp .env.example .env
 
 ```bash
 # 1. MCP Servers (News & Trading) 빌드
-cd mcp-news && npm install
-cd mcp-trading && npm install
+cd mcp-news && npm ci
+cd mcp-trading && npm ci
 
 # 2. Backend Orchestrator 실행
 # 프로젝트 루트 디렉토리에서 실행하는 것을 권장합니다.
-pip install -r backend/requirements.txt
+pip install -r backend/requirements-dev.txt
 uvicorn backend.main:app --host 0.0.0.0 --port 8787
 
 # 3. Frontend 실행 (Unity WebGL)
