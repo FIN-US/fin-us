@@ -26,7 +26,12 @@ name = "nat-finus-nat"
 dynamic = ["version"]
 requires-python = ">=3.11,<3.14"
 description = "Fin-Us NAT example: router + six sub-agents (OpenAI default, optional Ollama, Fin-Us MCP default, optional KIS SSE)"
-classifiers = ["Programming Language :: Python"]
+classifiers = [
+  "Programming Language :: Python",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+]
 dependencies = [
   "nvidia-nat[langchain,mcp]>=1.6.0,<2",
 ]

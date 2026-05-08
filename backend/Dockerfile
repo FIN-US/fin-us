@@ -1,17 +1,17 @@
-FROM python:3.11-slim
+FROM python:3.13-slim
 
 RUN apt-get update && apt-get install -y curl gnupg && \
-    curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
+    curl -fsSL https://deb.nodesource.com/setup_24.x | bash - && \
     apt-get install -y nodejs && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
 COPY mcp-news/package*.json ./mcp-news/
-RUN cd ./mcp-news && npm install
+RUN cd ./mcp-news && npm ci --omit=dev
 
 COPY mcp-trading/package*.json ./mcp-trading/
-RUN cd ./mcp-trading && npm install
+RUN cd ./mcp-trading && npm ci --omit=dev
 
 RUN cd ./mcp-news && npx playwright install --with-deps chromium
 
