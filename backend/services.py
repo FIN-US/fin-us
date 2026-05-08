@@ -201,6 +201,11 @@ async def _llm_nat_chat(user_msg: str) -> str:
                     "stream": False,
                 },
             )
+            logger.info(
+                "NAT raw response: status_code=%s body=%s",
+                resp.status_code,
+                resp.text,
+            )
     except httpx.RequestError as exc:
         raise HTTPException(
             status_code=502,
@@ -213,6 +218,11 @@ async def _llm_nat_chat(user_msg: str) -> str:
     try:
         payload = resp.json()
     except ValueError as exc:
+        logger.exception(
+            "Failed to parse NAT response JSON: status_code=%s body=%s",
+            resp.status_code,
+            resp.text,
+        )
         raise HTTPException(
             status_code=502,
             detail=f"NAT JSON 파싱 실패: {exc}; body[:800]={resp.text[:800]!r}",
@@ -316,4 +326,3 @@ async def llm_chat(
     if provider_key == "ollama":
         return await _llm_ollama_chat(user_msg)
     return await _llm_nat_chat(user_msg)
-
