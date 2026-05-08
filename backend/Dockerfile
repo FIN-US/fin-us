@@ -18,8 +18,8 @@ COPY mcp-trading ./
 
 WORKDIR /app
 
-COPY backend/requirements.txt ./backend/
-RUN pip install --no-cache-dir -r ./backend/requirements.txt
+COPY backend/requirements.lock ./backend/
+RUN pip install --no-cache-dir -r ./backend/requirements.lock
 
 COPY . .
 
