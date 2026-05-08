@@ -32,8 +32,8 @@ def _get_ollama_base_url() -> str:
 OLLAMA_BASE_URL = _get_ollama_base_url()
 
 
-_NEWS_MCP_DIR = (_FIN_US_ROOT / "mcp-news").resolve()
-_TRADING_MCP_DIR = (_FIN_US_ROOT / "mcp-trading").resolve()
+_NEWS_MCP_DIR = Path(os.environ.get("NEWS_MCP_DIR", _FIN_US_ROOT / "mcp-news")).resolve()
+_TRADING_MCP_DIR = Path(os.environ.get("TRADING_MCP_DIR", _FIN_US_ROOT / "mcp-trading")).resolve()
 
 # SQLite 데이터베이스 파일 경로 설정 (backend 디렉토리 내 finus.db 생성)
 DATABASE_URL = os.environ.get("DATABASE_URL") or f"sqlite:///{_FIN_US_ROOT}/backend/finus.db"
