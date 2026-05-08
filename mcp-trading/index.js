@@ -9,9 +9,13 @@ import dotenv from "dotenv";
 import path from "path";
 import { fileURLToPath } from "url";
 
+// Redirect console.log to console.error to prevent breaking MCP JSON-RPC on stdout
+const originalLog = console.log;
+console.log = console.error;
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-dotenv.config({ path: path.join(__dirname, ".env") });
+dotenv.config({ path: path.join(__dirname, "..", ".env") });
 
 const { KIS_API_KEY, KIS_API_SECRET, KIS_ACCOUNT_NO, KIS_URL } = process.env;
 
@@ -93,12 +97,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       const summary = data.output2[0];
+      const holdings = data.output1 || [];
+      
+      const stockList = holdings
+        .map(h => `- ${h.prdt_name} (${h.pdno}): ${h.hldg_qty}주 (평가금액: ${h.evlu_amt}원)`)
+        .join("\n");
+
       const balanceInfo = `
 [계좌 잔고 현황]
 - 총 평가금액: ${summary.tot_evlu_amt}원
 - 순자산금액: ${summary.pchs_amt_smtl_amt}원
 - 총 손익: ${summary.evlu_pfls_smtl_amt}원 (수익률: ${summary.evlu_pfls_rt}%)
 - 예수금: ${summary.dnca_tot_amt}원
+
+[보유 종목 리스트]
+${stockList || "보유 종목이 없습니다."}
       `.trim();
 
       return {

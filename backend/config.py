@@ -4,9 +4,9 @@ from dotenv import load_dotenv
 from mcp import StdioServerParameters
 
 _FIN_US_ROOT = Path(__file__).resolve().parent.parent
-_BACKEND_ENV = _FIN_US_ROOT / "backend" / ".env"
+_ROOT_ENV = _FIN_US_ROOT / ".env"
 
-load_dotenv(_BACKEND_ENV)
+load_dotenv(_ROOT_ENV)
 load_dotenv()
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -23,20 +23,13 @@ NAT_CHAT_MODEL = os.environ.get(
 OLLAMA_API_KEY = os.environ.get("OLLAMA_API_KEY", "ollama")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen3.5:9b")
 
+def _get_ollama_base_url() -> str:
+    raw = os.environ.get("OLLAMA_BASE_URL", "http://host.docker.internal:11434").strip().rstrip("/")
+    if not raw.endswith("/v1"):
+        return f"{raw}/v1"
+    return raw
 
-def get_ollama_openai_base_url() -> str:
-    """OpenAI-compatible Ollama /v1. In Docker, 127.0.0.1 is the container — default to host gateway."""
-    raw = (os.environ.get("OLLAMA_OPENAI_BASE_URL") or "").strip()
-    if not raw:
-        raw = (
-            "http://host.docker.internal:11434/v1"
-            if Path("/.dockerenv").exists()
-            else "http://127.0.0.1:11434/v1"
-        )
-    base = raw.rstrip("/")
-    if base.endswith("/v1"):
-        return base
-    return f"{base}/v1"
+OLLAMA_BASE_URL = _get_ollama_base_url()
 
 
 _NEWS_MCP_DIR = (_FIN_US_ROOT / "mcp-news").resolve()

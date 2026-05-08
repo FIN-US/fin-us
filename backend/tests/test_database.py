@@ -78,8 +78,8 @@ async def test_analyze_stock_saves_report(client: TestClient, session: Session, 
             }
         }
 
-    monkeypatch.setattr("backend.main.llm_chat", mock_llm_chat)
-    monkeypatch.setattr("backend.main.analysis_from_nat_text", mock_analysis_from_nat_text)
+    monkeypatch.setattr("backend.services.llm_chat", mock_llm_chat)
+    monkeypatch.setattr("backend.services.analysis_from_nat_text", mock_analysis_from_nat_text)
 
     # API Call
     response = client.get("/api/v1/analyze?stock=삼성전자")

@@ -6,6 +6,9 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { chromium } from "playwright";
 
+// Redirect console.log to console.error to prevent breaking MCP JSON-RPC on stdout
+console.log = console.error;
+
 const server = new Server(
   { name: "news-tool", version: "1.0.0" },
   { capabilities: { tools: {} } },

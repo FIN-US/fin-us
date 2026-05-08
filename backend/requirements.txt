@@ -8,3 +8,7 @@ mcp
 pyyaml
 httpx
 sqlmodel
+websockets
+apscheduler
+pytest
+pytest-asyncio

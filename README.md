@@ -59,16 +59,12 @@ goal: "뉴스의 행간을 읽고 증권사 리포트를 분석하여 투자 신
 
 ### 2. 환경 변수 설정
 
-각 프로젝트 폴더의 `.env.example`을 참고하여 `.env` 파일을 생성합니다.
+프로젝트 루트 디렉토리의 `.env.example`을 참고하여 `.env` 파일을 생성합니다. Fin-Us는 이제 모든 설정을 단일 루트 `.env` 파일에서 관리합니다.
 
 ```bash
-# backend/.env
-OPENAI_API_KEY=your_openai_key
-ANTHROPIC_API_KEY=your_anthropic_key
-
-# mcp-trading/.env
-KIS_API_KEY=your_kis_key
-...
+# 프로젝트 루트의 .env 파일 생성 및 편집
+cp .env.example .env
+# OpenAI, Anthropic, KIS API 키 및 Ollama 설정을 입력하세요.
 ```
 
 ### 3. 시스템 가동
@@ -120,7 +116,7 @@ Unity WebGL 빌드는 `index.html`을 더블클릭해서 `file://` URL로 실행
 ## Docker로 한번에 설치하기
 
 ```bash
-cp backend/.env.example backend/.env
+cp .env.example .env
 # 키 입력 후:
 bash scripts/setup_deps.sh
 ```

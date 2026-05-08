@@ -1,34 +1,48 @@
 import os
 import logging
-from fastapi import FastAPI, Query, Depends
+from contextlib import asynccontextmanager
+from fastapi import FastAPI, Query, Depends, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from sqlmodel import Session, select
 
 from .config import NAT_BASE_URL, NEWS_MCP_PARAMS, TRADING_MCP_PARAMS, ALLOW_ORIGINS
+from .ws_manager import manager
+from .scheduler import start_scheduler, stop_scheduler
 from .schemas import CommonResponse, DiaryCreate
 from .services import (
     run_mcp_tool,
     normalize_llm_provider,
     llm_chat,
-    analysis_from_nat_text
+    analysis_from_nat_text,
+    perform_stock_analysis
 )
 from .database import init_db, get_session
 from .models import Portfolio, TradeHistory, AgentReport, Diary
 
-# 로깅 설정
+# 로깅 설정: 모든 모듈의 로그를 터미널에 출력하도록 설정
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+)
 logger = logging.getLogger(__name__)
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # 앱 시작 시 실행: DB 초기화 및 스케줄러 가동
+    init_db()
+    start_scheduler()
+    logger.info("Database initialized and scheduler started.")
+    yield
+    # 앱 종료 시 실행: 스케줄러 안전 종료
+    stop_scheduler()
+    logger.info("Scheduler stopped.")
 
 app = FastAPI(
     title="Fin-Us + NAT (integrate)",
     description="MCP market data from fin-us; multi-agent analysis via NeMo NAT FastAPI",
     version="1.0.0",
+    lifespan=lifespan
 )
-
-@app.on_event("startup")
-def on_startup():
-    # 앱 시작 시 데이터베이스 테이블 생성
-    init_db()
-    logger.info("Database initialized.")
 
 app.add_middleware(
     CORSMiddleware,
@@ -57,40 +71,7 @@ async def analyze_stock(
     ),
     session: Session = Depends(get_session),
 ):
-    user_msg = (
-        f"종목: {stock}. 라우터·서브에이전트를 활용해 투자 관점 분석을 하라. "
-        "답변 마지막에 **다음 JSON 한 개만** 출력하라 (다른 텍스트 없이도 됨):\n"
-        '{"summary":"한 줄 요약",'
-        '"details":{"decision":"BUY"|"SELL"|"HOLD","confidence_score":0.0-1.0,'
-                '"reason":"근거","target_stock":"'
-        f'{stock}'
-        '"},'
-        '"source_news":["헤드라인1","헤드라인2"],'
-        '"trading_trend":"수급 한줄 요약 또는 null"}'
-    )
-    key = normalize_llm_provider(provider)
-    raw = await llm_chat(key, user_msg)
-    data = analysis_from_nat_text(str(raw), stock)
-
-    # 분석 리포트를 데이터베이스에 자동으로 저장
-    try:
-        details = data.get("details", {})
-        report = AgentReport(
-            stock_code="",  # 향후 개선: MCP를 통해 코드를 가져오거나 분석 결과에서 추출
-            stock_name=stock,
-            provider=key,
-            summary=data.get("summary", ""),
-            decision=details.get("decision", "HOLD"),
-            confidence_score=details.get("confidence_score", 0.0),
-            reason=details.get("reason", ""),
-        )
-        session.add(report)
-        session.commit()
-        logger.info(f"AgentReport saved for {stock}")
-    except Exception as e:
-        # DB 저장 실패가 분석 API 응답 전체의 실패로 이어지지 않도록 예외 처리
-        logger.error(f"Failed to save AgentReport for {stock}: {e}")
-
+    data = await perform_stock_analysis(stock, provider, session)
     return {"status": "success", "data": data}
 
 
@@ -154,6 +135,25 @@ async def create_db_diary(
 @app.get("/health", tags=["System"])
 async def health_check():
     return {"status": "alive", "nat_base_url": NAT_BASE_URL}
+
+
+@app.websocket("/api/v1/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    """
+    실시간 알림을 위한 WebSocket 엔드포인트입니다.
+    """
+    await manager.connect(websocket)
+    try:
+        while True:
+            # 연결 유지를 위해 클라이언트의 메시지를 대기함
+            data = await websocket.receive_text()
+            # 에코 응답 (테스트용)
+            await websocket.send_json({"status": "received", "message": data})
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
+    except Exception as e:
+        logger.error(f"WebSocket error: {e}")
+        manager.disconnect(websocket)
 
 
 if __name__ == "__main__":
