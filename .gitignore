@@ -51,6 +51,7 @@ backend-go/bin/
 Thumbs.db
 
 # coding agent specific
+AGENTS.md
 .gemini/
 .claude/
 .cursor/
