@@ -1,11 +1,13 @@
 import os
 import logging
+from dataclasses import dataclass
+from typing import Any
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from sqlmodel import Session
 from .ws_manager import manager
 from .database import engine
 from .config import NEWS_MCP_PARAMS, TRADING_MCP_PARAMS
-from .redis_state import RedisSchedulerState, news_hash, redis_state
+from .redis_state import RedisSchedulerState, signal_hash, redis_state
 from .services import perform_stock_analysis, run_mcp_tool, check_news_significance
 
 logger = logging.getLogger(__name__)
@@ -19,6 +21,23 @@ FILTER_PROVIDER = os.environ.get("NEWS_FILTER_PROVIDER", "ollama")
 # 종목별 마지막으로 분석된 뉴스 내용을 저장하는 인메모리 캐시 (LLM 호출 최적화용)
 # Redis 장애 시에만 사용하는 프로세스 로컬 fallback입니다.
 last_analyzed_news_cache = {}
+
+
+@dataclass(frozen=True)
+class SignalSource:
+    name: str
+    mcp_params: Any
+    tool_name: str
+    stock_arg_name: str = "stock_name"
+
+
+SIGNAL_SOURCES = [
+    SignalSource(
+        name="news",
+        mcp_params=NEWS_MCP_PARAMS,
+        tool_name="get_market_news",
+    )
+]
 
 def extract_stocks_from_balance(balance_text: str) -> list[str]:
     """mcp-trading의 get_balance 결과에서 종목명 리스트를 추출합니다."""
@@ -51,7 +70,7 @@ async def monitor_market_task():
                 await _monitor_market_task(state)
             finally:
                 try:
-                    await state.release_lock(state.keys.scheduler_lock(), scheduler_token)
+                    await state.release_lock(state.keys.scheduler_lock("market_monitoring"), scheduler_token)
                 except Exception as e:
                     logger.error("시장 모니터링 Redis lock 해제 중 오류: %s", e)
     except Exception as e:
@@ -80,79 +99,103 @@ async def _monitor_market_task(state: RedisSchedulerState | None):
         
         with Session(engine) as session:
             for stock in stocks_to_monitor:
-                await _monitor_stock(stock, session, state)
+                for source in SIGNAL_SOURCES:
+                    await _monitor_signal(stock, source, session, state)
                     
     except Exception as e:
         logger.error(f"모니터링 태스크 시작 중 오류: {e}")
 
 
-async def _monitor_stock(stock: str, session: Session, state: RedisSchedulerState | None):
+async def _monitor_signal(
+    stock: str,
+    source: SignalSource,
+    session: Session,
+    state: RedisSchedulerState | None,
+):
     analysis_token = None
     try:
-        # 1. 최신 뉴스 수집
-        current_news = await run_mcp_tool(NEWS_MCP_PARAMS, "get_market_news", {"stock_name": stock})
+        # 1. 최신 signal 수집
+        current_signal = await run_mcp_tool(
+            source.mcp_params,
+            source.tool_name,
+            {source.stock_arg_name: stock},
+        )
 
-        current_digest = news_hash(current_news)
+        current_digest = signal_hash(current_signal)
         if state is None:
-            last_news = last_analyzed_news_cache.get(stock)
-            if last_news is not None and news_hash(last_news) == current_digest:
-                logger.info(f"[{stock}] 동일 뉴스입니다. 분석을 건너뜁니다.")
+            cache_key = (source.name, stock)
+            last_signal = last_analyzed_news_cache.get(cache_key)
+            if last_signal is not None and signal_hash(last_signal) == current_digest:
+                logger.info(f"[{source.name}:{stock}] 동일 signal입니다. 분석을 건너뜁니다.")
                 return
         else:
-            if await state.in_cooldown(stock):
-                logger.info(f"[{stock}] 분석 cooldown 중입니다. 이번 실행을 건너뜁니다.")
+            if await state.in_cooldown(source.name, stock):
+                logger.info(f"[{source.name}:{stock}] 분석 cooldown 중입니다. 이번 실행을 건너뜁니다.")
                 return
 
-            last_digest = await state.get_last_news_hash(stock)
+            last_digest = await state.get_last_signal_hash(source.name, stock)
             if last_digest == current_digest:
-                logger.info(f"[{stock}] 동일 뉴스입니다. 분석을 건너뜁니다.")
+                logger.info(f"[{source.name}:{stock}] 동일 signal입니다. 분석을 건너뜁니다.")
                 return
 
-            analysis_token = await state.acquire_analysis_lock(stock)
+            analysis_token = await state.acquire_analysis_lock(source.name, stock)
             if analysis_token is None:
-                logger.info(f"[{stock}] 다른 worker가 분석 중입니다. 이번 실행을 건너뜁니다.")
+                logger.info(f"[{source.name}:{stock}] 다른 worker가 분석 중입니다. 이번 실행을 건너뜁니다.")
                 return
 
-            last_news = await state.get_last_news_text(stock)
+            last_signal = await state.get_last_signal_text(source.name, stock)
 
         # 2. 유의미성 판단 (Local Model or Mini LLM API)
         is_significant = await check_news_significance(
             stock,
-            current_news,
-            last_news,
+            current_signal,
+            last_signal,
             provider=FILTER_PROVIDER,
         )
 
-        # 상태 업데이트 (유의미성 여부와 상관없이 현재 뉴스를 캐시)
-        if state is None:
-            last_analyzed_news_cache[stock] = current_news
-        else:
-            await state.set_last_news(stock, current_news, current_digest)
-
         if not is_significant:
-            logger.info(f"[{stock}] 유의미한 변화 없음. 분석을 건너뜁니다.")
+            await _set_last_signal_state(state, source.name, stock, current_signal, current_digest)
+            logger.info(f"[{source.name}:{stock}] 유의미한 변화 없음. 분석을 건너뜁니다.")
             return
 
         # 3. 유의미한 변화가 있을 때만 고성능 에이전트 분석 실행
-        logger.info(f"[{stock}] 유의미한 변화 감지! 상세 분석을 시작합니다.")
+        logger.info(f"[{source.name}:{stock}] 유의미한 변화 감지! 상세 분석을 시작합니다.")
         analysis_data = await perform_stock_analysis(stock, "nat", session)
+        await _set_last_signal_state(state, source.name, stock, current_signal, current_digest)
 
         # 분석 결과를 WebSocket으로 실시간 전송
         await manager.broadcast({
             "type": "AGENT_ANALYSIS",
             "stock": stock,
+            "source": source.name,
             "data": analysis_data,
             "reason": "significant_change_detected"
         })
-        logger.info(f"[{stock}] 분석 결과 브로드캐스트 완료")
+        logger.info(f"[{source.name}:{stock}] 분석 결과 브로드캐스트 완료")
 
     except Exception as e:
         if state is not None and analysis_token is not None:
-            await state.set_cooldown(stock, type(e).__name__)
-        logger.error(f"[{stock}] 개별 종목 모니터링 중 오류: {e}")
+            await state.set_cooldown(source.name, stock, type(e).__name__)
+        logger.error(f"[{source.name}:{stock}] 개별 종목 모니터링 중 오류: {e}")
     finally:
         if state is not None and analysis_token is not None:
-            await state.release_lock(state.keys.analysis_lock(stock), analysis_token)
+            try:
+                await state.release_lock(state.keys.analysis_lock(source.name, stock), analysis_token)
+            except Exception as e:
+                logger.error(f"[{source.name}:{stock}] Redis analysis lock 해제 중 오류: {e}")
+
+
+async def _set_last_signal_state(
+    state: RedisSchedulerState | None,
+    source: str,
+    stock: str,
+    signal_text: str,
+    digest: str,
+) -> None:
+    if state is None:
+        last_analyzed_news_cache[(source, stock)] = signal_text
+    else:
+        await state.set_last_signal(source, stock, signal_text, digest)
 
 async def ping_task():
     """

@@ -15,41 +15,45 @@ SCHEDULER_LOCK_TTL_SEC = 60 * 30
 COOLDOWN_TTL_SEC = 60 * 10
 
 
-def normalize_news_text(news_text: str) -> str:
+def normalize_signal_text(signal_text: str) -> str:
     lines = []
-    for line in (news_text or "").splitlines():
+    for line in (signal_text or "").splitlines():
         normalized = re.sub(r"\s+", " ", line).strip().casefold()
         if normalized:
             lines.append(normalized)
     return "\n".join(sorted(set(lines)))
 
 
-def news_hash(news_text: str) -> str:
-    normalized = normalize_news_text(news_text)
+def signal_hash(signal_text: str) -> str:
+    normalized = normalize_signal_text(signal_text)
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+normalize_news_text = normalize_signal_text
+news_hash = signal_hash
 
 
 @dataclass(frozen=True)
 class RedisKeys:
     prefix: str = "finus"
 
-    def last_hash(self, stock: str) -> str:
-        return f"{self.prefix}:news:last_hash:{stock}"
+    def last_hash(self, source: str, stock: str) -> str:
+        return f"{self.prefix}:signal:last_hash:{source}:{stock}"
 
-    def last_text(self, stock: str) -> str:
-        return f"{self.prefix}:news:last_text:{stock}"
+    def last_text(self, source: str, stock: str) -> str:
+        return f"{self.prefix}:signal:last_text:{source}:{stock}"
 
-    def last_analyzed_at(self, stock: str) -> str:
-        return f"{self.prefix}:news:last_analyzed_at:{stock}"
+    def last_analyzed_at(self, source: str, stock: str) -> str:
+        return f"{self.prefix}:signal:last_analyzed_at:{source}:{stock}"
 
-    def analysis_lock(self, stock: str) -> str:
-        return f"{self.prefix}:analysis:lock:{stock}"
+    def analysis_lock(self, source: str, stock: str) -> str:
+        return f"{self.prefix}:analysis:lock:{source}:{stock}"
 
-    def analysis_cooldown(self, stock: str) -> str:
-        return f"{self.prefix}:analysis:cooldown:{stock}"
+    def analysis_cooldown(self, source: str, stock: str) -> str:
+        return f"{self.prefix}:analysis:cooldown:{source}:{stock}"
 
-    def scheduler_lock(self) -> str:
-        return f"{self.prefix}:scheduler:lock:market_monitoring"
+    def scheduler_lock(self, job_name: str = "market_monitoring") -> str:
+        return f"{self.prefix}:scheduler:lock:{job_name}"
 
 
 class RedisSchedulerState:
@@ -70,13 +74,19 @@ class RedisSchedulerState:
         self.scheduler_lock_ttl_sec = scheduler_lock_ttl_sec
         self.cooldown_ttl_sec = cooldown_ttl_sec
 
-    async def get_last_news_hash(self, stock: str) -> str | None:
-        value = await self.redis.get(self.keys.last_hash(stock))
+    async def get_last_signal_hash(self, source: str, stock: str) -> str | None:
+        value = await self.redis.get(self.keys.last_hash(source, stock))
         return self._decode(value)
 
-    async def get_last_news_text(self, stock: str) -> str | None:
-        value = await self.redis.get(self.keys.last_text(stock))
+    async def get_last_signal_text(self, source: str, stock: str) -> str | None:
+        value = await self.redis.get(self.keys.last_text(source, stock))
         return self._decode(value)
+
+    async def get_last_news_hash(self, stock: str) -> str | None:
+        return await self.get_last_signal_hash("news", stock)
+
+    async def get_last_news_text(self, stock: str) -> str | None:
+        return await self.get_last_signal_text("news", stock)
 
     @staticmethod
     def _decode(value: Any) -> str | None:
@@ -86,35 +96,51 @@ class RedisSchedulerState:
             return value.decode("utf-8")
         return str(value)
 
-    async def set_last_news(self, stock: str, news_text: str, digest: str) -> None:
-        await self.redis.set(self.keys.last_hash(stock), digest, ex=self.news_hash_ttl_sec)
-        await self.redis.set(self.keys.last_text(stock), news_text, ex=self.news_hash_ttl_sec)
+    async def set_last_signal(self, source: str, stock: str, signal_text: str, digest: str) -> None:
+        await self.redis.set(self.keys.last_hash(source, stock), digest, ex=self.news_hash_ttl_sec)
+        await self.redis.set(self.keys.last_text(source, stock), signal_text, ex=self.news_hash_ttl_sec)
         await self.redis.set(
-            self.keys.last_analyzed_at(stock),
+            self.keys.last_analyzed_at(source, stock),
             datetime.now(UTC).isoformat(),
             ex=self.news_hash_ttl_sec,
         )
 
-    async def in_cooldown(self, stock: str) -> bool:
-        return bool(await self.redis.exists(self.keys.analysis_cooldown(stock)))
+    async def set_last_news(self, stock: str, news_text: str, digest: str) -> None:
+        await self.set_last_signal("news", stock, news_text, digest)
 
-    async def set_cooldown(self, stock: str, reason: str) -> None:
-        await self.redis.set(self.keys.analysis_cooldown(stock), reason, ex=self.cooldown_ttl_sec)
+    async def in_cooldown(self, source: str, stock: str | None = None) -> bool:
+        source, stock = self._coerce_source_stock(source, stock)
+        return bool(await self.redis.exists(self.keys.analysis_cooldown(source, stock)))
 
-    async def acquire_scheduler_lock(self) -> str | None:
+    async def set_cooldown(self, source: str, stock: str | None = None, reason: str | None = None) -> None:
+        source, stock = self._coerce_source_stock(source, stock)
+        await self.redis.set(
+            self.keys.analysis_cooldown(source, stock),
+            reason or "analysis_failed",
+            ex=self.cooldown_ttl_sec,
+        )
+
+    @staticmethod
+    def _coerce_source_stock(source: str, stock: str | None) -> tuple[str, str]:
+        if stock is None:
+            return "news", source
+        return source, stock
+
+    async def acquire_scheduler_lock(self, job_name: str = "market_monitoring") -> str | None:
         token = uuid4().hex
         acquired = await self.redis.set(
-            self.keys.scheduler_lock(),
+            self.keys.scheduler_lock(job_name),
             token,
             nx=True,
             ex=self.scheduler_lock_ttl_sec,
         )
         return token if acquired else None
 
-    async def acquire_analysis_lock(self, stock: str) -> str | None:
+    async def acquire_analysis_lock(self, source: str, stock: str | None = None) -> str | None:
+        source, stock = self._coerce_source_stock(source, stock)
         token = uuid4().hex
         acquired = await self.redis.set(
-            self.keys.analysis_lock(stock),
+            self.keys.analysis_lock(source, stock),
             token,
             nx=True,
             ex=self.stock_lock_ttl_sec,

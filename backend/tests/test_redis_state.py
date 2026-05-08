@@ -1,6 +1,12 @@
 import pytest
 
-from backend.redis_state import RedisSchedulerState, news_hash, normalize_news_text
+from backend.redis_state import (
+    RedisSchedulerState,
+    news_hash,
+    normalize_news_text,
+    signal_hash,
+    normalize_signal_text,
+)
 
 
 class FakeRedis:
@@ -33,6 +39,8 @@ def test_news_hash_normalizes_order_and_whitespace():
 
     assert normalize_news_text(first) == normalize_news_text(second)
     assert news_hash(first) == news_hash(second)
+    assert normalize_signal_text(first) == normalize_signal_text(second)
+    assert signal_hash(first) == signal_hash(second)
 
 
 @pytest.mark.asyncio
@@ -47,32 +55,59 @@ async def test_last_news_hash_round_trip():
 
 
 @pytest.mark.asyncio
+async def test_last_signal_state_is_scoped_by_source():
+    state = RedisSchedulerState(FakeRedis())
+    news_digest = signal_hash("삼성전자 뉴스")
+    sns_digest = signal_hash("삼성전자 SNS")
+
+    await state.set_last_signal("news", "삼성전자", "삼성전자 뉴스", news_digest)
+    await state.set_last_signal("sns", "삼성전자", "삼성전자 SNS", sns_digest)
+
+    assert await state.get_last_signal_hash("news", "삼성전자") == news_digest
+    assert await state.get_last_signal_hash("sns", "삼성전자") == sns_digest
+    assert await state.get_last_signal_text("news", "삼성전자") == "삼성전자 뉴스"
+    assert await state.get_last_signal_text("sns", "삼성전자") == "삼성전자 SNS"
+
+
+@pytest.mark.asyncio
 async def test_analysis_lock_allows_single_owner_and_token_release():
     redis = FakeRedis()
     state = RedisSchedulerState(redis)
 
-    token = await state.acquire_analysis_lock("삼성전자")
-    second_token = await state.acquire_analysis_lock("삼성전자")
+    token = await state.acquire_analysis_lock("news", "삼성전자")
+    second_token = await state.acquire_analysis_lock("news", "삼성전자")
 
     assert token is not None
     assert second_token is None
 
-    await state.release_lock(state.keys.analysis_lock("삼성전자"), "wrong-token")
-    assert await state.acquire_analysis_lock("삼성전자") is None
+    await state.release_lock(state.keys.analysis_lock("news", "삼성전자"), "wrong-token")
+    assert await state.acquire_analysis_lock("news", "삼성전자") is None
 
-    await state.release_lock(state.keys.analysis_lock("삼성전자"), token)
-    assert await state.acquire_analysis_lock("삼성전자") is not None
+    await state.release_lock(state.keys.analysis_lock("news", "삼성전자"), token)
+    assert await state.acquire_analysis_lock("news", "삼성전자") is not None
+
+
+@pytest.mark.asyncio
+async def test_analysis_lock_is_scoped_by_source():
+    state = RedisSchedulerState(FakeRedis())
+
+    news_token = await state.acquire_analysis_lock("news", "삼성전자")
+    sns_token = await state.acquire_analysis_lock("sns", "삼성전자")
+
+    assert news_token is not None
+    assert sns_token is not None
 
 
 @pytest.mark.asyncio
 async def test_cooldown_flag():
     state = RedisSchedulerState(FakeRedis())
 
-    assert await state.in_cooldown("삼성전자") is False
+    assert await state.in_cooldown("news", "삼성전자") is False
 
-    await state.set_cooldown("삼성전자", "nat_failed")
+    await state.set_cooldown("news", "삼성전자", "nat_failed")
 
-    assert await state.in_cooldown("삼성전자") is True
+    assert await state.in_cooldown("news", "삼성전자") is True
+    assert await state.in_cooldown("sns", "삼성전자") is False
 
 
 @pytest.mark.asyncio
