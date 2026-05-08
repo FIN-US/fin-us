@@ -39,6 +39,9 @@ _TRADING_MCP_DIR = Path(os.environ.get("TRADING_MCP_DIR", _FIN_US_ROOT / "mcp-tr
 DATABASE_URL = os.environ.get("DATABASE_URL") or f"sqlite:///{_FIN_US_ROOT}/backend/finus.db"
 DB_ECHO = os.getenv("DB_ECHO", "false").lower() == "true"
 
+# Redis cache/lock settings for scheduler state.
+REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
+
 # CORS 설정
 _ALLOW_ORIGINS_RAW = os.getenv("ALLOW_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173")
 ALLOW_ORIGINS = [origin.strip() for origin in _ALLOW_ORIGINS_RAW.split(",") if origin.strip()]
