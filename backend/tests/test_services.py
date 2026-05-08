@@ -60,3 +60,22 @@ async def test_perform_stock_analysis_includes_trigger_signal(monkeypatch):
     assert prompts[0][0] == "nat"
     assert "분석 트리거 데이터 출처: sns" in prompts[0][1]
     assert "SNS mentions spiked after earnings guidance" in prompts[0][1]
+    assert '"source_signals"' in prompts[0][1]
+
+
+def test_analysis_from_nat_text_backfills_source_signals():
+    from ..services import analysis_from_nat_text
+
+    data = analysis_from_nat_text(
+        (
+            '{"summary":"요약",'
+            '"details":{"decision":"HOLD","confidence_score":0.5,'
+            '"reason":"근거","target_stock":"삼성전자"},'
+            '"source_news":["기존 뉴스"],'
+            '"trading_trend":null}'
+        ),
+        "삼성전자",
+    )
+
+    assert data["source_news"] == ["기존 뉴스"]
+    assert data["source_signals"] == ["기존 뉴스"]

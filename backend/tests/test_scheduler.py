@@ -243,3 +243,41 @@ async def test_monitor_market_task_skips_when_scheduler_lock_is_held(monkeypatch
     await monitor_market_task()
 
     mock_run_mcp_tool.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_monitor_market_task_runs_once_with_scheduler_lock(monkeypatch):
+    from ..scheduler import monitor_market_task
+
+    state = RedisSchedulerState(FakeRedis())
+
+    @asynccontextmanager
+    async def fake_redis_state():
+        yield state
+
+    async def mock_run_mcp_tool(params, name, args):
+        _ = params, args
+        await asyncio.sleep(0)
+        if name == "get_balance":
+            return "[보유 종목 리스트]\n- 삼성전자 (005930): 10주"
+        return "Latest news for Samsung"
+
+    async def mock_check_significance(stock, current, last, *, source, provider):
+        _ = stock, current, last, source, provider
+        return True
+
+    mock_perform_analysis = MagicMock(return_value=asyncio.Future())
+    mock_perform_analysis.return_value.set_result({"summary": "Mocked"})
+    mock_broadcast = MagicMock(return_value=asyncio.Future())
+    mock_broadcast.return_value.set_result(None)
+
+    monkeypatch.setattr("backend.scheduler.redis_state", fake_redis_state)
+    monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
+    monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
+    monkeypatch.setattr("backend.scheduler.perform_stock_analysis", mock_perform_analysis)
+    monkeypatch.setattr("backend.scheduler.manager.broadcast", mock_broadcast)
+
+    await asyncio.gather(monitor_market_task(), monitor_market_task())
+
+    assert mock_perform_analysis.call_count == 1
+    assert mock_broadcast.call_count == 1

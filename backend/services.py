@@ -53,6 +53,7 @@ async def perform_stock_analysis(
         f'{stock}'
         '"},'
         '"source_news":["헤드라인1","헤드라인2"],'
+        '"source_signals":["분석에 사용한 외부 signal 1","분석에 사용한 외부 signal 2"],'
         '"trading_trend":"수급 한줄 요약 또는 null"}'
     )
     
@@ -299,15 +300,14 @@ async def run_mcp_tool(
 def analysis_from_nat_text(raw: str, stock: str) -> dict[str, Any]:
     """Map NAT assistant output to AnalysisReport JSON for the reference React UI."""
     text = (raw or "").strip()
-    start = text.rfind("{")
-    end = text.rfind("}")
-    if start != -1 and end > start:
-        chunk = text[start : end + 1]
+    for data in _json_objects_from_text(text):
         try:
-            data = json.loads(chunk)
             report = AnalysisReport(**data)
-            return report.model_dump()
-        except (json.JSONDecodeError, ValueError):
+            dumped = report.model_dump()
+            if dumped.get("source_signals") is None:
+                dumped["source_signals"] = dumped.get("source_news", [])
+            return dumped
+        except ValueError:
             pass
     lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
     news_snip = lines[:8] if lines else []
@@ -320,8 +320,24 @@ def analysis_from_nat_text(raw: str, stock: str) -> dict[str, Any]:
             target_stock=stock,
         ),
         source_news=news_snip,
+        source_signals=news_snip,
         trading_trend=None,
     ).model_dump()
+
+
+def _json_objects_from_text(text: str) -> list[dict[str, Any]]:
+    decoder = json.JSONDecoder()
+    objects: list[dict[str, Any]] = []
+    for index, char in enumerate(text):
+        if char != "{":
+            continue
+        try:
+            value, _ = decoder.raw_decode(text[index:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            objects.append(value)
+    return list(reversed(objects))
 
 
 def normalize_llm_provider(

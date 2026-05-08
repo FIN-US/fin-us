@@ -25,7 +25,7 @@ export default function App() {
   } = useFinUsDashboard();
 
   const currentTrend = report?.trading_trend || rawTrend;
-  const currentNews = report?.source_news || rawNews;
+  const currentNews = report?.source_signals || report?.source_news || rawNews;
   const trendData = parseTrendData(currentTrend);
   const latest = trendData[trendData.length - 1];
 
