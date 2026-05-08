@@ -23,3 +23,73 @@ export interface TrendItem {
   institution: number;
   volume: number;
 }
+
+export interface ApiResponse<T> {
+  status: string;
+  data: T;
+  message?: string | null;
+}
+
+export interface HealthStatus {
+  status: string;
+  nat_base_url: string;
+}
+
+export interface PortfolioItem {
+  id?: number;
+  stock_code: string;
+  stock_name: string;
+  quantity: number;
+  avg_price: number;
+  current_price?: number | null;
+  updated_at: string;
+}
+
+export interface TradeHistoryItem {
+  id?: number;
+  stock_code: string;
+  stock_name: string;
+  trade_type: string;
+  quantity: number;
+  price: number;
+  trade_date: string;
+}
+
+export interface AgentReportItem {
+  id?: number;
+  stock_code: string;
+  stock_name: string;
+  provider: string;
+  summary: string;
+  decision: string;
+  confidence_score: number;
+  reason: string;
+  created_at: string;
+}
+
+export interface DiaryItem {
+  id?: number;
+  title: string;
+  content: string;
+  created_at: string;
+}
+
+export interface AccountBalance {
+  report: string;
+}
+
+export interface DashboardResources {
+  health: HealthStatus | null;
+  balance: AccountBalance | null;
+  portfolio: PortfolioItem[];
+  trades: TradeHistoryItem[];
+  reports: AgentReportItem[];
+  diaries: DiaryItem[];
+}
+
+export interface ChatMessage {
+  id: string;
+  role: 'system' | 'user' | 'server';
+  text: string;
+  createdAt: string;
+}

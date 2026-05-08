@@ -5,7 +5,10 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import axios from "axios";
+import crypto from "crypto";
 import dotenv from "dotenv";
+import fs from "fs/promises";
+import os from "os";
 import path from "path";
 import { fileURLToPath } from "url";
 
@@ -18,6 +21,44 @@ const __dirname = path.dirname(__filename);
 dotenv.config({ path: path.join(__dirname, "..", ".env") });
 
 const { KIS_API_KEY, KIS_API_SECRET, KIS_ACCOUNT_NO, KIS_URL } = process.env;
+const KIS_BALANCE_TR_ID = KIS_URL?.includes("openapivts") ? "VTTC8434R" : "TTTC8434R";
+const TOKEN_CACHE_PATH = process.env.KIS_TOKEN_CACHE_PATH || path.join(os.tmpdir(), "fin-us-kis-token-cache.json");
+const TOKEN_EXPIRY_BUFFER_MS = 60_000;
+const TOKEN_CACHE_SCOPE = crypto
+  .createHash("sha256")
+  .update(`${KIS_URL || ""}:${KIS_API_KEY || ""}`)
+  .digest("hex");
+
+async function readCachedAccessToken() {
+  try {
+    const raw = await fs.readFile(TOKEN_CACHE_PATH, "utf8");
+    const cache = JSON.parse(raw);
+    if (
+      cache.scope === TOKEN_CACHE_SCOPE
+      && cache.accessToken
+      && cache.expiresAt
+      && Date.now() + TOKEN_EXPIRY_BUFFER_MS < cache.expiresAt
+    ) {
+      return cache.accessToken;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+async function writeCachedAccessToken(tokenResponse) {
+  const expiresInSeconds = Number(tokenResponse.expires_in || 0);
+  const expiresAt = expiresInSeconds > 0
+    ? Date.now() + expiresInSeconds * 1000
+    : Date.now() + 23 * 60 * 60 * 1000;
+
+  await fs.writeFile(
+    TOKEN_CACHE_PATH,
+    JSON.stringify({ scope: TOKEN_CACHE_SCOPE, accessToken: tokenResponse.access_token, expiresAt }),
+    { mode: 0o600 },
+  );
+}
 
 const server = new Server(
   { name: "trading-tool", version: "1.0.0" },
@@ -41,15 +82,22 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
  * [Helper] KIS API Access Token 발급
  */
 async function getAccessToken() {
+  const cachedToken = await readCachedAccessToken();
+  if (cachedToken) return cachedToken;
+
   try {
     const response = await axios.post(`${KIS_URL}/oauth2/tokenP`, {
       grant_type: "client_credentials",
       appkey: KIS_API_KEY,
       appsecret: KIS_API_SECRET,
     });
+    await writeCachedAccessToken(response.data);
     return response.data.access_token;
   } catch (error) {
-    throw new Error(`Access Token 발급 실패: ${error.response?.data?.msg1 || error.message}`);
+    const detail = error.response?.data?.msg1
+      || error.response?.data?.error_description
+      || error.message;
+    throw new Error(`Access Token 발급 실패: ${detail}`);
   }
 }
 
@@ -74,7 +122,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           "authorization": `Bearer ${token}`,
           "appkey": KIS_API_KEY,
           "appsecret": KIS_API_SECRET,
-          "tr_id": "TTTC8434R",
+          "tr_id": KIS_BALANCE_TR_ID,
           "custtype": "P",
         },
         params: {
@@ -118,8 +166,11 @@ ${stockList || "보유 종목이 없습니다."}
         content: [{ type: "text", text: balanceInfo }],
       };
     } catch (error) {
+      const detail = error.response?.data?.msg1
+        || error.response?.data?.error_description
+        || error.message;
       return {
-        content: [{ type: "text", text: `잔고 조회 중 에러 발생: ${error.message}` }],
+        content: [{ type: "text", text: `잔고 조회 중 에러 발생: ${detail}` }],
         isError: true,
       };
     }

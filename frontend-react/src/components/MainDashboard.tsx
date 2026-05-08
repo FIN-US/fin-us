@@ -3,6 +3,7 @@ import { Activity, BarChart3, Layers } from 'lucide-react';
 import {
   BarChart,
   Bar,
+  AreaChart,
   XAxis,
   YAxis,
   CartesianGrid,
@@ -29,9 +30,11 @@ const MainDashboard: React.FC<MainDashboardProps> = ({ trendData, report }) => {
             <div className="p-2 bg-rose-50 rounded-lg"><Activity className="w-6 h-6 text-rose-500" /></div>
             <h3 className="text-slate-800 font-black text-xl tracking-tight">Price Trend</h3>
           </div>
-          <div className="h-64 w-full">
-            <ResponsiveContainer width="100%" height="100%">
-              <Area data={trendData} type="monotone" dataKey="price" fill="#fff1f2" stroke="#fb7185" strokeWidth={4} />
+          <div className="h-64 min-h-64 min-w-0 w-full">
+            <ResponsiveContainer width="100%" height="100%" minWidth={0}>
+              <AreaChart data={trendData}>
+                <Area type="monotone" dataKey="price" fill="#fff1f2" stroke="#fb7185" strokeWidth={4} />
+              </AreaChart>
             </ResponsiveContainer>
           </div>
         </div>
@@ -40,9 +43,11 @@ const MainDashboard: React.FC<MainDashboardProps> = ({ trendData, report }) => {
             <div className="p-2 bg-slate-50 rounded-lg"><BarChart3 className="w-6 h-6 text-slate-500" /></div>
             <h3 className="text-slate-800 font-black text-xl tracking-tight">Liquidity</h3>
           </div>
-          <div className="h-64 w-full">
-            <ResponsiveContainer width="100%" height="100%">
-              <Bar data={trendData} dataKey="volume" fill="#f1f5f9" radius={[4, 4, 0, 0]} />
+          <div className="h-64 min-h-64 min-w-0 w-full">
+            <ResponsiveContainer width="100%" height="100%" minWidth={0}>
+              <BarChart data={trendData}>
+                <Bar dataKey="volume" fill="#f1f5f9" radius={[4, 4, 0, 0]} />
+              </BarChart>
             </ResponsiveContainer>
           </div>
         </div>
@@ -60,8 +65,8 @@ const MainDashboard: React.FC<MainDashboardProps> = ({ trendData, report }) => {
           </div>
         </div>
 
-        <div className="h-64 w-full">
-          <ResponsiveContainer width="100%" height="100%">
+        <div className="h-64 min-h-64 min-w-0 w-full">
+          <ResponsiveContainer width="100%" height="100%" minWidth={0}>
             <BarChart data={trendData} margin={{ top: 0, right: 0, left: 0, bottom: 0 }}>
               <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
               <XAxis dataKey="date" axisLine={false} tickLine={false} tick={{ fontSize: 12, fontWeight: 700, fill: '#cbd5e1' }} />

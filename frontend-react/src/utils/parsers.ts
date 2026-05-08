@@ -2,7 +2,6 @@ import { TrendItem } from '../types';
 
 export const parseTrendData = (trendStr: string | null): TrendItem[] => {
   if (!trendStr) return [];
-  console.log("Parsing trend string:", trendStr);
   const lines = trendStr.split('\n').filter(l => l.includes('|'));
   return lines.map(line => {
     const parts = line.split('|').map(p => p.trim());
@@ -29,7 +28,6 @@ export const parseTrendData = (trendStr: string | null): TrendItem[] => {
       institution: parseInt(instStr) || 0,
       volume: parseInt(volStr) || 0
     };
-    console.log("Parsed row:", result);
     return result;
   }).reverse();
 };
