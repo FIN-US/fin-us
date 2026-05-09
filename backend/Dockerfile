@@ -1,22 +1,25 @@
-FROM python:3.11-slim
+FROM python:3.13-slim
 
 RUN apt-get update && apt-get install -y curl gnupg && \
-    curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
+    curl -fsSL https://deb.nodesource.com/setup_24.x | bash - && \
     apt-get install -y nodejs && \
     rm -rf /var/lib/apt/lists/*
 
+WORKDIR /opt/mcp-news
+COPY mcp-news/package*.json ./
+RUN npm ci --omit=dev
+RUN npx playwright install --with-deps chromium
+COPY mcp-news ./
+
+WORKDIR /opt/mcp-trading
+COPY mcp-trading/package*.json ./
+RUN npm ci --omit=dev
+COPY mcp-trading ./
+
 WORKDIR /app
 
-COPY mcp-news/package*.json ./mcp-news/
-RUN cd ./mcp-news && npm install
-
-COPY mcp-trading/package*.json ./mcp-trading/
-RUN cd ./mcp-trading && npm install
-
-RUN cd ./mcp-news && npx playwright install --with-deps chromium
-
-COPY backend/requirements.txt ./backend/
-RUN pip install --no-cache-dir -r ./backend/requirements.txt
+COPY backend/requirements.lock ./backend/
+RUN pip install --no-cache-dir -r ./backend/requirements.lock
 
 COPY . .
 

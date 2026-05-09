@@ -30,6 +30,8 @@ services:
       - "host.docker.internal:host-gateway"
     environment:
       NAT_BASE_URL: http://finus-nat:8000
+      NEWS_MCP_DIR: /opt/mcp-news
+      TRADING_MCP_DIR: /opt/mcp-trading
     depends_on:
       finus-nat:
         condition: service_healthy

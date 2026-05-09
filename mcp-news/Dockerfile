@@ -1,4 +1,4 @@
-FROM node:20-slim
+FROM node:24-slim
 
 RUN apt-get update && apt-get install -y \
     libnss3 \
@@ -23,7 +23,7 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /app
 
 COPY package*.json ./
-RUN npm install
+RUN npm ci --omit=dev
 
 RUN npx playwright install --with-deps chromium
 
