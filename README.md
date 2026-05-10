@@ -46,15 +46,21 @@ Fin-Us는 단일 모델이 모든 일을 처리하지 않고, 역할이 분리�
 - Node.js & npm
 - API Keys: OpenAI/Anthropic API, 한국투자증권(KIS) API Key/Secret
 
-### 1. 에이전트 페르소나 설정
+### 1. NAT 에이전트 설정
 
-`backend/agents/` 폴더 내의 YAML 파일을 수정하여 에이전트의 성격을 정의할 수 있습니다.
+에이전트의 페르소나, 도구 구성, 라우팅 지침은 NAT 레이어에서 정의합니다. `finus_nat/configs/agents/` 폴더 내의 YAML 파일을 수정하여 각 에이전트의 성격과 작업 지침을 관리할 수 있습니다.
 
 ```yaml
-# 예시: news_analyst.yaml
-name: "NewsAnalyst"
-role: "시장 심리 및 리서치 분석가"
-goal: "뉴스의 행간을 읽고 증권사 리포트를 분석하여 투자 신뢰도를 산출함"
+# 예시: finus_nat/configs/agents/news_agent.yml
+functions:
+  news_agent:
+    _type: react_agent
+    tool_names:
+      - finus_market_news
+      - finus_investor_trading
+    additional_instructions: |
+      역할: 시장 심리 분석가
+      뉴스와 외국인/기관 매매 동향을 종합 분석합니다.
 ```
 
 ### 2. 환경 변수 설정
