@@ -28,5 +28,35 @@
     "name": "카카오",
     "market": "KOSPI",
     "aliases": ["Kakao"]
+  },
+  {
+    "code": "373220",
+    "name": "LG에너지솔루션",
+    "market": "KOSPI",
+    "aliases": ["LG Energy Solution", "엘지에너지솔루션"]
+  },
+  {
+    "code": "207940",
+    "name": "삼성바이오로직스",
+    "market": "KOSPI",
+    "aliases": ["Samsung Biologics"]
+  },
+  {
+    "code": "068270",
+    "name": "셀트리온",
+    "market": "KOSPI",
+    "aliases": ["Celltrion"]
+  },
+  {
+    "code": "005490",
+    "name": "POSCO홀딩스",
+    "market": "KOSPI",
+    "aliases": ["포스코홀딩스", "POSCO Holdings"]
+  },
+  {
+    "code": "000270",
+    "name": "기아",
+    "market": "KOSPI",
+    "aliases": ["Kia", "기아차"]
   }
 ]

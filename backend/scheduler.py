@@ -23,6 +23,19 @@ FILTER_PROVIDER = os.environ.get("NEWS_FILTER_PROVIDER", "ollama")
 last_analyzed_signal_cache = {}
 last_analyzed_news_cache = last_analyzed_signal_cache
 
+DEFAULT_MONITOR_STOCKS = [
+    "삼성전자",
+    "SK하이닉스",
+    "현대차",
+    "NAVER",
+    "카카오",
+    "LG에너지솔루션",
+    "삼성바이오로직스",
+    "셀트리온",
+    "POSCO홀딩스",
+    "기아",
+]
+
 
 @dataclass(frozen=True)
 class SignalSource:
@@ -93,8 +106,8 @@ async def _monitor_market_task(state: RedisSchedulerState | None):
         stocks_to_monitor = extract_stocks_from_balance(balance_text)
 
         if not stocks_to_monitor:
-            logger.info("보유 종목이 없습니다. 기본 종목을 감시합니다.")
-            stocks_to_monitor = ["삼성전자"] # 기본 감시 종목
+            logger.info("보유 종목이 없습니다. 기본 종목 10개를 감시합니다.")
+            stocks_to_monitor = DEFAULT_MONITOR_STOCKS
 
         logger.info(f"실시간 모니터링 시작 (대상: {stocks_to_monitor}, 필터: {FILTER_PROVIDER})")
         
