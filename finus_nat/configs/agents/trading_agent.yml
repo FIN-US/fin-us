@@ -36,4 +36,4 @@ functions:
   trading_branch_agent:
     _type: fe_branch
     inner_function_name: trading_agent
-  tool_description: "Trading: Fin-Us account balance, Naver Search API news, KIS investor flows, deprecated research reports (stdio MCP)."
+    tool_description: "Trading: Fin-Us account balance, Naver Search API news, KIS investor flows, deprecated research reports (stdio MCP)."
