@@ -51,6 +51,7 @@ def _stdio_server_params(mcp_dir: Path) -> StdioServerParameters:
     return StdioServerParameters(
         command="node",
         args=[str(mcp_dir / "index.js")],
+        env=dict(os.environ),
         cwd=str(mcp_dir),
     )
 
