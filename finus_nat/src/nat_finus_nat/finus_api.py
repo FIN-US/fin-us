@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -83,7 +84,12 @@ async def _mcp_call_tool(
             },
             ensure_ascii=False)
 
-    params = StdioServerParameters(command="node", args=[str(script)], cwd=str(server_dir))
+    params = StdioServerParameters(
+        command="node",
+        args=[str(script)],
+        env=dict(os.environ),
+        cwd=str(server_dir),
+    )
 
     async def _inner() -> str:
         async with stdio_client(params) as (read, write):
