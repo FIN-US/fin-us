@@ -6,7 +6,6 @@ ROOT="$(cd "${HERE}/.." && pwd)"
 
 cd "${ROOT}/mcp-news"
 npm ci
-npx playwright install chromium
 
 cd "${ROOT}/mcp-trading"
 npm ci

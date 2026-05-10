@@ -1,0 +1,32 @@
+[
+  {
+    "code": "005930",
+    "name": "삼성전자",
+    "market": "KOSPI",
+    "aliases": ["Samsung Electronics"]
+  },
+  {
+    "code": "000660",
+    "name": "SK하이닉스",
+    "market": "KOSPI",
+    "aliases": ["에스케이하이닉스", "SK hynix"]
+  },
+  {
+    "code": "005380",
+    "name": "현대차",
+    "market": "KOSPI",
+    "aliases": ["현대자동차", "Hyundai Motor"]
+  },
+  {
+    "code": "035420",
+    "name": "NAVER",
+    "market": "KOSPI",
+    "aliases": ["네이버"]
+  },
+  {
+    "code": "035720",
+    "name": "카카오",
+    "market": "KOSPI",
+    "aliases": ["Kakao"]
+  }
+]

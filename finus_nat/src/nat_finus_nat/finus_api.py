@@ -77,7 +77,7 @@ async def _mcp_call_tool(
                 "path": str(server_dir),
                 "detail": "ERR_MODULE_NOT_FOUND @modelcontextprotocol/sdk — node_modules not installed.",
                 "hint": (
-                    f"cd {news} && npm ci && npx playwright install chromium; "
+                    f"cd {news} && npm ci; "
                     f"cd {trade} && npm ci"
                 ),
             },
@@ -129,6 +129,17 @@ async def _mcp_trading_balance(config: _FinusVendorTimeout) -> str:
     )
 
 
+async def _mcp_trading_stock(config: _FinusVendorTimeout, tool_name: str, stock_name: str) -> str:
+    vr, timeout = _vendor_and_timeout(config)
+    return await _mcp_call_tool(
+        vendor_root=vr,
+        subdir="mcp-trading",
+        tool_name=tool_name,
+        arguments={"stock_name": stock_name},
+        timeout_sec=timeout,
+    )
+
+
 class FinusMarketNewsConfig(FunctionBaseConfig, name="finus_market_news"):
     vendor_root: str | None = Field(default=None, description="Override parent dir containing mcp-news and mcp-trading.")
     timeout_sec: float = Field(default=120.0, ge=5.0, le=600.0)
@@ -160,7 +171,7 @@ async def finus_market_news(config: FinusMarketNewsConfig, _builder: Builder):
 @register_function(config_type=FinusInvestorTradingConfig)
 async def finus_investor_trading(config: FinusInvestorTradingConfig, _builder: Builder):
     async def get_investor_trading(stock_name: str) -> str:
-        return await _mcp_news_stock(config, "get_investor_trading", stock_name)
+        return await _mcp_trading_stock(config, "get_investor_trading", stock_name)
 
     yield FunctionInfo.from_fn(get_investor_trading, description=get_investor_trading.__doc__)
 

@@ -8,7 +8,6 @@ RUN apt-get update && apt-get install -y curl gnupg && \
 WORKDIR /opt/mcp-news
 COPY mcp-news/package*.json ./
 RUN npm ci --omit=dev
-RUN npx playwright install --with-deps chromium
 COPY mcp-news ./
 
 WORKDIR /opt/mcp-trading

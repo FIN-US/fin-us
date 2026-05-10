@@ -78,7 +78,7 @@ async def analyze_stock(
 @app.get("/api/v1/trading/trend", response_model=CommonResponse, tags=["Market Data"])
 async def get_trading_trend(stock: str = Query(..., examples=["삼성전자"])):
     trend = await run_mcp_tool(
-        NEWS_MCP_PARAMS,
+        TRADING_MCP_PARAMS,
         "get_investor_trading",
         {"stock_name": stock},
     )

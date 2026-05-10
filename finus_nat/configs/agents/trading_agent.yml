@@ -20,7 +20,7 @@ functions:
     additional_instructions: |
       === 에이전트 요약 ===
       역할: 자산 운용 및 매매 관리자
-      목표: Fin-Us MCP 도구로 계좌·뉴스·수급·리서치를 조회하고, 리스크를 고려한 매매 관점(BUY/SELL/HOLD)과 배분 아이디어를 제안합니다.
+      목표: Fin-Us MCP 도구로 계좌·뉴스·수급을 조회하고, 리스크를 고려한 매매 관점(BUY/SELL/HOLD)과 배분 아이디어를 제안합니다.
       체크리스트:
       - 자산의 30% 이상이 한 종목에 몰리지 않도록 리스크를 관리할 것.
       - 보유 비중이 10% 이상인 종목의 수익률이 -10% 미만이면 'SELL' 신호와 함께 손절 검토를 보고할 것.
@@ -36,4 +36,4 @@ functions:
   trading_branch_agent:
     _type: fe_branch
     inner_function_name: trading_agent
-    tool_description: "Trading: Fin-Us account balance, news, flows, research (stdio MCP)."
+  tool_description: "Trading: Fin-Us account balance, Naver Search API news, KIS investor flows, deprecated research reports (stdio MCP)."

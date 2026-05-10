@@ -17,7 +17,7 @@ COPY mcp-news /workspace/mcp-news
 COPY mcp-trading /workspace/mcp-trading
 
 WORKDIR /workspace/mcp-news
-RUN npm ci && npx playwright install --with-deps chromium
+RUN npm ci
 
 WORKDIR /workspace/mcp-trading
 RUN npm ci

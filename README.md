@@ -20,7 +20,7 @@ Fin-Us는 단일 모델이 모든 일을 처리하지 않고, 역할이 분리�
 - **NAT 기반 멀티 에이전트**: `finus_nat` 레이어를 통해 라우터 및 브랜치 구조의 복잡한 에이전트 워크플로우를 제어합니다.
 - **YAML 기반 에이전트 설정**: 에이전트의 성격, 배경지식, 작업 지침을 코드가 아닌 YAML 파일로 관리하여 유연한 튜닝이 가능합니다.
 - **관심사 분리 (SoC)**: MCP를 통해 도구(Tool)를 분리하고, 에이전트별로 역할을 분산하여 LLM의 할루시네이션(환각)을 최소화했습니다.
-- **실시간 지식 확장**: Playwright 기반 MCP 서버를 통해 실시간 시장 데이터 및 **증권사 리서치 리포트**에 접근합니다.
+- **실시간 지식 확장**: 공식 API 기반 MCP 서버를 통해 뉴스와 정형 금융 데이터에 접근합니다.
 
 ## 🏗️ 시스템 아키텍처
 
@@ -33,8 +33,8 @@ Fin-Us는 단일 모델이 모든 일을 처리하지 않고, 역할이 분리�
     - 라우터 및 브랜치 구조를 통해 사용자 요청에 최적화된 에이전트를 매칭합니다.
     - 전문화된 6종의 에이전트 협업 프로세스를 제어하며, MCP 서버와의 인터페이스를 담당합니다.
 3.  **Tooling Layer (MCP Servers)**:
-    - **News Provider (`mcp-news/`)**: 실시간 뉴스 및 **네이버 증권 리서치 리포트** 공급.
-    - **Trading Provider (`mcp-trading/`)**: 증권사 API를 통한 정형 금융 데이터 공급 및 명령 집행.
+    - **News Provider (`mcp-news/`)**: 네이버 뉴스 검색 API 기반 최신 뉴스 공급.
+    - **Trading Provider (`mcp-trading/`)**: 한국투자증권 Open API 기반 정형 금융 데이터 공급 및 명령 집행.
 4.  **Presentation Layer (`frontend-react/`)**: React (TypeScript)
     - 실시간 투자 신호 및 분석 리포트를 시각화하여 사용자에게 제공합니다.
 
@@ -64,7 +64,7 @@ goal: "뉴스의 행간을 읽고 증권사 리포트를 분석하여 투자 신
 ```bash
 # 프로젝트 루트의 .env 파일 생성 및 편집
 cp .env.example .env
-# OpenAI, Anthropic, KIS API 키 및 Ollama 설정을 입력하세요.
+# OpenAI, Anthropic, KIS, Naver API 키 및 Ollama 설정을 입력하세요.
 ```
 
 ### 3. 시스템 가동
@@ -94,9 +94,9 @@ Unity WebGL 빌드는 `index.html`을 더블클릭해서 `file://` URL로 실행
 
 | 에이전트             | 스킬 이름              | 설명                                         |
 | :------------------- | :--------------------- | :------------------------------------------- |
-| **News Analyst**     | `get_market_news`      | 네이버 뉴스 기반 최신 동향 수집              |
-|                      | `get_investor_trading` | 기관/외국인 수급 데이터 분석                 |
-|                      | `get_research_reports` | **네이버 증권 리서치 종목 분석 리포트 수집** |
+| **News Analyst**     | `get_market_news`      | 네이버 뉴스 검색 API 기반 최신 동향 수집      |
+|                      | `get_investor_trading` | KIS API 기반 기관/외국인 수급 데이터 분석     |
+|                      | `get_research_reports` | deprecated: 공식 대체 API 미선정으로 비활성화 |
 | **Trading Executor** | `get_balance`          | 실시간 계좌 잔고 및 수익률 확인              |
 |                      | `execute_trade`        | 매수/매도 주문 실행 (KIS API)                |
 

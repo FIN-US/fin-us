@@ -1,24 +1,140 @@
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { chromium } from "playwright";
 
 // Redirect console.log to console.error to prevent breaking MCP JSON-RPC on stdout
 console.log = console.error;
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const rootEnvPath = path.join(__dirname, "..", ".env");
+
+function loadRootEnv() {
+  if (!fs.existsSync(rootEnvPath)) return;
+
+  const envText = fs.readFileSync(rootEnvPath, "utf8");
+  for (const line of envText.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+
+    const eqIndex = trimmed.indexOf("=");
+    if (eqIndex === -1) continue;
+
+    const key = trimmed.slice(0, eqIndex).trim();
+    let value = trimmed.slice(eqIndex + 1).trim();
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1);
+    }
+    if (!process.env[key]) process.env[key] = value;
+  }
+}
+
+loadRootEnv();
+
+const NAVER_NEWS_ENDPOINT = "https://openapi.naver.com/v1/search/news.json";
+const NAVER_CLIENT_ID = process.env.NAVER_CLIENT_ID;
+const NAVER_CLIENT_SECRET = process.env.NAVER_CLIENT_SECRET;
+const DEFAULT_DISPLAY_COUNT = 3;
+const REQUEST_TIMEOUT_MS = 8000;
 
 const server = new Server(
   { name: "news-tool", version: "1.0.0" },
   { capabilities: { tools: {} } },
 );
 
+function isMissingCredential(value) {
+  return !value || value.startsWith("your_") || value.includes("_here");
+}
+
+function decodeHtml(text) {
+  return String(text ?? "")
+    .replace(/<[^>]+>/g, "")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function formatNewsItem(item) {
+  const title = decodeHtml(item.title);
+  const description = decodeHtml(item.description);
+  const pubDate = decodeHtml(item.pubDate);
+  const link = item.link || item.originallink || "";
+
+  const details = [description, pubDate, link].filter(Boolean).join(" | ");
+  return details ? `${title} - ${details}` : title;
+}
+
+async function fetchMarketNews(stockName) {
+  if (isMissingCredential(NAVER_CLIENT_ID) || isMissingCredential(NAVER_CLIENT_SECRET)) {
+    throw new Error(
+      "NAVER_CLIENT_ID 또는 NAVER_CLIENT_SECRET이 설정되지 않았습니다. 루트 .env 파일을 확인하세요.",
+    );
+  }
+
+  const url = new URL(NAVER_NEWS_ENDPOINT);
+  url.searchParams.set("query", `${stockName} 주식`);
+  url.searchParams.set("display", String(DEFAULT_DISPLAY_COUNT));
+  url.searchParams.set("start", "1");
+  url.searchParams.set("sort", "date");
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(url, {
+      headers: {
+        "X-Naver-Client-Id": NAVER_CLIENT_ID,
+        "X-Naver-Client-Secret": NAVER_CLIENT_SECRET,
+      },
+      signal: controller.signal,
+    });
+
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const errorMessage = payload.errorMessage || payload.message || response.statusText;
+      throw new Error(`네이버 뉴스 API 오류(${response.status}): ${errorMessage}`);
+    }
+
+    const items = Array.isArray(payload.items) ? payload.items : [];
+    const news = items.map(formatNewsItem).filter(Boolean).slice(0, DEFAULT_DISPLAY_COUNT);
+    return news.length > 0 ? news.join("\n") : `'${stockName}'에 대한 뉴스를 찾지 못했습니다.`;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function deprecatedToolMessage(toolName) {
+  if (toolName === "get_investor_trading") {
+    return (
+      "deprecated: get_investor_trading은 mcp-news에서 제거되었습니다. " +
+      "공식 시세/수급 데이터는 mcp-trading의 get_investor_trading 도구를 사용하세요."
+    );
+  }
+
+  return (
+    "deprecated: get_research_reports는 공식 대체 API가 확정되지 않아 비활성화되었습니다. " +
+    "네이버증권 리서치 HTML 크롤링은 더 이상 지원하지 않습니다."
+  );
+}
+
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
     {
       name: "get_market_news",
-      description: "특정 주식 종목의 최신 뉴스 3개를 네이버에서 가져옵니다.",
+      description: "네이버 뉴스 검색 API로 특정 주식 종목의 최신 뉴스 3개를 가져옵니다.",
       inputSchema: {
         type: "object",
         properties: {
@@ -32,7 +148,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: "get_investor_trading",
-      description: "특정 주식 종목의 외국인 및 기관 순매수 현황을 가져옵니다.",
+      description: "deprecated: mcp-trading의 get_investor_trading으로 이동되었습니다.",
       inputSchema: {
         type: "object",
         properties: {
@@ -46,7 +162,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: "get_research_reports",
-      description: "네이버 증권 리서치 페이지에서 특정 종목의 증권사 리포트 목록을 가져옵니다.",
+      description: "deprecated: 공식 대체 API가 확정되지 않아 비활성화되었습니다.",
       inputSchema: {
         type: "object",
         properties: {
@@ -63,129 +179,31 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
 
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
-  const stock_name = args?.stock_name;
+  const stockName = args?.stock_name;
 
-  if (!stock_name) {
+  if (!stockName) {
     return {
       content: [{ type: "text", text: "에러: stock_name 파라미터가 누락되었습니다." }],
       isError: true,
     };
   }
 
-  const browser = await chromium.launch({ headless: true });
   try {
-    const context = await browser.newContext({
-      userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-    });
-    const page = await context.newPage();
-
     if (name === "get_market_news") {
-      const searchUrl = `https://search.naver.com/search.naver?where=news&query=${encodeURIComponent(stock_name)}&sm=tab_opt&sort=0`;
-      await page.goto(searchUrl, { waitUntil: "load" });
+      const news = await fetchMarketNews(stockName);
+      return { content: [{ type: "text", text: news }] };
+    }
 
-      await Promise.race([
-        page.waitForSelector(".news_tit", { timeout: 8000 }),
-        page.waitForSelector(".list_news", { timeout: 8000 }),
-      ]).catch(() => null);
-
-      const results = await page.evaluate(() => {
-        const traditional = Array.from(document.querySelectorAll(".news_tit"))
-          .map((t) => t.textContent.trim())
-          .filter((t) => t.length > 0);
-        if (traditional.length > 0) return traditional.slice(0, 3);
-        const listNews = document.querySelector(".list_news");
-        if (!listNews) return [];
-        const titles = [];
-        const links = Array.from(listNews.querySelectorAll('a[target="_blank"]'));
-        for (const link of links) {
-          const text = link.textContent.trim();
-          if (text.length > 10 && text.length < 100 && !text.includes("저장") && !text.includes("바로가기") && !text.endsWith("...") && !link.className.includes("press")) {
-            if (!titles.includes(text)) titles.push(text);
-          }
-          if (titles.length >= 3) break;
-        }
-        return titles;
-      });
-
-      return { content: [{ type: "text", text: results.length > 0 ? results.join("\n") : `'${stock_name}'에 대한 뉴스를 찾지 못했습니다.` }] };
-
-    } else if (name === "get_investor_trading") {
-      const searchUrl = `https://search.naver.com/search.naver?query=${encodeURIComponent(stock_name + " 주가")}`;
-      await page.goto(searchUrl, { waitUntil: "load" });
-      
-      const code = await page.evaluate(() => {
-        const links = Array.from(document.querySelectorAll("a"));
-        for (const link of links) {
-          const href = link.getAttribute("href") || "";
-          const match = href.match(/code=(\d{6})/);
-          if (match) return match[1];
-        }
-        return null;
-      });
-
-      if (!code) {
-        return { content: [{ type: "text", text: `'${stock_name}'의 종목 코드를 찾을 수 없습니다.` }], isError: true };
-      }
-
-      await page.goto(`https://finance.naver.com/item/frgn.naver?code=${code}`, { waitUntil: "load" });
-      const tradingData = await page.evaluate((sName) => {
-        const rows = Array.from(document.querySelectorAll("table.type2 tr"))
-          .map(tr => Array.from(tr.querySelectorAll("td")).map(td => td.innerText.trim()))
-          .filter(cells => cells.length >= 7 && cells[0].match(/^\d{4}\.\d{2}\.\d{2}$/))
-          .slice(0, 5);
-        
-        if (rows.length === 0) return `데이터를 불러올 수 없습니다.`;
-        
-        let report = `[${sName}] 최근 5일 외국인/기관 매매동향\n`;
-        rows.forEach(row => {
-          const change = row[2].replace(/\n/g, " ");
-          report += `${row[0]} | 종가: ${row[1]} | 변동: ${change} (${row[3]}) | 외인: ${row[5]} | 기관: ${row[6]} | 거래량: ${row[4]}\n`;
-        });
-        return report;
-      }, stock_name);
-
-      return { content: [{ type: "text", text: tradingData }] };
-
-    } else if (name === "get_research_reports") {
-      const researchUrl = "https://finance.naver.com/research/company_list.naver";
-      await page.goto(researchUrl, { waitUntil: "load" });
-
-      const reports = await page.evaluate((sName) => {
-        const rows = Array.from(document.querySelectorAll("table.type_1 tr"))
-          .filter(tr => {
-            const cells = tr.querySelectorAll("td");
-            if (cells.length < 2) return false;
-            const target = cells[0].innerText.trim();
-            const title = cells[1].innerText.trim();
-            return target === sName || title.includes(sName);
-          })
-          .map(tr => {
-            const cells = tr.querySelectorAll("td");
-            return {
-              stock: cells[0].innerText.trim(),
-              title: cells[1].innerText.trim(),
-              company: cells[2].innerText.trim(),
-              date: cells[4].innerText.trim(),
-            };
-          })
-          .slice(0, 5);
-
-        if (rows.length === 0) return `해당 종목('${sName}')에 대한 최근 리서치 리포트를 찾을 수 없습니다.`;
-
-        let reportText = `[${sName}] 네이버 증권 최근 리서치 리포트\n`;
-        rows.forEach(r => {
-          reportText += `${r.date} | ${r.company} | ${r.title}\n`;
-        });
-        return reportText;
-      }, stock_name);
-
-      return { content: [{ type: "text", text: reports }] };
+    if (name === "get_investor_trading" || name === "get_research_reports") {
+      return {
+        content: [{ type: "text", text: deprecatedToolMessage(name) }],
+        isError: true,
+      };
     }
   } catch (error) {
     return { content: [{ type: "text", text: `에러 발생: ${error.message}` }], isError: true };
-  } finally {
-    await browser.close();
   }
+
   throw new Error("존재하지 않는 도구입니다.");
 });
 
