@@ -40,7 +40,7 @@ async def test_llm_nat_chat_logs_raw_response(monkeypatch, caplog):
         mock_async_client_factory(response),
     )
 
-    with caplog.at_level(logging.INFO, logger=services.logger.name):
+    with caplog.at_level(logging.DEBUG, logger=services.logger.name):
         result = await services._llm_nat_chat("삼성전자 분석")
 
     assert result == "분석 결과"
@@ -57,10 +57,11 @@ async def test_llm_nat_chat_logs_json_parse_failure(monkeypatch, caplog):
         mock_async_client_factory(response),
     )
 
-    with caplog.at_level(logging.INFO, logger=services.logger.name):
+    with caplog.at_level(logging.DEBUG, logger=services.logger.name):
         with pytest.raises(HTTPException) as exc_info:
             await services._llm_nat_chat("삼성전자 분석")
 
     assert exc_info.value.status_code == 502
     assert "NAT raw response: status_code=200 body=not-json" in caplog.text
-    assert "Failed to parse NAT response JSON: status_code=200 body=not-json" in caplog.text
+    assert "Failed to parse NAT response JSON: status_code=200" in caplog.text
+    assert "NAT response body: not-json" in caplog.text
