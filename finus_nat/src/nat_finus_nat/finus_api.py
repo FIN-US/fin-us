@@ -30,6 +30,28 @@ from nat.data_models.function import FunctionBaseConfig
 from nat_finus_nat.finus_paths import fin_us_vendor_root
 
 
+_MCP_ENV_ALLOWED_KEYS = {
+    "PATH",
+    "NODE_ENV",
+    "NODE_OPTIONS",
+    "NODE_EXTRA_CA_CERTS",
+    "SSL_CERT_FILE",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "no_proxy",
+    "KIS_API_KEY",
+    "KIS_API_SECRET",
+    "KIS_ACCOUNT_NO",
+    "KIS_URL",
+    "NAVER_CLIENT_ID",
+    "NAVER_CLIENT_SECRET",
+}
+_MCP_ENV_ALLOWED_PREFIXES = ("FIN_US_",)
+
+
 class _FinusVendorTimeout(Protocol):
     vendor_root: str | None
     timeout_sec: float
@@ -44,6 +66,14 @@ def _resolve_vendor_root(override: str | None) -> Path:
 def _node_deps_ready(server_dir: Path) -> bool:
     sdk = server_dir / "node_modules" / "@modelcontextprotocol" / "sdk"
     return sdk.is_dir()
+
+
+def _mcp_child_env() -> dict[str, str]:
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if key in _MCP_ENV_ALLOWED_KEYS or key.startswith(_MCP_ENV_ALLOWED_PREFIXES)
+    }
 
 
 async def _mcp_call_tool(
@@ -87,7 +117,7 @@ async def _mcp_call_tool(
     params = StdioServerParameters(
         command="node",
         args=[str(script)],
-        env=dict(os.environ),
+        env=_mcp_child_env(),
         cwd=str(server_dir),
     )
 

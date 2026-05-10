@@ -19,7 +19,16 @@ def test_mcp_call_tool_passes_environment_to_child_process(monkeypatch, tmp_path
             captured.update(kwargs)
 
     monkeypatch.setattr(finus_api, "StdioServerParameters", FakeStdioServerParameters)
-    monkeypatch.setattr(finus_api.os, "environ", {"NAVER_CLIENT_ID": "id"})
+    monkeypatch.setattr(
+        finus_api.os,
+        "environ",
+        {
+            "NAVER_CLIENT_ID": "id",
+            "KIS_API_KEY": "kis-key",
+            "FIN_US_TRACE_ID": "trace-id",
+            "DATABASE_URL": "postgresql://user:secret@db/prod",
+        },
+    )
 
     def fake_inner(*args, **kwargs):
         class _Context:
@@ -62,5 +71,9 @@ def test_mcp_call_tool_passes_environment_to_child_process(monkeypatch, tmp_path
     )
 
     assert result == "ok"
-    assert captured["env"] == {"NAVER_CLIENT_ID": "id"}
+    assert captured["env"] == {
+        "NAVER_CLIENT_ID": "id",
+        "KIS_API_KEY": "kis-key",
+        "FIN_US_TRACE_ID": "trace-id",
+    }
     assert json.dumps(captured["args"])
