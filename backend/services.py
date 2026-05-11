@@ -19,6 +19,7 @@ from .schemas import TradingSignal, AnalysisReport
 from .models import AgentReport
 
 logger = logging.getLogger(__name__)
+_NAT_RESPONSE_LOG_PREVIEW_CHARS = 800
 
 async def perform_stock_analysis(
     stock: str,
@@ -229,6 +230,19 @@ def _nat_message_from_payload(payload: dict[str, Any]) -> str:
     return (content if content is not None else "").strip()
 
 
+def _log_nat_response(resp: httpx.Response) -> None:
+    logger.debug(
+        "NAT response received: status_code=%s body_length=%s",
+        resp.status_code,
+        len(resp.text),
+    )
+    if resp.text:
+        logger.debug(
+            "NAT response body preview: %s",
+            resp.text[:_NAT_RESPONSE_LOG_PREVIEW_CHARS],
+        )
+
+
 async def _llm_nat_chat(user_msg: str) -> str:
     url = f"{NAT_BASE_URL}/v1/chat/completions"
     try:
@@ -242,11 +256,7 @@ async def _llm_nat_chat(user_msg: str) -> str:
                     "stream": False,
                 },
             )
-            logger.debug(
-                "NAT raw response: status_code=%s body=%s",
-                resp.status_code,
-                resp.text,
-            )
+            _log_nat_response(resp)
     except httpx.RequestError as exc:
         raise HTTPException(
             status_code=502,
@@ -263,7 +273,10 @@ async def _llm_nat_chat(user_msg: str) -> str:
             "Failed to parse NAT response JSON: status_code=%s",
             resp.status_code,
         )
-        logger.debug("NAT response body: %s", resp.text)
+        logger.debug(
+            "NAT response body preview: %s",
+            resp.text[:_NAT_RESPONSE_LOG_PREVIEW_CHARS],
+        )
         raise HTTPException(
             status_code=502,
             detail=f"NAT JSON 파싱 실패: {exc}; body[:800]={resp.text[:800]!r}",

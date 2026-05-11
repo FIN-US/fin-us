@@ -139,10 +139,11 @@ def test_analysis_from_nat_text_extracts_json_object_from_wrapped_text():
 
 
 @pytest.mark.asyncio
-async def test_llm_nat_chat_logs_raw_response(monkeypatch, caplog):
+async def test_llm_nat_chat_logs_bounded_response_preview(monkeypatch, caplog):
+    long_content = "분석 결과" + ("x" * 1200)
     response = httpx.Response(
         200,
-        json={"choices": [{"message": {"content": "분석 결과"}}]},
+        json={"choices": [{"message": {"content": long_content}}]},
     )
     monkeypatch.setattr(
         services.httpx,
@@ -153,9 +154,10 @@ async def test_llm_nat_chat_logs_raw_response(monkeypatch, caplog):
     with caplog.at_level(logging.DEBUG, logger=services.logger.name):
         result = await services._llm_nat_chat("삼성전자 분석")
 
-    assert result == "분석 결과"
-    assert "NAT raw response: status_code=200" in caplog.text
-    assert '"content":"분석 결과"' in caplog.text
+    assert result == long_content
+    assert "NAT response received: status_code=200 body_length=" in caplog.text
+    assert "NAT response body preview:" in caplog.text
+    assert "x" * 900 not in caplog.text
 
 
 @pytest.mark.asyncio
@@ -172,6 +174,6 @@ async def test_llm_nat_chat_logs_json_parse_failure(monkeypatch, caplog):
             await services._llm_nat_chat("삼성전자 분석")
 
     assert exc_info.value.status_code == 502
-    assert "NAT raw response: status_code=200 body=not-json" in caplog.text
+    assert "NAT response received: status_code=200 body_length=8" in caplog.text
     assert "Failed to parse NAT response JSON: status_code=200" in caplog.text
-    assert "NAT response body: not-json" in caplog.text
+    assert "NAT response body preview: not-json" in caplog.text
