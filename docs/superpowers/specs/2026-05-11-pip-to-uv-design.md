@@ -27,7 +27,7 @@ Issue #33은 `backend/` 서비스의 패키지 관리 방식을 pip/pip-compile�
 
 ### 선택안: backend 독립 uv project
 
-`backend/pyproject.toml`과 `backend/uv.lock`을 추가하고, 기존 `requirements.txt`, `requirements-dev.txt`, `requirements.lock`을 제거한다. Dockerfile은 `finus_nat/Dockerfile`처럼 `ghcr.io/astral-sh/uv:0.9.28` 이미지에서 uv 바이너리를 복사한 뒤 `uv sync --no-dev --frozen`으로 런타임 의존성을 설치한다.
+`backend/pyproject.toml`과 `backend/uv.lock`을 추가하고, 기존 `requirements.txt`, `requirements-dev.txt`, `requirements.lock`을 제거한다. Dockerfile은 `finus_nat/Dockerfile`처럼 `ghcr.io/astral-sh/uv:0.9.28` 이미지에서 uv 바이너리를 복사한 뒤 `uv sync --no-dev --no-install-project --locked`로 런타임 의존성을 설치한다.
 
 이 방식은 issue #33 범위와 가장 잘 맞고, `finus_nat`과 운영 패턴을 맞추면서도 repo 전체 구조 변경을 피한다.
 
@@ -51,7 +51,9 @@ Issue #33은 `backend/` 서비스의 패키지 관리 방식을 pip/pip-compile�
 
 `backend/Dockerfile`의 Node MCP 서버 설치 흐름은 유지한다. Python 의존성 설치 단계만 pip에서 uv로 바꾼다.
 
-의존성 캐시 효율을 위해 `backend/pyproject.toml`과 `backend/uv.lock`을 먼저 복사하고 `uv sync --project ./backend --no-dev --frozen`을 실행한 뒤 전체 소스를 복사한다. 런타임 명령은 `finus_nat`과 같은 패턴으로 `uv run --project ./backend uvicorn backend.main:app ...`을 사용한다.
+의존성 캐시 효율을 위해 `backend/pyproject.toml`과 `backend/uv.lock`을 먼저 복사하고 `uv sync --project ./backend --no-dev --no-install-project --locked`를 실행한 뒤 전체 소스를 복사한다. `--locked`로 `pyproject.toml`과 `uv.lock`의 불일치를 빌드 시점에 실패시키고, `--no-install-project`로 이 레이어가 backend 소스 설치에 의존하지 않게 한다.
+
+런타임 명령은 `finus_nat`과 같은 패턴으로 `uv run --project ./backend --locked --no-sync uvicorn backend.main:app ...`을 사용한다. `--no-sync`를 넣어 컨테이너 시작 시 가상환경이 다시 동기화되거나 수정되지 않게 한다.
 
 개발 편의를 위한 기존 `--reload` 동작은 유지한다.
 
@@ -88,7 +90,7 @@ uv run --project backend pytest backend/tests
 
 uv 전환은 앱 런타임 로직을 바꾸지 않는다. 설치 및 lockfile 문제는 빌드와 테스트 단계에서 명확히 실패하게 둔다.
 
-- lockfile 불일치: `uv sync --frozen` 실패
+- lockfile 불일치: `uv sync --locked` 실패
 - 누락 런타임 의존성: backend import 또는 API 테스트 실패
 - 누락 dev 의존성: uv 기반 pytest 실행 실패
 - compose volume 경로 불일치: backend 컨테이너 실행 검증 실패
@@ -115,5 +117,6 @@ git diff --check
 - 루트 uv workspace는 도입하지 않는다.
 - `backend/pyproject.toml`은 의존성 관리용으로만 사용한다.
 - `pytest`, `pytest-asyncio`는 dev dependency로 분리한다.
-- Docker runtime 설치는 `uv sync --no-dev --frozen`을 사용한다.
+- Docker runtime 설치는 `uv sync --no-dev --no-install-project --locked`를 사용한다.
+- Docker runtime 실행은 `uv run --locked --no-sync`를 사용한다.
 - pip 기반 requirements 파일은 제거한다.
