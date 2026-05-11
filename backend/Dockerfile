@@ -20,7 +20,7 @@ COPY mcp-trading ./
 WORKDIR /app
 
 COPY backend/pyproject.toml backend/uv.lock ./backend/
-RUN uv sync --project ./backend --no-dev --frozen
+RUN uv sync --project ./backend --no-dev --no-install-project --frozen
 
 COPY . .
 
