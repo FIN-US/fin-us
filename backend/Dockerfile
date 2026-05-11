@@ -20,10 +20,10 @@ COPY mcp-trading ./
 WORKDIR /app
 
 COPY backend/pyproject.toml backend/uv.lock ./backend/
-RUN uv sync --project ./backend --no-dev --no-install-project --frozen
+RUN uv sync --project ./backend --no-dev --no-install-project --locked
 
 COPY . .
 
 EXPOSE 8000
 
-CMD ["uv", "run", "--project", "./backend", "--frozen", "uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+CMD ["uv", "run", "--project", "./backend", "--locked", "--no-sync", "uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
