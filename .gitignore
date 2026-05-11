@@ -58,3 +58,5 @@ AGENTS.md
 .codex/
 *.db
 CLAUDE.md
+
+docs/superpowers/
