@@ -30,6 +30,16 @@ def test_scheduler_lifecycle(monkeypatch):
     # 컨텍스트를 빠져나오면 shutdown 이벤트 발생 후 stop_scheduler가 호출되었어야 함
     mock_stop.assert_called_once()
 
+
+def test_default_signal_sources_include_news_and_disclosure():
+    from ..scheduler import SIGNAL_SOURCES
+
+    assert [(source.name, source.tool_name) for source in SIGNAL_SOURCES] == [
+        ("news", "get_market_news"),
+        ("disclosure", "get_disclosure_signal"),
+    ]
+
+
 @pytest.mark.asyncio
 async def test_ping_task_execution(monkeypatch):
     """
@@ -56,7 +66,7 @@ async def test_monitor_market_task_filtering(monkeypatch):
     """
     Redis 장애 시 fallback 경로에서도 뉴스가 새로운 경우에만 분석을 수행하는지 확인합니다.
     """
-    from ..scheduler import monitor_market_task, last_analyzed_news_cache
+    from ..scheduler import SignalSource, monitor_market_task, last_analyzed_news_cache
     
     # 캐시 초기화
     last_analyzed_news_cache.clear()
@@ -83,6 +93,10 @@ async def test_monitor_market_task_filtering(monkeypatch):
         yield
     
     monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
+    monkeypatch.setattr(
+        "backend.scheduler.SIGNAL_SOURCES",
+        [SignalSource(name="news", mcp_params=object(), tool_name="get_market_news")],
+    )
     monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
     monkeypatch.setattr("backend.scheduler.perform_stock_analysis", mock_perform_analysis)
     monkeypatch.setattr("backend.scheduler.manager.broadcast", mock_broadcast)
@@ -145,7 +159,7 @@ async def test_monitor_market_task_uses_default_stocks_when_balance_empty(monkey
     """
     보유 종목이 없으면 기본 감시 종목 10개를 대상으로 모니터링합니다.
     """
-    from ..scheduler import DEFAULT_MONITOR_STOCKS, monitor_market_task, last_analyzed_news_cache
+    from ..scheduler import DEFAULT_MONITOR_STOCKS, SignalSource, monitor_market_task, last_analyzed_news_cache
 
     state = RedisSchedulerState(FakeRedis())
 
@@ -172,6 +186,10 @@ async def test_monitor_market_task_uses_default_stocks_when_balance_empty(monkey
     mock_broadcast.return_value.set_result(None)
 
     monkeypatch.setattr("backend.scheduler.redis_state", fake_redis_state)
+    monkeypatch.setattr(
+        "backend.scheduler.SIGNAL_SOURCES",
+        [SignalSource(name="news", mcp_params=object(), tool_name="get_market_news")],
+    )
     monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
     monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
     monkeypatch.setattr("backend.scheduler.perform_stock_analysis", mock_perform_analysis)
@@ -187,7 +205,7 @@ async def test_monitor_market_task_uses_default_stocks_when_balance_empty(monkey
 
 @pytest.mark.asyncio
 async def test_monitor_market_task_uses_redis_hash_to_skip_duplicate_news(monkeypatch):
-    from ..scheduler import monitor_market_task
+    from ..scheduler import SignalSource, monitor_market_task
 
     state = RedisSchedulerState(FakeRedis())
 
@@ -210,6 +228,10 @@ async def test_monitor_market_task_uses_redis_hash_to_skip_duplicate_news(monkey
     mock_broadcast.return_value.set_result(None)
 
     monkeypatch.setattr("backend.scheduler.redis_state", fake_redis_state)
+    monkeypatch.setattr(
+        "backend.scheduler.SIGNAL_SOURCES",
+        [SignalSource(name="news", mcp_params=object(), tool_name="get_market_news")],
+    )
     monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
     monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
     monkeypatch.setattr("backend.scheduler.perform_stock_analysis", mock_perform_analysis)
@@ -270,7 +292,7 @@ async def test_monitor_market_task_processes_multiple_signal_sources_independent
 
 @pytest.mark.asyncio
 async def test_monitor_market_task_skips_when_scheduler_lock_is_held(monkeypatch):
-    from ..scheduler import monitor_market_task
+    from ..scheduler import SignalSource, monitor_market_task
 
     state = RedisSchedulerState(FakeRedis())
     await state.acquire_scheduler_lock()
@@ -283,6 +305,10 @@ async def test_monitor_market_task_skips_when_scheduler_lock_is_held(monkeypatch
     mock_run_mcp_tool.return_value.set_result("[보유 종목 리스트]\n- 삼성전자 (005930): 10주")
 
     monkeypatch.setattr("backend.scheduler.redis_state", fake_redis_state)
+    monkeypatch.setattr(
+        "backend.scheduler.SIGNAL_SOURCES",
+        [SignalSource(name="news", mcp_params=object(), tool_name="get_market_news")],
+    )
     monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
 
     await monitor_market_task()
@@ -292,7 +318,7 @@ async def test_monitor_market_task_skips_when_scheduler_lock_is_held(monkeypatch
 
 @pytest.mark.asyncio
 async def test_concurrent_monitor_market_task_runs_once_with_scheduler_lock(monkeypatch):
-    from ..scheduler import monitor_market_task
+    from ..scheduler import SignalSource, monitor_market_task
 
     state = RedisSchedulerState(FakeRedis())
 
@@ -317,6 +343,10 @@ async def test_concurrent_monitor_market_task_runs_once_with_scheduler_lock(monk
     mock_broadcast.return_value.set_result(None)
 
     monkeypatch.setattr("backend.scheduler.redis_state", fake_redis_state)
+    monkeypatch.setattr(
+        "backend.scheduler.SIGNAL_SOURCES",
+        [SignalSource(name="news", mcp_params=object(), tool_name="get_market_news")],
+    )
     monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
     monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
     monkeypatch.setattr("backend.scheduler.perform_stock_analysis", mock_perform_analysis)
