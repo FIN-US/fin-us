@@ -25,12 +25,14 @@ export default function App() {
     resources,
     error,
     chatStatus,
+    chatBusy,
     chatMessages,
     handleAnalyze,
     handleFetchData,
     loadResources,
     submitDiary,
     sendChatMessage,
+    resetNatConversation,
   } = useFinUsDashboard();
 
   const currentTrend = report?.trading_trend || rawTrend;
@@ -71,7 +73,13 @@ export default function App() {
 
         <div className="grid grid-cols-1 xl:grid-cols-[1fr_420px] gap-6">
           <RecordsPanel resources={resources} loading={resourceLoading} onSubmitDiary={submitDiary} />
-          <ChatPanel status={chatStatus} messages={chatMessages} onSend={sendChatMessage} />
+          <ChatPanel
+            status={chatStatus}
+            busy={chatBusy}
+            messages={chatMessages}
+            onSend={sendChatMessage}
+            onNewConversation={resetNatConversation}
+          />
         </div>
       </main>
     </div>

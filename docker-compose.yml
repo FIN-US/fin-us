@@ -10,9 +10,13 @@ services:
     environment:
       - VITE_API_BASE_URL=http://localhost:8000/api/v1
       - VITE_BACKEND_TARGET=http://backend:8000
+      # Vite 프록시는 프론트 컨테이너에서 실행되므로 호스트 8765가 아니라 동일 네트워크의 NAT 서비스로 향해야 함
+      - VITE_NAT_TARGET=http://finus-nat:8000
     depends_on:
       backend:
         condition: service_started
+      finus-nat:
+        condition: service_healthy
     networks:
       - fin-us-network
 
