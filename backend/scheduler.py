@@ -9,6 +9,7 @@ from .database import engine
 from .config import NEWS_MCP_PARAMS, TRADING_MCP_PARAMS, DART_MCP_PARAMS
 from .redis_state import RedisSchedulerState, signal_hash, redis_state
 from .services import perform_stock_analysis, run_mcp_tool, check_signal_significance
+from .telegram_bot import notifier as telegram_notifier
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +69,6 @@ def extract_stocks_from_balance(balance_text: str) -> list[str]:
 async def monitor_market_task():
     """
     주기적으로 시장 상황을 모니터링합니다.
-    mcp-trading에서 실시간 잔고를 가져와 보유 종목들을 대상으로 감시를 수행합니다.
     """
     fallback_to_memory = True
     try:
@@ -108,8 +108,6 @@ async def _monitor_market_task(state: RedisSchedulerState | None):
             logger.info("보유 종목이 없습니다. 기본 종목 10개를 감시합니다.")
             stocks_to_monitor = DEFAULT_MONITOR_STOCKS
 
-        logger.info(f"실시간 모니터링 시작 (대상: {stocks_to_monitor}, 필터: {FILTER_PROVIDER})")
-        
         with Session(engine) as session:
             for stock in stocks_to_monitor:
                 for source in SIGNAL_SOURCES:
