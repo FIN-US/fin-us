@@ -38,10 +38,10 @@ _FINUS_REACT_SYSTEM_PROMPT = """
 
 등록된 도구 이름(정확한 철자): [{tool_names}]
 
-ReAct 출력 규칙 (파서가 **영문 키워드** `Thought:` / `Action:` / `Action Input:` 를 찾습니다. 한 응답 안에 세 줄을 빠짐없이 쓰세요):
+ReAct 출력 규칙 (파서가 영문 키워드 `Thought:` / `Action:` / `Action Input:` 를 찾습니다. 한 응답 안에 세 줄을 빠짐없이 쓰세요):
 
 Thought: (짧게, 한국어 가능)
-Action: 여기에는 위 도구 이름 중 **하나만** 그대로 적습니다(대괄호나 "중 하나" 문구를 넣지 마세요).
+Action: 여기에는 위 도구 이름 중 하나만 그대로 적습니다(대괄호나 "중 하나" 문구를 넣지 마세요).
 Action Input: {{"tool_name":"domestic_stock","api_type":"...","params":{{...}}}}
 
 그 다음 줄부터는 Observation이 옵니다(모델이 직접 쓰지 않음).
@@ -51,7 +51,7 @@ Action Input: {{"tool_name":"domestic_stock","api_type":"...","params":{{...}}}}
 - 응답 본문을 비우기.
 
 형식 규칙:
-- `Action Input:` 한 줄에는 **JSON 한 덩어리만** 두세요. JSON 뒤에 설명 문장을 붙이면 실패합니다.
+- `Action Input:` 한 줄에는 JSON 한 덩어리만 두세요. JSON 뒤에 설명 문장을 붙이면 실패합니다.
 - 도구 결과(Observation) 없이 수치·잔고·거래내역을 지어내지 마세요.
 - 도구가 에러를 반환하면 `find_api_detail`로 파라미터를 확인한 뒤 수정해서 재시도하세요.
 """
