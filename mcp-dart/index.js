@@ -46,7 +46,7 @@ function loadRootEnv() {
     ) {
       value = value.slice(1, -1);
     }
-    if (!process.env[key]) process.env[key] = value;
+    if (process.env[key] === undefined) process.env[key] = value;
   }
 }
 
@@ -118,7 +118,13 @@ async function fetchJson(endpoint, params) {
   }
 
   const response = await fetchWithTimeout(url);
-  const payload = await response.json().catch(() => ({}));
+  let payload;
+  try {
+    payload = await response.json();
+  } catch (error) {
+    throw new Error(`OpenDART JSON 파싱 오류(${url.pathname}): ${error.message}`);
+  }
+
   if (!response.ok) {
     const message = payload.message || response.statusText;
     throw new Error(`OpenDART HTTP 오류(${response.status}): ${message}`);
@@ -131,6 +137,29 @@ async function fetchJson(endpoint, params) {
   }
 
   return payload;
+}
+
+function extractOpenDartXmlStatus(parsed) {
+  const result = parsed?.result ?? parsed;
+  return {
+    status: cleanText(result?.status),
+    message: cleanText(result?.message),
+  };
+}
+
+function assertNotOpenDartXmlError(body) {
+  const text = body.toString("utf8").trimStart();
+  if (!text.startsWith("<") || (!text.includes("<status>") && !text.includes("<message>"))) {
+    return;
+  }
+
+  const parser = new XMLParser({ parseTagValue: false, trimValues: true });
+  const { status, message } = extractOpenDartXmlStatus(parser.parse(text));
+  if (status && status !== "000") {
+    throw new Error(`OpenDART API 오류(${status}): ${message || "알 수 없는 오류"}`);
+  }
+
+  throw new Error("OpenDART corpCode.xml 응답이 ZIP 파일이 아닙니다.");
 }
 
 async function readFreshCorpCodeCache() {
@@ -155,6 +184,8 @@ async function downloadCorpCodes(apiKey) {
 
   const response = await fetchWithTimeout(url);
   const body = Buffer.from(await response.arrayBuffer());
+  assertNotOpenDartXmlError(body);
+
   if (!response.ok) {
     throw new Error(`OpenDART corpCode.xml 다운로드 오류(${response.status}): ${response.statusText}`);
   }
@@ -362,8 +393,15 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
 
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
-  const stockName = args?.stock_name;
 
+  if (name !== "get_disclosure_signal") {
+    return {
+      content: [{ type: "text", text: "에러: 존재하지 않는 도구입니다." }],
+      isError: true,
+    };
+  }
+
+  const stockName = args?.stock_name;
   if (!stockName) {
     return {
       content: [{ type: "text", text: "에러: stock_name 파라미터가 누락되었습니다." }],
@@ -371,15 +409,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     };
   }
 
-  if (name === "get_disclosure_signal") {
-    try {
-      const signal = await getDisclosureSignal(stockName);
-      return { content: [{ type: "text", text: signal }] };
-    } catch (error) {
-      return { content: [{ type: "text", text: `에러 발생: ${error.message}` }], isError: true };
-    }
+  try {
+    const signal = await getDisclosureSignal(stockName);
+    return { content: [{ type: "text", text: signal }] };
+  } catch (error) {
+    return { content: [{ type: "text", text: `에러 발생: ${error.message}` }], isError: true };
   }
-  throw new Error("존재하지 않는 도구입니다.");
 });
 
 const transport = new StdioServerTransport();
