@@ -1,0 +1,43 @@
+base: agents/diary_agent.yml
+
+# Mem0 메모리 없이 라우터 에이전트 설정 (이전과 같은 방식)
+# Mem0 self-hosted server가 docker에 올라가있지 않은 경우 사용합니다.
+# finus_nat/scripts/run.sh에서 기본으로 Mem0를 활성화하지 않고 빌드합니다. --memory 옵션을 추가하면 config/router.yml을 사용합니다.
+llms:
+  router_openai_llm:
+    _type: openai
+    api_key: ${OPENAI_API_KEY}
+    base_url: ${OPENAI_API_BASE_URL:-${OPENAI_BASE_URL:-https://api.openai.com/v1}}
+    model_name: ${ROUTER_OPENAI_CHAT_MODEL:-gpt-5.4-mini}
+
+functions:
+  router_supervisor_agent:
+    _type: finus_supervisor_agent
+    llm_name: router_openai_llm
+    max_history_messages: 12
+    history_message_max_chars: 800
+    branches:
+      - name: trading_agent
+        function_name: trading_branch_agent
+        description: "Kis Trading MCP 기반 계좌/잔고/보유/주문/체결, 현재가·호가·거래량 같은 정형 시장 데이터 조회."
+      - name: monitoring_agent
+        function_name: monitoring_branch_agent
+        description: "보유·관심 포트폴리오 상태 점검, 리스크/하락/알림/건전성 모니터링."
+      - name: news_agent
+        function_name: news_branch_agent
+        description: "종목·시황 뉴스 헤드라인·요약, 투자자 수급(mcp-news: get_market_news, get_investor_trading)."
+      - name: recommend_agent
+        function_name: recommend_branch_agent
+        description: "조건에 맞는 종목 후보 탐색, 대안 종목, 관심종목 아이디어 추천."
+      - name: strategy_agent
+        function_name: strategy_branch_agent
+        description: "BUY/SELL/HOLD 판단, 매매 규칙, 시나리오, 비중·리밸런싱 전략."
+      - name: diary_agent
+        function_name: diary_branch_agent
+        description: "당일 거래 조회, 매매일지 초안, 거래 회고와 기록 정리."
+
+workflow:
+  _type: finus_sqlite_transcript_agent
+  inner_agent_name: router_supervisor_agent
+  db_path: ${FINUS_TRANSCRIPT_DB_PATH:-.state/conversations.sqlite3}
+  max_history_messages: 30

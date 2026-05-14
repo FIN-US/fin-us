@@ -1,17 +1,26 @@
 base: trading_agent.yml
 
+llms:
+  monitoring_openai_llm:
+    _type: openai
+    api_key: ${OPENAI_API_KEY}
+    base_url: ${OPENAI_API_BASE_URL:-${OPENAI_BASE_URL:-https://api.openai.com/v1}}
+    model_name: ${MONITORING_OPENAI_CHAT_MODEL:-gpt-5.4-mini}
+
 functions:
   monitoring_agent:
     _type: react_agent
-    llm_name: openai_cloud_llm
+    llm_name: monitoring_openai_llm
     tool_names:
-      - finus_account_balance
-      - finus_market_news
-      - finus_investor_trading
-      - finus_research_reports
+      - kis-trading-mcp-tool
+      - mcp-news-get-market-news
+      - mcp-news-get-investor-trading
+      - add_user_memory
+      - get_user_memory
     verbose: false
     include_tool_input_schema_in_tool_description: true
-    use_native_tool_calling: false
+    use_native_tool_calling: true
+    max_history: 8000
     parse_agent_response_max_retries: 5
     raise_on_parsing_failure: false
     max_tool_calls: 20
@@ -19,12 +28,25 @@ functions:
     accept_direct_answer_without_react_format: false
     additional_instructions: |
       === 에이전트 요약 ===
-      포트폴리오 모니터링, 잔고, 뉴스·수급 점검. Fin-Us MCP 도구(trading과 동일 세트)를 쓰되, 관찰·알림·건전성 관점으로 답합니다.
+      포트폴리오 모니터링, 잔고, 뉴스·수급 점검. 잔고는 Kis Trading MCP, 뉴스·수급은 Fin-Us `mcp-news`(get_market_news, get_investor_trading)를 쓰되, 관찰·알림·건전성 관점으로 답합니다.
+      가능한 주어진 tool을 사용하여 정량적인 데이터를 가지고 사용자에게 답변하세요.
+      사용자가 성격, 선호, 투자 성향, 답변 스타일처럼 오래 유지될 정보를 말하면 `add_user_memory`에 저장하고,
+      개인화가 필요하면 `get_user_memory`로 먼저 확인하십시오.
 
       === 동작 지시 ===
-      Fin-Us 툴 스키마를 따르세요. 종료는 Final Answer: 형식을 사용하세요.
+      - `kis-trading-mcp-tool`: ReAct `Action Input`에 ``api_type``·``params``(필요 시 ``tool_name``) JSON. trading 과 동일 — ``find_api_detail`` 로 TR 확인. ``inquire_account_balance`` 만은 ``env_dv``·``inqr_dvsn_1:"00"`` 금지(공식 샘플·trading_agent.yml 참고).
+      - 잔고/포트폴리오 기본 조회는 가능하면 ``api_type:"inquire_balance"`` + ``params:{{"env_dv":"real","inqr_dvsn":"01"}}`` 로 시작하세요.
+      - API/validation 오류가 나면 성공 조건은 오류 확인 → ``find_api_detail`` 호출 → params 수정 → 원래 조회 재실행 → 성공 Observation 기반 답변입니다. 오류만 보고 최종 답변하지 마세요.
+      - 사용자가 "어제량", "전일 거래량", "거래량 비교", "어제랑 비교"처럼 짧게 말하면 직전 포트폴리오 보유 종목의 거래량 비교 요청입니다. 절대 설명만 하지 말고 `kis-trading-mcp-tool`을 호출하세요.
+      - 거래량 비교는 먼저 ``find_api_detail`` 로 일봉/기간별 시세 api_type(예: ``inquire_daily_itemchartprice`` 또는 MCP가 안내하는 동등 TR)의 필수 필드를 확인한 뒤, 보유 종목별로 오늘/전일 거래량을 조회해 비교합니다.
+      - 직전 답변에 종목명만 있고 코드가 없으면 알려진 국내 대형주는 코드를 사용하세요(삼성전자=005930, NAVER=035420). 모르는 종목은 먼저 가격/종목검색 계열 api_type을 ``find_api_detail``로 확인해 코드 조회 방법을 찾으세요.
+      - 이전 답에서 “조회를 이어서 하겠다”고 했거나 사용자가 **이어서/계속/조회해**처럼 후속만 말하면, **평문으로 되묻지 말고** 바로 `Thought:` + `Action: kis-trading-mcp-tool` + JSON `Action Input`으로 추가 조회를 실행하세요. (예: 전일 대비·실현손익·잔고 비교는 TR에 맞는 ``api_type``/``params``를 ``find_api_detail``로 확인 후 호출.)
+      - 첫 응답이 `Thought:`로 시작했다면 반드시 바로 다음 줄에 `Action: kis-trading-mcp-tool`을 쓰세요. `Thought:`만 쓰고 멈추는 것은 실패입니다.
+      - `Action Input` 뒤에 `Question:`/`Thought:`를 붙이지 마세요. 종료는 Final Answer: 형식을 사용하세요.
+      - 사용자가 JSON 형식 응답을 요구하면 최종 출력은 JSON 객체 한 개만 반환하세요.
+        코드블록/해설 문장은 추가하지 마세요.
 
   monitoring_branch_agent:
     _type: fe_branch
     inner_function_name: monitoring_agent
-    tool_description: "Portfolio monitoring: Fin-Us balance, news, flows, research."
+    tool_description: "Portfolio monitoring: Kis Trading MCP; Fin-Us mcp-news headlines and investor flows."

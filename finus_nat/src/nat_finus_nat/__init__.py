@@ -10,8 +10,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Fin-Us NAT example: router_agent + sub-agents (OpenAI API by default; optional Ollama; Fin-Us MCP tools; KIS MCP optional).
-
-  이 패키지는 예제 워크플로(`configs/router.yml` 등)에서 쓰는 커스텀 NAT 컴포넌트의 네임스페이스입니다.
-  실제 등록은 `register` 모듈이 `nat.components` 엔트리포인트로 로드될 때 수행됩니다.
+"""
+Fin-Us NAT은 멀티 에이전트 워크플로우를 구성합니다
 """
