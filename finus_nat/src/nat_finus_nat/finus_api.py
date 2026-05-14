@@ -1,8 +1,3 @@
-# mcp-news(get_market_news, get_investor_trading), kis trading MCP, kis http
-# Note: avoid ``from __future__ import annotations`` here — NAT's FunctionInfo builds a
-# stream wrapper that calls ``get_type_hints`` on nested functions in ``function_info``
-# module globals; postponed annotations leave ``KisTradingMcpCallInput`` unresolved.
-
 import asyncio
 import json
 import os

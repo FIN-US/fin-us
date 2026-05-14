@@ -11,12 +11,13 @@ finus_nat/scripts/run.sh 으로 실행하여 cli 환경에서 에이전트를 �
 
 ## SQLite 대화 히스토리
 
-router.yml과 router_nomemory.yml은 기본적으로 `finus_sqlite_transcript_agent`를 통해 최근 대화 히스토리를 SQLite에 저장하고 다음 요청에 다시 주입합니다. 기본 저장 위치는 `finus_nat/.state/conversations.sqlite3`이며, `FINUS_TRANSCRIPT_DB_PATH`로 경로를 바꿀 수 있습니다. NAT는 HTTP `conversation-id` 헤더로 세션을 구분합니다(`finus-chat`은 `FINUS_CHAT_CONVERSATION_ID` 또는 자동 UUID, backend는 `NAT_CONVERSATION_ID`). 헤더가 없으면 transcript 단계에서 오류가 납니다.
+router.yml과 router_nomemory.yml은 기본적으로 최근 대화 히스토리를 SQLite에 저장하고 다음 요청에 다시 주입합니다. NAT는 HTTP `conversation-id` 헤더로 세션을 구분합니다.
+이는 OpenAI compatible /v1/chat/completion을 사용하기 위함입니다.
 
 ## 1. Mem0 self-hosted server 설정
 
+설치하지 않아도 테스트 및 구동에는 문제가 없습니다. 에이전트는 자동으로 router_nomemory.yml을 사용하게 됩니다.
 **Prerequisites**
-
 `Docker, Docker compose, OPEN_API_KEY, Port 8888 for API and 3000 for dashboard`
 
 1. `git clone https://github.com/mem0ai/mem0.git`
@@ -51,9 +52,3 @@ JWT_SECRET= ...
 **Kis-Trade-MCP도 기본으로 Docker에서 구동할때 Port3000으로 설정되어있지만 Mem0와 충돌하므로 포트를 3300으로 변경한다.**
 
 NAT의 `finus_account_balance`는 원격 MCP에 `call_tool(tool_name, {api_type, params})`만 넘깁니다. URL은 `FINUS_KIS_TRADING_MCP_URL` 등으로 설정합니다.
-
-## 3. mcp-news (stdio)
-
-`fin-us` 벤더의 `mcp-news` Node MCP만 사용합니다. NAT에 연결된 도구는 **`get_market_news`**, **`get_investor_trading`** 두 가지뿐입니다(리서치·PDF 파이프라인 없음).
-
-설치: `fin-us` 루트에서 `scripts/install_fin_us_mcp.sh` 또는 `mcp-news` 디렉터리에서 `npm ci` 후 필요 시 `npx playwright install chromium`. `FINUS_VENDOR_ROOT`로 `mcp-news` 상위 경로를 바꿀 수 있습니다.
