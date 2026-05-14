@@ -12,6 +12,7 @@ class AnalysisReport(BaseModel):
     summary: str
     details: TradingSignal
     source_news: list[str]
+    source_signals: list[str] | None = None
     trading_trend: str | None = None
 
 

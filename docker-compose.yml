@@ -1,19 +1,20 @@
 services:
-  # frontend:
-  #   build:
-  #     context: ./frontend-react
-  #   ports:
-  #     - "5173:5173"
-  #   volumes:
-  #     - ./frontend-react:/app
-  #     - /app/node_modules
-  #   environment:
-  #     - VITE_API_BASE_URL=http://localhost:8000/api/v1
-  #   depends_on:
-  #     backend:
-  #       condition: service_started
-  #   networks:
-  #     - fin-us-network
+  frontend:
+    build:
+      context: ./frontend-react
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend-react:/app
+      - /app/node_modules
+    environment:
+      - VITE_API_BASE_URL=http://localhost:8000/api/v1
+      - VITE_BACKEND_TARGET=http://backend:8000
+    depends_on:
+      backend:
+        condition: service_started
+    networks:
+      - fin-us-network
 
   backend:
     build:
@@ -23,7 +24,7 @@ services:
       - "8000:8000"
     volumes:
       - .:/app
-      - /app/backend/venv
+      - /app/backend/.venv
     env_file:
       - ./.env
     extra_hosts:
@@ -32,8 +33,11 @@ services:
       NAT_BASE_URL: http://finus-nat:8000
       NEWS_MCP_DIR: /opt/mcp-news
       TRADING_MCP_DIR: /opt/mcp-trading
+      REDIS_URL: redis://redis:6379/0
     depends_on:
       finus-nat:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     networks:
       - fin-us-network
@@ -54,6 +58,18 @@ services:
       timeout: 5s
       retries: 10
       start_period: 90s
+    networks:
+      - fin-us-network
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
     networks:
       - fin-us-network
 

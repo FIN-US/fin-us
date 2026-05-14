@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -27,6 +28,28 @@ from nat.builder.function_info import FunctionInfo
 from nat.cli.register_workflow import register_function
 from nat.data_models.function import FunctionBaseConfig
 from nat_finus_nat.finus_paths import fin_us_vendor_root
+
+
+_MCP_ENV_ALLOWED_KEYS = {
+    "PATH",
+    "NODE_ENV",
+    "NODE_OPTIONS",
+    "NODE_EXTRA_CA_CERTS",
+    "SSL_CERT_FILE",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "no_proxy",
+    "KIS_API_KEY",
+    "KIS_API_SECRET",
+    "KIS_ACCOUNT_NO",
+    "KIS_URL",
+    "NAVER_CLIENT_ID",
+    "NAVER_CLIENT_SECRET",
+}
+_MCP_ENV_ALLOWED_PREFIXES = ("FIN_US_",)
 
 
 class _FinusVendorTimeout(Protocol):
@@ -43,6 +66,14 @@ def _resolve_vendor_root(override: str | None) -> Path:
 def _node_deps_ready(server_dir: Path) -> bool:
     sdk = server_dir / "node_modules" / "@modelcontextprotocol" / "sdk"
     return sdk.is_dir()
+
+
+def _mcp_child_env() -> dict[str, str]:
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if key in _MCP_ENV_ALLOWED_KEYS or key.startswith(_MCP_ENV_ALLOWED_PREFIXES)
+    }
 
 
 async def _mcp_call_tool(
@@ -77,13 +108,18 @@ async def _mcp_call_tool(
                 "path": str(server_dir),
                 "detail": "ERR_MODULE_NOT_FOUND @modelcontextprotocol/sdk — node_modules not installed.",
                 "hint": (
-                    f"cd {news} && npm ci && npx playwright install chromium; "
+                    f"cd {news} && npm ci; "
                     f"cd {trade} && npm ci"
                 ),
             },
             ensure_ascii=False)
 
-    params = StdioServerParameters(command="node", args=[str(script)], cwd=str(server_dir))
+    params = StdioServerParameters(
+        command="node",
+        args=[str(script)],
+        env=_mcp_child_env(),
+        cwd=str(server_dir),
+    )
 
     async def _inner() -> str:
         async with stdio_client(params) as (read, write):
@@ -129,6 +165,17 @@ async def _mcp_trading_balance(config: _FinusVendorTimeout) -> str:
     )
 
 
+async def _mcp_trading_stock(config: _FinusVendorTimeout, tool_name: str, stock_name: str) -> str:
+    vr, timeout = _vendor_and_timeout(config)
+    return await _mcp_call_tool(
+        vendor_root=vr,
+        subdir="mcp-trading",
+        tool_name=tool_name,
+        arguments={"stock_name": stock_name},
+        timeout_sec=timeout,
+    )
+
+
 class FinusMarketNewsConfig(FunctionBaseConfig, name="finus_market_news"):
     vendor_root: str | None = Field(default=None, description="Override parent dir containing mcp-news and mcp-trading.")
     timeout_sec: float = Field(default=120.0, ge=5.0, le=600.0)
@@ -160,7 +207,7 @@ async def finus_market_news(config: FinusMarketNewsConfig, _builder: Builder):
 @register_function(config_type=FinusInvestorTradingConfig)
 async def finus_investor_trading(config: FinusInvestorTradingConfig, _builder: Builder):
     async def get_investor_trading(stock_name: str) -> str:
-        return await _mcp_news_stock(config, "get_investor_trading", stock_name)
+        return await _mcp_trading_stock(config, "get_investor_trading", stock_name)
 
     yield FunctionInfo.from_fn(get_investor_trading, description=get_investor_trading.__doc__)
 

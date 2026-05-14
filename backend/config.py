@@ -34,20 +34,52 @@ OLLAMA_BASE_URL = _get_ollama_base_url()
 
 _NEWS_MCP_DIR = Path(os.environ.get("NEWS_MCP_DIR", _FIN_US_ROOT / "mcp-news")).resolve()
 _TRADING_MCP_DIR = Path(os.environ.get("TRADING_MCP_DIR", _FIN_US_ROOT / "mcp-trading")).resolve()
+_MCP_ENV_ALLOWED_KEYS = {
+    "PATH",
+    "NODE_ENV",
+    "NODE_OPTIONS",
+    "NODE_EXTRA_CA_CERTS",
+    "SSL_CERT_FILE",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "no_proxy",
+    "KIS_API_KEY",
+    "KIS_API_SECRET",
+    "KIS_ACCOUNT_NO",
+    "KIS_URL",
+    "NAVER_CLIENT_ID",
+    "NAVER_CLIENT_SECRET",
+}
+_MCP_ENV_ALLOWED_PREFIXES = ("FIN_US_",)
 
 # SQLite 데이터베이스 파일 경로 설정 (backend 디렉토리 내 finus.db 생성)
 DATABASE_URL = os.environ.get("DATABASE_URL") or f"sqlite:///{_FIN_US_ROOT}/backend/finus.db"
 DB_ECHO = os.getenv("DB_ECHO", "false").lower() == "true"
+
+# Redis cache/lock settings for scheduler state.
+REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 
 # CORS 설정
 _ALLOW_ORIGINS_RAW = os.getenv("ALLOW_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173")
 ALLOW_ORIGINS = [origin.strip() for origin in _ALLOW_ORIGINS_RAW.split(",") if origin.strip()]
 
 
+def _mcp_child_env() -> dict[str, str]:
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if key in _MCP_ENV_ALLOWED_KEYS or key.startswith(_MCP_ENV_ALLOWED_PREFIXES)
+    }
+
+
 def _stdio_server_params(mcp_dir: Path) -> StdioServerParameters:
     return StdioServerParameters(
         command="node",
         args=[str(mcp_dir / "index.js")],
+        env=_mcp_child_env(),
         cwd=str(mcp_dir),
     )
 

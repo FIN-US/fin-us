@@ -19,18 +19,34 @@ from .schemas import TradingSignal, AnalysisReport
 from .models import AgentReport
 
 logger = logging.getLogger(__name__)
+_NAT_RESPONSE_LOG_PREVIEW_CHARS = 800
 
 async def perform_stock_analysis(
     stock: str,
     provider: str,
-    session: Session
+    session: Session,
+    *,
+    trigger_source: str | None = None,
+    trigger_signal: str | None = None,
 ) -> dict[str, Any]:
     """
     종목 분석을 수행하고 결과를 DB에 저장한 뒤 반환합니다.
     API 엔드포인트와 백그라운드 스케줄러에서 공용으로 사용됩니다.
     """
+    trigger_context = ""
+    if trigger_signal:
+        source_label = trigger_source or "signal"
+        trigger_context = (
+            f"\n분석 트리거 데이터 출처: {source_label}\n"
+            f"--- 트리거 데이터 ---\n{trigger_signal[:4000]}\n"
+            "------------------\n"
+            "위 트리거 데이터를 투자 판단의 주요 근거로 반영하라. "
+            "필요하면 라우터·서브에이전트로 보조 시장 데이터를 추가 확인하라.\n"
+        )
+
     user_msg = (
         f"종목: {stock}. 라우터·서브에이전트를 활용해 투자 관점 분석을 하라. "
+        f"{trigger_context}"
         "답변 마지막에 **다음 JSON 한 개만** 출력하라 (다른 텍스트 없이도 됨):\n"
         '{"summary":"한 줄 요약",'
         '"details":{"decision":"BUY"|"SELL"|"HOLD","confidence_score":0.0-1.0,'
@@ -38,6 +54,7 @@ async def perform_stock_analysis(
         f'{stock}'
         '"},'
         '"source_news":["헤드라인1","헤드라인2"],'
+        '"source_signals":["분석에 사용한 외부 signal 1","분석에 사용한 외부 signal 2"],'
         '"trading_trend":"수급 한줄 요약 또는 null"}'
     )
     
@@ -67,32 +84,36 @@ async def perform_stock_analysis(
 
     return data
 
-async def check_news_significance(
+async def check_signal_significance(
     stock: str,
-    news_content: str,
-    last_news_content: Optional[str] = None,
+    signal_content: str,
+    last_signal_content: Optional[str] = None,
+    *,
+    source: str = "signal",
     provider: str = "ollama"
 ) -> bool:
     """
-    뉴스 제목을 분석하여 투자 관점에서 유의미한 변화가 있는지 판단합니다.
+    외부 signal을 분석하여 투자 관점에서 유의미한 변화가 있는지 판단합니다.
     로컬 초경량 모델(예: gemma4) 또는 경량 API 모델(예: gpt-5.4-mini)을 
     1차 필터로 사용하여 비용과 정확도의 균형을 맞출 수 있습니다.
     """
-    if not news_content:
+    if not signal_content:
         return False
     
-    if news_content == last_news_content:
+    if signal_content == last_signal_content:
         return False
 
-    # 뉴스 텍스트 상단(제목 위주) 1000자 사용
-    snip_content = news_content[:1000]
+    # signal 텍스트 상단 1000자 사용
+    snip_content = signal_content[:1000]
 
     prompt = (
-        f"당신은 전문 주식 분석가입니다. 다음은 '{stock}' 종목에 대한 최신 뉴스 데이터입니다.\n\n"
-        f"--- 뉴스 내용 ---\n{snip_content}\n"
+        f"당신은 전문 주식 분석가입니다. 다음은 '{stock}' 종목에 대한 최신 외부 signal입니다.\n"
+        f"signal 출처: {source}\n\n"
+        f"--- signal 내용 ---\n{snip_content}\n"
         "------------------\n\n"
-        "이 뉴스들이 기존 상황을 바꿀 만큼 유의미한 새로운 정보(실적 발표, 계약, M&A 등)를 포함하고 있습니까?\n"
-        "중요한 변화가 있다면 'YES', 사소하거나 반복되는 뉴스라면 'NO'라고만 답하세요.\n"
+        "이 signal이 기존 상황을 바꿀 만큼 유의미한 새로운 투자 정보"
+        "(실적 발표, 계약, M&A, 수급 변화, 평판 리스크, 급격한 여론 변화 등)를 포함하고 있습니까?\n"
+        "중요한 변화가 있다면 'YES', 사소하거나 반복되는 signal이라면 'NO'라고만 답하세요.\n"
         "답변은 반드시 다른 설명 없이 'YES' 또는 'NO' 중 하나로만 대답하십시오."
     )
 
@@ -100,11 +121,32 @@ async def check_news_significance(
         # 설정된 provider(ollama, openai 등)에 따라 경량 모델 호출
         result = await llm_chat(provider, prompt)
         is_significant = "YES" in result.upper()
-        logger.info(f"뉴스 유의미성 확인 [{stock}] (Provider: {provider}): {is_significant}")
+        logger.info(
+            "signal 유의미성 확인 [%s:%s] (Provider: %s): %s",
+            source,
+            stock,
+            provider,
+            is_significant,
+        )
         return is_significant
     except Exception as e:
-        logger.error(f"뉴스 유의미성 확인 중 오류 발생 ({stock}, {provider}): {e}")
+        logger.error(f"signal 유의미성 확인 중 오류 발생 ({source}, {stock}, {provider}): {e}")
         return True
+
+
+async def check_news_significance(
+    stock: str,
+    news_content: str,
+    last_news_content: Optional[str] = None,
+    provider: str = "ollama",
+) -> bool:
+    return await check_signal_significance(
+        stock,
+        news_content,
+        last_news_content,
+        source="news",
+        provider=provider,
+    )
 
 async def _llm_openai_chat(user_msg: str) -> str:
     if not OPENAI_API_KEY:
@@ -188,6 +230,19 @@ def _nat_message_from_payload(payload: dict[str, Any]) -> str:
     return (content if content is not None else "").strip()
 
 
+def _log_nat_response(resp: httpx.Response) -> None:
+    logger.debug(
+        "NAT response received: status_code=%s body_length=%s",
+        resp.status_code,
+        len(resp.text),
+    )
+    if resp.text:
+        logger.debug(
+            "NAT response body preview: %s",
+            resp.text[:_NAT_RESPONSE_LOG_PREVIEW_CHARS],
+        )
+
+
 async def _llm_nat_chat(user_msg: str) -> str:
     url = f"{NAT_BASE_URL}/v1/chat/completions"
     try:
@@ -201,11 +256,7 @@ async def _llm_nat_chat(user_msg: str) -> str:
                     "stream": False,
                 },
             )
-            logger.debug(
-                "NAT raw response: status_code=%s body=%s",
-                resp.status_code,
-                resp.text,
-            )
+            _log_nat_response(resp)
     except httpx.RequestError as exc:
         raise HTTPException(
             status_code=502,
@@ -222,7 +273,10 @@ async def _llm_nat_chat(user_msg: str) -> str:
             "Failed to parse NAT response JSON: status_code=%s",
             resp.status_code,
         )
-        logger.debug("NAT response body: %s", resp.text)
+        logger.debug(
+            "NAT response body preview: %s",
+            resp.text[:_NAT_RESPONSE_LOG_PREVIEW_CHARS],
+        )
         raise HTTPException(
             status_code=502,
             detail=f"NAT JSON 파싱 실패: {exc}; body[:800]={resp.text[:800]!r}",
@@ -269,15 +323,14 @@ async def run_mcp_tool(
 def analysis_from_nat_text(raw: str, stock: str) -> dict[str, Any]:
     """Map NAT assistant output to AnalysisReport JSON for the reference React UI."""
     text = (raw or "").strip()
-    start = text.rfind("{")
-    end = text.rfind("}")
-    if start != -1 and end > start:
-        chunk = text[start : end + 1]
+    for data in _json_objects_from_text(text):
         try:
-            data = json.loads(chunk)
             report = AnalysisReport(**data)
-            return report.model_dump()
-        except (json.JSONDecodeError, ValueError):
+            dumped = report.model_dump()
+            if dumped.get("source_signals") is None:
+                dumped["source_signals"] = dumped.get("source_news", [])
+            return dumped
+        except ValueError:
             pass
     lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
     news_snip = lines[:8] if lines else []
@@ -290,8 +343,24 @@ def analysis_from_nat_text(raw: str, stock: str) -> dict[str, Any]:
             target_stock=stock,
         ),
         source_news=news_snip,
+        source_signals=news_snip,
         trading_trend=None,
     ).model_dump()
+
+
+def _json_objects_from_text(text: str) -> list[dict[str, Any]]:
+    decoder = json.JSONDecoder()
+    objects: list[dict[str, Any]] = []
+    for index, char in enumerate(text):
+        if char != "{":
+            continue
+        try:
+            value, _ = decoder.raw_decode(text[index:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            objects.append(value)
+    return list(reversed(objects))
 
 
 def normalize_llm_provider(
