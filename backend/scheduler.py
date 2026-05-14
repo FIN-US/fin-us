@@ -6,7 +6,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from sqlmodel import Session
 from .ws_manager import manager
 from .database import engine
-from .config import NEWS_MCP_PARAMS, TRADING_MCP_PARAMS
+from .config import NEWS_MCP_PARAMS, TRADING_MCP_PARAMS, DART_MCP_PARAMS
 from .redis_state import RedisSchedulerState, signal_hash, redis_state
 from .services import perform_stock_analysis, run_mcp_tool, check_signal_significance
 
@@ -50,7 +50,12 @@ SIGNAL_SOURCES = [
         name="news",
         mcp_params=NEWS_MCP_PARAMS,
         tool_name="get_market_news",
-    )
+    ),
+    SignalSource(
+        name="disclosure",
+        mcp_params=DART_MCP_PARAMS,
+        tool_name="get_disclosure_signal",
+    ),
 ]
 
 def extract_stocks_from_balance(balance_text: str) -> list[str]:
