@@ -9,6 +9,8 @@ functions:
     _type: finus_research_reports
   finus_account_balance:
     _type: finus_account_balance
+  finus_disclosure_signal:
+    _type: finus_disclosure_signal
 
 llms:
   openai_cloud_llm:

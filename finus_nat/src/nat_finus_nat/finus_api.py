@@ -48,6 +48,7 @@ _MCP_ENV_ALLOWED_KEYS = {
     "KIS_URL",
     "NAVER_CLIENT_ID",
     "NAVER_CLIENT_SECRET",
+    "DART_API_KEY",
 }
 _MCP_ENV_ALLOWED_PREFIXES = ("FIN_US_",)
 
@@ -102,6 +103,7 @@ async def _mcp_call_tool(
     if not _node_deps_ready(server_dir):
         news = vendor_root / "mcp-news"
         trade = vendor_root / "mcp-trading"
+        dart = vendor_root / "mcp-dart"
         return json.dumps(
             {
                 "error": "mcp_node_dependencies_missing",
@@ -109,7 +111,8 @@ async def _mcp_call_tool(
                 "detail": "ERR_MODULE_NOT_FOUND @modelcontextprotocol/sdk — node_modules not installed.",
                 "hint": (
                     f"cd {news} && npm ci; "
-                    f"cd {trade} && npm ci"
+                    f"cd {trade} && npm ci; "
+                    f"cd {dart} && npm ci"
                 ),
             },
             ensure_ascii=False)
@@ -176,8 +179,19 @@ async def _mcp_trading_stock(config: _FinusVendorTimeout, tool_name: str, stock_
     )
 
 
+async def _mcp_dart_stock(config: _FinusVendorTimeout, stock_name: str) -> str:
+    vr, timeout = _vendor_and_timeout(config)
+    return await _mcp_call_tool(
+        vendor_root=vr,
+        subdir="mcp-dart",
+        tool_name="get_disclosure_signal",
+        arguments={"stock_name": stock_name},
+        timeout_sec=timeout,
+    )
+
+
 class FinusMarketNewsConfig(FunctionBaseConfig, name="finus_market_news"):
-    vendor_root: str | None = Field(default=None, description="Override parent dir containing mcp-news and mcp-trading.")
+    vendor_root: str | None = Field(default=None, description="Override parent dir containing Fin-Us MCP servers.")
     timeout_sec: float = Field(default=120.0, ge=5.0, le=600.0)
 
 
@@ -194,6 +208,11 @@ class FinusResearchReportsConfig(FunctionBaseConfig, name="finus_research_report
 class FinusAccountBalanceConfig(FunctionBaseConfig, name="finus_account_balance"):
     vendor_root: str | None = Field(default=None)
     timeout_sec: float = Field(default=180.0, ge=5.0, le=600.0)
+
+
+class FinusDisclosureSignalConfig(FunctionBaseConfig, name="finus_disclosure_signal"):
+    vendor_root: str | None = Field(default=None)
+    timeout_sec: float = Field(default=120.0, ge=5.0, le=600.0)
 
 
 @register_function(config_type=FinusMarketNewsConfig)
@@ -227,3 +246,11 @@ async def finus_account_balance(config: FinusAccountBalanceConfig, _builder: Bui
         return await _mcp_trading_balance(config)
 
     yield FunctionInfo.from_fn(get_account_balance, description=get_account_balance.__doc__)
+
+
+@register_function(config_type=FinusDisclosureSignalConfig)
+async def finus_disclosure_signal(config: FinusDisclosureSignalConfig, _builder: Builder):
+    async def get_disclosure_signal(stock_name: str) -> str:
+        return await _mcp_dart_stock(config, stock_name)
+
+    yield FunctionInfo.from_fn(get_disclosure_signal, description=get_disclosure_signal.__doc__)
