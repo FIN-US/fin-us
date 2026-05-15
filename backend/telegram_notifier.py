@@ -9,9 +9,20 @@ from .config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, is_placeholder_secret
 logger = logging.getLogger(__name__)
 
 URGENT_TELEGRAM_LEVELS = {"high", "critical"}
+TELEGRAM_ALERT_MODES = {"urgent", "all", "off"}
 
 
-def should_send_telegram_alert(analysis_data: dict[str, Any]) -> bool:
+def should_send_telegram_alert(
+    analysis_data: dict[str, Any],
+    *,
+    alert_mode: str = "urgent",
+) -> bool:
+    if alert_mode == "off":
+        return False
+    if alert_mode == "all":
+        return True
+    if alert_mode != "urgent":
+        return False
     return (
         analysis_data.get("telegram_alert") is True
         and analysis_data.get("urgency") in URGENT_TELEGRAM_LEVELS
@@ -62,10 +73,12 @@ class TelegramNotifier:
         stock: str,
         source: str,
         analysis_data: dict[str, Any],
+        *,
+        alert_mode: str = "urgent",
     ) -> bool:
         if not self.enabled:
             return False
-        if not should_send_telegram_alert(analysis_data):
+        if not should_send_telegram_alert(analysis_data, alert_mode=alert_mode):
             return False
 
         try:
@@ -79,6 +92,17 @@ class TelegramNotifier:
             return True
         except Exception as exc:
             logger.error("Telegram alert send failed for %s/%s: %s", source, stock, exc)
+            return False
+
+    async def send_text(self, text: str) -> bool:
+        if not self.enabled:
+            return False
+
+        try:
+            await self._post_message(text[:4000])
+            return True
+        except Exception as exc:
+            logger.error("Telegram message send failed: %s", exc)
             return False
 
     async def _post_message(self, text: str) -> None:

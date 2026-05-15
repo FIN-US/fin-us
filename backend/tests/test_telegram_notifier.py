@@ -12,6 +12,16 @@ def test_should_send_telegram_alert_requires_high_or_critical_with_flag():
     assert should_send_telegram_alert({}) is False
 
 
+def test_should_send_telegram_alert_supports_alert_modes():
+    normal_analysis = {"telegram_alert": False, "urgency": "normal"}
+    urgent_analysis = {"telegram_alert": True, "urgency": "critical"}
+
+    assert should_send_telegram_alert(normal_analysis, alert_mode="urgent") is False
+    assert should_send_telegram_alert(normal_analysis, alert_mode="all") is True
+    assert should_send_telegram_alert(urgent_analysis, alert_mode="off") is False
+    assert should_send_telegram_alert(urgent_analysis, alert_mode="unknown") is False
+
+
 def test_notifier_disabled_for_missing_or_placeholder_config():
     assert TelegramNotifier("", "123").enabled is False
     assert TelegramNotifier("your_telegram_bot_token_here", "123").enabled is False
