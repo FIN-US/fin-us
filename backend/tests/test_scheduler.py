@@ -157,7 +157,7 @@ class FakeRedis:
 @pytest.mark.asyncio
 async def test_monitor_market_task_uses_default_stocks_when_balance_empty(monkeypatch):
     """
-    보유 종목이 없으면 기본 감시 종목 10개를 대상으로 모니터링합니다.
+    보유 종목이 없으면 기본 감시 종목 4개를 대상으로 모니터링합니다.
     """
     from ..scheduler import DEFAULT_MONITOR_STOCKS, SignalSource, monitor_market_task, last_analyzed_news_cache
 
@@ -197,7 +197,7 @@ async def test_monitor_market_task_uses_default_stocks_when_balance_empty(monkey
 
     await monitor_market_task()
 
-    assert len(DEFAULT_MONITOR_STOCKS) == 10
+    assert len(DEFAULT_MONITOR_STOCKS) == 4
     assert monitored_stocks == DEFAULT_MONITOR_STOCKS
     assert mock_perform_analysis.call_count == 0
     assert mock_broadcast.call_count == 0
