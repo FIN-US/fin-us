@@ -279,6 +279,10 @@ async function fetchMajorStock(apiKey, corp) {
   const payload = await fetchJson(MAJOR_STOCK_ENDPOINT, {
     crtfc_key: apiKey,
     corp_code: corp.corp_code,
+    page_no: "1",
+    page_count: "10",
+    sort: "date",
+    sort_mth: "desc",
   });
   return asArray(payload.list);
 }
@@ -287,6 +291,10 @@ async function fetchEleStock(apiKey, corp) {
   const payload = await fetchJson(ELE_STOCK_ENDPOINT, {
     crtfc_key: apiKey,
     corp_code: corp.corp_code,
+    page_no: "1",
+    page_count: "10",
+    sort: "date",
+    sort_mth: "desc",
   });
   return asArray(payload.list);
 }

@@ -60,3 +60,5 @@ AGENTS.md
 CLAUDE.md
 
 mcp-dart/data/corp-codes.json
+
+.superpowers/brainstorm/**/state/
