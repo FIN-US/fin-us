@@ -155,6 +155,89 @@ class FakeRedis:
 
 
 @pytest.mark.asyncio
+async def test_monitor_signal_sends_telegram_for_urgent_analysis(monkeypatch):
+    from ..scheduler import SignalSource, _monitor_signal
+
+    state = RedisSchedulerState(FakeRedis())
+    source = SignalSource(name="news", mcp_params=object(), tool_name="get_market_news")
+
+    async def mock_run_mcp_tool(params, name, args):
+        _ = params, name, args
+        return "urgent signal"
+
+    async def mock_check_significance(stock, current, last, *, source, provider):
+        _ = stock, current, last, source, provider
+        return True
+
+    async def mock_perform_analysis(*args, **kwargs):
+        _ = args, kwargs
+        return {
+            "summary": "긴급",
+            "details": {"decision": "HOLD"},
+            "telegram_alert": True,
+            "urgency": "high",
+        }
+
+    mock_telegram = MagicMock(return_value=asyncio.Future())
+    mock_telegram.return_value.set_result(True)
+    mock_broadcast = MagicMock(return_value=asyncio.Future())
+    mock_broadcast.return_value.set_result(None)
+
+    monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
+    monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
+    monkeypatch.setattr("backend.scheduler.perform_stock_analysis", mock_perform_analysis)
+    monkeypatch.setattr("backend.scheduler.telegram_notifier.send_analysis_alert", mock_telegram)
+    monkeypatch.setattr("backend.scheduler.manager.broadcast", mock_broadcast)
+
+    await _monitor_signal("삼성전자", source, object(), state)
+
+    mock_telegram.assert_called_once()
+    mock_broadcast.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_monitor_signal_keeps_websocket_when_telegram_fails(monkeypatch):
+    from ..scheduler import SignalSource, _monitor_signal
+
+    state = RedisSchedulerState(FakeRedis())
+    source = SignalSource(name="news", mcp_params=object(), tool_name="get_market_news")
+
+    async def mock_run_mcp_tool(params, name, args):
+        _ = params, name, args
+        return "urgent signal"
+
+    async def mock_check_significance(stock, current, last, *, source, provider):
+        _ = stock, current, last, source, provider
+        return True
+
+    async def mock_perform_analysis(*args, **kwargs):
+        _ = args, kwargs
+        return {
+            "summary": "긴급",
+            "details": {"decision": "HOLD"},
+            "telegram_alert": True,
+            "urgency": "critical",
+        }
+
+    async def failing_telegram(*args, **kwargs):
+        _ = args, kwargs
+        raise RuntimeError("telegram down")
+
+    mock_broadcast = MagicMock(return_value=asyncio.Future())
+    mock_broadcast.return_value.set_result(None)
+
+    monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
+    monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
+    monkeypatch.setattr("backend.scheduler.perform_stock_analysis", mock_perform_analysis)
+    monkeypatch.setattr("backend.scheduler.telegram_notifier.send_analysis_alert", failing_telegram)
+    monkeypatch.setattr("backend.scheduler.manager.broadcast", mock_broadcast)
+
+    await _monitor_signal("삼성전자", source, object(), state)
+
+    mock_broadcast.assert_called_once()
+
+
+@pytest.mark.asyncio
 async def test_monitor_market_task_uses_default_stocks_when_balance_empty(monkeypatch):
     """
     보유 종목이 없으면 기본 감시 종목 4개를 대상으로 모니터링합니다.

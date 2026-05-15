@@ -9,7 +9,7 @@ from .database import engine
 from .config import NEWS_MCP_PARAMS, TRADING_MCP_PARAMS, DART_MCP_PARAMS
 from .redis_state import RedisSchedulerState, signal_hash, redis_state
 from .services import perform_stock_analysis, run_mcp_tool, check_signal_significance
-from .telegram_bot import notifier as telegram_notifier
+from .telegram_notifier import telegram_notifier
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +117,17 @@ async def _monitor_market_task(state: RedisSchedulerState | None):
         logger.error(f"모니터링 태스크 시작 중 오류: {e}")
 
 
+async def _send_telegram_alert_if_needed(
+    stock: str,
+    source: str,
+    analysis_data: dict[str, Any],
+) -> None:
+    try:
+        await telegram_notifier.send_analysis_alert(stock, source, analysis_data)
+    except Exception as e:
+        logger.error("[%s:%s] Telegram 알림 처리 중 오류: %s", source, stock, e)
+
+
 async def _monitor_signal(
     stock: str,
     source: SignalSource,
@@ -180,6 +191,8 @@ async def _monitor_signal(
             trigger_signal=current_signal,
         )
         await _set_last_signal_state(state, source.name, stock, current_signal, current_digest)
+
+        await _send_telegram_alert_if_needed(stock, source.name, analysis_data)
 
         # 분석 결과를 WebSocket으로 실시간 전송
         await manager.broadcast({
