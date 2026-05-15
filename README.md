@@ -154,6 +154,15 @@ docker compose exec backend uv run --project /app/backend python /app/backend/sc
 docker compose exec backend uv run --project /app/backend python /app/backend/scripts/send_test_telegram_alert.py --dry-run
 ```
 
+같은 Telegram 봇에서 알림 범위를 바꿀 수 있습니다. 기본값은 긴급 알림만 전송하는 `urgent`입니다.
+
+```text
+/alerts urgent  # high/critical 긴급 분석만 전송
+/alerts all     # NAT 분석이 실행될 때마다 전송
+/alerts off     # Telegram 분석 알림 중지
+/alerts status  # 현재 알림 모드 확인
+```
+
 ---
 
 ## 🙌 팀원 목록
