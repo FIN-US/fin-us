@@ -140,6 +140,20 @@ bash scripts/run_stack.sh
 
 - 로컬에서 `uvicorn --reload`만 쓰고 싶다면 볼륨 마운트된 소스로 호스트에서 실행하면 됩니다.
 
+### Telegram 긴급 알림 수동 테스트
+
+Docker Compose가 실행 중이고 `.env`에 `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`가 설정되어 있으면 backend 컨테이너에서 테스트 알림을 보낼 수 있습니다.
+
+```bash
+docker compose exec backend uv run --project /app/backend python /app/backend/scripts/send_test_telegram_alert.py
+```
+
+메시지 포맷만 확인하려면 실제 전송 없이 dry-run으로 실행합니다.
+
+```bash
+docker compose exec backend uv run --project /app/backend python /app/backend/scripts/send_test_telegram_alert.py --dry-run
+```
+
 ---
 
 ## 🙌 팀원 목록
