@@ -34,6 +34,7 @@ OLLAMA_BASE_URL = _get_ollama_base_url()
 
 _NEWS_MCP_DIR = Path(os.environ.get("NEWS_MCP_DIR", _FIN_US_ROOT / "mcp-news")).resolve()
 _TRADING_MCP_DIR = Path(os.environ.get("TRADING_MCP_DIR", _FIN_US_ROOT / "mcp-trading")).resolve()
+_DART_MCP_DIR = Path(os.environ.get("DART_MCP_DIR", _FIN_US_ROOT / "mcp-dart")).resolve()
 _MCP_ENV_ALLOWED_KEYS = {
     "PATH",
     "NODE_ENV",
@@ -52,6 +53,7 @@ _MCP_ENV_ALLOWED_KEYS = {
     "KIS_URL",
     "NAVER_CLIENT_ID",
     "NAVER_CLIENT_SECRET",
+    "DART_API_KEY",
 }
 _MCP_ENV_ALLOWED_PREFIXES = ("FIN_US_",)
 
@@ -86,3 +88,4 @@ def _stdio_server_params(mcp_dir: Path) -> StdioServerParameters:
 
 NEWS_MCP_PARAMS = _stdio_server_params(_NEWS_MCP_DIR)
 TRADING_MCP_PARAMS = _stdio_server_params(_TRADING_MCP_DIR)
+DART_MCP_PARAMS = _stdio_server_params(_DART_MCP_DIR)

@@ -9,18 +9,19 @@ functions:
       - finus_investor_trading
       - finus_research_reports
       - finus_account_balance
+      - finus_disclosure_signal
     verbose: false
     use_native_tool_calling: false
     parse_agent_response_max_retries: 2
     raise_on_parsing_failure: false
     additional_instructions: |
       === 에이전트 요약 ===
-      매매 규칙·시나리오·BUY/SELL/HOLD 관점의 전략 제안. 뉴스/수급/리서치/잔고 도구 결과를 근거로 한국어로 정리합니다.
+      매매 규칙·시나리오·BUY/SELL/HOLD 관점의 전략 제안. 뉴스/수급/리서치/잔고/DART 지분공시 도구 결과를 근거로 한국어로 정리합니다.
 
       === 동작 지시 ===
-      뉴스·수급·리서치·계좌 스냅샷 도구를 필요에 따라 호출한 뒤, BUY/SELL/HOLD 관점과 근거를 한국어로 제시하십시오.
+      뉴스·수급·리서치·계좌 스냅샷·DART 5% 룰 및 임원 주요주주 거래 signal 도구를 필요에 따라 호출한 뒤, BUY/SELL/HOLD 관점과 근거를 한국어로 제시하십시오.
 
   strategy_branch_agent:
     _type: fe_branch
     inner_function_name: strategy_agent
-    tool_description: "Strategy: Fin-Us mcp-news + mcp-trading balance + LLM synthesis."
+    tool_description: "Strategy: Fin-Us mcp-news + mcp-trading balance + DART disclosure signals + LLM synthesis."

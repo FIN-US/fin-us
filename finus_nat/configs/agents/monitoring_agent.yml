@@ -9,6 +9,7 @@ functions:
       - finus_market_news
       - finus_investor_trading
       - finus_research_reports
+      - finus_disclosure_signal
     verbose: false
     include_tool_input_schema_in_tool_description: true
     use_native_tool_calling: false
@@ -19,12 +20,12 @@ functions:
     accept_direct_answer_without_react_format: false
     additional_instructions: |
       === 에이전트 요약 ===
-      포트폴리오 모니터링, 잔고, 뉴스·수급 점검. Fin-Us MCP 도구(trading과 동일 세트)를 쓰되, 관찰·알림·건전성 관점으로 답합니다.
+      포트폴리오 모니터링, 잔고, 뉴스·수급·DART 지분공시 점검. Fin-Us MCP 도구를 쓰되, 관찰·알림·건전성 관점으로 답합니다.
 
       === 동작 지시 ===
-      Fin-Us 툴 스키마를 따르세요. 종료는 Final Answer: 형식을 사용하세요.
+      DART 5% 룰·임원 주요주주 거래 signal은 보유 리스크 관찰 신호로만 반영하세요. 종료는 Final Answer: 형식을 사용하세요.
 
   monitoring_branch_agent:
     _type: fe_branch
     inner_function_name: monitoring_agent
-    tool_description: "Portfolio monitoring: Fin-Us balance, news, flows, research."
+    tool_description: "Portfolio monitoring: Fin-Us balance, news, flows, research, DART disclosure signals."

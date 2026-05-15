@@ -10,4 +10,7 @@ npm ci
 cd "${ROOT}/mcp-trading"
 npm ci
 
-echo "OK: mcp-news and mcp-trading Node dependencies installed."
+cd "${ROOT}/mcp-dart"
+npm ci
+
+echo "OK: mcp-news, mcp-trading, and mcp-dart Node dependencies installed."

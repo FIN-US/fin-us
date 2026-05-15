@@ -1,0 +1,16 @@
+{
+  "name": "mcp-dart",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "description": "Fin-Us MCP server for official OpenDART disclosure signals",
+  "main": "index.js",
+  "scripts": {
+    "check": "node --check index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.21.0",
+    "adm-zip": "^0.5.16",
+    "fast-xml-parser": "^5.3.2"
+  }
+}

@@ -17,6 +17,15 @@ COPY mcp-trading/package*.json ./
 RUN npm ci --omit=dev
 COPY mcp-trading ./
 
+WORKDIR /opt/mcp-dart
+COPY mcp-dart/package*.json ./
+RUN npm ci --omit=dev
+COPY mcp-dart ./
+
+ENV NEWS_MCP_DIR=/opt/mcp-news \
+    TRADING_MCP_DIR=/opt/mcp-trading \
+    DART_MCP_DIR=/opt/mcp-dart
+
 WORKDIR /app
 
 COPY backend/pyproject.toml backend/uv.lock ./backend/

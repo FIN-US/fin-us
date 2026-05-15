@@ -15,11 +15,15 @@ ENV SETUPTOOLS_SCM_PRETEND_VERSION=${SETUPTOOLS_SCM_PRETEND_VERSION}
 COPY finus_nat /workspace/finus_nat
 COPY mcp-news /workspace/mcp-news
 COPY mcp-trading /workspace/mcp-trading
+COPY mcp-dart /workspace/mcp-dart
 
 WORKDIR /workspace/mcp-news
 RUN npm ci
 
 WORKDIR /workspace/mcp-trading
+RUN npm ci
+
+WORKDIR /workspace/mcp-dart
 RUN npm ci
 
 WORKDIR /workspace/finus_nat
