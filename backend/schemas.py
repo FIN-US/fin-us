@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 class TradingSignal(BaseModel):
@@ -14,6 +14,9 @@ class AnalysisReport(BaseModel):
     source_news: list[str]
     source_signals: list[str] | None = None
     trading_trend: str | None = None
+    urgency: Literal["low", "normal", "high", "critical"] = "normal"
+    urgency_reason: str | None = None
+    telegram_alert: bool = False
 
 
 class CommonResponse(BaseModel):

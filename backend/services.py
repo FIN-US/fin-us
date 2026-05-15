@@ -47,6 +47,11 @@ async def perform_stock_analysis(
     user_msg = (
         f"종목: {stock}. 라우터·서브에이전트를 활용해 투자 관점 분석을 하라. "
         f"{trigger_context}"
+        "Telegram 알림은 매우 긴급한 경우에만 사용한다. "
+        "거래정지·상장폐지 위험, 대규모 공시, 실적 쇼크, 소송·규제 리스크, "
+        "보유종목에 대한 급격한 위험 변화처럼 즉시 확인이 필요한 경우에만 "
+        'urgency를 "high" 또는 "critical"로 두고 telegram_alert를 true로 둔다. '
+        "그 외에는 urgency를 normal 이하로 두고 telegram_alert를 false로 둔다. "
         "답변 마지막에 **다음 JSON 한 개만** 출력하라 (다른 텍스트 없이도 됨):\n"
         '{"summary":"한 줄 요약",'
         '"details":{"decision":"BUY"|"SELL"|"HOLD","confidence_score":0.0-1.0,'
@@ -55,7 +60,10 @@ async def perform_stock_analysis(
         '"},'
         '"source_news":["헤드라인1","헤드라인2"],'
         '"source_signals":["분석에 사용한 외부 signal 1","분석에 사용한 외부 signal 2"],'
-        '"trading_trend":"수급 한줄 요약 또는 null"}'
+        '"trading_trend":"수급 한줄 요약 또는 null",'
+        '"urgency":"low"|"normal"|"high"|"critical",'
+        '"urgency_reason":"긴급 판단 사유 한 줄 또는 null",'
+        '"telegram_alert":true|false}'
     )
     
     key = normalize_llm_provider(provider)

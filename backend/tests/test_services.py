@@ -102,6 +102,45 @@ def test_analysis_from_nat_text_backfills_source_signals():
     assert data["source_signals"] == ["기존 뉴스"]
 
 
+def test_analysis_from_nat_text_defaults_telegram_urgency_fields():
+    data = services.analysis_from_nat_text(
+        (
+            '{"summary":"요약",'
+            '"details":{"decision":"HOLD","confidence_score":0.5,'
+            '"reason":"근거","target_stock":"삼성전자"},'
+            '"source_news":["기존 뉴스"],'
+            '"source_signals":["기존 signal"],'
+            '"trading_trend":null}'
+        ),
+        "삼성전자",
+    )
+
+    assert data["urgency"] == "normal"
+    assert data["urgency_reason"] is None
+    assert data["telegram_alert"] is False
+
+
+def test_analysis_from_nat_text_parses_telegram_urgency_fields():
+    data = services.analysis_from_nat_text(
+        (
+            '{"summary":"긴급 요약",'
+            '"details":{"decision":"SELL","confidence_score":0.8,'
+            '"reason":"규제 리스크","target_stock":"삼성전자"},'
+            '"source_news":["뉴스"],'
+            '"source_signals":["signal"],'
+            '"trading_trend":null,'
+            '"urgency":"critical",'
+            '"urgency_reason":"거래정지 위험",'
+            '"telegram_alert":true}'
+        ),
+        "삼성전자",
+    )
+
+    assert data["urgency"] == "critical"
+    assert data["urgency_reason"] == "거래정지 위험"
+    assert data["telegram_alert"] is True
+
+
 def test_analysis_from_nat_text_parses_nested_json_object():
     raw = (
         '{"summary":"도구 인증 설정 오류로 실시간 분석 불가",'
