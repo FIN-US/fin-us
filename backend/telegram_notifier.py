@@ -1,0 +1,98 @@
+import logging
+from numbers import Real
+from typing import Any
+
+import httpx
+
+from .config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, is_placeholder_secret
+
+logger = logging.getLogger(__name__)
+
+URGENT_TELEGRAM_LEVELS = {"high", "critical"}
+
+
+def should_send_telegram_alert(analysis_data: dict[str, Any]) -> bool:
+    return (
+        analysis_data.get("telegram_alert") is True
+        and analysis_data.get("urgency") in URGENT_TELEGRAM_LEVELS
+    )
+
+
+class TelegramNotifier:
+    def __init__(
+        self,
+        bot_token: str | None = TELEGRAM_BOT_TOKEN,
+        chat_id: str | None = TELEGRAM_CHAT_ID,
+    ):
+        self.bot_token = (bot_token or "").strip()
+        self.chat_id = (chat_id or "").strip()
+        self.enabled = not (
+            is_placeholder_secret(self.bot_token)
+            or is_placeholder_secret(self.chat_id)
+        )
+
+    def format_analysis_alert(
+        self,
+        *,
+        stock: str,
+        source: str,
+        analysis_data: dict[str, Any],
+    ) -> str:
+        details = analysis_data.get("details") or {}
+        decision = details.get("decision", "HOLD")
+        confidence = details.get("confidence_score", "")
+        reason = details.get("reason") or analysis_data.get("summary", "")
+        urgency = analysis_data.get("urgency", "normal")
+        urgency_reason = analysis_data.get("urgency_reason") or "긴급 판단 사유 없음"
+        summary = analysis_data.get("summary", "")
+
+        confidence_text = f" ({confidence:.2f})" if isinstance(confidence, Real) else ""
+        lines = [
+            f"[긴급] {stock} / {source}",
+            f"Decision: {decision}{confidence_text}",
+            f"Reason: {reason}",
+            f"Urgency: {urgency} - {urgency_reason}",
+        ]
+        if summary:
+            lines.append(f"Summary: {summary}")
+        return "\n".join(lines)[:4000]
+
+    async def send_analysis_alert(
+        self,
+        stock: str,
+        source: str,
+        analysis_data: dict[str, Any],
+    ) -> bool:
+        if not self.enabled:
+            return False
+        if not should_send_telegram_alert(analysis_data):
+            return False
+
+        try:
+            await self._post_message(
+                self.format_analysis_alert(
+                    stock=stock,
+                    source=source,
+                    analysis_data=analysis_data,
+                )
+            )
+            return True
+        except Exception as exc:
+            logger.error("Telegram alert send failed for %s/%s: %s", source, stock, exc)
+            return False
+
+    async def _post_message(self, text: str) -> None:
+        url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(
+                url,
+                json={
+                    "chat_id": self.chat_id,
+                    "text": text,
+                    "disable_web_page_preview": True,
+                },
+            )
+            response.raise_for_status()
+
+
+telegram_notifier = TelegramNotifier()
