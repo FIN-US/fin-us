@@ -18,7 +18,6 @@ from .services import (
 )
 from .database import init_db, get_session
 from .models import Portfolio, TradeHistory, AgentReport, Diary
-from .telegram_bot import start_bot, stop_bot, notifier
 
 # 로깅 설정: 모든 모듈의 로그를 터미널에 출력하도록 설정
 logging.basicConfig(
@@ -32,12 +31,10 @@ async def lifespan(app: FastAPI):
     # 앱 시작 시 실행: DB 초기화 및 스케줄러 가동
     init_db()
     start_scheduler()
-    await start_bot()
     logger.info("Database initialized and scheduler started.")
     yield
     # 앱 종료 시 실행: 스케줄러 안전 종료
     stop_scheduler()
-    await stop_bot()
     logger.info("Scheduler stopped.")
 
 
