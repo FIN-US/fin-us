@@ -35,6 +35,7 @@ Fin-Us는 단일 모델이 모든 일을 처리하지 않고, 역할이 분리�
 3.  **Tooling Layer (MCP Servers)**:
     - **News Provider (`mcp-news/`)**: 네이버 뉴스 검색 API 기반 최신 뉴스 공급.
     - **Trading Provider (`mcp-trading/`)**: 한국투자증권 Open API 기반 정형 금융 데이터 공급 및 명령 집행.
+    - **Disclosure Provider (`mcp-dart/`)**: OpenDART 공식 API 기반 5% 룰 및 임원·주요주주 지분공시 signal 공급.
 4.  **Presentation Layer (`frontend-react/`)**: React (TypeScript)
     - 실시간 투자 신호 및 분석 리포트를 시각화하여 사용자에게 제공합니다.
 
@@ -44,7 +45,7 @@ Fin-Us는 단일 모델이 모든 일을 처리하지 않고, 역할이 분리�
 
 - Python 3.12+
 - Node.js & npm
-- API Keys: OpenAI/Anthropic API, 한국투자증권(KIS) API Key/Secret
+- API Keys: OpenAI/Anthropic API, 한국투자증권(KIS) API Key/Secret, Naver Search API, OpenDART API Key
 
 ### 1. NAT 에이전트 설정
 
@@ -70,15 +71,16 @@ functions:
 ```bash
 # 프로젝트 루트의 .env 파일 생성 및 편집
 cp .env.example .env
-# OpenAI, Anthropic, KIS, Naver API 키 및 Ollama 설정을 입력하세요.
+# OpenAI, Anthropic, KIS, Naver, DART API 키 및 Ollama 설정을 입력하세요.
 ```
 
 ### 3. 시스템 가동
 
 ```bash
-# 1. MCP Servers (News & Trading) 빌드
-cd mcp-news && npm ci
-cd mcp-trading && npm ci
+# 1. MCP Servers (News, Trading, DART) 빌드
+(cd mcp-news && npm ci)
+(cd mcp-trading && npm ci)
+(cd mcp-dart && npm ci)
 
 # 2. Backend Orchestrator 실행
 # 프로젝트 루트 디렉토리에서 실행하는 것을 권장합니다.
@@ -102,9 +104,12 @@ Unity WebGL 빌드는 `index.html`을 더블클릭해서 `file://` URL로 실행
 | :------------------- | :--------------------- | :------------------------------------------- |
 | **News Analyst**     | `get_market_news`      | 네이버 뉴스 검색 API 기반 최신 동향 수집      |
 |                      | `get_investor_trading` | KIS API 기반 기관/외국인 수급 데이터 분석     |
+|                      | `get_disclosure_signal` | OpenDART 공식 API 기반 지분공시 signal 조회   |
 |                      | `get_research_reports` | deprecated: 공식 대체 API 미선정으로 비활성화 |
 | **Trading Executor** | `get_balance`          | 실시간 계좌 잔고 및 수익률 확인              |
 |                      | `execute_trade`        | 매수/매도 주문 실행 (KIS API)                |
+
+Backend는 `GET /api/v1/disclosures?stock=삼성전자`로 DART 지분공시 signal을 제공하며, 스케줄러는 뉴스 signal과 함께 공시 signal도 주기적으로 수집합니다.
 
 ## 📅 로드맵
 

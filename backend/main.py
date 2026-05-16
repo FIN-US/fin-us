@@ -5,7 +5,7 @@ from fastapi import FastAPI, Query, Depends, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from sqlmodel import Session, select
 
-from .config import NAT_BASE_URL, NEWS_MCP_PARAMS, TRADING_MCP_PARAMS, ALLOW_ORIGINS
+from .config import NAT_BASE_URL, NEWS_MCP_PARAMS, TRADING_MCP_PARAMS, DART_MCP_PARAMS, ALLOW_ORIGINS
 from .ws_manager import manager
 from .scheduler import start_scheduler, stop_scheduler
 from .schemas import CommonResponse, DiaryCreate
@@ -57,6 +57,12 @@ app.add_middleware(
 async def get_news(stock: str = Query(..., examples=["삼성전자"])):
     content = await run_mcp_tool(NEWS_MCP_PARAMS, "get_market_news", {"stock_name": stock})
     return {"status": "success", "data": {"stock": stock, "news": content.split("\n")}}
+
+
+@app.get("/api/v1/disclosures", response_model=CommonResponse, tags=["Market Data"])
+async def get_disclosures(stock: str = Query(..., examples=["삼성전자"])):
+    disclosure = await run_mcp_tool(DART_MCP_PARAMS, "get_disclosure_signal", {"stock_name": stock})
+    return {"status": "success", "data": {"stock": stock, "disclosure": disclosure}}
 
 
 @app.get("/api/v1/analyze", response_model=CommonResponse, tags=["AI Agent"])
