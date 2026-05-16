@@ -40,6 +40,30 @@ def test_default_signal_sources_include_news_and_disclosure():
     ]
 
 
+def test_start_scheduler_runs_market_monitoring_immediately(monkeypatch):
+    from .. import scheduler as scheduler_module
+
+    added_jobs = []
+
+    class FakeScheduler:
+        running = False
+        timezone = None
+
+        def add_job(self, *args, **kwargs):
+            added_jobs.append((args, kwargs))
+
+        def start(self):
+            self.running = True
+
+    fake_scheduler = FakeScheduler()
+    monkeypatch.setattr(scheduler_module, "scheduler", fake_scheduler)
+
+    scheduler_module.start_scheduler()
+
+    market_job = next(kwargs for _args, kwargs in added_jobs if kwargs["id"] == "market_monitoring")
+    assert market_job["next_run_time"] is not None
+
+
 @pytest.mark.asyncio
 async def test_ping_task_execution(monkeypatch):
     """

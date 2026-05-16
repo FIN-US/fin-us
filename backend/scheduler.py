@@ -1,6 +1,7 @@
 import os
 import logging
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from sqlmodel import Session
@@ -257,7 +258,13 @@ def start_scheduler():
         scheduler.add_job(ping_task, "interval", seconds=60, id="periodic_ping")
         
         # 10분마다 시장 모니터링 수행 (뉴스 기반 필터링이 있으므로 주기를 짧게 조정 가능)
-        scheduler.add_job(monitor_market_task, "interval", minutes=10, id="market_monitoring")
+        scheduler.add_job(
+            monitor_market_task,
+            "interval",
+            minutes=10,
+            id="market_monitoring",
+            next_run_time=datetime.now(scheduler.timezone),
+        )
         
         scheduler.start()
         logger.info("APScheduler started with optimized monitoring tasks.")
