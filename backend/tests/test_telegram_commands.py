@@ -1,6 +1,6 @@
 import pytest
 
-from backend.telegram_commands import TelegramCommandHandler
+from backend.telegram_commands import TelegramCommandHandler, TelegramCommandPoller
 
 
 class FakeState:
@@ -58,3 +58,30 @@ async def test_alerts_command_ignores_other_chats():
 
     assert state.mode == "urgent"
     assert notifier.messages == []
+
+
+@pytest.mark.asyncio
+async def test_poller_keeps_offset_when_update_handling_fails(monkeypatch):
+    notifier = FakeNotifier()
+    notifier.enabled = True
+    notifier.bot_token = "token"
+
+    class FailingHandler:
+        async def handle_update(self, update):
+            raise RuntimeError("redis unavailable")
+
+    poller = TelegramCommandPoller(notifier=notifier, handler=FailingHandler())
+
+    async def fake_get_updates():
+        return [{"update_id": 41, "message": {"chat": {"id": 123}, "text": "/alerts off"}}]
+
+    async def stop_after_failure(delay):
+        raise pytest.fail.Exception("stop after first failed polling iteration")
+
+    monkeypatch.setattr(poller, "_get_updates", fake_get_updates)
+    monkeypatch.setattr("backend.telegram_commands.asyncio.sleep", stop_after_failure)
+
+    with pytest.raises(pytest.fail.Exception):
+        await poller.run()
+
+    assert poller.offset is None

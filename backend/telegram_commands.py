@@ -79,9 +79,9 @@ class TelegramCommandPoller:
                 updates = await self._get_updates()
                 for update in updates:
                     update_id = update.get("update_id")
+                    await self.handler.handle_update(update)
                     if isinstance(update_id, int):
                         self.offset = update_id + 1
-                    await self.handler.handle_update(update)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
