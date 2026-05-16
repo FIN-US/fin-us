@@ -13,6 +13,8 @@ NEWS_HASH_TTL_SEC = 60 * 60 * 24 * 14
 STOCK_LOCK_TTL_SEC = 60 * 10
 SCHEDULER_LOCK_TTL_SEC = 60 * 30
 COOLDOWN_TTL_SEC = 60 * 10
+TELEGRAM_ALERT_MODES = {"urgent", "all", "off"}
+DEFAULT_TELEGRAM_ALERT_MODE = "urgent"
 
 
 def normalize_signal_text(signal_text: str) -> str:
@@ -54,6 +56,9 @@ class RedisKeys:
 
     def scheduler_lock(self, job_name: str = "market_monitoring") -> str:
         return f"{self.prefix}:scheduler:lock:{job_name}"
+
+    def telegram_alert_mode(self) -> str:
+        return f"{self.prefix}:telegram:alert_mode"
 
 
 class RedisSchedulerState:
@@ -155,6 +160,18 @@ class RedisSchedulerState:
         return 0
         """
         await self.redis.eval(script, 1, key, token)
+
+    async def get_telegram_alert_mode(self) -> str:
+        mode = self._decode(await self.redis.get(self.keys.telegram_alert_mode()))
+        if mode in TELEGRAM_ALERT_MODES:
+            return mode
+        return DEFAULT_TELEGRAM_ALERT_MODE
+
+    async def set_telegram_alert_mode(self, mode: str) -> bool:
+        if mode not in TELEGRAM_ALERT_MODES:
+            return False
+        await self.redis.set(self.keys.telegram_alert_mode(), mode)
+        return True
 
 
 def create_redis_client() -> Any:

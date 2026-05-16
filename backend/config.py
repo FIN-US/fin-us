@@ -64,6 +64,18 @@ DB_ECHO = os.getenv("DB_ECHO", "false").lower() == "true"
 # Redis cache/lock settings for scheduler state.
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 
+# Telegram urgent alert settings.
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+
+
+def is_placeholder_secret(value: str | None) -> bool:
+    if not value:
+        return True
+    normalized = value.strip()
+    return not normalized or normalized.startswith("your_") or normalized.endswith("_here")
+
+
 # CORS 설정
 _ALLOW_ORIGINS_RAW = os.getenv("ALLOW_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173")
 ALLOW_ORIGINS = [origin.strip() for origin in _ALLOW_ORIGINS_RAW.split(",") if origin.strip()]

@@ -40,6 +40,30 @@ def test_default_signal_sources_include_news_and_disclosure():
     ]
 
 
+def test_start_scheduler_runs_market_monitoring_immediately(monkeypatch):
+    from .. import scheduler as scheduler_module
+
+    added_jobs = []
+
+    class FakeScheduler:
+        running = False
+        timezone = None
+
+        def add_job(self, *args, **kwargs):
+            added_jobs.append((args, kwargs))
+
+        def start(self):
+            self.running = True
+
+    fake_scheduler = FakeScheduler()
+    monkeypatch.setattr(scheduler_module, "scheduler", fake_scheduler)
+
+    scheduler_module.start_scheduler()
+
+    market_job = next(kwargs for _args, kwargs in added_jobs if kwargs["id"] == "market_monitoring")
+    assert market_job["next_run_time"] is not None
+
+
 @pytest.mark.asyncio
 async def test_ping_task_execution(monkeypatch):
     """
@@ -152,6 +176,172 @@ class FakeRedis:
             del self.store[key]
             return 1
         return 0
+
+
+@pytest.mark.asyncio
+async def test_monitor_signal_sends_telegram_for_urgent_analysis(monkeypatch):
+    from ..scheduler import SignalSource, _monitor_signal
+
+    state = RedisSchedulerState(FakeRedis())
+    source = SignalSource(name="news", mcp_params=object(), tool_name="get_market_news")
+
+    async def mock_run_mcp_tool(params, name, args):
+        _ = params, name, args
+        return "urgent signal"
+
+    async def mock_check_significance(stock, current, last, *, source, provider):
+        _ = stock, current, last, source, provider
+        return True
+
+    async def mock_perform_analysis(*args, **kwargs):
+        _ = args, kwargs
+        return {
+            "summary": "긴급",
+            "details": {"decision": "HOLD"},
+            "telegram_alert": True,
+            "urgency": "high",
+        }
+
+    mock_telegram = MagicMock(return_value=asyncio.Future())
+    mock_telegram.return_value.set_result(True)
+    mock_broadcast = MagicMock(return_value=asyncio.Future())
+    mock_broadcast.return_value.set_result(None)
+
+    monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
+    monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
+    monkeypatch.setattr("backend.scheduler.perform_stock_analysis", mock_perform_analysis)
+    monkeypatch.setattr("backend.scheduler.telegram_notifier.send_analysis_alert", mock_telegram)
+    monkeypatch.setattr("backend.scheduler.manager.broadcast", mock_broadcast)
+
+    await _monitor_signal("삼성전자", source, object(), state)
+
+    mock_telegram.assert_called_once()
+    mock_broadcast.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_monitor_signal_sends_telegram_for_all_mode_analysis(monkeypatch):
+    from ..scheduler import SignalSource, _monitor_signal
+
+    state = RedisSchedulerState(FakeRedis())
+    await state.set_telegram_alert_mode("all")
+    source = SignalSource(name="news", mcp_params=object(), tool_name="get_market_news")
+
+    async def mock_run_mcp_tool(params, name, args):
+        _ = params, name, args
+        return "normal signal"
+
+    async def mock_check_significance(stock, current, last, *, source, provider):
+        _ = stock, current, last, source, provider
+        return True
+
+    async def mock_perform_analysis(*args, **kwargs):
+        _ = args, kwargs
+        return {
+            "summary": "일반 분석",
+            "details": {"decision": "HOLD"},
+            "telegram_alert": False,
+            "urgency": "normal",
+        }
+
+    mock_telegram = MagicMock(return_value=asyncio.Future())
+    mock_telegram.return_value.set_result(True)
+    mock_broadcast = MagicMock(return_value=asyncio.Future())
+    mock_broadcast.return_value.set_result(None)
+
+    monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
+    monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
+    monkeypatch.setattr("backend.scheduler.perform_stock_analysis", mock_perform_analysis)
+    monkeypatch.setattr("backend.scheduler.telegram_notifier.send_analysis_alert", mock_telegram)
+    monkeypatch.setattr("backend.scheduler.manager.broadcast", mock_broadcast)
+
+    await _monitor_signal("삼성전자", source, object(), state)
+
+    mock_telegram.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_monitor_signal_skips_telegram_when_alert_mode_off(monkeypatch):
+    from ..scheduler import SignalSource, _monitor_signal
+
+    state = RedisSchedulerState(FakeRedis())
+    await state.set_telegram_alert_mode("off")
+    source = SignalSource(name="news", mcp_params=object(), tool_name="get_market_news")
+
+    async def mock_run_mcp_tool(params, name, args):
+        _ = params, name, args
+        return "urgent signal"
+
+    async def mock_check_significance(stock, current, last, *, source, provider):
+        _ = stock, current, last, source, provider
+        return True
+
+    async def mock_perform_analysis(*args, **kwargs):
+        _ = args, kwargs
+        return {
+            "summary": "긴급",
+            "details": {"decision": "HOLD"},
+            "telegram_alert": True,
+            "urgency": "critical",
+        }
+
+    mock_telegram = MagicMock(return_value=asyncio.Future())
+    mock_telegram.return_value.set_result(True)
+    mock_broadcast = MagicMock(return_value=asyncio.Future())
+    mock_broadcast.return_value.set_result(None)
+
+    monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
+    monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
+    monkeypatch.setattr("backend.scheduler.perform_stock_analysis", mock_perform_analysis)
+    monkeypatch.setattr("backend.scheduler.telegram_notifier.send_analysis_alert", mock_telegram)
+    monkeypatch.setattr("backend.scheduler.manager.broadcast", mock_broadcast)
+
+    await _monitor_signal("삼성전자", source, object(), state)
+
+    mock_telegram.assert_not_called()
+    mock_broadcast.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_monitor_signal_keeps_websocket_when_telegram_fails(monkeypatch):
+    from ..scheduler import SignalSource, _monitor_signal
+
+    state = RedisSchedulerState(FakeRedis())
+    source = SignalSource(name="news", mcp_params=object(), tool_name="get_market_news")
+
+    async def mock_run_mcp_tool(params, name, args):
+        _ = params, name, args
+        return "urgent signal"
+
+    async def mock_check_significance(stock, current, last, *, source, provider):
+        _ = stock, current, last, source, provider
+        return True
+
+    async def mock_perform_analysis(*args, **kwargs):
+        _ = args, kwargs
+        return {
+            "summary": "긴급",
+            "details": {"decision": "HOLD"},
+            "telegram_alert": True,
+            "urgency": "critical",
+        }
+
+    async def failing_telegram(*args, **kwargs):
+        _ = args, kwargs
+        raise RuntimeError("telegram down")
+
+    mock_broadcast = MagicMock(return_value=asyncio.Future())
+    mock_broadcast.return_value.set_result(None)
+
+    monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
+    monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
+    monkeypatch.setattr("backend.scheduler.perform_stock_analysis", mock_perform_analysis)
+    monkeypatch.setattr("backend.scheduler.telegram_notifier.send_analysis_alert", failing_telegram)
+    monkeypatch.setattr("backend.scheduler.manager.broadcast", mock_broadcast)
+
+    await _monitor_signal("삼성전자", source, object(), state)
+
+    mock_broadcast.assert_called_once()
 
 
 @pytest.mark.asyncio
