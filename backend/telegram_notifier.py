@@ -54,12 +54,16 @@ class TelegramNotifier:
         confidence = details.get("confidence_score", "")
         reason = details.get("reason") or analysis_data.get("summary", "")
         urgency = analysis_data.get("urgency", "normal")
-        urgency_reason = analysis_data.get("urgency_reason") or "긴급 판단 사유 없음"
+        is_urgent = should_send_telegram_alert(analysis_data, alert_mode="urgent")
+        urgency_reason = analysis_data.get("urgency_reason") or (
+            "긴급 판단 사유 없음" if is_urgent else "판단 사유 없음"
+        )
         summary = analysis_data.get("summary", "")
 
         confidence_text = f" ({confidence:.2f})" if isinstance(confidence, Real) else ""
+        title = f"[긴급] {stock} / {source}" if is_urgent else f"{stock} / {source}"
         lines = [
-            f"[긴급] {stock} / {source}",
+            title,
             f"Decision: {decision}{confidence_text}",
             f"Reason: {reason}",
             f"Urgency: {urgency} - {urgency_reason}",

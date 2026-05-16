@@ -53,6 +53,26 @@ def test_format_analysis_alert_uses_plain_text():
     assert "Summary: 대량보유 변동" in message
 
 
+def test_format_analysis_alert_marks_only_actual_urgent_alerts():
+    notifier = TelegramNotifier("token", "123")
+    message = notifier.format_analysis_alert(
+        stock="삼성전자",
+        source="news",
+        analysis_data={
+            "summary": "시장 동향 업데이트",
+            "details": {
+                "decision": "HOLD",
+                "reason": "추가 확인 필요",
+            },
+            "urgency": "normal",
+            "telegram_alert": False,
+        },
+    )
+
+    assert message.splitlines()[0] == "삼성전자 / news"
+    assert "긴급" not in message
+
+
 @pytest.mark.asyncio
 async def test_send_analysis_alert_skips_when_gate_is_false(monkeypatch):
     notifier = TelegramNotifier("token", "123")
