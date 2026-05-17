@@ -1,13 +1,14 @@
 import os
 import logging
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Query, Depends, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Query, Depends, WebSocket, WebSocketDisconnect, Body
 from fastapi.middleware.cors import CORSMiddleware
 from sqlmodel import Session, select
 
 from .config import NAT_BASE_URL, NEWS_MCP_PARAMS, TRADING_MCP_PARAMS, DART_MCP_PARAMS, ALLOW_ORIGINS
 from .ws_manager import manager
 from .scheduler import start_scheduler, stop_scheduler
+from .telegram_commands import start_telegram_commands, stop_telegram_commands
 from .schemas import CommonResponse, DiaryCreate
 from .services import (
     run_mcp_tool,
@@ -31,11 +32,14 @@ async def lifespan(app: FastAPI):
     # 앱 시작 시 실행: DB 초기화 및 스케줄러 가동
     init_db()
     start_scheduler()
+    start_telegram_commands()
     logger.info("Database initialized and scheduler started.")
     yield
     # 앱 종료 시 실행: 스케줄러 안전 종료
+    await stop_telegram_commands()
     stop_scheduler()
     logger.info("Scheduler stopped.")
+
 
 app = FastAPI(
     title="Fin-Us + NAT (integrate)",

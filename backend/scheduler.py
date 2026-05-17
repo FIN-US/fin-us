@@ -1,6 +1,7 @@
 import os
 import logging
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from sqlmodel import Session
@@ -9,6 +10,8 @@ from .database import engine
 from .config import NEWS_MCP_PARAMS, TRADING_MCP_PARAMS, DART_MCP_PARAMS
 from .redis_state import RedisSchedulerState, signal_hash, redis_state
 from .services import perform_stock_analysis, run_mcp_tool, check_signal_significance
+from .telegram_notifier import telegram_notifier
+from .telegram_notifier import should_send_telegram_alert
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +71,6 @@ def extract_stocks_from_balance(balance_text: str) -> list[str]:
 async def monitor_market_task():
     """
     주기적으로 시장 상황을 모니터링합니다.
-    mcp-trading에서 실시간 잔고를 가져와 보유 종목들을 대상으로 감시를 수행합니다.
     """
     fallback_to_memory = True
     try:
@@ -108,8 +110,6 @@ async def _monitor_market_task(state: RedisSchedulerState | None):
             logger.info("보유 종목이 없습니다. 기본 종목 10개를 감시합니다.")
             stocks_to_monitor = DEFAULT_MONITOR_STOCKS
 
-        logger.info(f"실시간 모니터링 시작 (대상: {stocks_to_monitor}, 필터: {FILTER_PROVIDER})")
-        
         with Session(engine) as session:
             for stock in stocks_to_monitor:
                 for source in SIGNAL_SOURCES:
@@ -117,6 +117,26 @@ async def _monitor_market_task(state: RedisSchedulerState | None):
                     
     except Exception as e:
         logger.error(f"모니터링 태스크 시작 중 오류: {e}")
+
+
+async def _send_telegram_alert_if_needed(
+    stock: str,
+    source: str,
+    analysis_data: dict[str, Any],
+    state: RedisSchedulerState | None,
+) -> None:
+    try:
+        alert_mode = await state.get_telegram_alert_mode() if state is not None else "urgent"
+        if not should_send_telegram_alert(analysis_data, alert_mode=alert_mode):
+            return
+        await telegram_notifier.send_analysis_alert(
+            stock,
+            source,
+            analysis_data,
+            alert_mode=alert_mode,
+        )
+    except Exception as e:
+        logger.error("[%s:%s] Telegram 알림 처리 중 오류: %s", source, stock, e)
 
 
 async def _monitor_signal(
@@ -183,6 +203,8 @@ async def _monitor_signal(
         )
         await _set_last_signal_state(state, source.name, stock, current_signal, current_digest)
 
+        await _send_telegram_alert_if_needed(stock, source.name, analysis_data, state)
+
         # 분석 결과를 WebSocket으로 실시간 전송
         await manager.broadcast({
             "type": "AGENT_ANALYSIS",
@@ -236,7 +258,13 @@ def start_scheduler():
         scheduler.add_job(ping_task, "interval", seconds=60, id="periodic_ping")
         
         # 10분마다 시장 모니터링 수행 (뉴스 기반 필터링이 있으므로 주기를 짧게 조정 가능)
-        scheduler.add_job(monitor_market_task, "interval", minutes=10, id="market_monitoring")
+        scheduler.add_job(
+            monitor_market_task,
+            "interval",
+            minutes=10,
+            id="market_monitoring",
+            next_run_time=datetime.now(scheduler.timezone),
+        )
         
         scheduler.start()
         logger.info("APScheduler started with optimized monitoring tasks.")

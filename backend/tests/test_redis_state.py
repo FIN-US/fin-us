@@ -118,3 +118,26 @@ async def test_scheduler_lock_allows_single_owner():
 
     assert token is not None
     assert await state.acquire_scheduler_lock() is None
+
+
+@pytest.mark.asyncio
+async def test_telegram_alert_mode_defaults_to_urgent_and_round_trips():
+    state = RedisSchedulerState(FakeRedis())
+
+    assert await state.get_telegram_alert_mode() == "urgent"
+
+    await state.set_telegram_alert_mode("all")
+    assert await state.get_telegram_alert_mode() == "all"
+
+    await state.set_telegram_alert_mode("off")
+    assert await state.get_telegram_alert_mode() == "off"
+
+
+@pytest.mark.asyncio
+async def test_telegram_alert_mode_ignores_invalid_values():
+    state = RedisSchedulerState(FakeRedis())
+
+    await state.set_telegram_alert_mode("all")
+    await state.set_telegram_alert_mode("invalid")
+
+    assert await state.get_telegram_alert_mode() == "all"
