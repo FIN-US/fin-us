@@ -107,6 +107,21 @@ def _mcp_call_tool_first_text(result: Any) -> str:
     return getattr(block0, "text", str(block0))
 
 
+async def _run_mcp_timed(inner, *, tool_name: str, timeout_sec: float) -> str:
+    """Run MCP inner coroutine; return tool text or JSON error (never raise to the agent)."""
+    try:
+        return await asyncio.wait_for(inner(), timeout=timeout_sec)
+    except TimeoutError:
+        return _err_json("mcp_timeout", tool=tool_name)
+    except asyncio.CancelledError:
+        raise
+    except BaseExceptionGroup as exc:
+        sub = exc.exceptions[0] if exc.exceptions else exc
+        return _err_json("mcp_call_failed", tool=tool_name, detail=str(sub))
+    except Exception as exc:  # noqa: BLE001
+        return _err_json("mcp_call_failed", tool=tool_name, detail=str(exc))
+
+
 # 작업 timeout에서 SSE 연결 타임아웃을 적당히 산출합니다.
 def _sse_connect_timeout(operation_timeout: float) -> float:
     return min(_SSE_CONNECT_CAP, max(_SSE_CONNECT_FLOOR, operation_timeout * 0.25))
@@ -180,7 +195,7 @@ async def _mcp_call_tool(
                 await session.initialize()
                 return _mcp_call_tool_first_text(await session.call_tool(tool_name, arguments))
 
-    return await asyncio.wait_for(_inner(), timeout=timeout_sec)
+    return await _run_mcp_timed(_inner, tool_name=tool_name, timeout_sec=timeout_sec)
 
 
 # 원격 MCP(SSE/streamable-http) 도구 하나를 호출하고 텍스트(또는 에러 JSON)를 반환합니다.
@@ -204,7 +219,7 @@ async def _mcp_call_tool_remote(
         async with _remote_mcp_session(transport=transport, url=url, operation_timeout=timeout_sec) as session:
             return _mcp_call_tool_first_text(await session.call_tool(tool_name, arguments))
 
-    return await asyncio.wait_for(_inner(), timeout=timeout_sec)
+    return await _run_mcp_timed(_inner, tool_name=tool_name, timeout_sec=timeout_sec)
 
 
 # mcp-news stdio MCP에서 종목 단위 조회 도구를 공통 호출합니다.
@@ -657,7 +672,12 @@ async def _fetch_mcp_tool_documentation(config: FinusAccountBalanceConfig) -> st
         ) as session:
             return _build_list_tools_doc(await session.list_tools())
 
-    text = await asyncio.wait_for(_list_doc(), timeout=timeout_sec + _MCP_LIST_TOOLS_GRACE_SEC)
+    try:
+        text = await asyncio.wait_for(_list_doc(), timeout=timeout_sec + _MCP_LIST_TOOLS_GRACE_SEC)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        return None
     if len(text) > _MCP_DOC_MAX_CHARS:
         return text[: _MCP_DOC_MAX_CHARS - 100] + "\n…(truncated)"
     return text
