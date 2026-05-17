@@ -25,7 +25,7 @@ where = ["src"]
 name = "nat-finus-nat"
 dynamic = ["version"]
 requires-python = ">=3.11,<3.14"
-description = "Fin-Us NAT: router + sub-agents, mcp-news (headlines + investor flows), Kis Trading MCP pass-through, optional Mem0"
+description = "Fin-Us NAT: router + sub-agents, mcp-news/mcp-trading/mcp-dart (stdio MCP), Kis Trading MCP pass-through, optional Mem0"
 classifiers = ["Programming Language :: Python"]
 dependencies = [
   "nvidia-nat[langchain,mcp,mem0ai]>=1.6.0,<2",

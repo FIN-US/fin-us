@@ -4,7 +4,7 @@ import os
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Literal, Protocol, TypeAlias
+from typing import Any, Literal, TypeAlias
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -21,34 +21,44 @@ from nat.cli.register_workflow import register_function
 from nat.data_models.function import FunctionBaseConfig
 
 # Remote MCP / doc 한도
-_MCP_DOC_MAX_CHARS = 14_000
-_MCP_LIST_TOOLS_GRACE_SEC = 10.0
-_SSE_CONNECT_CAP = 60.0
-_SSE_CONNECT_FLOOR = 5.0
+_MCP_DOC_MAX_CHARS = 14_000 #텍스트 최대 길이
+_MCP_LIST_TOOLS_GRACE_SEC = 10.0 #툴 호출 시 timeout 방지
+_SSE_CONNECT_CAP = 60.0 # SSE 연결 타임아웃
+_SSE_CONNECT_FLOOR = 5.0 # SSE 연결 타임아웃 하한
+
+_MCP_ENV_ALLOWED_KEYS = frozenset({
+    "PATH",
+    "NODE_ENV",
+    "NODE_OPTIONS",
+    "NODE_EXTRA_CA_CERTS",
+    "SSL_CERT_FILE",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "no_proxy",
+    "KIS_API_KEY",
+    "KIS_API_SECRET",
+    "KIS_ACCOUNT_NO",
+    "KIS_URL",
+    "NAVER_CLIENT_ID",
+    "NAVER_CLIENT_SECRET",
+    "DART_API_KEY",
+})
+_MCP_ENV_ALLOWED_PREFIXES = ("FIN_US_",)
 
 McpCallArguments: TypeAlias = dict[str, Any]
 
-
-# vendor_root + timeout_sec 두 필드만 요구하는 config의 구조적 타입.
-class _FinusVendorTimeout(Protocol):
-    vendor_root: str | None
-    timeout_sec: float
-
-
-# 에러 응답 JSON 문자열을 일관된 포맷으로 직렬화합니다.
+# 에러 응답 JSON 문자열을 일관된 포맷으로 변환합니다.
 def _err_json(error: str, **extra: Any) -> str:
     return json.dumps({"error": error, **extra}, ensure_ascii=False)
-
 
 # ReAct 프롬프트(ChatPromptTemplate)에서 ``{``/``}``가 변수로 해석되지 않게 이스케이프합니다.
 def _langchain_escape_braces(text: str) -> str:
     return text.replace("{", "{{").replace("}", "}}")
 
-
-# ---------- vendor / MCP plumbing ----------
-
-
-# vendor_root 오버라이드를 절대 Path로 정규화합니다(없으면 기본 탐색).
+# vendor_root를 절대경로로 정규화합니다(없으면 기본 탐색).
 def finus_nat_example_root() -> Path:
     return Path(__file__).resolve().parent.parent.parent
 
@@ -59,10 +69,12 @@ def fin_us_vendor_root() -> Path:
         return Path(env).expanduser().resolve()
     integrate_root = finus_nat_example_root().parent
     flat = integrate_root
-    if (flat / "mcp-news" / "index.js").is_file():
+    if ((flat / "mcp-news" / "index.js").is_file()
+            and (flat / "mcp-trading" / "index.js").is_file()):
         return flat
     fin_us_home = integrate_root / "fin-us"
-    if (fin_us_home / "mcp-news" / "index.js").is_file():
+    if ((fin_us_home / "mcp-news" / "index.js").is_file()
+            and (fin_us_home / "mcp-trading" / "index.js").is_file()):
         return fin_us_home
     return finus_nat_example_root() / "vendor" / "fin_us"
 
@@ -73,12 +85,20 @@ def _resolve_vendor_root(override: str | None) -> Path:
     return fin_us_vendor_root()
 
 
-# stdio MCP 서버에 필요한 Node 의존성 설치 여부를 빠르게 확인합니다.
+# stdio MCP 서버에 필요한 Node 의존성 설치 여부를 확인합니다.
 def _node_deps_ready(server_dir: Path) -> bool:
     return (server_dir / "node_modules" / "@modelcontextprotocol" / "sdk").is_dir()
 
 
-# MCP ``call_tool`` 결과의 첫 텍스트 블록을 추출합니다(stdio/remote 공용).
+def _mcp_child_env() -> dict[str, str]:
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if key in _MCP_ENV_ALLOWED_KEYS or key.startswith(_MCP_ENV_ALLOWED_PREFIXES)
+    }
+
+
+# MCP call_tool 결과의 첫 텍스트 블록을 추출합니다(stdio/remote 공용).
 def _mcp_call_tool_first_text(result: Any) -> str:
     blocks = getattr(result, "content", None) or []
     if not blocks:
@@ -87,7 +107,7 @@ def _mcp_call_tool_first_text(result: Any) -> str:
     return getattr(block0, "text", str(block0))
 
 
-# 작업 timeout에서 SSE 연결 타임아웃을 적당히 산출합니다(상/하한 클램프).
+# 작업 timeout에서 SSE 연결 타임아웃을 적당히 산출합니다.
 def _sse_connect_timeout(operation_timeout: float) -> float:
     return min(_SSE_CONNECT_CAP, max(_SSE_CONNECT_FLOOR, operation_timeout * 0.25))
 
@@ -133,14 +153,25 @@ async def _mcp_call_tool(
                   "or set FINUS_VENDOR_ROOT."),
         )
     if not _node_deps_ready(server_dir):
+        news = vendor_root / "mcp-news"
+        trade = vendor_root / "mcp-trading"
+        dart = vendor_root / "mcp-dart"
         return _err_json(
             "mcp_node_dependencies_missing",
             path=str(server_dir),
             detail="ERR_MODULE_NOT_FOUND @modelcontextprotocol/sdk — node_modules not installed.",
-            hint=f"cd {vendor_root / 'mcp-news'} && npm ci && npx playwright install chromium",
+            hint=(
+                f"Run scripts/install_fin_us_mcp.sh from repo root, or: "
+                f"cd {news} && npm ci; cd {trade} && npm ci; cd {dart} && npm ci"
+            ),
         )
 
-    params = StdioServerParameters(command="node", args=[str(script)], cwd=str(server_dir))
+    params = StdioServerParameters(
+        command="node",
+        args=[str(script)],
+        env=_mcp_child_env(),
+        cwd=str(server_dir),
+    )
 
     # 실제 stdio 세션 안에서 단일 tool 호출을 수행하는 inner.
     async def _inner() -> str:
@@ -176,25 +207,39 @@ async def _mcp_call_tool_remote(
     return await asyncio.wait_for(_inner(), timeout=timeout_sec)
 
 
-# config로부터 (vendor_root, timeout_sec) 페어를 추출합니다.
-def _vendor_and_timeout(config: _FinusVendorTimeout) -> tuple[Path, float]:
-    return _resolve_vendor_root(config.vendor_root), config.timeout_sec
-
-
 # mcp-news stdio MCP에서 종목 단위 조회 도구를 공통 호출합니다.
-async def _mcp_news_stock(config: _FinusVendorTimeout, tool_name: str, stock_name: str) -> str:
-    vr, timeout = _vendor_and_timeout(config)
+async def _mcp_news_stock(
+    *,
+    vendor_root: str | None,
+    timeout_sec: float,
+    tool_name: str,
+    stock_name: str,
+) -> str:
     return await _mcp_call_tool(
-        vendor_root=vr,
+        vendor_root=_resolve_vendor_root(vendor_root),
         subdir="mcp-news",
         tool_name=tool_name,
         arguments={"stock_name": stock_name},
-        timeout_sec=timeout,
+        timeout_sec=timeout_sec,
     )
 
 
-# ---------- public Configs (registered NAT components) ----------
+async def _mcp_dart_stock(
+    *,
+    vendor_root: str | None,
+    timeout_sec: float,
+    stock_name: str,
+) -> str:
+    return await _mcp_call_tool(
+        vendor_root=_resolve_vendor_root(vendor_root),
+        subdir="mcp-dart",
+        tool_name="get_disclosure_signal",
+        arguments={"stock_name": stock_name},
+        timeout_sec=timeout_sec,
+    )
 
+
+# =========== registered NAT components ==========
 
 class FinusMarketNewsConfig(FunctionBaseConfig, name="finus_market_news"):
     vendor_root: str | None = Field(default=None, description="Override parent dir containing mcp-news (stdio MCP).")
@@ -202,8 +247,10 @@ class FinusMarketNewsConfig(FunctionBaseConfig, name="finus_market_news"):
 
 
 class FinusInvestorTradingConfig(FinusMarketNewsConfig, name="finus_investor_trading"):
-    """``finus_market_news``와 동일 필드 — 등록 타입만 분리."""
+    """finus_market_news와 동일 필드"""
 
+class FinusDisclosureSignalConfig(FinusMarketNewsConfig, name="finus_disclosure_signal"):
+    """mcp-dart stdio MCP — OpenDART 지분공시 signal."""
 
 class FinusKisDailyTradesConfig(FunctionBaseConfig, name="finus_kis_daily_trades"):
     """KIS HTTP Open API로 당일(KST) 국내주식 주문/체결 내역 조회 (MCP 미사용)."""
@@ -211,9 +258,7 @@ class FinusKisDailyTradesConfig(FunctionBaseConfig, name="finus_kis_daily_trades
     timeout_sec: float = Field(default=120.0, ge=5.0, le=600.0)
 
 
-# ---------- Kis Trading remote MCP (pass-through call_tool) ----------
-
-
+# ========== Kis Trading remote MCP ==========
 def _parse_leading_json_object(text: str) -> dict[str, Any] | None:
     t = (text or "").strip()
     if not t:
@@ -226,7 +271,7 @@ def _parse_leading_json_object(text: str) -> dict[str, Any] | None:
 
 
 class KisTradingMcpCallInput(BaseModel):
-    """Kis Trading MCP ``call_tool`` 입력. 표준 도구는 모두 ``{api_type, params}`` (MCP ``list_tools``·각 도구 설명 참고)."""
+    """Kis Trading MCP call_tool 입력. 표준 도구는 모두 {api_type, params} (MCP list_tools·각 도구 설명 참고)."""
 
     tool_name: str | None = Field(
         default=None,
@@ -253,7 +298,6 @@ class KisTradingMcpCallInput(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _coerce_whole_string_payload(cls, data: Any) -> Any:
-        """ReAct가 Action Input JSON 뒤에 설명 문장을 붙이면 NAT이 str 통째로 넘기는 경우가 있어 첫 JSON 객체만 쓴다."""
         if isinstance(data, str):
             parsed = _parse_leading_json_object(data)
             if parsed is None:
@@ -280,9 +324,9 @@ def _coerce_api_type_params_payload(tool_input: Any, kwargs: dict[str, Any]) -> 
 
 
 class FinusAccountBalanceConfig(FunctionBaseConfig, name="finus_account_balance"):
-    """원격 Kis Trading MCP — ``call_tool`` 에 ``api_type``·``params`` 만 전달.
+    """원격 Kis Trading MCP — `call_tool` 에 `api_type`·`params` 만 전달.
 
-    ``tool_name`` 생략 시 YAML ``trading_tool_name``. Upstream: ``open-trading-api``/``MCP/Kis Trading MCP``.
+    `tool_name` 생략 시 YAML `trading_tool_name`. Upstream: `open-trading-api`/`MCP/Kis Trading MCP`.
     """
 
     timeout_sec: float = Field(default=180.0, ge=5.0, le=600.0)
@@ -310,7 +354,6 @@ def _adjust_domestic_stock_params(api_type: str, params: dict[str, Any]) -> dict
     if api == "inquire_balance":
         out.setdefault("env_dv", "real")
         out.setdefault("inqr_dvsn", "01")
-        # KIS TR 주식잔고조회 필수 필드 — LLM이 빼먹기 쉬워 MCP TypeError가 나므로 안전한 기본을 채운다.
         out.setdefault("afhr_flpr_yn", "N")
         out.setdefault("unpr_dvsn", "01")
         out.setdefault("fund_sttl_icld_yn", "N")
@@ -364,11 +407,9 @@ def _prepare_kis_trading_mcp_call(
 
 
 # ---------- registered functions ----------
-
-
 _KIS_TRADING_TOOL_GUIDE = """
 ### Fin-Us KIS 호출 규칙
-- ReAct 형식: `Action Input:` 한 줄에는 **JSON만** 두세요. JSON 뒤에 같은 줄·바로 다음 줄에 설명을 붙이면 도구 입력이 깨질 수 있습니다. 설명은 Observation 이후 또는 `Final Answer:` 에 쓰세요.
+- ReAct 형식: `Action Input:` 한 줄에는 JSON만 두세요. JSON 뒤에 같은 줄·바로 다음 줄에 설명을 붙이면 도구 입력이 깨질 수 있습니다. 설명은 Observation 이후 또는 `Final Answer:` 에 쓰세요.
 - 국내 주식 기본 tool_name은 `domestic_stock`입니다.
 - 잔고/포트폴리오 `api_type="inquire_balance"`: 서버가 흔한 필수값을 기본 채웁니다. 직접 넣을 때 예시는
   `{"env_dv":"real","inqr_dvsn":"01","afhr_flpr_yn":"N","unpr_dvsn":"01","fund_sttl_icld_yn":"N","fncg_amt_auto_rdpt_yn":"N","prcs_dvsn":"01"}` 입니다.
@@ -379,9 +420,20 @@ _KIS_TRADING_TOOL_GUIDE = """
 """.strip()
 
 
-def _mcp_news_stock_function_info(config: _FinusVendorTimeout, *, mcp_tool: str, fn_doc: str) -> FunctionInfo:
+def _mcp_news_stock_function_info(
+    *,
+    vendor_root: str | None,
+    timeout_sec: float,
+    mcp_tool: str,
+    fn_doc: str,
+) -> FunctionInfo:
     async def by_stock(stock_name: str) -> str:
-        return await _mcp_news_stock(config, mcp_tool, stock_name)
+        return await _mcp_news_stock(
+            vendor_root=vendor_root,
+            timeout_sec=timeout_sec,
+            tool_name=mcp_tool,
+            stock_name=stock_name,
+        )
 
     by_stock.__doc__ = fn_doc
     return FunctionInfo.from_fn(by_stock, description=fn_doc)
@@ -390,16 +442,44 @@ def _mcp_news_stock_function_info(config: _FinusVendorTimeout, *, mcp_tool: str,
 @register_function(config_type=FinusMarketNewsConfig)
 async def finus_market_news(config: FinusMarketNewsConfig, _builder: Builder):
     doc = (
-        "Fin-Us mcp-news stdio MCP: 종목명·코드 기준 최신 시장 뉴스(헤드라인·요약). "
-        "stock_name 예: 삼성전자, 005930."
+        "Fin-Us mcp-news stdio MCP: 종목명 기준 최신 시장 뉴스(헤드라인·요약). "
+        "stock_name 예: 삼성전자"
     )
-    yield _mcp_news_stock_function_info(config, mcp_tool="get_market_news", fn_doc=doc)
+    yield _mcp_news_stock_function_info(
+        vendor_root=config.vendor_root,
+        timeout_sec=config.timeout_sec,
+        mcp_tool="get_market_news",
+        fn_doc=doc,
+    )
 
 
 @register_function(config_type=FinusInvestorTradingConfig)
 async def finus_investor_trading(config: FinusInvestorTradingConfig, _builder: Builder):
     doc = "Fin-Us mcp-news stdio MCP: 투자자별 순매수·수급(약 5거래일), 종목명·코드 기준."
-    yield _mcp_news_stock_function_info(config, mcp_tool="get_investor_trading", fn_doc=doc)
+    yield _mcp_news_stock_function_info(
+        vendor_root=config.vendor_root,
+        timeout_sec=config.timeout_sec,
+        mcp_tool="get_investor_trading",
+        fn_doc=doc,
+    )
+
+
+@register_function(config_type=FinusDisclosureSignalConfig)
+async def finus_disclosure_signal(config: FinusDisclosureSignalConfig, _builder: Builder):
+    doc = (
+        "Fin-Us mcp-dart stdio MCP: OpenDART 공식 API 지분공시 signal "
+        "(5% 룰·임원/주요주주). stock_name 예: 삼성전자, 005930. DART_API_KEY 필요."
+    )
+
+    async def get_disclosure_signal(stock_name: str) -> str:
+        return await _mcp_dart_stock(
+            vendor_root=config.vendor_root,
+            timeout_sec=config.timeout_sec,
+            stock_name=stock_name,
+        )
+
+    get_disclosure_signal.__doc__ = doc
+    yield FunctionInfo.from_fn(get_disclosure_signal, description=doc)
 
 
 # ---------- KIS HTTP (no MCP) ----------

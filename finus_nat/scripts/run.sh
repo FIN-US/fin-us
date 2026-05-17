@@ -55,8 +55,20 @@ if [[ -n "${FINUS_MEM0_HOST:-}" || -n "${MEM0_API_KEY:-}" ]]; then
   uv run --project "${FE_PKG}" python - <<'PY'
 from pathlib import Path
 
-target = Path("finus_nat/.venv/lib/python3.12/site-packages/nat/plugins/mem0ai/memory.py")
-if not target.exists():
+
+def _venv_site(*parts: str) -> Path | None:
+    lib = Path("finus_nat/.venv/lib")
+    if not lib.is_dir():
+        return None
+    for py_dir in sorted(lib.glob("python3.*")):
+        candidate = py_dir / "site-packages" / Path(*parts)
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+target = _venv_site("nat", "plugins", "mem0ai", "memory.py")
+if target is None:
     raise SystemExit(0)
 
 text = target.read_text()
@@ -66,8 +78,8 @@ new = """    mem0_api_key = os.environ.get("MEM0_API_KEY")\n\n    if mem0_api_ke
 if old in text and new not in text:
     target.write_text(text.replace(old, new, 1))
 
-client_target = Path("finus_nat/.venv/lib/python3.12/site-packages/mem0/client/main.py")
-if client_target.exists():
+client_target = _venv_site("mem0", "client", "main.py")
+if client_target is not None:
     client_text = client_target.read_text()
     client_old = """        response = await self.async_client.post("/v1/memories/", json=payload)\n"""
     client_new = """        endpoint = "/memories" if self.host and "api.mem0.ai" not in self.host else "/v1/memories/"\n        response = await self.async_client.post(endpoint, json=payload)\n"""
@@ -81,8 +93,8 @@ if client_target.exists():
 
     client_target.write_text(client_text)
 
-editor_target = Path("finus_nat/.venv/lib/python3.12/site-packages/nat/plugins/mem0ai/mem0_editor.py")
-if editor_target.exists():
+editor_target = _venv_site("nat", "plugins", "mem0ai", "mem0_editor.py")
+if editor_target is not None:
     editor_text = editor_target.read_text()
     editor_old = """    async def add_items(self, items: list[MemoryItem]) -> None:\n"""
     editor_new = """    async def add_items(self, items: list[MemoryItem], **kwargs) -> None:\n"""
@@ -100,8 +112,8 @@ if editor_target.exists():
         editor_text = editor_text.replace(editor_old, editor_new, 1)
         editor_target.write_text(editor_text)
 
-agent_target = Path("finus_nat/.venv/lib/python3.12/site-packages/nat/plugins/langchain/agent/auto_memory_wrapper/agent.py")
-if agent_target.exists():
+agent_target = _venv_site("nat", "plugins", "langchain", "agent", "auto_memory_wrapper", "agent.py")
+if agent_target is not None:
     agent_text = agent_target.read_text()
     agent_old = """        user_manager = self._context.user_manager\n"""
     agent_new = """        user_manager = getattr(self._context, "user_manager", None)\n"""

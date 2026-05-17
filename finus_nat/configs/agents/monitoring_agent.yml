@@ -15,6 +15,7 @@ functions:
       - kis-trading-mcp-tool
       - mcp-news-get-market-news
       - mcp-news-get-investor-trading
+      - mcp-dart-get-disclosure-signal
       - add_user_memory
       - get_user_memory
     verbose: false
@@ -28,7 +29,7 @@ functions:
     accept_direct_answer_without_react_format: false
     additional_instructions: |
       === 에이전트 요약 ===
-      포트폴리오 모니터링, 잔고, 뉴스·수급 점검. 잔고는 Kis Trading MCP, 뉴스·수급은 Fin-Us `mcp-news`(get_market_news, get_investor_trading)를 쓰되, 관찰·알림·건전성 관점으로 답합니다.
+      포트폴리오 모니터링, 잔고, 뉴스·수급·DART 공시 점검. 잔고는 Kis Trading MCP, 뉴스·수급은 `mcp-news`, 지분공시는 `mcp-dart`를 쓰되 관찰·알림·건전성 관점으로 답합니다.
       가능한 주어진 tool을 사용하여 정량적인 데이터를 가지고 사용자에게 답변하세요.
       사용자가 성격, 선호, 투자 성향, 답변 스타일처럼 오래 유지될 정보를 말하면 `add_user_memory`에 저장하고,
       개인화가 필요하면 `get_user_memory`로 먼저 확인하십시오.
@@ -38,6 +39,7 @@ functions:
       - 잔고/포트폴리오 기본 조회는 가능하면 ``api_type:"inquire_balance"`` + ``params:{{"env_dv":"real","inqr_dvsn":"01"}}`` 로 시작하세요.
       - API/validation 오류가 나면 성공 조건은 오류 확인 → ``find_api_detail`` 호출 → params 수정 → 원래 조회 재실행 → 성공 Observation 기반 답변입니다. 오류만 보고 최종 답변하지 마세요.
       - 사용자가 "어제량", "전일 거래량", "거래량 비교", "어제랑 비교"처럼 짧게 말하면 직전 포트폴리오 보유 종목의 거래량 비교 요청입니다. 절대 설명만 하지 말고 `kis-trading-mcp-tool`을 호출하세요.
+      - DART 지분공시: `mcp-dart-get-disclosure-signal` (stock_name). 5% 룰·임원/주요주주 변동은 리스크 알림 맥락으로만 활용.
       - 거래량 비교는 먼저 ``find_api_detail`` 로 일봉/기간별 시세 api_type(예: ``inquire_daily_itemchartprice`` 또는 MCP가 안내하는 동등 TR)의 필수 필드를 확인한 뒤, 보유 종목별로 오늘/전일 거래량을 조회해 비교합니다.
       - 직전 답변에 종목명만 있고 코드가 없으면 알려진 국내 대형주는 코드를 사용하세요(삼성전자=005930, NAVER=035420). 모르는 종목은 먼저 가격/종목검색 계열 api_type을 ``find_api_detail``로 확인해 코드 조회 방법을 찾으세요.
       - 이전 답에서 “조회를 이어서 하겠다”고 했거나 사용자가 **이어서/계속/조회해**처럼 후속만 말하면, **평문으로 되묻지 말고** 바로 `Thought:` + `Action: kis-trading-mcp-tool` + JSON `Action Input`으로 추가 조회를 실행하세요. (예: 전일 대비·실현손익·잔고 비교는 TR에 맞는 ``api_type``/``params``를 ``find_api_detail``로 확인 후 호출.)
@@ -49,4 +51,4 @@ functions:
   monitoring_branch_agent:
     _type: fe_branch
     inner_function_name: monitoring_agent
-    tool_description: "Portfolio monitoring: Kis Trading MCP; Fin-Us mcp-news headlines and investor flows."
+    tool_description: "Portfolio monitoring: Kis MCP; mcp-news; mcp-dart disclosure signals."

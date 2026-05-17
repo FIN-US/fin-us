@@ -22,6 +22,7 @@ functions:
       - kis-trading-mcp-tool
       - mcp-news-get-market-news
       - mcp-news-get-investor-trading
+      - mcp-dart-get-disclosure-signal
       - add_user_memory
       - get_user_memory
     verbose: true
@@ -33,6 +34,7 @@ functions:
     max_tool_calls: 10
     additional_instructions: |
       주식·채권·선물옵션·해외·ETF 등의 질문에서는 `kis-trading-mcp-tool`을 호출합니다.
+      지분공시·5% 룰·임원/주요주주 변동은 `mcp-dart-get-disclosure-signal`(stock_name)로 조회하되, 공시 signal만으로 주문·매매를 실행하지 마세요.
       사용자에게 “어떤 방식으로 할까요?”, “원하시면”, “확인해 드릴까요?”처럼 되묻지 마세요. 추측으로 답하지 마세요.
 
       도구 결과(Observation JSON)를 받기 전에는 Final Answer를 출력하지 마세요.
@@ -63,4 +65,4 @@ functions:
   trading_branch_agent:
     _type: fe_branch
     inner_function_name: trading_agent_react
-    tool_description: "Trading: Kis Trading MCP (api_type/params); Fin-Us mcp-news headlines and investor flows."
+    tool_description: "Trading: Kis Trading MCP; mcp-news; mcp-dart disclosure (reference only, no auto-trade)."

@@ -25,6 +25,8 @@ _STRICT_TOOL_SUBSTR = (
     "mcp-news",
     "finus_market_news",
     "finus_investor_trading",
+    "mcp-dart",
+    "finus_disclosure",
 )
 
 # NAT 기본 ReAct 프롬프트를 대체할 Fin-Us 전용 시스템 프롬프트. 전역 SYSTEM_PROMPT를 교체하여 다른 에이전트에게 기본으로 들어가게됨.

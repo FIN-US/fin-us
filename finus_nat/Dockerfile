@@ -1,7 +1,7 @@
-FROM python:3.11-slim
+FROM python:3.13-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates gnupg \
-    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 
@@ -15,11 +15,15 @@ ENV SETUPTOOLS_SCM_PRETEND_VERSION=${SETUPTOOLS_SCM_PRETEND_VERSION}
 COPY finus_nat /workspace/finus_nat
 COPY mcp-news /workspace/mcp-news
 COPY mcp-trading /workspace/mcp-trading
+COPY mcp-dart /workspace/mcp-dart
 
 WORKDIR /workspace/mcp-news
-RUN npm ci && npx playwright install --with-deps chromium
+RUN npm ci
 
 WORKDIR /workspace/mcp-trading
+RUN npm ci
+
+WORKDIR /workspace/mcp-dart
 RUN npm ci
 
 WORKDIR /workspace/finus_nat
@@ -27,7 +31,11 @@ RUN uv sync --no-dev
 RUN python - <<'PY'
 from pathlib import Path
 
-target = Path("/workspace/finus_nat/.venv/lib/python3.11/site-packages/nat/plugins/mem0ai/memory.py")
+venv_lib = Path("/workspace/finus_nat/.venv/lib")
+matches = list(venv_lib.glob("python3.*/site-packages/nat/plugins/mem0ai/memory.py"))
+if len(matches) != 1:
+    raise SystemExit(f"Expected one mem0ai memory.py, found {matches!r}")
+target = matches[0]
 text = target.read_text()
 old = """    mem0_api_key = os.environ.get(\"MEM0_API_KEY\")\n\n    if mem0_api_key is None:\n        raise RuntimeError(\"Mem0 API key is not set. Please specify it in the environment variable 'MEM0_API_KEY'.\")\n"""
 new = """    mem0_api_key = os.environ.get(\"MEM0_API_KEY\")\n\n    if mem0_api_key is None:\n        if config.host:\n            # Self-hosted Mem0: keep client init deterministic without env provisioning.\n            mem0_api_key = \"selfhost-mem0-static-key\"\n        else:\n            raise RuntimeError(\"Mem0 API key is not set. Please specify it in the environment variable 'MEM0_API_KEY'.\")\n"""

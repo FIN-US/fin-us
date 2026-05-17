@@ -18,6 +18,10 @@ functions:
   mcp-news-get-investor-trading:
     _type: finus_investor_trading
 
+  # fin-us/mcp-dart stdio: get_disclosure_signal
+  mcp-dart-get-disclosure-signal:
+    _type: finus_disclosure_signal
+
 llms:
   openai_cloud_llm:
     _type: openai
