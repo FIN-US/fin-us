@@ -26,6 +26,7 @@ SHOW_COT = os.environ.get("FINUS_CHAT_COT", "1").strip().lower() not in ("0", "f
 _USE_COLOR = os.environ.get("FINUS_CHAT_COLOR", "1").strip().lower() not in ("0", "false", "no") and sys.stderr.isatty()
 
 _TAG_RE = re.compile(r"<[^>]+>")
+_USER_PROMPT = "User > "
 
 
 def _configure_stdio() -> None:
@@ -39,19 +40,25 @@ def _decode_stdin(raw: bytes) -> str:
     return raw.decode(sys.stdin.encoding or "utf-8")
 
 
-def _read_user_line(prompt: str) -> str:
-    """Read one line. On an interactive TTY use ``input()`` so readline/IME behave; pipes keep binary decode."""
-    tty_in = sys.stdin.isatty()
-    tty_out = sys.stdout.isatty()
-    if tty_in and tty_out:
-        sys.stderr.flush()
-        return input(prompt)
+def _read_user_line() -> str:
+    """Read one line.
+
+    Interactive: prompt on stderr, ``input()`` on stdin (readline/backspace work; stdout stays for replies).
+    Pipes: prompt on stdout + binary readline.
+    """
+    if sys.stdin.isatty():
+        try:
+            import readline  # noqa: F401, PLC0415
+        except ImportError:
+            pass
+        print(_USER_PROMPT, end="", flush=True, file=sys.stderr)
+        return input()
 
     buffer = getattr(sys.stdin, "buffer", None)
     if buffer is None:
-        return input(prompt)
+        return input(_USER_PROMPT)
 
-    print(prompt, end="", flush=True)
+    print(_USER_PROMPT, end="", flush=True)
     raw = buffer.readline()
     if raw == b"":
         raise EOFError
@@ -213,7 +220,7 @@ def main() -> None:
         messages.append({"role": "assistant", "content": reply})
 
     while True:
-        line = _read_user_line("You> ").strip()
+        line = _read_user_line().strip()
         if not line:
             continue
         low = line.lower()
