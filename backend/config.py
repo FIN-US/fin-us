@@ -19,6 +19,11 @@ NAT_CHAT_MODEL = os.environ.get(
     "NAT_CHAT_MODEL",
     os.environ.get("OPENAI_CHAT_MODEL", "gpt-5.4-mini"),
 )
+# finus_sqlite_transcript_agent thread id (HTTP header conversation-id)
+NAT_CONVERSATION_ID = os.environ.get(
+    "NAT_CONVERSATION_ID",
+    os.environ.get("FINUS_DEFAULT_CONVERSATION_ID", "fin-us-default"),
+).strip()
 
 OLLAMA_API_KEY = os.environ.get("OLLAMA_API_KEY", "ollama")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen3.5:9b")

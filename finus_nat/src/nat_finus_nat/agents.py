@@ -1,4 +1,5 @@
 import logging
+import os
 import re
 import sqlite3
 from datetime import UTC
@@ -32,6 +33,7 @@ logger = logging.getLogger(__name__)
 
 MEMORY_PROMPT_PREFIX = "Relevant context from memory:"
 CONVERSATION_ID_HTTP_HEADER = "conversation-id"
+_DEFAULT_CONVERSATION_ID = os.environ.get("FINUS_DEFAULT_CONVERSATION_ID", "fin-us-default")
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _KNOWN_STOCK_NAMES = ("삼성전자", "NAVER", "네이버")
 
@@ -456,14 +458,12 @@ def _append_messages(db_path: Path, conversation_id: str, messages: list[tuple[s
         )
 
 
-def _require_conversation_id() -> str:
+def _resolve_conversation_id() -> str:
+    """Use request header when present; otherwise a single default thread (non-multi-tenant)."""
     cid = Context.get().conversation_id
     if cid and str(cid).strip():
         return str(cid).strip()
-    raise ValueError(
-        f"HTTP header '{CONVERSATION_ID_HTTP_HEADER}' is required when using finus_sqlite_transcript_agent. "
-        "Set it from finus-chat (FINUS_CHAT_CONVERSATION_ID), curl, or your backend (NAT_CONVERSATION_ID)."
-    )
+    return _DEFAULT_CONVERSATION_ID
 
 
 def _chat_request_with_messages(chat_request: ChatRequest, messages: list[Message]) -> ChatRequest:
@@ -480,7 +480,7 @@ async def finus_sqlite_transcript_agent(config: FinusSqliteTranscriptAgentConfig
 
     async def _response_fn(chat_request_or_message: ChatRequestOrMessage) -> ChatResponse | str:
         chat_request = GlobalTypeConverter.get().convert(chat_request_or_message, to_type=ChatRequest)
-        conversation_id = _require_conversation_id()
+        conversation_id = _resolve_conversation_id()
 
         if _has_client_supplied_transcript(chat_request.messages):
             history: list[Message] = []

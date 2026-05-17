@@ -13,7 +13,7 @@ from .config import (
     OPENAI_API_KEY, OPENAI_CHAT_MODEL,
     ANTHROPIC_API_KEY, ANTHROPIC_CHAT_MODEL,
     OLLAMA_API_KEY, OLLAMA_MODEL, OLLAMA_BASE_URL,
-    NAT_BASE_URL, NAT_CHAT_MODEL
+    NAT_BASE_URL, NAT_CHAT_MODEL, NAT_CONVERSATION_ID,
 )
 from .schemas import TradingSignal, AnalysisReport
 from .models import AgentReport
@@ -245,10 +245,15 @@ def _log_nat_response(resp: httpx.Response) -> None:
 
 async def _llm_nat_chat(user_msg: str) -> str:
     url = f"{NAT_BASE_URL}/v1/chat/completions"
+    headers = {
+        "Content-Type": "application/json",
+        "conversation-id": NAT_CONVERSATION_ID,
+    }
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as client:
             resp = await client.post(
                 url,
+                headers=headers,
                 json={
                     "model": NAT_CHAT_MODEL,
                     "messages": [{"role": "user", "content": user_msg}],
