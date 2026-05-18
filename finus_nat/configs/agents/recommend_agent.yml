@@ -1,26 +1,47 @@
 base: news_agent.yml
+# 사용자의 질문을 기반으로 조건에 맞는 종목을 검색하고 추천하는 에이전트입니다.
+
+llms:
+  recommend_openai_llm:
+    _type: openai
+    api_key: ${OPENAI_API_KEY}
+    base_url: ${OPENAI_API_BASE_URL:-${OPENAI_BASE_URL:-https://api.openai.com/v1}}
+    model_name: ${RECOMMEND_OPENAI_CHAT_MODEL:-gpt-5.4-mini}
 
 functions:
   recommend_agent:
     _type: react_agent
-    llm_name: openai_cloud_llm
+
+    llm_name: recommend_openai_llm
     tool_names:
-      - finus_market_news
-      - finus_investor_trading
-      - finus_research_reports
+      - kis-trading-mcp-tool
+      - mcp-news-get-market-news
+      - mcp-news-get-investor-trading
+      - add_user_memory
+      - get_user_memory
     verbose: false
-    use_native_tool_calling: false
+    use_native_tool_calling: true
+    max_history: 8000
     parse_agent_response_max_retries: 2
     raise_on_parsing_failure: false
+    accept_direct_answer_without_react_format: false
     additional_instructions: |
-      === 에이전트 요약 ===
-      뉴스 브랜치(`news_agent`)와 같은 스타일을 유지하되, 답변은 **권고·아이디어·리스크·촉매·모멘텀** 관점으로 정리하십시오.
-      체크리스트(요약): 뉴스 3건 핵심, 수급 엇갈림 이유, 리서치 논조, 시장 심리 지수(0~100)는 필요 시 참고하되 최종은 "권고 관점" 한국어 서술에 맞추십시오.
+      직전 대화에서 섹터·비교 기준·종목 목록이 이미 정해졌다면, 사용자가 짧게만 말해도 **그 맥락을 유지**하고
+      같은 주제로 도구를 쓰거나 답합니다. 이미 정해진 업종/테마를 다시 묻지 마세요.
 
-      === 동작 지시 ===
-      도구로 뉴스·수급·리서치 원문을 가져온 뒤, 종목에 대한 권고 관점(리스크·촉매·모멘텀)을 한국어로 정리하십시오.
+      사용자의 질문에 따라 조건에 맞는 종목을 추천합니다.
+      정형적인 데이터에 기반한 조건을 질문할 경우 kis-trading-mcp-tool을 호출합니다.
+      KIS 조회에서 API/validation 오류가 나면 오류 응답으로 끝내지 말고 `find_api_detail`로 해당 api_type의 필드와 기본값을 확인한 뒤 params를 고쳐 원래 조회를 다시 실행합니다. 이 재시도까지가 성공 조건입니다.
+      잔고/포트폴리오 맥락이 필요한 경우 `inquire_balance` 기본값은 params `{{"env_dv":"real","inqr_dvsn":"01"}}` 입니다.
+      비정형적인 데이터에 기반한 조건을 질문할 경우 mcp-news 툴을 호출합니다.
+      사용자의 투자 성향, 선호 섹터, 제외 조건처럼 오래 유지될 정보가 필요하면 get_user_memory로 확인하고,
+      사용자가 그런 정보를 새로 말하면 add_user_memory에 저장합니다.
+      최대한 조건에 맞는 종목 하나를 사용자에게 추천하고 만약에 찾지 못했다면 유사한 종목도 제시합니다.
+      기본 답변은 항상 평문 한국어입니다. 사용자가 JSON 출력을 명시한 경우에만 JSON 객체 하나만 반환합니다.
+      도구가 JSON을 반환해도 사용자에게는 요약·표 형태의 한국어로 설명합니다.
+
 
   recommend_branch_agent:
     _type: fe_branch
     inner_function_name: recommend_agent
-    tool_description: "Recommendations: Fin-Us mcp-news (headlines, flows, research) + LLM synthesis."
+    tool_description: "Recommendations: KIS MCP context, Fin-Us mcp-news headlines/flows, and user memory when available."

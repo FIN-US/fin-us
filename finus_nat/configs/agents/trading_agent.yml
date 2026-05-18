@@ -1,39 +1,68 @@
 base: ../common.yml
 
+llms:
+  trading_openai_llm:
+    _type: openai
+    api_key: ${OPENAI_API_KEY}
+    base_url: ${OPENAI_API_BASE_URL:-${OPENAI_BASE_URL:-https://api.openai.com/v1}}
+    model_name: ${TRADING_OPENAI_CHAT_MODEL:-gpt-5.4-mini}
+
+
 functions:
-  trading_agent:
+  kis-trading-mcp-tool:
+    _type: finus_account_balance
+    mcp_transport: sse
+    mcp_url: ${FINUS_KIS_TRADING_MCP_URL:-http://host.docker.internal:3300/sse}
+    trading_tool_name: ${FINUS_KIS_TRADING_TOOL_NAME:-domestic_stock}
+
+  trading_agent_react:
     _type: react_agent
-    llm_name: openai_cloud_llm
+    llm_name: trading_openai_llm
     tool_names:
-      - finus_account_balance
-      - finus_market_news
-      - finus_investor_trading
-      - finus_research_reports
+      - kis-trading-mcp-tool
+      - mcp-news-get-market-news
+      - mcp-news-get-investor-trading
+      - mcp-dart-get-disclosure-signal
+      - add_user_memory
+      - get_user_memory
     verbose: true
-    include_tool_input_schema_in_tool_description: true
-    use_native_tool_calling: false
+    use_native_tool_calling: true
     parse_agent_response_max_retries: 5
     raise_on_parsing_failure: false
-    max_tool_calls: 25
-    pass_tool_call_errors_to_agent: true
+    # 도구 없이 hallucination으로 답변하는 것을 막기 위해 도구 사용을 강제
     accept_direct_answer_without_react_format: false
+    max_tool_calls: 10
     additional_instructions: |
-      === 에이전트 요약 ===
-      역할: 자산 운용 및 매매 관리자
-      목표: Fin-Us MCP 도구로 계좌·뉴스·수급을 조회하고, 리스크를 고려한 매매 관점(BUY/SELL/HOLD)과 배분 아이디어를 제안합니다.
-      체크리스트:
-      - 자산의 30% 이상이 한 종목에 몰리지 않도록 리스크를 관리할 것.
-      - 보유 비중이 10% 이상인 종목의 수익률이 -10% 미만이면 'SELL' 신호와 함께 손절 검토를 보고할 것.
-      - 최종 결정에는 반드시 '결정 이유(Reason)'와 조회한 데이터 근거를 포함할 것.
+      주식·채권·선물옵션·해외·ETF 등의 질문에서는 `kis-trading-mcp-tool`을 호출합니다.
+      지분공시·5% 룰·임원/주요주주 변동은 `mcp-dart-get-disclosure-signal`(stock_name)로 조회하되, 공시 signal만으로 주문·매매를 실행하지 마세요.
+      사용자에게 “어떤 방식으로 할까요?”, “원하시면”, “확인해 드릴까요?”처럼 되묻지 마세요. 추측으로 답하지 마세요.
 
-      === 동작 지시 ===
-      도구는 Fin-Us 벤더 MCP입니다. 각 툴의 스키마에 맞는 인자만 사용하십시오.
-      - 종목 관련 질문에는 `stock_name`(한글 종목명) 등 스키마에 정의된 필드를 따르십시오.
-      - `get_balance` 등 계좌 조회는 인자가 없을 수 있습니다.
-      - 도구가 오류 JSON을 반환하면 내용을 사용자에게 설명하고, 가능하면 다른 도구로 보완하십시오.
-      - 최종 답변은 조회 결과가 드러나는 한국어 문장으로 마무리하십시오.
+      도구 결과(Observation JSON)를 받기 전에는 Final Answer를 출력하지 마세요.
+      조회 질문에서 첫 응답은 반드시 ReAct 형식:
+      Thought: (한 줄)
+      Action: kis-trading-mcp-tool
+      Action Input: {{"tool_name":"domestic_stock","api_type":"...","params": {{...}}}}
+      (국내 주식만 다루면 ``tool_name`` 생략 가능 — YAML 기본값 domestic_stock)
+
+      MCP는 도구별로 나뉩니다: domestic_stock, overseas_stock, domestic_bond, domestic_futureoption,
+      overseas_futureoption, elw, etfetn, auth. 해외 주식이면 ``tool_name`` 을 ``overseas_stock`` 등으로 지정합니다.
+      새 api_type은 먼저 ``find_api_detail`` 로 필수 파라미터를 확인한 뒤 호출합니다.
+      모의투자는 MCP 규칙대로 ``params`` 에 ``"env_dv":"demo"`` 를 넣습니다.
+
+      kis-trading-mcp-tool 예시(국내):
+      - ``{{"api_type":"find_api_detail","params":{{"api_type":"inquire_balance"}}}}``
+      - ``{{"api_type":"inquire_balance","params":{{"env_dv":"real","inqr_dvsn":"01"}}}}``  # 잔고/포트폴리오 기본값
+      - ``{{"api_type":"inquire_price","params":{{"fid_cond_mrkt_div_code":"J","fid_input_iscd":"005930","env_dv":"real"}}}}``
+      - ``inquire_account_balance``(투자계좌자산현황): ``params``에 ``env_dv`` 넣지 마세요(MCP TypeError). ``inqr_dvsn_1``은 공식 샘플처럼 비우거나 문서 허용값만; ``"00"`` 추측 금지.
+
+      데이터 조회에서 API/validation 오류가 나면 그것은 실패 응답의 끝이 아닙니다. 성공 조건은
+      (1) 오류의 api_type/params 확인 → (2) ``find_api_detail`` 호출 → (3) params 수정 → (4) 원래 조회 재실행 →
+      (5) 성공 Observation 기반 최종 답변입니다. 이 루프 없이 추측으로 Final Answer 하지 마세요.
+
+      도구가 오류를 반환하면 내용을 설명하고 다른 도구로 보완하십시오.
+      최종 답변은 한국어로 합니다.
 
   trading_branch_agent:
     _type: fe_branch
-    inner_function_name: trading_agent
-    tool_description: "Trading: Fin-Us account balance, Naver Search API news, KIS investor flows, deprecated research reports (stdio MCP)."
+    inner_function_name: trading_agent_react
+    tool_description: "Trading: Kis Trading MCP; mcp-news; mcp-dart disclosure (reference only, no auto-trade)."

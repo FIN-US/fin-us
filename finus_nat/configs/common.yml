@@ -1,26 +1,38 @@
+# 공용 LLM 및 함수 tools 등록
 functions:
-  fe_stub:
-    _type: fe_stub
-  finus_market_news:
+  # router_nomemory.yml에서는 memory 도구를 no-op으로 둡니다.
+  # router.yml(memory 모드)은 같은 이름을 실제 Mem0 도구로 덮어씁니다.
+  add_user_memory:
+    _type: finus_memory_disabled
+    description: "Memory disabled: acknowledge that durable memory is unavailable and continue with live context only."
+
+  get_user_memory:
+    _type: finus_memory_disabled
+    description: "Memory disabled: report that no durable memory can be retrieved and continue with live context only."
+
+  # fin-us/mcp-news stdio: get_market_news
+  mcp-news-get-market-news:
     _type: finus_market_news
-  finus_investor_trading:
+
+  # fin-us/mcp-news stdio: get_investor_trading
+  mcp-news-get-investor-trading:
     _type: finus_investor_trading
-  finus_research_reports:
-    _type: finus_research_reports
-  finus_account_balance:
-    _type: finus_account_balance
-  finus_disclosure_signal:
+
+  # fin-us/mcp-dart stdio: get_disclosure_signal
+  mcp-dart-get-disclosure-signal:
     _type: finus_disclosure_signal
 
 llms:
   openai_cloud_llm:
     _type: openai
+    # fin-us/backend/.env에 저장된 OPENAI_API_KEY를 사용
     api_key: ${OPENAI_API_KEY}
-    base_url: ${OPENAI_API_BASE_URL:-https://api.openai.com/v1}
+    base_url: ${OPENAI_API_BASE_URL:-${OPENAI_BASE_URL:-https://api.openai.com/v1}}
     model_name: ${OPENAI_CHAT_MODEL:-gpt-5.4-mini}
+
 
   ollama_llm:
     _type: openai
     api_key: ${OLLAMA_API_KEY:-ollama}
-    base_url: ${OLLAMA_BASE_URL:-http://127.0.0.1:11434/v1}
+    base_url: ${OLLAMA_OPENAI_BASE_URL:-http://127.0.0.1:11434/v1}
     model_name: ""

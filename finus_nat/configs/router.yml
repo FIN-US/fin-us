@@ -1,32 +1,72 @@
 base: agents/diary_agent.yml
+# src/nat_finus_nat/supervisor.py 의 router_supervisor_agent 설정을 확장합니다(common.yml 상속).
+# Mem0(self-hosted) + auto_memory_agent 조합. 실행: ./scripts/run.sh --memory 또는 FINUS_NAT_CONFIG_FILE 로 이 파일 지정.
+# 기본 ./scripts/run.sh 는 router_nomemory.yml 입니다(Mem0 없음).
+llms:
+  router_openai_llm:
+    _type: openai
+    api_key: ${OPENAI_API_KEY}
+    base_url: ${OPENAI_API_BASE_URL:-${OPENAI_BASE_URL:-https://api.openai.com/v1}}
+    model_name: ${ROUTER_OPENAI_CHAT_MODEL:-gpt-5.4-mini}
 
-workflow:
-  _type: router_agent
-  llm_name: openai_cloud_llm
-  branches:
-    - trading_branch_agent
-    - monitoring_branch_agent
-    - news_branch_agent
-    - recommend_branch_agent
-    - strategy_branch_agent
-    - diary_branch_agent
+memory: # 라우터 에이전트의 Mem0 메모리 설정
+  router_mem0_memory:
+    _type: mem0_memory
+    host: ${FINUS_MEM0_HOST:-http://localhost:8888}
+    org_id: ${FINUS_MEM0_ORG_ID:-selfhost-org}
+    project_id: ${FINUS_ROUTER_MEM0_PROJECT_ID:-selfhost-router-project}
+
+functions:
+  add_user_memory:
+    _type: add_memory
+    memory: router_mem0_memory
+    description: |
+      Store durable user traits, preferences, personality, or response style only.
+      Do not store one-off questions, transient market data, or full answers.
+
+  get_user_memory:
+    _type: get_memory
+    memory: router_mem0_memory
+    description: |
+      Retrieve durable user traits, preferences, personality, or response style before personalized answers.
+
+  router_supervisor_agent:
+    _type: finus_supervisor_agent
+    llm_name: router_openai_llm
+    max_history_messages: 6
+    history_message_max_chars: 800 # assistant 한도; user 발화는 슈퍼바이저에서 2배(최대 3200자)까지
+    branches:
+      - name: trading_agent
+        function_name: trading_branch_agent
+        description: "Kis Trading MCP: 계좌·잔고·보유·주문·체결, 현재가·호가·시가총액·거래량·순위 등 정형 시장/계좌 데이터 조회."
+      - name: monitoring_agent
+        function_name: monitoring_branch_agent
+        description: "보유·관심 포트폴리오 상태 점검, 리스크/하락/알림/건전성 모니터링."
+      - name: news_agent
+        function_name: news_branch_agent
+        description: "종목·시황 뉴스 헤드라인·요약, 투자자 수급(mcp-news: get_market_news, get_investor_trading)."
+      - name: recommend_agent
+        function_name: recommend_branch_agent
+        description: "조건에 맞는 종목 후보 탐색, 대안 종목, 관심종목 아이디어 추천."
+      - name: strategy_agent
+        function_name: strategy_branch_agent
+        description: "BUY/SELL/HOLD 판단, 매매 규칙, 시나리오, 비중·리밸런싱 전략."
+      - name: diary_agent
+        function_name: diary_branch_agent
+        description: "당일 거래 조회, 매매일지 초안, 거래 회고와 기록 정리."
+
+  transcript_router_agent:
+    _type: finus_sqlite_transcript_agent
+    inner_agent_name: router_supervisor_agent
+    db_path: ${FINUS_TRANSCRIPT_DB_PATH:-.state/conversations.sqlite3}
+    max_history_messages: 30
+
+workflow: # Mem0 auto_memory_agent를 설정합니다.
+  _type: auto_memory_agent
+  inner_agent_name: transcript_router_agent
+  memory_name: router_mem0_memory
+  llm_name: router_openai_llm
+  add_params:
+    infer: false
   verbose: true
-  system_prompt: |
-    == 에이전트 요약 ==
-    라우터 에이전트는 사용자 메시지를 분석하고, 가장 적합한 하위 에이전트로 라우팅합니다.
-
-    가능한 에이전트들:
-    {branches}
-
-    == 동작 지시 ==
-    - 하나의 에이전트만 선택하세요: [{branch_names}]
-    - 답변은 하나의 에이전트 이름만 포함하세요, 다른 텍스트는 포함하지 마세요.
-
-    - trading_branch_agent: 트레이딩, 주문, 체결, 보유, 증권사, 주식 시세
-    - monitoring_branch_agent: 모니터링, 리스크, 알림, 포트폴리오 건전성, 하락
-    - news_branch_agent: 뉴스, 헤드라인, 거시경제, 신고서, 달력 이벤트
-    - recommend_branch_agent: 권고, 아이디어, 무엇을 사야 하는지, 관찰 목록
-    - strategy_branch_agent: 전략, 규칙, 백테스트, 배분, 신호
-    - diary_branch_agent: 일기, 일기, 메모, 거래 로깅 또는 생각
-
-    답변은 하나의 에이전트 이름만 포함하세요.
+  description: "Fin-Us router supervisor with separate Mem0 memory"

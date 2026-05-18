@@ -1,36 +1,32 @@
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
-from __future__ import annotations
-
 import asyncio
 import json
 import os
+from contextlib import asynccontextmanager
+from datetime import datetime
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Literal, TypeAlias
+from zoneinfo import ZoneInfo
 
+import httpx
 from mcp import ClientSession
 from mcp import StdioServerParameters
+from mcp.client.sse import sse_client
 from mcp.client.stdio import stdio_client
-from pydantic import Field
+from mcp.client.streamable_http import streamable_http_client
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from nat.builder.builder import Builder
 from nat.builder.function_info import FunctionInfo
 from nat.cli.register_workflow import register_function
 from nat.data_models.function import FunctionBaseConfig
-from nat_finus_nat.finus_paths import fin_us_vendor_root
 
+# Remote MCP / doc 한도
+_MCP_DOC_MAX_CHARS = 14_000 #텍스트 최대 길이
+_MCP_LIST_TOOLS_GRACE_SEC = 10.0 #툴 호출 시 timeout 방지
+_SSE_CONNECT_CAP = 60.0 # SSE 연결 타임아웃
+_SSE_CONNECT_FLOOR = 5.0 # SSE 연결 타임아웃 하한
 
-_MCP_ENV_ALLOWED_KEYS = {
+_MCP_ENV_ALLOWED_KEYS = frozenset({
     "PATH",
     "NODE_ENV",
     "NODE_OPTIONS",
@@ -49,13 +45,38 @@ _MCP_ENV_ALLOWED_KEYS = {
     "NAVER_CLIENT_ID",
     "NAVER_CLIENT_SECRET",
     "DART_API_KEY",
-}
+})
 _MCP_ENV_ALLOWED_PREFIXES = ("FIN_US_",)
 
+McpCallArguments: TypeAlias = dict[str, Any]
 
-class _FinusVendorTimeout(Protocol):
-    vendor_root: str | None
-    timeout_sec: float
+# 에러 응답 JSON 문자열을 일관된 포맷으로 변환합니다.
+def _err_json(error: str, **extra: Any) -> str:
+    return json.dumps({"error": error, **extra}, ensure_ascii=False)
+
+# ReAct 프롬프트(ChatPromptTemplate)에서 ``{``/``}``가 변수로 해석되지 않게 이스케이프합니다.
+def _langchain_escape_braces(text: str) -> str:
+    return text.replace("{", "{{").replace("}", "}}")
+
+# vendor_root를 절대경로로 정규화합니다(없으면 기본 탐색).
+def finus_nat_example_root() -> Path:
+    return Path(__file__).resolve().parent.parent.parent
+
+
+def fin_us_vendor_root() -> Path:
+    env = os.environ.get("FINUS_VENDOR_ROOT")
+    if env:
+        return Path(env).expanduser().resolve()
+    integrate_root = finus_nat_example_root().parent
+    flat = integrate_root
+    if ((flat / "mcp-news" / "index.js").is_file()
+            and (flat / "mcp-trading" / "index.js").is_file()):
+        return flat
+    fin_us_home = integrate_root / "fin-us"
+    if ((fin_us_home / "mcp-news" / "index.js").is_file()
+            and (fin_us_home / "mcp-trading" / "index.js").is_file()):
+        return fin_us_home
+    return finus_nat_example_root() / "vendor" / "fin_us"
 
 
 def _resolve_vendor_root(override: str | None) -> Path:
@@ -64,9 +85,9 @@ def _resolve_vendor_root(override: str | None) -> Path:
     return fin_us_vendor_root()
 
 
+# stdio MCP 서버에 필요한 Node 의존성 설치 여부를 확인합니다.
 def _node_deps_ready(server_dir: Path) -> bool:
-    sdk = server_dir / "node_modules" / "@modelcontextprotocol" / "sdk"
-    return sdk.is_dir()
+    return (server_dir / "node_modules" / "@modelcontextprotocol" / "sdk").is_dir()
 
 
 def _mcp_child_env() -> dict[str, str]:
@@ -77,45 +98,88 @@ def _mcp_child_env() -> dict[str, str]:
     }
 
 
+# MCP call_tool 결과의 첫 텍스트 블록을 추출합니다(stdio/remote 공용).
+def _mcp_call_tool_first_text(result: Any) -> str:
+    blocks = getattr(result, "content", None) or []
+    if not blocks:
+        return ""
+    block0 = blocks[0]
+    return getattr(block0, "text", str(block0))
+
+
+async def _run_mcp_timed(inner, *, tool_name: str, timeout_sec: float) -> str:
+    """Run MCP inner coroutine; return tool text or JSON error (never raise to the agent)."""
+    try:
+        return await asyncio.wait_for(inner(), timeout=timeout_sec)
+    except TimeoutError:
+        return _err_json("mcp_timeout", tool=tool_name)
+    except asyncio.CancelledError:
+        raise
+    except BaseExceptionGroup as exc:
+        sub = exc.exceptions[0] if exc.exceptions else exc
+        return _err_json("mcp_call_failed", tool=tool_name, detail=str(sub))
+    except Exception as exc:  # noqa: BLE001
+        return _err_json("mcp_call_failed", tool=tool_name, detail=str(exc))
+
+
+# 작업 timeout에서 SSE 연결 타임아웃을 적당히 산출합니다.
+def _sse_connect_timeout(operation_timeout: float) -> float:
+    return min(_SSE_CONNECT_CAP, max(_SSE_CONNECT_FLOOR, operation_timeout * 0.25))
+
+
+# Kis 계열 원격 MCP 한 곳에 대한 초기화된 ClientSession을 컨텍스트로 제공합니다.
+@asynccontextmanager
+async def _remote_mcp_session(
+    *,
+    transport: Literal["sse", "streamable-http"],
+    url: str,
+    operation_timeout: float,
+):
+    conn = _sse_connect_timeout(operation_timeout)
+    if transport == "sse":
+        async with sse_client(url=url, timeout=conn, sse_read_timeout=operation_timeout) as (read, write):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                yield session
+        return
+    async with httpx.AsyncClient() as http_client:
+        async with streamable_http_client(url=url, http_client=http_client) as (read, write, _get_sid):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                yield session
+
+
+# stdio MCP(예: mcp-news) 도구 하나를 호출하고 결과 텍스트(또는 에러 JSON)를 반환합니다.
 async def _mcp_call_tool(
     *,
     vendor_root: Path,
     subdir: str,
     tool_name: str,
-    arguments: dict[str, Any],
+    arguments: McpCallArguments,
     timeout_sec: float,
 ) -> str:
     server_dir = (vendor_root / subdir).resolve()
     script = (server_dir / "index.js").resolve()
     if not script.is_file():
-        return json.dumps(
-            {
-                "error": "mcp_server_script_missing",
-                "path": str(script),
-                "hint": (
-                    f"Expected MCP under {vendor_root}; run the install script "
-                    f"(scripts/install_fin_us_mcp.sh from this repository root) "
-                    "or set FINUS_VENDOR_ROOT."
-                ),
-            },
-            ensure_ascii=False)
-
+        return _err_json(
+            "mcp_server_script_missing",
+            path=str(script),
+            hint=(f"Expected MCP under {vendor_root}; run scripts/install_fin_us_mcp.sh "
+                  "or set FINUS_VENDOR_ROOT."),
+        )
     if not _node_deps_ready(server_dir):
         news = vendor_root / "mcp-news"
         trade = vendor_root / "mcp-trading"
         dart = vendor_root / "mcp-dart"
-        return json.dumps(
-            {
-                "error": "mcp_node_dependencies_missing",
-                "path": str(server_dir),
-                "detail": "ERR_MODULE_NOT_FOUND @modelcontextprotocol/sdk — node_modules not installed.",
-                "hint": (
-                    f"cd {news} && npm ci; "
-                    f"cd {trade} && npm ci; "
-                    f"cd {dart} && npm ci"
-                ),
-            },
-            ensure_ascii=False)
+        return _err_json(
+            "mcp_node_dependencies_missing",
+            path=str(server_dir),
+            detail="ERR_MODULE_NOT_FOUND @modelcontextprotocol/sdk — node_modules not installed.",
+            hint=(
+                f"Run scripts/install_fin_us_mcp.sh from repo root, or: "
+                f"cd {news} && npm ci; cd {trade} && npm ci; cd {dart} && npm ci"
+            ),
+        )
 
     params = StdioServerParameters(
         command="node",
@@ -124,133 +188,532 @@ async def _mcp_call_tool(
         cwd=str(server_dir),
     )
 
+    # 실제 stdio 세션 안에서 단일 tool 호출을 수행하는 inner.
     async def _inner() -> str:
         async with stdio_client(params) as (read, write):
             async with ClientSession(read, write) as session:
                 await session.initialize()
-                result = await session.call_tool(tool_name, arguments)
-                if not result.content:
-                    return ""
-                block = result.content[0]
-                return getattr(block, "text", str(block))
+                return _mcp_call_tool_first_text(await session.call_tool(tool_name, arguments))
 
-    try:
-        return await asyncio.wait_for(_inner(), timeout=timeout_sec)
-    except TimeoutError:
-        return json.dumps({"error": "mcp_timeout", "tool": tool_name}, ensure_ascii=False)
-    except Exception as exc:  # noqa: BLE001
-        return json.dumps({"error": str(exc), "tool": tool_name}, ensure_ascii=False)
+    return await _run_mcp_timed(_inner, tool_name=tool_name, timeout_sec=timeout_sec)
 
 
-def _vendor_and_timeout(config: _FinusVendorTimeout) -> tuple[Path, float]:
-    return _resolve_vendor_root(config.vendor_root), config.timeout_sec
+# 원격 MCP(SSE/streamable-http) 도구 하나를 호출하고 텍스트(또는 에러 JSON)를 반환합니다.
+async def _mcp_call_tool_remote(
+    *,
+    transport: Literal["sse", "streamable-http"],
+    url: str,
+    tool_name: str,
+    arguments: McpCallArguments,
+    timeout_sec: float,
+) -> str:
+    if not url.strip():
+        return _err_json(
+            "mcp_url_empty",
+            tool=tool_name,
+            hint="Set mcp_url on finus_account_balance (Kis Trading MCP) config.",
+        )
+
+    # 실제 원격 세션을 열고 단일 tool 호출을 수행하는 inner.
+    async def _inner() -> str:
+        async with _remote_mcp_session(transport=transport, url=url, operation_timeout=timeout_sec) as session:
+            return _mcp_call_tool_first_text(await session.call_tool(tool_name, arguments))
+
+    return await _run_mcp_timed(_inner, tool_name=tool_name, timeout_sec=timeout_sec)
 
 
-async def _mcp_news_stock(config: _FinusVendorTimeout, tool_name: str, stock_name: str) -> str:
-    vr, timeout = _vendor_and_timeout(config)
+# mcp-news stdio MCP에서 종목 단위 조회 도구를 공통 호출합니다.
+async def _mcp_news_stock(
+    *,
+    vendor_root: str | None,
+    timeout_sec: float,
+    tool_name: str,
+    stock_name: str,
+) -> str:
     return await _mcp_call_tool(
-        vendor_root=vr,
+        vendor_root=_resolve_vendor_root(vendor_root),
         subdir="mcp-news",
         tool_name=tool_name,
         arguments={"stock_name": stock_name},
-        timeout_sec=timeout,
+        timeout_sec=timeout_sec,
     )
 
 
-async def _mcp_trading_balance(config: _FinusVendorTimeout) -> str:
-    vr, timeout = _vendor_and_timeout(config)
+async def _mcp_dart_stock(
+    *,
+    vendor_root: str | None,
+    timeout_sec: float,
+    stock_name: str,
+) -> str:
     return await _mcp_call_tool(
-        vendor_root=vr,
-        subdir="mcp-trading",
-        tool_name="get_balance",
-        arguments={},
-        timeout_sec=timeout,
-    )
-
-
-async def _mcp_trading_stock(config: _FinusVendorTimeout, tool_name: str, stock_name: str) -> str:
-    vr, timeout = _vendor_and_timeout(config)
-    return await _mcp_call_tool(
-        vendor_root=vr,
-        subdir="mcp-trading",
-        tool_name=tool_name,
-        arguments={"stock_name": stock_name},
-        timeout_sec=timeout,
-    )
-
-
-async def _mcp_dart_stock(config: _FinusVendorTimeout, stock_name: str) -> str:
-    vr, timeout = _vendor_and_timeout(config)
-    return await _mcp_call_tool(
-        vendor_root=vr,
+        vendor_root=_resolve_vendor_root(vendor_root),
         subdir="mcp-dart",
         tool_name="get_disclosure_signal",
         arguments={"stock_name": stock_name},
-        timeout_sec=timeout,
+        timeout_sec=timeout_sec,
     )
 
 
+# =========== registered NAT components ==========
+
 class FinusMarketNewsConfig(FunctionBaseConfig, name="finus_market_news"):
-    vendor_root: str | None = Field(default=None, description="Override parent dir containing Fin-Us MCP servers.")
+    vendor_root: str | None = Field(default=None, description="Override parent dir containing mcp-news (stdio MCP).")
     timeout_sec: float = Field(default=120.0, ge=5.0, le=600.0)
 
 
-class FinusInvestorTradingConfig(FunctionBaseConfig, name="finus_investor_trading"):
-    vendor_root: str | None = Field(default=None)
+class FinusInvestorTradingConfig(FinusMarketNewsConfig, name="finus_investor_trading"):
+    """finus_market_news와 동일 필드"""
+
+class FinusDisclosureSignalConfig(FinusMarketNewsConfig, name="finus_disclosure_signal"):
+    """mcp-dart stdio MCP — OpenDART 지분공시 signal."""
+
+class FinusKisDailyTradesConfig(FunctionBaseConfig, name="finus_kis_daily_trades"):
+    """KIS HTTP Open API로 당일(KST) 국내주식 주문/체결 내역 조회 (MCP 미사용)."""
+
     timeout_sec: float = Field(default=120.0, ge=5.0, le=600.0)
 
 
-class FinusResearchReportsConfig(FunctionBaseConfig, name="finus_research_reports"):
-    vendor_root: str | None = Field(default=None)
-    timeout_sec: float = Field(default=120.0, ge=5.0, le=600.0)
+# ========== Kis Trading remote MCP ==========
+def _parse_leading_json_object(text: str) -> dict[str, Any] | None:
+    t = (text or "").strip()
+    if not t:
+        return None
+    i = t.find("{")
+    if i < 0:
+        return None
+    obj, _end = json.JSONDecoder().raw_decode(t[i:])
+    return obj if isinstance(obj, dict) else None
+
+
+class KisTradingMcpCallInput(BaseModel):
+    """Kis Trading MCP call_tool 입력. 표준 도구는 모두 {api_type, params} (MCP list_tools·각 도구 설명 참고)."""
+
+    tool_name: str | None = Field(
+        default=None,
+        description=(
+            "MCP 도구 이름: domestic_stock, overseas_stock, domestic_bond, domestic_futureoption, "
+            "overseas_futureoption, elw, etfetn, auth. 비우면 YAML ``trading_tool_name`` 기본값."
+        ),
+    )
+    tool_input: str | dict[str, Any] | None = Field(
+        default="",
+        description='레거시: JSON 한 줄 또는 {"api_type","params"} dict.',
+    )
+    api_type: str | None = Field(default=None, description="TR 식별자(find_api_detail, inquire_price, …).")
+    params: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "해당 api_type용 params. domestic_stock + inquire_balance 는 서버에서 흔한 필수값을 기본 채움 "
+            "(env_dv, inqr_dvsn, afhr_flpr_yn 등). 그래도 오류면 find_api_detail 로 스키마 확인 후 수정."
+        ),
+    )
+
+    model_config = ConfigDict(extra="ignore")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_whole_string_payload(cls, data: Any) -> Any:
+        if isinstance(data, str):
+            parsed = _parse_leading_json_object(data)
+            if parsed is None:
+                raise ValueError(
+                    "KisTradingMcpCallInput: JSON 객체가 필요합니다. Action Input에는 JSON 한 덩어리만 두고 "
+                    "그 뒤에는 줄을 바꾼 뒤 Thought/Action을 이어 쓰세요."
+                )
+            return parsed
+        return data
+
+
+def _coerce_api_type_params_payload(tool_input: Any, kwargs: dict[str, Any]) -> McpCallArguments | None:
+    nested = kwargs.get("tool_input")
+    if isinstance(nested, dict) and nested.get("api_type") is not None:
+        return dict(nested)
+    at_kw, pr_kw = kwargs.get("api_type"), kwargs.get("params")
+    if at_kw is not None:
+        return {"api_type": at_kw, "params": pr_kw if isinstance(pr_kw, dict) else {}}
+    if isinstance(tool_input, dict) and tool_input.get("api_type") is not None:
+        return dict(tool_input)
+    if isinstance(tool_input, str):
+        return _parse_leading_json_object(tool_input)
+    return None
 
 
 class FinusAccountBalanceConfig(FunctionBaseConfig, name="finus_account_balance"):
-    vendor_root: str | None = Field(default=None)
+    """원격 Kis Trading MCP — `call_tool` 에 `api_type`·`params` 만 전달.
+
+    `tool_name` 생략 시 YAML `trading_tool_name`. Upstream: `open-trading-api`/`MCP/Kis Trading MCP`.
+    """
+
     timeout_sec: float = Field(default=180.0, ge=5.0, le=600.0)
+    mcp_transport: Literal["sse", "streamable-http"] = Field(
+        default="sse",
+        description="Kis Trading MCP Docker: 호스트 포트 매핑에서는 보통 host.docker.internal:3300/sse.",
+    )
+    mcp_url: str = Field(
+        default="http://host.docker.internal:3300/sse",
+        description="MCP URL. 호스트 포트 매핑 시 ``FINUS_KIS_TRADING_MCP_URL`` 등으로 덮어씁니다.",
+    )
+    trading_tool_name: str = Field(
+        default="domestic_stock",
+        description=(
+            "``tool_name`` 미지정 시 사용할 MCP 도구 기본값. domestic_stock, overseas_stock, auth 등 "
+            "``list_tools`` 이름과 동일해야 합니다."
+        ),
+    )
 
 
-class FinusDisclosureSignalConfig(FunctionBaseConfig, name="finus_disclosure_signal"):
-    vendor_root: str | None = Field(default=None)
-    timeout_sec: float = Field(default=120.0, ge=5.0, le=600.0)
+def _adjust_domestic_stock_params(api_type: str, params: dict[str, Any]) -> dict[str, Any]:
+    """Kis Trading MCP / KIS TR별로 흔한 잘못된 인자만 보정(그 외는 MCP·공식 문서 그대로)."""
+    out = dict(params)
+    api = (api_type or "").strip().lower()
+    if api == "inquire_balance":
+        out.setdefault("env_dv", "real")
+        out.setdefault("inqr_dvsn", "01")
+        out.setdefault("afhr_flpr_yn", "N")
+        out.setdefault("unpr_dvsn", "01")
+        out.setdefault("fund_sttl_icld_yn", "N")
+        out.setdefault("fncg_amt_auto_rdpt_yn", "N")
+        out.setdefault("prcs_dvsn", "01")
+    if api == "inquire_account_balance":
+        # MCP Python 래퍼가 env_dv 키워드를 받지 않음(TypeError).
+        out.pop("env_dv", None)
+        # 공식 예제는 inqr_dvsn_1 기본 "". LLM이 자주 넣는 "00"은 OPSQ2002 INVALID INPUT_FILED_SIZE 유발.
+        if str(out.get("inqr_dvsn_1", "")).strip() == "00":
+            out["inqr_dvsn_1"] = ""
+    return out
+
+
+def _prepare_kis_trading_mcp_call(
+    inp: KisTradingMcpCallInput,
+    config: FinusAccountBalanceConfig,
+) -> str | tuple[str, McpCallArguments]:
+    kw: dict[str, Any] = {}
+    if inp.api_type is not None:
+        kw["api_type"] = inp.api_type
+    if inp.params is not None:
+        kw["params"] = inp.params
+    ti = inp.tool_input if inp.tool_input is not None else ""
+    blob = _coerce_api_type_params_payload(ti, kw)
+    if not blob:
+        return _err_json(
+            "kis_mcp_missing_arguments",
+            hint='Provide api_type and params, e.g. {"api_type":"find_api_detail","params":{"api_type":"inquire_balance"}}',
+        )
+    blob = dict(blob)
+    tool_from_blob = blob.pop("tool_name", None)
+    tool_name = (
+        (inp.tool_name or "").strip()
+        or (str(tool_from_blob).strip() if tool_from_blob is not None else "")
+        or (config.trading_tool_name or "").strip()
+    )
+    if not tool_name:
+        return _err_json(
+            "kis_tool_name_missing",
+            hint="Pass tool_name in Action Input or set trading_tool_name in YAML (see MCP list_tools).",
+        )
+    api_type = blob.get("api_type")
+    if api_type is None or str(api_type).strip() == "":
+        return _err_json("kis_mcp_missing_api_type", tool=tool_name, blob_keys=list(blob.keys()))
+    raw_params = blob.get("params")
+    params: dict[str, Any] = raw_params if isinstance(raw_params, dict) else {}
+    if (tool_name or "").strip() == "domestic_stock":
+        params = _adjust_domestic_stock_params(str(api_type).strip(), params)
+    return tool_name, {"api_type": str(api_type).strip(), "params": params}
+
+
+# ---------- registered functions ----------
+_KIS_TRADING_TOOL_GUIDE = """
+### Fin-Us KIS 호출 규칙
+- ReAct 형식: `Action Input:` 한 줄에는 JSON만 두세요. JSON 뒤에 같은 줄·바로 다음 줄에 설명을 붙이면 도구 입력이 깨질 수 있습니다. 설명은 Observation 이후 또는 `Final Answer:` 에 쓰세요.
+- 국내 주식 기본 tool_name은 `domestic_stock`입니다.
+- 잔고/포트폴리오 `api_type="inquire_balance"`: 서버가 흔한 필수값을 기본 채웁니다. 직접 넣을 때 예시는
+  `{"env_dv":"real","inqr_dvsn":"01","afhr_flpr_yn":"N","unpr_dvsn":"01","fund_sttl_icld_yn":"N","fncg_amt_auto_rdpt_yn":"N","prcs_dvsn":"01"}` 입니다.
+- 투자계좌자산현황 `api_type="inquire_account_balance"`는 MCP 래퍼 제약상 `env_dv`를 넣지 마세요. `inqr_dvsn_1`은 기본 `""`이며 `"00"`을 추측해서 넣지 마세요.
+- 현재가 조회 `api_type="inquire_price"`의 국내 주식 기본값은 `{"fid_cond_mrkt_div_code":"J","fid_input_iscd":"종목코드","env_dv":"real"}` 입니다.
+- 알 수 없는 필드, INVALID INPUT, 필드 크기 오류, 필수 파라미터 오류가 나오면 실패로 끝내지 말고 `api_type="find_api_detail"`을 호출해 해당 `api_type`의 필드를 확인한 뒤 같은 사용자 요청을 다시 실행하세요.
+- 성공 조건은 사용자가 요청한 데이터 조회가 정상 Observation으로 돌아오고, 그 Observation을 근거로 최종 답변하는 것입니다.
+""".strip()
+
+
+def _mcp_news_stock_function_info(
+    *,
+    vendor_root: str | None,
+    timeout_sec: float,
+    mcp_tool: str,
+    fn_doc: str,
+) -> FunctionInfo:
+    async def by_stock(stock_name: str) -> str:
+        return await _mcp_news_stock(
+            vendor_root=vendor_root,
+            timeout_sec=timeout_sec,
+            tool_name=mcp_tool,
+            stock_name=stock_name,
+        )
+
+    by_stock.__doc__ = fn_doc
+    return FunctionInfo.from_fn(by_stock, description=fn_doc)
 
 
 @register_function(config_type=FinusMarketNewsConfig)
 async def finus_market_news(config: FinusMarketNewsConfig, _builder: Builder):
-    async def get_market_news(stock_name: str) -> str:
-        return await _mcp_news_stock(config, "get_market_news", stock_name)
-
-    yield FunctionInfo.from_fn(get_market_news, description=get_market_news.__doc__)
+    doc = (
+        "Fin-Us mcp-news stdio MCP: 종목명 기준 최신 시장 뉴스(헤드라인·요약). "
+        "stock_name 예: 삼성전자"
+    )
+    yield _mcp_news_stock_function_info(
+        vendor_root=config.vendor_root,
+        timeout_sec=config.timeout_sec,
+        mcp_tool="get_market_news",
+        fn_doc=doc,
+    )
 
 
 @register_function(config_type=FinusInvestorTradingConfig)
 async def finus_investor_trading(config: FinusInvestorTradingConfig, _builder: Builder):
-    async def get_investor_trading(stock_name: str) -> str:
-        return await _mcp_trading_stock(config, "get_investor_trading", stock_name)
-
-    yield FunctionInfo.from_fn(get_investor_trading, description=get_investor_trading.__doc__)
-
-
-@register_function(config_type=FinusResearchReportsConfig)
-async def finus_research_reports(config: FinusResearchReportsConfig, _builder: Builder):
-    async def get_research_reports(stock_name: str) -> str:
-        return await _mcp_news_stock(config, "get_research_reports", stock_name)
-
-    yield FunctionInfo.from_fn(get_research_reports, description=get_research_reports.__doc__)
-
-
-@register_function(config_type=FinusAccountBalanceConfig)
-async def finus_account_balance(config: FinusAccountBalanceConfig, _builder: Builder):
-    async def get_account_balance(placeholder: str) -> str:
-        _ = placeholder
-        return await _mcp_trading_balance(config)
-
-    yield FunctionInfo.from_fn(get_account_balance, description=get_account_balance.__doc__)
+    doc = "Fin-Us mcp-news stdio MCP: 투자자별 순매수·수급(약 5거래일), 종목명·코드 기준."
+    yield _mcp_news_stock_function_info(
+        vendor_root=config.vendor_root,
+        timeout_sec=config.timeout_sec,
+        mcp_tool="get_investor_trading",
+        fn_doc=doc,
+    )
 
 
 @register_function(config_type=FinusDisclosureSignalConfig)
 async def finus_disclosure_signal(config: FinusDisclosureSignalConfig, _builder: Builder):
-    async def get_disclosure_signal(stock_name: str) -> str:
-        return await _mcp_dart_stock(config, stock_name)
+    doc = (
+        "Fin-Us mcp-dart stdio MCP: OpenDART 공식 API 지분공시 signal "
+        "(5% 룰·임원/주요주주). stock_name 예: 삼성전자, 005930. DART_API_KEY 필요."
+    )
 
-    yield FunctionInfo.from_fn(get_disclosure_signal, description=get_disclosure_signal.__doc__)
+    async def get_disclosure_signal(stock_name: str) -> str:
+        return await _mcp_dart_stock(
+            vendor_root=config.vendor_root,
+            timeout_sec=config.timeout_sec,
+            stock_name=stock_name,
+        )
+
+    get_disclosure_signal.__doc__ = doc
+    yield FunctionInfo.from_fn(get_disclosure_signal, description=doc)
+
+
+# ---------- KIS HTTP (no MCP) ----------
+
+
+# KIS Open API에서 access_token을 발급받습니다(클라이언트 자격증명 그랜트).
+async def _kis_issue_access_token(*, base_url: str, app_key: str, app_secret: str, timeout: float) -> str:
+    token_url = f"{base_url.rstrip('/')}/oauth2/tokenP"
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.post(
+            token_url,
+            json={"grant_type": "client_credentials", "appkey": app_key, "appsecret": app_secret},
+        )
+        resp.raise_for_status()
+        body = resp.json()
+        token = body.get("access_token")
+        if not token:
+            raise RuntimeError(str(body.get("msg1") or body))
+        return str(token)
+
+
+# 일별 주문체결 조회용 TR_ID를 환경변수와 모의투자 플래그에 따라 결정합니다.
+def _kis_tr_id_daily_ccld() -> str:
+    override = (os.getenv("FINUS_KIS_TR_ID_DAILY_CCLD") or "").strip()
+    if override:
+        return override
+    paper = (os.getenv("FINUS_KIS_PAPER") or "").lower() in ("1", "true", "yes", "y")
+    return "VTTC8001R" if paper else "TTTC8001R"
+
+
+# 당일(KST) 국내주식 주문/체결 내역을 KIS Open API로 조회하는 NAT 함수로 등록합니다.
+@register_function(config_type=FinusKisDailyTradesConfig)
+async def finus_kis_daily_trades(config: FinusKisDailyTradesConfig, _builder: Builder):
+
+    # 환경변수 + 토큰 발급 + 일별주문체결 GET을 수행하고 결과 JSON을 반환합니다.
+    async def get_today_domestic_trade_history(placeholder: str = "") -> str:
+        """한국투자 Open API(HTTP)로 당일(KST 기준) 국내주식 일별주문체결 내역을 조회합니다.
+
+        ``placeholder``는 NAT 도구 스키마 호환용이며 조회에 사용하지 않습니다.
+        MCP가 아니라 ``KIS_URL``·``KIS_API_KEY``·``KIS_API_SECRET``·``KIS_ACCOUNT_NO`` 환경 변수를 사용합니다.
+        모의투자는 ``FINUS_KIS_PAPER=true`` 또는 ``FINUS_KIS_TR_ID_DAILY_CCLD`` 로 TR_ID를 직접 지정하세요.
+
+        Returns:
+            JSON 문자열. 성공 시 ``output1``(체결·주문 내역 배열), ``output2``(집계) 및 조회일 ``as_of_kst_date``.
+        """
+        kis_url = (os.getenv("KIS_URL") or "").strip().rstrip("/")
+        api_key = (os.getenv("KIS_API_KEY") or "").strip()
+        api_secret = (os.getenv("KIS_API_SECRET") or "").strip()
+        account_no = (os.getenv("KIS_ACCOUNT_NO") or "").strip()
+
+        if not all([kis_url, api_key, api_secret, account_no]):
+            return _err_json(
+                "kis_env_missing",
+                hint="Set KIS_URL, KIS_API_KEY, KIS_API_SECRET, KIS_ACCOUNT_NO (10 digits: 8+2).",
+            )
+        if len(account_no) != 10 or not account_no.isdigit():
+            return _err_json("kis_invalid_account", detail="KIS_ACCOUNT_NO must be 10 digits.")
+
+        today_kst = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y%m%d")
+        tr_id = _kis_tr_id_daily_ccld()
+        token_timeout = min(60.0, float(config.timeout_sec))
+
+        token = await _kis_issue_access_token(
+            base_url=kis_url, app_key=api_key, app_secret=api_secret, timeout=token_timeout)
+
+        path = "/uapi/domestic-stock/v1/trading/inquire-daily-ccld"
+        params: dict[str, str] = {
+            "CANO": account_no[0:8],
+            "ACNT_PRDT_CD": account_no[8:10],
+            "INQR_STRT_DT": today_kst,
+            "INQR_END_DT": today_kst,
+            "SLL_BUY_DVSN_CD": "00",
+            "INQR_DVSN": "01",
+            "PDNO": "",
+            "CCLD_DVSN": "00",
+            "ORD_GNO_BRNO": "",
+            "ODNO": "",
+            "INQR_DVSN_3": "00",
+            "INQR_DVSN_1": "",
+            "CTX_AREA_FK100": "",
+            "CTX_AREA_NK100": "",
+        }
+        headers = {
+            "Content-Type": "application/json",
+            "authorization": f"Bearer {token}",
+            "appkey": api_key,
+            "appsecret": api_secret,
+            "tr_id": tr_id,
+            "custtype": "P",
+        }
+
+        async with httpx.AsyncClient(timeout=config.timeout_sec) as client:
+            resp = await client.get(f"{kis_url}{path}", headers=headers, params=params)
+            resp.raise_for_status()
+            data = resp.json()
+
+        if data.get("rt_cd") != "0":
+            return _err_json(
+                "kis_api_error",
+                rt_cd=data.get("rt_cd"),
+                msg_cd=data.get("msg_cd"),
+                msg1=data.get("msg1"),
+            )
+
+        return json.dumps(
+            {
+                "as_of_kst_date": today_kst,
+                "tr_id": tr_id,
+                "output1": data.get("output1"),
+                "output2": data.get("output2"),
+            },
+            ensure_ascii=False,
+        )
+
+    yield FunctionInfo.from_fn(get_today_domestic_trade_history, description=get_today_domestic_trade_history.__doc__)
+
+
+def _mcp_tool_input_schema_json(tool: Any) -> str | None:
+    schema = getattr(tool, "input_schema", None) or getattr(tool, "inputSchema", None)
+    if schema is None:
+        return None
+    if hasattr(schema, "model_json_schema"):
+        return json.dumps(schema.model_json_schema(), indent=2, ensure_ascii=False)
+    if isinstance(schema, dict):
+        return json.dumps(schema, indent=2, ensure_ascii=False)
+    if hasattr(schema, "schema_json"):
+        return str(schema.schema_json(indent=2))
+    return json.dumps({"raw": str(schema)}, indent=2, ensure_ascii=False)
+
+
+# MCP tool 한 개의 이름/설명/inputSchema를 사람이 읽기 좋은 마크다운 블록으로 만듭니다.
+def _format_one_mcp_tool(tool: Any) -> str:
+    name = getattr(tool, "name", "?")
+    desc = (getattr(tool, "description", None) or "").strip()
+    schema = _mcp_tool_input_schema_json(tool)
+    lines = [f"### MCP tool `{name}`"]
+    if desc:
+        lines.append(desc)
+    if schema:
+        lines.append("inputSchema:")
+        lines.append(schema)
+    return "\n".join(lines)
+
+
+# list_tools 결과 전체를 LLM용 도큐먼트로 합칩니다.
+def _build_list_tools_doc(lr: Any) -> str:
+    tools = list(getattr(lr, "tools", None) or [])
+    header = (
+        "### Kis Trading MCP (list_tools)\n"
+        f"{_KIS_TRADING_TOOL_GUIDE}\n\n"
+        "각 MCP 도구는 인자 객체 ``api_type`` + ``params`` 만 받습니다. 새 TR은 먼저 ``find_api_detail`` 로 필드 확인.\n"
+        "NAT 도구 호출 시 **tool_name** 으로 아래 목록 중 하나를 고르세요(비우면 YAML ``trading_tool_name`` 기본값).\n"
+        "모의투자는 MCP 설명대로 ``params.env_dv`` 를 ``demo`` 로 넣습니다.\n"
+    )
+    if not tools:
+        return header + "(서버가 빈 도구 목록을 반환했습니다.)"
+    parts = [header, "### 노출된 MCP 도구\n"]
+    for t in tools:
+        parts.append(_format_one_mcp_tool(t))
+        parts.append("")
+    return "\n".join(parts).strip()
+
+
+async def _fetch_mcp_tool_documentation(config: FinusAccountBalanceConfig) -> str | None:
+    if (os.environ.get("FINUS_SKIP_MCP_LIST_TOOLS") or "").strip().lower() in ("1", "true", "yes"):
+        return None
+    url = (config.mcp_url or "").strip()
+    if not url:
+        return None
+    timeout_sec = min(25.0, max(5.0, float(config.timeout_sec)))
+
+    async def _list_doc() -> str:
+        async with _remote_mcp_session(
+            transport=config.mcp_transport, url=url, operation_timeout=timeout_sec,
+        ) as session:
+            return _build_list_tools_doc(await session.list_tools())
+
+    try:
+        text = await asyncio.wait_for(_list_doc(), timeout=timeout_sec + _MCP_LIST_TOOLS_GRACE_SEC)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        return None
+    if len(text) > _MCP_DOC_MAX_CHARS:
+        return text[: _MCP_DOC_MAX_CHARS - 100] + "\n…(truncated)"
+    return text
+
+
+@register_function(config_type=FinusAccountBalanceConfig)
+async def finus_account_balance(config: FinusAccountBalanceConfig, _builder: Builder):
+
+    async def get_account_balance(inp: KisTradingMcpCallInput) -> str:
+        """Kis Trading MCP ``call_tool``: ``tool_name``(선택) + ``api_type`` + ``params``; 레거시 ``tool_input`` JSON.
+
+        Defaults:
+        - ``inquire_balance``: 서버가 ``env_dv``·``inqr_dvsn`` 및 TR 필수 필드(``afhr_flpr_yn`` 등)를 기본 채움.
+        - ``inquire_account_balance``: omit ``env_dv``; keep ``inqr_dvsn_1`` empty unless ``find_api_detail`` says otherwise.
+
+        Self-correction:
+        On API/validation errors, call ``find_api_detail`` for the failed ``api_type``, fix ``params``, and retry before
+        producing the final answer.
+        """
+        prepared = _prepare_kis_trading_mcp_call(inp, config)
+        if isinstance(prepared, str):
+            return prepared
+        tool_name, arguments = prepared
+        return await _mcp_call_tool_remote(
+            transport=config.mcp_transport,
+            url=config.mcp_url,
+            tool_name=tool_name,
+            arguments=arguments,
+            timeout_sec=config.timeout_sec,
+        )
+
+    base_desc = (get_account_balance.__doc__ or "").strip()
+    remote = await _fetch_mcp_tool_documentation(config)
+    merged = f"{base_desc}\n\n{_KIS_TRADING_TOOL_GUIDE}\n\n{remote}" if remote else f"{base_desc}\n\n{_KIS_TRADING_TOOL_GUIDE}"
+    yield FunctionInfo.from_fn(
+        get_account_balance,
+        description=_langchain_escape_braces(merged),
+        input_schema=KisTradingMcpCallInput,
+    )

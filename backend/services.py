@@ -1,6 +1,7 @@
 import json
 import httpx
 import logging
+from datetime import date
 from typing import Any, Literal, Optional
 from fastapi import HTTPException
 from anthropic import AsyncAnthropic
@@ -13,13 +14,24 @@ from .config import (
     OPENAI_API_KEY, OPENAI_CHAT_MODEL,
     ANTHROPIC_API_KEY, ANTHROPIC_CHAT_MODEL,
     OLLAMA_API_KEY, OLLAMA_MODEL, OLLAMA_BASE_URL,
-    NAT_BASE_URL, NAT_CHAT_MODEL
+    NAT_BASE_URL, NAT_CHAT_MODEL, NAT_CONVERSATION_ID,
 )
 from .schemas import TradingSignal, AnalysisReport
 from .models import AgentReport
 
 logger = logging.getLogger(__name__)
 _NAT_RESPONSE_LOG_PREVIEW_CHARS = 800
+
+def _nat_conversation_id(
+    stock: str,
+    *,
+    trigger_source: str | None = None,
+) -> str:
+    """Per-stock NAT thread so scheduler/API runs do not share ReAct transcript."""
+    today = date.today().isoformat()
+    prefix = trigger_source or "api"
+    return f"{prefix}:{stock}:{today}"
+
 
 async def perform_stock_analysis(
     stock: str,
@@ -28,6 +40,7 @@ async def perform_stock_analysis(
     *,
     trigger_source: str | None = None,
     trigger_signal: str | None = None,
+    conversation_id: str | None = None,
 ) -> dict[str, Any]:
     """
     종목 분석을 수행하고 결과를 DB에 저장한 뒤 반환합니다.
@@ -67,7 +80,10 @@ async def perform_stock_analysis(
     )
     
     key = normalize_llm_provider(provider)
-    raw = await llm_chat(key, user_msg)
+    nat_cid = conversation_id
+    if key == "nat" and nat_cid is None:
+        nat_cid = _nat_conversation_id(stock, trigger_source=trigger_source)
+    raw = await llm_chat(key, user_msg, conversation_id=nat_cid)
     data = analysis_from_nat_text(str(raw), stock)
 
     # 분석 리포트를 데이터베이스에 자동으로 저장
@@ -251,12 +267,18 @@ def _log_nat_response(resp: httpx.Response) -> None:
         )
 
 
-async def _llm_nat_chat(user_msg: str) -> str:
+async def _llm_nat_chat(user_msg: str, *, conversation_id: str | None = None) -> str:
     url = f"{NAT_BASE_URL}/v1/chat/completions"
+    cid = (conversation_id or NAT_CONVERSATION_ID).strip()
+    headers = {
+        "Content-Type": "application/json",
+        "conversation-id": cid,
+    }
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as client:
             resp = await client.post(
                 url,
+                headers=headers,
                 json={
                     "model": NAT_CHAT_MODEL,
                     "messages": [{"role": "user", "content": user_msg}],
@@ -395,6 +417,8 @@ def normalize_llm_provider(
 async def llm_chat(
     provider_key: Literal["openai", "anthropic", "nat", "ollama"],
     user_msg: str,
+    *,
+    conversation_id: str | None = None,
 ) -> str:
     if provider_key == "openai":
         return await _llm_openai_chat(user_msg)
@@ -402,4 +426,4 @@ async def llm_chat(
         return await _llm_anthropic_chat(user_msg)
     if provider_key == "ollama":
         return await _llm_ollama_chat(user_msg)
-    return await _llm_nat_chat(user_msg)
+    return await _llm_nat_chat(user_msg, conversation_id=conversation_id)

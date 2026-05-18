@@ -1,9 +1,12 @@
 import asyncio
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 from nat_finus_nat import finus_api
-from nat_finus_nat import finus_paths
+
+# path helpers live on finus_api (no separate finus_paths module)
+finus_paths = finus_api
 
 
 def _write_mcp_script(root, name):
@@ -123,12 +126,17 @@ def test_mcp_dart_stock_routes_to_disclosure_signal_tool(monkeypatch, tmp_path):
 
     monkeypatch.setattr(finus_api, "_mcp_call_tool", fake_mcp_call_tool)
 
-    config = SimpleNamespace(vendor_root=str(tmp_path), timeout_sec=7)
-    result = asyncio.run(finus_api._mcp_dart_stock(config, "삼성전자"))
+    result = asyncio.run(
+        finus_api._mcp_dart_stock(
+            vendor_root=str(tmp_path),
+            timeout_sec=7,
+            stock_name="삼성전자",
+        )
+    )
 
     assert result == "ok"
     assert captured == {
-        "vendor_root": tmp_path,
+        "vendor_root": Path(str(tmp_path)).expanduser().resolve(),
         "subdir": "mcp-dart",
         "tool_name": "get_disclosure_signal",
         "arguments": {"stock_name": "삼성전자"},

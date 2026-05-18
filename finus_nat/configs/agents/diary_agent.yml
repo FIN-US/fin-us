@@ -1,24 +1,37 @@
 base: strategy_agent.yml
+# 해당 에이전트는 당일 거래 내역을 확인하고 이를 기반으로 매매일지 초안을 작성합니다.
+
+llms:
+  diary_openai_llm:
+    _type: openai
+    api_key: ${OPENAI_API_KEY}
+    base_url: ${OPENAI_API_BASE_URL:-${OPENAI_BASE_URL:-https://api.openai.com/v1}}
+    model_name: ${DIARY_OPENAI_CHAT_MODEL:-gpt-5.4-mini}
 
 functions:
+  # Kis Trading MCP 없이 KIS Open API(HTTP) 환경 변수로 당일 체결·주문 내역 조회
+  # Kis Trading MCP를 사용하면 혹시나라도 거래가 발생할 가능성을 없애기 위함
+  kis-api-daily-trades:
+    _type: finus_kis_daily_trades
+    timeout_sec: 120
+
   diary_agent:
     _type: react_agent
-    llm_name: openai_cloud_llm
+    llm_name: diary_openai_llm
     tool_names:
-      - fe_stub
+      - kis-api-daily-trades
     verbose: false
-    use_native_tool_calling: false
+    use_native_tool_calling: true
+    max_history: 8000
     parse_agent_response_max_retries: 2
     raise_on_parsing_failure: false
     accept_direct_answer_without_react_format: false
     additional_instructions: |
-      === 에이전트 요약 ===
-      매매 대한 메모, 복기, 감정 정리을 정리합니다. 외부 데이터 도구 없이 저장된 데이터로 초안을 작성합니다.
-
-      === 동작 지시 ===
-      "diary agent를 호출합니다"를 출력합니다.
+      당일 거래 내역을 기반으로 사용자의 매매일지의 초안을 작성합니다. 종목명, 거래 금액, 변동율, 매매 구분(매수, 매도, 보유)을 포함합니다.
+      거래 근거가 필요하면 `kis-api-daily-trades`를 호출합니다. (환경 변수: KIS_URL, KIS_API_KEY, KIS_API_SECRET, KIS_ACCOUNT_NO)
+      최종 답변은 한국어로, 오늘 거래가 없으면 그 사실을 명시합니다.
 
   diary_branch_agent:
     _type: fe_branch
     inner_function_name: diary_agent
-    tool_description: "Trading diary: conversation and reflection (no file journal)."
+    tool_description: "Trading diary: KIS Open API 당일 체결·주문 내역 조회 후 매매일지 초안 생성."

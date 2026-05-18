@@ -25,16 +25,15 @@ where = ["src"]
 name = "nat-finus-nat"
 dynamic = ["version"]
 requires-python = ">=3.11,<3.14"
-description = "Fin-Us NAT example: router + six sub-agents (OpenAI default, optional Ollama, Fin-Us MCP default, optional KIS SSE)"
-classifiers = [
-  "Programming Language :: Python",
-  "Programming Language :: Python :: 3.11",
-  "Programming Language :: Python :: 3.12",
-  "Programming Language :: Python :: 3.13",
-]
+description = "Fin-Us NAT: router + sub-agents, mcp-news/mcp-trading/mcp-dart (stdio MCP), Kis Trading MCP pass-through, optional Mem0"
+classifiers = ["Programming Language :: Python"]
 dependencies = [
-  "nvidia-nat[langchain,mcp]>=1.6.0,<2",
+  "nvidia-nat[langchain,mcp,mem0ai]>=1.6.0,<2",
 ]
 
 [project.entry-points.'nat.components']
 nat_finus_nat = "nat_finus_nat.register"
+
+[project.scripts]
+finus-chat = "nat_finus_nat.chat_cli:main"
+
