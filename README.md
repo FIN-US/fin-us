@@ -161,7 +161,13 @@ docker compose exec backend uv run --project /app/backend python /app/backend/sc
 /alerts all     # NAT 분석이 실행될 때마다 전송
 /alerts off     # Telegram 분석 알림 중지
 /alerts status  # 현재 알림 모드 확인
+/help           # 사용 가능한 Telegram 명령 확인
+/balance        # 예수금·총자산·보유 종목 조회
+/quote <종목명> # 현재가 조회
+/trend <종목명> # 외국인·기관·개인 수급 조회
 ```
+
+슬래시 명령이 아닌 일반 텍스트는 NAT 채팅으로 전달됩니다. Telegram 채팅은 `telegram:{chat_id}` conversation id를 사용하므로 스케줄러 분석 리포트와 대화 이력이 섞이지 않습니다.
 
 ---
 
