@@ -109,6 +109,23 @@ class TelegramNotifier:
             logger.error("Telegram message send failed: %s", exc)
             return False
 
+    async def send_chat_action(self, action: str = "typing") -> bool:
+        if not self.enabled:
+            return False
+
+        url = f"https://api.telegram.org/bot{self.bot_token}/sendChatAction"
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.post(
+                    url,
+                    json={"chat_id": self.chat_id, "action": action},
+                )
+                response.raise_for_status()
+            return True
+        except Exception as exc:
+            logger.error("Telegram chat action send failed: %s", exc)
+            return False
+
     async def _post_message(self, text: str) -> None:
         url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
         async with httpx.AsyncClient(timeout=10.0) as client:

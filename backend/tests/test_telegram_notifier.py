@@ -110,3 +110,36 @@ async def test_send_analysis_alert_returns_false_on_http_error(monkeypatch):
     )
 
     assert result is False
+
+
+@pytest.mark.asyncio
+async def test_send_chat_action_posts_typing_payload(monkeypatch):
+    captured = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+    class FakeAsyncClient:
+        def __init__(self, *, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return None
+
+        async def post(self, url, *, json):
+            captured["url"] = url
+            captured["json"] = json
+            return FakeResponse()
+
+    monkeypatch.setattr("backend.telegram_notifier.httpx.AsyncClient", FakeAsyncClient)
+    notifier = TelegramNotifier("token", "123")
+
+    result = await notifier.send_chat_action()
+
+    assert result is True
+    assert captured["url"] == "https://api.telegram.org/bottoken/sendChatAction"
+    assert captured["json"] == {"chat_id": "123", "action": "typing"}
