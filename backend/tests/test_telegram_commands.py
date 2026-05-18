@@ -24,14 +24,15 @@ class FakeState:
 
 
 class FakeNotifier:
-    def __init__(self, chat_id="123"):
+    def __init__(self, chat_id="123", send_text_result=True):
         self.chat_id = chat_id
+        self.send_text_result = send_text_result
         self.messages = []
         self.actions = []
 
     async def send_text(self, text):
         self.messages.append(text)
-        return True
+        return self.send_text_result
 
     async def send_chat_action(self, action="typing"):
         self.actions.append(action)
@@ -320,4 +321,39 @@ async def test_poller_keeps_offset_when_update_handling_fails(monkeypatch):
     with pytest.raises(pytest.fail.Exception):
         await poller.run()
 
+    assert poller.offset is None
+
+
+@pytest.mark.asyncio
+async def test_poller_keeps_offset_when_nat_response_send_fails(monkeypatch):
+    calls = []
+    notifier = FakeNotifier(send_text_result=False)
+    notifier.enabled = True
+    notifier.bot_token = "token"
+
+    async def fake_llm_runner(provider, text, *, conversation_id=None):
+        calls.append((provider, text, conversation_id))
+        return "NAT 응답"
+
+    handler = TelegramCommandHandler(notifier=notifier, llm_runner=fake_llm_runner)
+    poller = TelegramCommandPoller(notifier=notifier, handler=handler)
+    polls = 0
+
+    async def fake_get_updates():
+        nonlocal polls
+        polls += 1
+        if polls > 1:
+            raise RuntimeError("stop after handled update")
+        return [{"update_id": 41, "message": {"chat": {"id": 123}, "text": "질문"}}]
+
+    async def stop_after_failure(delay):
+        raise pytest.fail.Exception("stop after first failed polling iteration")
+
+    monkeypatch.setattr(poller, "_get_updates", fake_get_updates)
+    monkeypatch.setattr("backend.telegram_commands.asyncio.sleep", stop_after_failure)
+
+    with pytest.raises(pytest.fail.Exception):
+        await poller.run()
+
+    assert calls == [("nat", "질문", "telegram:123")]
     assert poller.offset is None

@@ -80,7 +80,7 @@ class TelegramCommandHandler:
             await self._handle_alerts(argument)
             return
         if command == "/help":
-            await self.notifier.send_text(TELEGRAM_INTERACTIVE_HELP)
+            await self._send_text_or_raise(TELEGRAM_INTERACTIVE_HELP)
             return
         if command == "/balance":
             await self._handle_balance()
@@ -92,10 +92,15 @@ class TelegramCommandHandler:
             await self._handle_trend(argument)
             return
         if text.startswith("/"):
-            await self.notifier.send_text(TELEGRAM_INTERACTIVE_HELP)
+            await self._send_text_or_raise(TELEGRAM_INTERACTIVE_HELP)
             return
 
         await self._handle_chat_fallback(text, str(chat.get("id", "")).strip())
+
+    async def _send_text_or_raise(self, text: str) -> None:
+        sent = await self.notifier.send_text(text)
+        if sent is False:
+            raise RuntimeError("telegram send failed")
 
     async def _handle_alerts(self, argument: str) -> None:
         parts = argument.split()
@@ -103,28 +108,30 @@ class TelegramCommandHandler:
         async with self._state() as state:
             if action == "status":
                 mode = await state.get_telegram_alert_mode()
-                await self.notifier.send_text(f"현재 Telegram 알림 모드: {mode}")
+                await self._send_text_or_raise(f"현재 Telegram 알림 모드: {mode}")
                 return
 
             if action not in TELEGRAM_ALERT_MODES:
-                await self.notifier.send_text(ALERT_COMMAND_HELP)
+                await self._send_text_or_raise(ALERT_COMMAND_HELP)
                 return
 
             await state.set_telegram_alert_mode(action)
-            await self.notifier.send_text(f"Telegram 알림 모드가 {action}(으)로 변경되었습니다.")
+            await self._send_text_or_raise(
+                f"Telegram 알림 모드가 {action}(으)로 변경되었습니다."
+            )
 
     async def _handle_balance(self) -> None:
         await self.notifier.send_chat_action("typing")
         try:
             result = await self.mcp_runner(TRADING_MCP_PARAMS, "get_balance", {})
         except Exception as exc:
-            await self.notifier.send_text(f"조회 실패: {_short_error(exc)}")
+            await self._send_text_or_raise(f"조회 실패: {_short_error(exc)}")
             return
-        await self.notifier.send_text(_telegram_text(str(result)))
+        await self._send_text_or_raise(_telegram_text(str(result)))
 
     async def _handle_quote(self, argument: str) -> None:
         if not argument:
-            await self.notifier.send_text(QUOTE_COMMAND_HELP)
+            await self._send_text_or_raise(QUOTE_COMMAND_HELP)
             return
 
         stock = argument.strip()
@@ -136,13 +143,13 @@ class TelegramCommandHandler:
                 {"stock_name": stock},
             )
         except Exception as exc:
-            await self.notifier.send_text(f"조회 실패: {_short_error(exc)}")
+            await self._send_text_or_raise(f"조회 실패: {_short_error(exc)}")
             return
-        await self.notifier.send_text(_telegram_text(str(result)))
+        await self._send_text_or_raise(_telegram_text(str(result)))
 
     async def _handle_trend(self, argument: str) -> None:
         if not argument:
-            await self.notifier.send_text(TREND_COMMAND_HELP)
+            await self._send_text_or_raise(TREND_COMMAND_HELP)
             return
 
         stock = argument.strip()
@@ -154,9 +161,9 @@ class TelegramCommandHandler:
                 {"stock_name": stock},
             )
         except Exception as exc:
-            await self.notifier.send_text(f"조회 실패: {_short_error(exc)}")
+            await self._send_text_or_raise(f"조회 실패: {_short_error(exc)}")
             return
-        await self.notifier.send_text(_telegram_text(str(result)))
+        await self._send_text_or_raise(_telegram_text(str(result)))
 
     async def _handle_chat_fallback(self, text: str, chat_id: str) -> None:
         await self.notifier.send_chat_action("typing")
@@ -167,9 +174,9 @@ class TelegramCommandHandler:
                 conversation_id=f"telegram:{chat_id}",
             )
         except Exception as exc:
-            await self.notifier.send_text(f"응답 생성 실패: {_short_error(exc)}")
+            await self._send_text_or_raise(f"응답 생성 실패: {_short_error(exc)}")
             return
-        await self.notifier.send_text(_telegram_text(str(result)))
+        await self._send_text_or_raise(_telegram_text(str(result)))
 
     @asynccontextmanager
     async def _state(self):
