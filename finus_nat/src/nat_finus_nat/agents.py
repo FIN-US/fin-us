@@ -33,7 +33,10 @@ logger = logging.getLogger(__name__)
 
 MEMORY_PROMPT_PREFIX = "Relevant context from memory:"
 CONVERSATION_ID_HTTP_HEADER = "conversation-id"
-_DEFAULT_CONVERSATION_ID = os.environ.get("FINUS_DEFAULT_CONVERSATION_ID", "fin-us-default")
+_DEFAULT_CONVERSATION_ID = os.environ.get(
+    "FINUS_DEFAULT_CONVERSATION_ID",
+    "fin-us-default",
+).strip()
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _KNOWN_STOCK_NAMES = ("삼성전자", "NAVER", "네이버")
 
