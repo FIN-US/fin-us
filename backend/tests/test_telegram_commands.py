@@ -74,7 +74,7 @@ async def test_help_command_replies_with_supported_commands():
     assert "/balance - 예수금·총자산·보유 종목 조회" in notifier.messages[-1]
     assert "/quote <종목명> - 현재가 조회" in notifier.messages[-1]
     assert "/trend <종목명> - 외국인·기관·개인 수급 조회" in notifier.messages[-1]
-    assert "NAT" not in notifier.messages[-1]
+    assert "일반 문장은 NAT에게 바로 질문합니다." in notifier.messages[-1]
 
 
 @pytest.mark.asyncio
@@ -84,6 +84,57 @@ async def test_unknown_slash_command_replies_with_help():
 
     await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/unknown"}})
 
+    assert notifier.messages == [TELEGRAM_INTERACTIVE_HELP]
+
+
+@pytest.mark.asyncio
+async def test_regular_text_calls_nat_with_telegram_conversation_id():
+    calls = []
+
+    async def fake_llm_runner(provider, text, *, conversation_id=None):
+        calls.append((provider, text, conversation_id))
+        return "NAT 응답"
+
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(notifier=notifier, llm_runner=fake_llm_runner)
+
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "삼성전자 오늘 어때?"}})
+
+    assert calls == [("nat", "삼성전자 오늘 어때?", "telegram:123")]
+    assert notifier.actions == ["typing"]
+    assert notifier.messages[-1] == "NAT 응답"
+
+
+@pytest.mark.asyncio
+async def test_regular_text_uses_actual_chat_id_in_conversation_id():
+    calls = []
+
+    async def fake_llm_runner(provider, text, *, conversation_id=None):
+        calls.append(conversation_id)
+        return "ok"
+
+    notifier = FakeNotifier(chat_id="456")
+    handler = TelegramCommandHandler(notifier=notifier, llm_runner=fake_llm_runner)
+
+    await handler.handle_update({"message": {"chat": {"id": 456}, "text": "계속 봐줘"}})
+
+    assert calls == ["telegram:456"]
+
+
+@pytest.mark.asyncio
+async def test_unknown_slash_command_does_not_call_nat():
+    calls = []
+
+    async def fake_llm_runner(provider, text, *, conversation_id=None):
+        calls.append((provider, text, conversation_id))
+        raise AssertionError("unknown slash command must not call NAT")
+
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(notifier=notifier, llm_runner=fake_llm_runner)
+
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/unknown"}})
+
+    assert calls == []
     assert notifier.messages == [TELEGRAM_INTERACTIVE_HELP]
 
 
@@ -199,6 +250,34 @@ async def test_mcp_result_is_truncated_for_telegram_limit():
     handler = TelegramCommandHandler(notifier=notifier, mcp_runner=mcp_runner)
 
     await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/balance"}})
+
+    message = notifier.messages[-1]
+    assert len(message) == TELEGRAM_MESSAGE_LIMIT
+    assert message.endswith(TELEGRAM_TRUNCATION_SUFFIX)
+
+
+@pytest.mark.asyncio
+async def test_nat_failure_replies_with_short_failure_message():
+    async def fake_llm_runner(provider, text, *, conversation_id=None):
+        raise RuntimeError("nat unavailable")
+
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(notifier=notifier, llm_runner=fake_llm_runner)
+
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "질문"}})
+
+    assert notifier.messages[-1] == "응답 생성 실패: nat unavailable"
+
+
+@pytest.mark.asyncio
+async def test_nat_response_is_truncated_for_telegram_limit():
+    async def fake_llm_runner(provider, text, *, conversation_id=None):
+        return "나" * (TELEGRAM_MESSAGE_LIMIT + 100)
+
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(notifier=notifier, llm_runner=fake_llm_runner)
+
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "긴 답변 줘"}})
 
     message = notifier.messages[-1]
     assert len(message) == TELEGRAM_MESSAGE_LIMIT

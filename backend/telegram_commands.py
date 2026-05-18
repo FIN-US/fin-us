@@ -7,7 +7,7 @@ import httpx
 
 from .config import TRADING_MCP_PARAMS
 from .redis_state import RedisSchedulerState, redis_state
-from .services import run_mcp_tool
+from .services import llm_chat, run_mcp_tool
 from .telegram_notifier import TELEGRAM_ALERT_MODES, TelegramNotifier, telegram_notifier
 
 logger = logging.getLogger(__name__)
@@ -20,6 +20,7 @@ TELEGRAM_INTERACTIVE_HELP = "\n".join(
         "/balance - 예수금·총자산·보유 종목 조회",
         "/quote <종목명> - 현재가 조회",
         "/trend <종목명> - 외국인·기관·개인 수급 조회",
+        "일반 문장은 NAT에게 바로 질문합니다.",
     ]
 )
 QUOTE_COMMAND_HELP = "사용법: /quote <종목명>"
@@ -57,10 +58,12 @@ class TelegramCommandHandler:
         notifier: TelegramNotifier,
         state_factory: Callable[[], Any] = redis_state,
         mcp_runner: Callable[[Any, str, dict[str, Any]], Any] = run_mcp_tool,
+        llm_runner: Callable[..., Any] = llm_chat,
     ):
         self.notifier = notifier
         self.state_factory = state_factory
         self.mcp_runner = mcp_runner
+        self.llm_runner = llm_runner
 
     async def handle_update(self, update: dict[str, Any]) -> None:
         message = update.get("message") or {}
@@ -90,6 +93,9 @@ class TelegramCommandHandler:
             return
         if text.startswith("/"):
             await self.notifier.send_text(TELEGRAM_INTERACTIVE_HELP)
+            return
+
+        await self._handle_chat_fallback(text, str(chat.get("id", "")).strip())
 
     async def _handle_alerts(self, argument: str) -> None:
         parts = argument.split()
@@ -149,6 +155,19 @@ class TelegramCommandHandler:
             )
         except Exception as exc:
             await self.notifier.send_text(f"조회 실패: {_short_error(exc)}")
+            return
+        await self.notifier.send_text(_telegram_text(str(result)))
+
+    async def _handle_chat_fallback(self, text: str, chat_id: str) -> None:
+        await self.notifier.send_chat_action("typing")
+        try:
+            result = await self.llm_runner(
+                "nat",
+                text,
+                conversation_id=f"telegram:{chat_id}",
+            )
+        except Exception as exc:
+            await self.notifier.send_text(f"응답 생성 실패: {_short_error(exc)}")
             return
         await self.notifier.send_text(_telegram_text(str(result)))
 
