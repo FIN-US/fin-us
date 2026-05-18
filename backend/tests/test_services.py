@@ -1,5 +1,6 @@
 import logging
 from datetime import date
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -40,6 +41,35 @@ def mock_async_client_factory(response: httpx.Response):
     return factory
 
 
+class FakeStdioClient:
+    async def __aenter__(self):
+        return "read", "write"
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+class FakeMcpSession:
+    def __init__(self, read, write):
+        self.read = read
+        self.write = write
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def initialize(self):
+        return None
+
+    async def call_tool(self, tool_name, arguments):
+        return SimpleNamespace(
+            isError=True,
+            content=[SimpleNamespace(text="잔고 조회 에러 발생: 인증 실패")],
+        )
+
+
 @pytest.mark.asyncio
 async def test_check_signal_significance_uses_generic_source_prompt(monkeypatch):
     prompts = []
@@ -61,6 +91,22 @@ async def test_check_signal_significance_uses_generic_source_prompt(monkeypatch)
     assert prompts[0][0] == "ollama"
     assert "signal 출처: sns" in prompts[0][1]
     assert "뉴스 내용" not in prompts[0][1]
+
+
+@pytest.mark.asyncio
+async def test_run_mcp_tool_raises_tool_level_error_detail(monkeypatch):
+    monkeypatch.setattr(services, "stdio_client", lambda server_params: FakeStdioClient())
+    monkeypatch.setattr(services, "ClientSession", FakeMcpSession)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await services.run_mcp_tool(
+            SimpleNamespace(),
+            "get_balance",
+            {},
+        )
+
+    assert exc_info.value.status_code == 500
+    assert exc_info.value.detail == "잔고 조회 에러 발생: 인증 실패"
 
 
 @pytest.mark.asyncio
