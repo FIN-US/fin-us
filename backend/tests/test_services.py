@@ -1,4 +1,5 @@
 import logging
+from datetime import date
 
 import httpx
 import pytest
@@ -43,7 +44,7 @@ def mock_async_client_factory(response: httpx.Response):
 async def test_check_signal_significance_uses_generic_source_prompt(monkeypatch):
     prompts = []
 
-    async def fake_llm_chat(provider, prompt):
+    async def fake_llm_chat(provider, prompt, *, conversation_id=None):
         prompts.append((provider, prompt))
         return "YES"
 
@@ -66,8 +67,11 @@ async def test_check_signal_significance_uses_generic_source_prompt(monkeypatch)
 async def test_perform_stock_analysis_includes_trigger_signal(monkeypatch):
     prompts = []
 
-    async def fake_llm_chat(provider, prompt):
+    captured_cids = []
+
+    async def fake_llm_chat(provider, prompt, *, conversation_id=None):
         prompts.append((provider, prompt))
+        captured_cids.append(conversation_id)
         return "plain analysis"
 
     monkeypatch.setattr(services, "llm_chat", fake_llm_chat)
@@ -81,6 +85,7 @@ async def test_perform_stock_analysis_includes_trigger_signal(monkeypatch):
     )
 
     assert prompts[0][0] == "nat"
+    assert captured_cids == [f"sns:삼성전자:{date.today().isoformat()}"]
     assert "분석 트리거 데이터 출처: sns" in prompts[0][1]
     assert "SNS mentions spiked after earnings guidance" in prompts[0][1]
     assert '"source_signals"' in prompts[0][1]
