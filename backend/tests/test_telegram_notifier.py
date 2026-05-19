@@ -1,3 +1,5 @@
+import logging
+
 import httpx
 import pytest
 
@@ -110,6 +112,29 @@ async def test_send_analysis_alert_returns_false_on_http_error(monkeypatch):
     )
 
     assert result is False
+
+
+def test_httpx_telegram_bot_token_is_redacted_from_logs(caplog):
+    telegram_url = "https://api.telegram.org/bot8666951614:SECRET/sendMessage"
+
+    with caplog.at_level(logging.INFO, logger="httpx"):
+        logging.getLogger("httpx").info(
+            'HTTP Request: POST %s "HTTP/1.1 200 OK"',
+            telegram_url,
+        )
+
+    assert "8666951614:SECRET" not in caplog.text
+    assert "https://api.telegram.org/bot<redacted>/sendMessage" in caplog.text
+
+
+def test_telegram_error_log_redacts_bot_token(caplog):
+    telegram_url = "https://api.telegram.org/bot8666951614:SECRET/getUpdates"
+
+    with caplog.at_level(logging.ERROR, logger="httpx"):
+        logging.getLogger("httpx").error("request failed: %s", httpx.HTTPError(telegram_url))
+
+    assert "8666951614:SECRET" not in caplog.text
+    assert "https://api.telegram.org/bot<redacted>/getUpdates" in caplog.text
 
 
 @pytest.mark.asyncio
