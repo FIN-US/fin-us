@@ -1,3 +1,5 @@
+import logging
+
 import httpx
 import pytest
 
@@ -110,3 +112,92 @@ async def test_send_analysis_alert_returns_false_on_http_error(monkeypatch):
     )
 
     assert result is False
+
+
+def test_httpx_telegram_bot_token_is_redacted_from_logs(caplog):
+    telegram_url = "https://api.telegram.org/bot8666951614:SECRET/sendMessage"
+
+    with caplog.at_level(logging.INFO, logger="httpx"):
+        logging.getLogger("httpx").info(
+            'HTTP Request: POST %s "HTTP/1.1 200 OK"',
+            telegram_url,
+        )
+
+    assert "8666951614:SECRET" not in caplog.text
+    assert "https://api.telegram.org/bot<redacted>/sendMessage" in caplog.text
+
+
+def test_telegram_error_log_redacts_bot_token(caplog):
+    telegram_url = "https://api.telegram.org/bot8666951614:SECRET/getUpdates"
+
+    with caplog.at_level(logging.ERROR, logger="httpx"):
+        logging.getLogger("httpx").error("request failed: %s", httpx.HTTPError(telegram_url))
+
+    assert "8666951614:SECRET" not in caplog.text
+    assert "https://api.telegram.org/bot<redacted>/getUpdates" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_send_chat_action_posts_typing_payload(monkeypatch):
+    captured = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+    class FakeAsyncClient:
+        def __init__(self, *, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return None
+
+        async def post(self, url, *, json):
+            captured["url"] = url
+            captured["json"] = json
+            return FakeResponse()
+
+    monkeypatch.setattr("backend.telegram_notifier.httpx.AsyncClient", FakeAsyncClient)
+    notifier = TelegramNotifier("token", "123")
+
+    result = await notifier.send_chat_action()
+
+    assert result is True
+    assert captured["url"] == "https://api.telegram.org/bottoken/sendChatAction"
+    assert captured["json"] == {"chat_id": "123", "action": "typing"}
+
+
+@pytest.mark.asyncio
+async def test_load_bot_username_fetches_and_caches_get_me(monkeypatch):
+    calls = []
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"ok": True, "result": {"username": "Finus_Bot"}}
+
+    class FakeAsyncClient:
+        def __init__(self, *, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return None
+
+        async def post(self, url, **kwargs):
+            calls.append((url, kwargs))
+            return FakeResponse()
+
+    monkeypatch.setattr("backend.telegram_notifier.httpx.AsyncClient", FakeAsyncClient)
+    notifier = TelegramNotifier("token", "123")
+
+    assert await notifier.load_bot_username() == "finus_bot"
+    assert await notifier.load_bot_username() == "finus_bot"
+    assert calls == [("https://api.telegram.org/bottoken/getMe", {})]

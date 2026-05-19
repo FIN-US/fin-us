@@ -338,10 +338,16 @@ async def run_mcp_tool(
             async with ClientSession(read, write) as session:
                 await session.initialize()
                 result = await session.call_tool(tool_name, arguments)
+                if getattr(result, "isError", False):
+                    block = result.content[0] if result.content else None
+                    detail = getattr(block, "text", str(block)) if block else "MCP 도구 오류"
+                    raise HTTPException(status_code=500, detail=detail)
                 if not result.content:
                     return ""
                 block = result.content[0]
                 return getattr(block, "text", str(block))
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.exception("MCP call_tool failed for %s", tool_name)
         raise HTTPException(
