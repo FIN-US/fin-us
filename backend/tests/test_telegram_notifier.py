@@ -143,3 +143,36 @@ async def test_send_chat_action_posts_typing_payload(monkeypatch):
     assert result is True
     assert captured["url"] == "https://api.telegram.org/bottoken/sendChatAction"
     assert captured["json"] == {"chat_id": "123", "action": "typing"}
+
+
+@pytest.mark.asyncio
+async def test_load_bot_username_fetches_and_caches_get_me(monkeypatch):
+    calls = []
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"ok": True, "result": {"username": "Finus_Bot"}}
+
+    class FakeAsyncClient:
+        def __init__(self, *, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return None
+
+        async def post(self, url, **kwargs):
+            calls.append((url, kwargs))
+            return FakeResponse()
+
+    monkeypatch.setattr("backend.telegram_notifier.httpx.AsyncClient", FakeAsyncClient)
+    notifier = TelegramNotifier("token", "123")
+
+    assert await notifier.load_bot_username() == "finus_bot"
+    assert await notifier.load_bot_username() == "finus_bot"
+    assert calls == [("https://api.telegram.org/bottoken/getMe", {})]

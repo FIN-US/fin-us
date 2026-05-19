@@ -24,9 +24,11 @@ class FakeState:
 
 
 class FakeNotifier:
-    def __init__(self, chat_id="123", send_text_result=True):
+    def __init__(self, chat_id="123", send_text_result=True, bot_username=""):
         self.chat_id = chat_id
         self.send_text_result = send_text_result
+        self.bot_username = bot_username
+        self.loaded_bot_username = False
         self.messages = []
         self.actions = []
 
@@ -37,6 +39,10 @@ class FakeNotifier:
     async def send_chat_action(self, action="typing"):
         self.actions.append(action)
         return True
+
+    async def load_bot_username(self):
+        self.loaded_bot_username = True
+        return self.bot_username
 
 
 @pytest.mark.asyncio
@@ -62,6 +68,20 @@ async def test_alerts_status_reports_current_mode():
 
     assert state.mode == "off"
     assert "off" in notifier.messages[-1]
+
+
+@pytest.mark.asyncio
+async def test_alerts_command_accepts_matching_telegram_bot_suffix():
+    state = FakeState()
+    notifier = FakeNotifier(bot_username="finus_bot")
+    handler = TelegramCommandHandler(notifier=notifier, state_factory=lambda: state)
+
+    await handler.handle_update(
+        {"message": {"chat": {"id": 123}, "text": "/alerts@finus_bot all"}}
+    )
+
+    assert state.mode == "all"
+    assert "all" in notifier.messages[-1]
 
 
 @pytest.mark.asyncio
@@ -169,6 +189,26 @@ async def test_quote_command_calls_mcp_runner_with_stock_name():
     handler = TelegramCommandHandler(notifier=notifier, mcp_runner=mcp_runner)
 
     await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/quote 삼성전자"}})
+
+    assert calls == [(TRADING_MCP_PARAMS, "get_stock_quote", {"stock_name": "삼성전자"})]
+    assert notifier.actions == ["typing"]
+    assert notifier.messages == ["현재가 응답"]
+
+
+@pytest.mark.asyncio
+async def test_quote_command_accepts_matching_telegram_bot_suffix():
+    calls = []
+
+    async def mcp_runner(server_params, tool_name, arguments):
+        calls.append((server_params, tool_name, arguments))
+        return "현재가 응답"
+
+    notifier = FakeNotifier(bot_username="finus_bot")
+    handler = TelegramCommandHandler(notifier=notifier, mcp_runner=mcp_runner)
+
+    await handler.handle_update(
+        {"message": {"chat": {"id": 123}, "text": "/quote@finus_bot 삼성전자"}}
+    )
 
     assert calls == [(TRADING_MCP_PARAMS, "get_stock_quote", {"stock_name": "삼성전자"})]
     assert notifier.actions == ["typing"]
@@ -311,6 +351,34 @@ async def test_poller_keeps_offset_when_update_handling_fails(monkeypatch):
 
     async def fake_get_updates():
         return [{"update_id": 41, "message": {"chat": {"id": 123}, "text": "/alerts off"}}]
+
+    async def stop_after_failure(delay):
+        raise pytest.fail.Exception("stop after first failed polling iteration")
+
+    monkeypatch.setattr(poller, "_get_updates", fake_get_updates)
+    monkeypatch.setattr("backend.telegram_commands.asyncio.sleep", stop_after_failure)
+
+    with pytest.raises(pytest.fail.Exception):
+        await poller.run()
+
+    assert poller.offset is None
+
+
+@pytest.mark.asyncio
+async def test_poller_loads_bot_username_before_updates(monkeypatch):
+    notifier = FakeNotifier(bot_username="finus_bot")
+    notifier.enabled = True
+    notifier.bot_token = "token"
+
+    class NoopHandler:
+        async def handle_update(self, update):
+            return None
+
+    poller = TelegramCommandPoller(notifier=notifier, handler=NoopHandler())
+
+    async def fake_get_updates():
+        assert notifier.loaded_bot_username is True
+        raise RuntimeError("stop after username load")
 
     async def stop_after_failure(delay):
         raise pytest.fail.Exception("stop after first failed polling iteration")

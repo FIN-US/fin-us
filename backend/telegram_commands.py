@@ -46,9 +46,10 @@ def _short_error(exc: Exception) -> str:
     return text[:300]
 
 
-def _telegram_command_parts(text: str) -> tuple[str, str]:
+def _telegram_command_parts(text: str) -> tuple[str, str, str]:
     command, _, argument = text.partition(" ")
-    return command.lower(), argument.strip()
+    command_name, separator, bot_username = command.partition("@")
+    return command_name.lower(), bot_username.lower() if separator else "", argument.strip()
 
 
 class TelegramCommandHandler:
@@ -75,20 +76,20 @@ class TelegramCommandHandler:
         if not text:
             return
 
-        command, argument = _telegram_command_parts(text)
-        if command == "/alerts":
+        command, bot_username, argument = _telegram_command_parts(text)
+        if self._matches_command(command, bot_username, "/alerts"):
             await self._handle_alerts(argument)
             return
-        if command == "/help":
+        if self._matches_command(command, bot_username, "/help"):
             await self._send_text_or_raise(TELEGRAM_INTERACTIVE_HELP)
             return
-        if command == "/balance":
+        if self._matches_command(command, bot_username, "/balance"):
             await self._handle_balance()
             return
-        if command == "/quote":
+        if self._matches_command(command, bot_username, "/quote"):
             await self._handle_quote(argument)
             return
-        if command == "/trend":
+        if self._matches_command(command, bot_username, "/trend"):
             await self._handle_trend(argument)
             return
         if text.startswith("/"):
@@ -101,6 +102,14 @@ class TelegramCommandHandler:
         sent = await self.notifier.send_text(text)
         if sent is False:
             raise RuntimeError("telegram send failed")
+
+    def _matches_command(self, command: str, bot_username: str, expected: str) -> bool:
+        if command != expected:
+            return False
+        if not bot_username:
+            return True
+        notifier_username = str(getattr(self.notifier, "bot_username", "") or "").lower()
+        return bot_username == notifier_username
 
     async def _handle_alerts(self, argument: str) -> None:
         parts = argument.split()
@@ -202,6 +211,9 @@ class TelegramCommandPoller:
     async def run(self) -> None:
         if not self.notifier.enabled:
             return
+        load_bot_username = getattr(self.notifier, "load_bot_username", None)
+        if callable(load_bot_username):
+            await load_bot_username()
 
         while True:
             try:

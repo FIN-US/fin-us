@@ -37,6 +37,7 @@ class TelegramNotifier:
     ):
         self.bot_token = (bot_token or "").strip()
         self.chat_id = (chat_id or "").strip()
+        self.bot_username = ""
         self.enabled = not (
             is_placeholder_secret(self.bot_token)
             or is_placeholder_secret(self.chat_id)
@@ -125,6 +126,26 @@ class TelegramNotifier:
         except Exception as exc:
             logger.error("Telegram chat action send failed: %s", exc)
             return False
+
+    async def load_bot_username(self) -> str:
+        if not self.enabled:
+            return ""
+        if self.bot_username:
+            return self.bot_username
+
+        url = f"https://api.telegram.org/bot{self.bot_token}/getMe"
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.post(url)
+                response.raise_for_status()
+                body = response.json()
+            result = body.get("result") or {}
+            username = str(result.get("username") or "").strip().lstrip("@")
+            self.bot_username = username.lower()
+            return self.bot_username
+        except Exception as exc:
+            logger.error("Telegram bot username lookup failed: %s", exc)
+            return ""
 
     async def _post_message(self, text: str) -> None:
         url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
