@@ -20,13 +20,13 @@ functions:
       - get_user_memory
     verbose: false
     include_tool_input_schema_in_tool_description: true
-    use_native_tool_calling: true
+    use_native_tool_calling: false
     max_history: 8000
     parse_agent_response_max_retries: 5
     raise_on_parsing_failure: false
     max_tool_calls: 20
     pass_tool_call_errors_to_agent: true
-    accept_direct_answer_without_react_format: false
+    accept_direct_answer_without_react_format: true
     additional_instructions: |
       === 에이전트 요약 ===
       포트폴리오 모니터링, 잔고, 뉴스·수급·DART 공시 점검. 잔고는 Kis Trading MCP, 뉴스·수급은 `mcp-news`, 지분공시는 `mcp-dart`를 쓰되 관찰·알림·건전성 관점으로 답합니다.

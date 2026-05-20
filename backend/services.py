@@ -3,6 +3,7 @@ import httpx
 import logging
 from datetime import date
 from typing import Any, Literal, Optional
+from urllib.parse import quote as _url_quote
 from fastapi import HTTPException
 from anthropic import AsyncAnthropic
 from openai import AsyncOpenAI
@@ -30,7 +31,9 @@ def _nat_conversation_id(
     """Per-stock NAT thread so scheduler/API runs do not share ReAct transcript."""
     today = date.today().isoformat()
     prefix = trigger_source or "api"
-    return f"{prefix}:{stock}:{today}"
+    # HTTP 헤더는 ASCII만 허용되므로 한글 종목명을 퍼센트 인코딩
+    safe_stock = _url_quote(stock, safe="")
+    return f"{prefix}:{safe_stock}:{today}"
 
 
 async def perform_stock_analysis(
