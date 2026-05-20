@@ -23,6 +23,18 @@ from .models import AgentReport
 logger = logging.getLogger(__name__)
 _NAT_RESPONSE_LOG_PREVIEW_CHARS = 800
 
+
+def _find_http_exception(exc: BaseException) -> HTTPException | None:
+    if isinstance(exc, HTTPException):
+        return exc
+    if isinstance(exc, BaseExceptionGroup):
+        for nested in exc.exceptions:
+            found = _find_http_exception(nested)
+            if found is not None:
+                return found
+    return None
+
+
 def _nat_conversation_id(
     stock: str,
     *,
@@ -352,6 +364,9 @@ async def run_mcp_tool(
     except HTTPException:
         raise
     except Exception as exc:
+        http_exc = _find_http_exception(exc)
+        if http_exc is not None:
+            raise http_exc from exc
         logger.exception("MCP call_tool failed for %s", tool_name)
         raise HTTPException(
             status_code=500,

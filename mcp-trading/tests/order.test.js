@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { buildBalanceParams, formatPercent } from "../balance.js";
 import {
   buildCashOrderBody,
   createCashOrderRequest,
@@ -27,6 +28,27 @@ test("validateOrderEnvMatchesUrl fails closed on env and URL mismatch", () => {
     () => validateOrderEnvMatchesUrl({ orderEnv: "real", kisUrl: "https://openapivts.koreainvestment.com:29443" }),
     /실계좌 주문은 실전 KIS_URL/,
   );
+});
+
+test("buildBalanceParams includes required KIS inquire-balance fields", () => {
+  assert.deepEqual(buildBalanceParams("1234567801"), {
+    CANO: "12345678",
+    ACNT_PRDT_CD: "01",
+    AFHR_FLPR_YN: "N",
+    OFL_YN: "",
+    INQR_DVSN: "02",
+    UNPR_DVSN: "01",
+    FUND_STTL_ICLD_YN: "N",
+    FNCG_AMT_AUTO_RDPT_YN: "N",
+    PRCS_DVSN: "00",
+    CTX_AREA_FK100: "",
+    CTX_AREA_NK100: "",
+  });
+});
+
+test("formatPercent avoids undefined balance rates", () => {
+  assert.equal(formatPercent(undefined), "-");
+  assert.equal(formatPercent("1.23"), "1.23%");
 });
 
 test("buildCashOrderBody creates uppercase KIS order body", () => {

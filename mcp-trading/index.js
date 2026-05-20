@@ -11,6 +11,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import axios from "axios";
 import dotenv from "dotenv";
+import { buildBalanceParams, formatPercent } from "./balance.js";
 import {
   createCashOrderRequest,
   formatOrderResult,
@@ -267,18 +268,7 @@ async function getBalance() {
   const data = await kisGet(
     "/uapi/domestic-stock/v1/trading/inquire-balance",
     KIS_BALANCE_TR_ID,
-    {
-      CANO: KIS_ACCOUNT_NO.substring(0, 8),
-      ACNT_PRDT_CD: KIS_ACCOUNT_NO.substring(8, 10),
-      AFHR_FLPR_YN: "N",
-      OFL_YN: "",
-      INQR_DVSN: "02",
-      UNPR_DVSN: "01",
-      FUND_STTL_ICLD_YN: "N",
-      FRLG_AMT_UNIT_CD: "00",
-      CTX_AREA_FK100: "",
-      CTX_AREA_NK100: "",
-    },
+    buildBalanceParams(KIS_ACCOUNT_NO),
   );
 
   const summary = data.output2?.[0] || {};
@@ -292,7 +282,7 @@ async function getBalance() {
 [계좌 잔고 현황]
 - 총 평가금액: ${summary.tot_evlu_amt}원
 - 순자산금액: ${summary.pchs_amt_smtl_amt}원
-- 총 손익: ${summary.evlu_pfls_smtl_amt}원 (수익률: ${summary.evlu_pfls_rt}%)
+- 총 손익: ${summary.evlu_pfls_smtl_amt}원 (수익률: ${formatPercent(summary.evlu_pfls_rt)})
 - 예수금: ${summary.dnca_tot_amt}원
 
 [보유 종목 리스트]
