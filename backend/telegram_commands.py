@@ -1,6 +1,8 @@
 import asyncio
 import logging
+import re
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta
 from typing import Any, Callable
 
 import httpx
@@ -9,10 +11,14 @@ from .config import TRADING_MCP_PARAMS
 from .redis_state import RedisSchedulerState, redis_state
 from .services import llm_chat, run_mcp_tool
 from .telegram_notifier import TELEGRAM_ALERT_MODES, TelegramNotifier, telegram_notifier
+from .trading_orders import KST, PendingOrder, is_korean_market_open
 
 logger = logging.getLogger(__name__)
 
 ALERT_COMMAND_HELP = "사용법: /alerts urgent | all | off | status"
+BUY_COMMAND_HELP = "사용법: /buy <종목명> <수량> <지정가>"
+SELL_COMMAND_HELP = "사용법: /sell <종목명> <수량> <지정가>"
+ORDER_EXPIRES_AFTER = timedelta(seconds=60)
 TELEGRAM_INTERACTIVE_HELP = "\n".join(
     [
         "사용 가능한 명령:",
@@ -20,6 +26,10 @@ TELEGRAM_INTERACTIVE_HELP = "\n".join(
         "/balance - 예수금·총자산·보유 종목 조회",
         "/quote <종목명> - 현재가 조회",
         "/trend <종목명> - 외국인·기관·개인 수급 조회",
+        "/buy <종목명> <수량> <지정가> - 지정가 매수 주문 준비",
+        "/sell <종목명> <수량> <지정가> - 지정가 매도 주문 준비",
+        "/confirm - 대기 주문 확정",
+        "/cancel - 대기 주문 취소",
         "일반 문장은 NAT에게 바로 질문합니다.",
     ]
 )
@@ -60,11 +70,18 @@ class TelegramCommandHandler:
         state_factory: Callable[[], Any] = redis_state,
         mcp_runner: Callable[[Any, str, dict[str, Any]], Any] = run_mcp_tool,
         llm_runner: Callable[..., Any] = llm_chat,
+        order_gateway: Any | None = None,
+        trade_recorder: Any | None = None,
+        now_factory: Callable[[], datetime] | None = None,
     ):
         self.notifier = notifier
         self.state_factory = state_factory
         self.mcp_runner = mcp_runner
         self.llm_runner = llm_runner
+        self.order_gateway = order_gateway
+        self.trade_recorder = trade_recorder
+        self.now_factory = now_factory or (lambda: datetime.now(KST))
+        self.pending_orders: dict[str, PendingOrder] = {}
 
     async def handle_update(self, update: dict[str, Any]) -> None:
         message = update.get("message") or {}
@@ -91,6 +108,12 @@ class TelegramCommandHandler:
             return
         if self._matches_command(command, bot_username, "/trend"):
             await self._handle_trend(argument)
+            return
+        if self._matches_command(command, bot_username, "/buy"):
+            await self._handle_order_command("BUY", argument, str(chat.get("id", "")).strip())
+            return
+        if self._matches_command(command, bot_username, "/sell"):
+            await self._handle_order_command("SELL", argument, str(chat.get("id", "")).strip())
             return
         if text.startswith("/"):
             await self._send_text_or_raise(TELEGRAM_INTERACTIVE_HELP)
@@ -155,6 +178,139 @@ class TelegramCommandHandler:
             await self._send_text_or_raise(f"조회 실패: {_short_error(exc)}")
             return
         await self._send_text_or_raise(_telegram_text(str(result)))
+
+    async def _handle_order_command(self, side: str, argument: str, chat_id: str) -> None:
+        usage = BUY_COMMAND_HELP if side == "BUY" else SELL_COMMAND_HELP
+        parsed = self._parse_order_argument(argument)
+        if parsed is None:
+            await self._send_text_or_raise(usage)
+            return
+
+        stock_name, quantity, price = parsed
+        now = self.now_factory()
+        if not is_korean_market_open(now):
+            await self._send_text_or_raise(
+                "주문 불가: 현재 장 운영 시간이 아닙니다. (평일 09:00~15:30)"
+            )
+            return
+
+        self._drop_expired_pending_order(chat_id, now)
+        if chat_id in self.pending_orders:
+            await self._send_text_or_raise(
+                "이미 대기 중인 주문이 있습니다. /confirm 또는 /cancel로 먼저 처리하세요."
+            )
+            return
+
+        await self.notifier.send_chat_action("typing")
+        try:
+            resolved = await self.mcp_runner(
+                TRADING_MCP_PARAMS,
+                "resolve_stock_code",
+                {"stock_name": stock_name},
+            )
+            stock_code = self._extract_stock_code(str(resolved)) or stock_name
+            quote_result, balance_result = await asyncio.gather(
+                self.mcp_runner(
+                    TRADING_MCP_PARAMS,
+                    "get_stock_quote",
+                    {"stock_name": stock_name},
+                ),
+                self.mcp_runner(TRADING_MCP_PARAMS, "get_balance", {}),
+            )
+        except Exception as exc:
+            await self._send_text_or_raise(f"주문 준비 실패: {_short_error(exc)}")
+            return
+
+        order = PendingOrder(
+            chat_id=chat_id,
+            stock_name=stock_name,
+            stock_code=stock_code,
+            side=side,
+            quantity=quantity,
+            price=price,
+            created_at=now,
+        )
+        self.pending_orders[chat_id] = order
+        await self._send_text_or_raise(
+            self._format_order_prompt(order, str(quote_result), str(balance_result))
+        )
+
+    def _parse_order_argument(self, argument: str) -> tuple[str, int, int] | None:
+        parts = argument.split()
+        if len(parts) != 3:
+            return None
+        stock_name, raw_quantity, raw_price = parts
+        try:
+            quantity = int(raw_quantity.replace(",", ""))
+            price = int(raw_price.replace(",", ""))
+        except ValueError:
+            return None
+        if quantity <= 0 or price <= 0:
+            return None
+        return stock_name, quantity, price
+
+    def _drop_expired_pending_order(self, chat_id: str, now: datetime) -> None:
+        order = self.pending_orders.get(chat_id)
+        if order is None:
+            return
+        created_at = order.created_at
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=KST)
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=KST)
+        if now.astimezone(KST) - created_at.astimezone(KST) > ORDER_EXPIRES_AFTER:
+            self.pending_orders.pop(chat_id, None)
+
+    def _extract_stock_code(self, text: str) -> str | None:
+        match = re.search(r"\b(\d{6})\b", text)
+        return match.group(1) if match else None
+
+    def _format_order_prompt(
+        self,
+        order: PendingOrder,
+        quote_result: str,
+        balance_result: str,
+    ) -> str:
+        side_text = "매수" if order.side == "BUY" else "매도"
+        amount = order.quantity * order.price
+        lines = [
+            f"{order.stock_name} {side_text} 주문 확인",
+            f"종목코드: {order.stock_code}",
+            f"수량: {order.quantity:,}주",
+            f"지정가: {order.price:,}원",
+            f"주문금액: {amount:,}원",
+        ]
+
+        current_price = self._first_line_containing(
+            str(quote_result),
+            ("현재가", "price", "Price"),
+        )
+        if current_price:
+            lines.append(f"현재가: {current_price}")
+
+        balance = self._first_line_containing(
+            str(balance_result),
+            ("주문가능", "예수금", "총자산", "balance"),
+        )
+        if balance:
+            lines.append(f"잔고: {balance}")
+
+        lines.extend(
+            [
+                "",
+                "/confirm 입력 시 대기 주문을 확정합니다.",
+                "/cancel 입력 시 대기 주문을 취소합니다.",
+                "이 주문은 60초 후 만료됩니다.",
+            ]
+        )
+        return "\n".join(lines)
+
+    def _first_line_containing(self, text: str, needles: tuple[str, ...]) -> str | None:
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped and any(needle in stripped for needle in needles):
+                return stripped
+        return None
 
     async def _handle_trend(self, argument: str) -> None:
         if not argument:

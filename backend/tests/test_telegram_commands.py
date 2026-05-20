@@ -1,7 +1,11 @@
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
 import pytest
 
 from backend.config import TRADING_MCP_PARAMS
 from backend.telegram_commands import (
+    BUY_COMMAND_HELP,
     QUOTE_COMMAND_HELP,
     TELEGRAM_INTERACTIVE_HELP,
     TELEGRAM_MESSAGE_LIMIT,
@@ -10,6 +14,8 @@ from backend.telegram_commands import (
     TelegramCommandHandler,
     TelegramCommandPoller,
 )
+
+KST = ZoneInfo("Asia/Seoul")
 
 
 class FakeState:
@@ -95,6 +101,10 @@ async def test_help_command_replies_with_supported_commands():
     assert "/balance - 예수금·총자산·보유 종목 조회" in notifier.messages[-1]
     assert "/quote <종목명> - 현재가 조회" in notifier.messages[-1]
     assert "/trend <종목명> - 외국인·기관·개인 수급 조회" in notifier.messages[-1]
+    assert "/buy <종목명> <수량> <지정가> - 지정가 매수 주문 준비" in notifier.messages[-1]
+    assert "/sell <종목명> <수량> <지정가> - 지정가 매도 주문 준비" in notifier.messages[-1]
+    assert "/confirm - 대기 주문 확정" in notifier.messages[-1]
+    assert "/cancel - 대기 주문 취소" in notifier.messages[-1]
     assert "일반 문장은 NAT에게 바로 질문합니다." in notifier.messages[-1]
 
 
@@ -264,6 +274,117 @@ async def test_quote_and_trend_missing_args_reply_with_usage():
     await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/trend"}})
 
     assert notifier.messages == [QUOTE_COMMAND_HELP, TREND_COMMAND_HELP]
+
+
+@pytest.mark.asyncio
+async def test_buy_command_creates_pending_order_and_prompts_confirmation():
+    calls = []
+
+    async def mcp_runner(server_params, tool_name, arguments):
+        calls.append((server_params, tool_name, arguments))
+        if tool_name == "resolve_stock_code":
+            return "삼성전자 (005930, KOSPI)"
+        if tool_name == "get_stock_quote":
+            return "현재가: 74,500원"
+        if tool_name == "get_balance":
+            return "주문가능금액: 1,000,000원"
+        raise AssertionError(f"unexpected tool: {tool_name}")
+
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        mcp_runner=mcp_runner,
+        now_factory=lambda: datetime(2026, 5, 20, 10, 0, tzinfo=KST),
+    )
+
+    await handler.handle_update(
+        {"message": {"chat": {"id": 123}, "text": "/buy 삼성전자 10 75,000"}}
+    )
+
+    assert calls == [
+        (TRADING_MCP_PARAMS, "resolve_stock_code", {"stock_name": "삼성전자"}),
+        (TRADING_MCP_PARAMS, "get_stock_quote", {"stock_name": "삼성전자"}),
+        (TRADING_MCP_PARAMS, "get_balance", {}),
+    ]
+    assert "삼성전자 매수 주문 확인" in notifier.messages[-1]
+    assert "/confirm" in notifier.messages[-1]
+    assert "/cancel" in notifier.messages[-1]
+    assert handler.pending_orders["123"].stock_name == "삼성전자"
+    assert handler.pending_orders["123"].stock_code == "005930"
+    assert handler.pending_orders["123"].side == "BUY"
+    assert handler.pending_orders["123"].quantity == 10
+    assert handler.pending_orders["123"].price == 75000
+
+
+@pytest.mark.asyncio
+async def test_sell_command_rejects_market_closed():
+    calls = []
+
+    async def mcp_runner(server_params, tool_name, arguments):
+        calls.append((server_params, tool_name, arguments))
+        return "should not be called"
+
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        mcp_runner=mcp_runner,
+        now_factory=lambda: datetime(2026, 5, 20, 8, 59, tzinfo=KST),
+    )
+
+    await handler.handle_update(
+        {"message": {"chat": {"id": 123}, "text": "/sell 삼성전자 10 75,000"}}
+    )
+
+    assert notifier.messages == ["주문 불가: 현재 장 운영 시간이 아닙니다. (평일 09:00~15:30)"]
+    assert handler.pending_orders == {}
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_buy_command_rejects_invalid_args_with_usage():
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        now_factory=lambda: datetime(2026, 5, 20, 10, 0, tzinfo=KST),
+    )
+
+    await handler.handle_update(
+        {"message": {"chat": {"id": 123}, "text": "/buy 삼성전자 x 75000"}}
+    )
+
+    assert notifier.messages == [BUY_COMMAND_HELP]
+
+
+@pytest.mark.asyncio
+async def test_sell_command_rejects_duplicate_pending_order():
+    async def mcp_runner(server_params, tool_name, arguments):
+        if tool_name == "resolve_stock_code":
+            return "삼성전자 (005930, KOSPI)"
+        if tool_name == "get_stock_quote":
+            return "현재가: 74,500원"
+        if tool_name == "get_balance":
+            return "주문가능금액: 1,000,000원"
+        raise AssertionError(f"unexpected tool: {tool_name}")
+
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        mcp_runner=mcp_runner,
+        now_factory=lambda: datetime(2026, 5, 20, 10, 0, tzinfo=KST),
+    )
+
+    await handler.handle_update(
+        {"message": {"chat": {"id": 123}, "text": "/buy 삼성전자 1 75000"}}
+    )
+    await handler.handle_update(
+        {"message": {"chat": {"id": 123}, "text": "/sell 삼성전자 1 75000"}}
+    )
+
+    assert (
+        notifier.messages[-1]
+        == "이미 대기 중인 주문이 있습니다. /confirm 또는 /cancel로 먼저 처리하세요."
+    )
+    assert handler.pending_orders["123"].side == "BUY"
 
 
 @pytest.mark.asyncio
