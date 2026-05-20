@@ -49,16 +49,26 @@ class TradeRecorder:
         from .models import TradeHistory
 
         session = self.session_factory()
-        session.add(
-            TradeHistory(
-                stock_code=result.stock_code,
-                stock_name=result.stock_name,
-                trade_type=result.side,
-                quantity=result.quantity,
-                price=float(result.price),
+        try:
+            session.add(
+                TradeHistory(
+                    stock_code=result.stock_code,
+                    stock_name=result.stock_name,
+                    trade_type=result.side,
+                    quantity=result.quantity,
+                    price=float(result.price),
+                )
             )
-        )
-        session.commit()
+            session.commit()
+        except Exception:
+            rollback = getattr(session, "rollback", None)
+            if callable(rollback):
+                rollback()
+            raise
+        finally:
+            close = getattr(session, "close", None)
+            if callable(close):
+                close()
 
 
 RemoteMcpRunner = Callable[..., Awaitable[str]]

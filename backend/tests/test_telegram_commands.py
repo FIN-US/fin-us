@@ -73,11 +73,14 @@ class FakeOrderGateway:
 
 
 class FakeTradeRecorder:
-    def __init__(self):
+    def __init__(self, *, error=None):
+        self.error = error
         self.results = []
 
     def record(self, result):
         self.results.append(result)
+        if self.error is not None:
+            raise self.error
 
 
 @pytest.mark.asyncio
@@ -453,6 +456,41 @@ async def test_confirm_executes_gateway_and_records_trade():
     assert recorder.results[0].stock_code == "005930"
     assert notifier.actions == ["typing", "typing"]
     assert "주문 완료" in notifier.messages[-1]
+    assert handler.pending_orders == {}
+
+
+@pytest.mark.asyncio
+async def test_confirm_gateway_success_recorder_failure_clears_pending_order():
+    async def mcp_runner(server_params, tool_name, arguments):
+        if tool_name == "resolve_stock_code":
+            return "삼성전자 (005930, KOSPI)"
+        if tool_name == "get_stock_quote":
+            return "현재가: 74,500원"
+        if tool_name == "get_balance":
+            return "주문가능금액: 1,000,000원"
+        raise AssertionError(f"unexpected tool: {tool_name}")
+
+    gateway = FakeOrderGateway()
+    recorder = FakeTradeRecorder(error=RuntimeError("db commit failed"))
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        mcp_runner=mcp_runner,
+        order_gateway=gateway,
+        trade_recorder=recorder,
+        now_factory=lambda: datetime(2026, 5, 20, 10, 0, tzinfo=KST),
+    )
+
+    await handler.handle_update(
+        {"message": {"chat": {"id": 123}, "text": "/buy 삼성전자 1 75000"}}
+    )
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/confirm"}})
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/confirm"}})
+
+    assert len(gateway.orders) == 1
+    assert len(recorder.results) == 1
+    assert notifier.messages[-2] == "주문 완료: 주문 접수\n거래 이력 기록 실패: db commit failed"
+    assert notifier.messages[-1] == "확정할 대기 주문이 없습니다."
     assert handler.pending_orders == {}
 
 

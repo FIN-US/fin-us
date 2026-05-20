@@ -267,10 +267,15 @@ class TelegramCommandHandler:
             await self._send_text_or_raise(f"주문 실패: {_short_error(exc)}")
             return
 
-        if self.trade_recorder is not None:
-            self.trade_recorder.record(result)
         self.pending_orders.pop(chat_id, None)
-        await self._send_text_or_raise(f"주문 완료: {result.message}")
+        record_warning = ""
+        if self.trade_recorder is not None:
+            try:
+                self.trade_recorder.record(result)
+            except Exception as exc:
+                logger.warning("Trade history recording failed: %s", exc)
+                record_warning = f"\n거래 이력 기록 실패: {_short_error(exc)}"
+        await self._send_text_or_raise(f"주문 완료: {result.message}{record_warning}")
 
     def _parse_order_argument(self, argument: str) -> tuple[str, int, int] | None:
         parts = argument.split()
