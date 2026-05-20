@@ -12,9 +12,6 @@ from sqlmodel import Session
 from .config import (
     KIS_ORDER_ENV,
     KIS_REAL_ORDER_ENABLED,
-    KIS_TRADING_MCP_TOOL_NAME,
-    KIS_TRADING_MCP_TRANSPORT,
-    KIS_TRADING_MCP_URL,
     TRADING_MCP_PARAMS,
 )
 from .database import engine
@@ -23,10 +20,9 @@ from .services import llm_chat, run_mcp_tool
 from .telegram_notifier import TELEGRAM_ALERT_MODES, TelegramNotifier, telegram_notifier
 from .trading_orders import (
     KST,
-    OfficialKisMcpOrderGateway,
+    McpTradingOrderGateway,
     PendingOrder,
     TradeRecorder,
-    call_official_kis_mcp,
     is_korean_market_open,
 )
 
@@ -79,20 +75,13 @@ def _telegram_command_parts(text: str) -> tuple[str, str, str]:
     return command_name.lower(), bot_username.lower() if separator else "", argument.strip()
 
 
-def _create_order_gateway() -> OfficialKisMcpOrderGateway:
-    transport = (
-        KIS_TRADING_MCP_TRANSPORT
-        if KIS_TRADING_MCP_TRANSPORT in {"sse", "streamable-http"}
-        else "sse"
-    )
+def _create_order_gateway() -> McpTradingOrderGateway:
     order_env = "real" if KIS_ORDER_ENV == "real" else "demo"
-    return OfficialKisMcpOrderGateway(
-        mcp_url=KIS_TRADING_MCP_URL,
-        mcp_transport=transport,
-        tool_name=KIS_TRADING_MCP_TOOL_NAME,
+    return McpTradingOrderGateway(
+        server_params=TRADING_MCP_PARAMS,
+        mcp_runner=run_mcp_tool,
         order_env=order_env,
         real_order_enabled=KIS_REAL_ORDER_ENABLED,
-        remote_runner=call_official_kis_mcp,
     )
 
 

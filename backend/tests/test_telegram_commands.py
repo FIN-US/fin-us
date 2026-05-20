@@ -793,30 +793,25 @@ def test_poller_explicit_handler_does_not_call_dependency_factories(monkeypatch)
     assert poller.handler is handler
 
 
-def test_create_order_gateway_normalizes_transport_and_order_env(monkeypatch):
+def test_create_order_gateway_uses_local_mcp_trading(monkeypatch):
     captured = {}
 
     class FakeGateway:
         def __init__(self, **kwargs):
             captured.update(kwargs)
 
-    monkeypatch.setattr(telegram_commands, "OfficialKisMcpOrderGateway", FakeGateway)
-    monkeypatch.setattr(telegram_commands, "KIS_TRADING_MCP_TRANSPORT", "stdio")
+    monkeypatch.setattr(telegram_commands, "McpTradingOrderGateway", FakeGateway)
     monkeypatch.setattr(telegram_commands, "KIS_ORDER_ENV", "sandbox")
-    monkeypatch.setattr(telegram_commands, "KIS_TRADING_MCP_URL", "http://kis.example/sse")
-    monkeypatch.setattr(telegram_commands, "KIS_TRADING_MCP_TOOL_NAME", "domestic_stock")
     monkeypatch.setattr(telegram_commands, "KIS_REAL_ORDER_ENABLED", True)
 
     gateway = telegram_commands._create_order_gateway()
 
     assert isinstance(gateway, FakeGateway)
     assert captured == {
-        "mcp_url": "http://kis.example/sse",
-        "mcp_transport": "sse",
-        "tool_name": "domestic_stock",
+        "server_params": TRADING_MCP_PARAMS,
+        "mcp_runner": telegram_commands.run_mcp_tool,
         "order_env": "demo",
         "real_order_enabled": True,
-        "remote_runner": telegram_commands.call_official_kis_mcp,
     }
 
 
