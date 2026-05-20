@@ -3,10 +3,14 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import datetime, time
-from typing import Awaitable, Callable, Literal
+from typing import Any, Awaitable, Callable, Literal
 from zoneinfo import ZoneInfo
 
+import httpx
 from fastapi import HTTPException
+from mcp import ClientSession
+from mcp.client.sse import sse_client
+from mcp.client.streamable_http import streamable_http_client
 
 
 KST = ZoneInfo("Asia/Seoul")
@@ -37,6 +41,8 @@ class OrderExecutionResult:
 
 
 RemoteMcpRunner = Callable[..., Awaitable[str]]
+_SSE_CONNECT_FLOOR = 5.0
+_SSE_CONNECT_CAP = 30.0
 
 
 def is_korean_market_open(now: datetime | None = None) -> bool:
@@ -48,6 +54,55 @@ def is_korean_market_open(now: datetime | None = None) -> bool:
     if current.weekday() >= 5:
         return False
     return time(9, 0) <= current.time() <= time(15, 30)
+
+
+def _mcp_first_text_or_error(result: Any) -> str:
+    blocks = getattr(result, "content", None) or []
+    if blocks:
+        block0 = blocks[0]
+        text = getattr(block0, "text", str(block0))
+    else:
+        text = ""
+
+    if getattr(result, "isError", False):
+        raise HTTPException(
+            status_code=502,
+            detail=text or "KIS MCP 주문 실행 실패",
+        )
+
+    return text
+
+
+def _sse_connect_timeout(operation_timeout: float) -> float:
+    return min(_SSE_CONNECT_CAP, max(_SSE_CONNECT_FLOOR, operation_timeout * 0.25))
+
+
+async def call_official_kis_mcp(
+    *,
+    transport: str,
+    url: str,
+    tool_name: str,
+    arguments: dict[str, Any],
+    timeout_sec: float,
+) -> str:
+    if transport == "sse":
+        conn = _sse_connect_timeout(timeout_sec)
+        async with sse_client(url=url, timeout=conn, sse_read_timeout=timeout_sec) as (read, write):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                return _mcp_first_text_or_error(await session.call_tool(tool_name, arguments))
+
+    if transport == "streamable-http":
+        async with httpx.AsyncClient() as http_client:
+            async with streamable_http_client(url=url, http_client=http_client) as (read, write, _get_sid):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    return _mcp_first_text_or_error(await session.call_tool(tool_name, arguments))
+
+    raise HTTPException(
+        status_code=500,
+        detail=f"지원하지 않는 KIS MCP transport입니다: {transport}",
+    )
 
 
 class OfficialKisMcpOrderGateway:

@@ -8,6 +8,8 @@ from backend.trading_orders import (
     OfficialKisMcpOrderGateway,
     OrderExecutionResult,
     PendingOrder,
+    _mcp_first_text_or_error,
+    call_official_kis_mcp,
     is_korean_market_open,
 )
 
@@ -138,3 +140,45 @@ async def test_demo_order_calls_mcp_runner_and_returns_normalized_result():
         message="주문 접수",
         raw_result='{"msg1":"주문 접수"}',
     )
+
+
+class _FakeTextBlock:
+    def __init__(self, text):
+        self.text = text
+
+
+class _FakeMcpResult:
+    def __init__(self, *, content, is_error=False):
+        self.content = content
+        self.isError = is_error
+
+
+def test_mcp_first_text_or_error_returns_first_text_block():
+    result = _FakeMcpResult(content=[_FakeTextBlock("주문 접수"), _FakeTextBlock("ignored")])
+
+    assert _mcp_first_text_or_error(result) == "주문 접수"
+
+
+def test_mcp_first_text_or_error_raises_bad_gateway_for_error_result():
+    result = _FakeMcpResult(content=[_FakeTextBlock("KIS rejected order")], is_error=True)
+
+    with pytest.raises(HTTPException) as exc_info:
+        _mcp_first_text_or_error(result)
+
+    assert exc_info.value.status_code == 502
+    assert exc_info.value.detail == "KIS rejected order"
+
+
+@pytest.mark.asyncio
+async def test_call_official_kis_mcp_rejects_unsupported_transport_without_network():
+    with pytest.raises(HTTPException) as exc_info:
+        await call_official_kis_mcp(
+            transport="stdio",
+            url="http://127.0.0.1:3300/sse",
+            tool_name="domestic_stock",
+            arguments={},
+            timeout_sec=1.0,
+        )
+
+    assert exc_info.value.status_code == 500
+    assert "지원하지 않는 KIS MCP transport" in str(exc_info.value.detail)
