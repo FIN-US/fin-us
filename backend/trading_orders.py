@@ -41,6 +41,26 @@ class OrderExecutionResult:
     raw_result: str
 
 
+class TradeRecorder:
+    def __init__(self, session_factory: Callable[[], Any]):
+        self.session_factory = session_factory
+
+    def record(self, result: OrderExecutionResult) -> None:
+        from .models import TradeHistory
+
+        session = self.session_factory()
+        session.add(
+            TradeHistory(
+                stock_code=result.stock_code,
+                stock_name=result.stock_name,
+                trade_type=result.side,
+                quantity=result.quantity,
+                price=float(result.price),
+            )
+        )
+        session.commit()
+
+
 RemoteMcpRunner = Callable[..., Awaitable[str]]
 _SSE_CONNECT_FLOOR = 5.0
 _SSE_CONNECT_CAP = 30.0

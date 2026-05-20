@@ -18,8 +18,6 @@ logger = logging.getLogger(__name__)
 ALERT_COMMAND_HELP = "사용법: /alerts urgent | all | off | status"
 BUY_COMMAND_HELP = "사용법: /buy <종목명> <수량> <지정가>"
 SELL_COMMAND_HELP = "사용법: /sell <종목명> <수량> <지정가>"
-CONFIRM_PLACEHOLDER_MESSAGE = "주문 확정 기능은 아직 연결되지 않았습니다."
-CANCEL_PLACEHOLDER_MESSAGE = "주문 취소 기능은 아직 연결되지 않았습니다."
 ORDER_EXPIRES_AFTER = timedelta(seconds=60)
 TELEGRAM_INTERACTIVE_HELP = "\n".join(
     [
@@ -118,10 +116,10 @@ class TelegramCommandHandler:
             await self._handle_order_command("SELL", argument, str(chat.get("id", "")).strip())
             return
         if self._matches_command(command, bot_username, "/confirm"):
-            await self._send_text_or_raise(CONFIRM_PLACEHOLDER_MESSAGE)
+            await self._handle_confirm(str(chat.get("id", "")).strip())
             return
         if self._matches_command(command, bot_username, "/cancel"):
-            await self._send_text_or_raise(CANCEL_PLACEHOLDER_MESSAGE)
+            await self._handle_cancel(str(chat.get("id", "")).strip())
             return
         if text.startswith("/"):
             await self._send_text_or_raise(TELEGRAM_INTERACTIVE_HELP)
@@ -242,6 +240,37 @@ class TelegramCommandHandler:
         await self._send_text_or_raise(
             self._format_order_prompt(order, str(quote_result), str(balance_result))
         )
+
+    async def _handle_cancel(self, chat_id: str) -> None:
+        self._drop_expired_pending_order(chat_id, self.now_factory())
+        if chat_id not in self.pending_orders:
+            await self._send_text_or_raise("취소할 대기 주문이 없습니다.")
+            return
+
+        self.pending_orders.pop(chat_id, None)
+        await self._send_text_or_raise("대기 주문을 취소했습니다.")
+
+    async def _handle_confirm(self, chat_id: str) -> None:
+        self._drop_expired_pending_order(chat_id, self.now_factory())
+        order = self.pending_orders.get(chat_id)
+        if order is None:
+            await self._send_text_or_raise("확정할 대기 주문이 없습니다.")
+            return
+        if self.order_gateway is None:
+            await self._send_text_or_raise("주문 실행 설정이 준비되지 않았습니다.")
+            return
+
+        await self.notifier.send_chat_action("typing")
+        try:
+            result = await self.order_gateway.place_order(order)
+        except Exception as exc:
+            await self._send_text_or_raise(f"주문 실패: {_short_error(exc)}")
+            return
+
+        if self.trade_recorder is not None:
+            self.trade_recorder.record(result)
+        self.pending_orders.pop(chat_id, None)
+        await self._send_text_or_raise(f"주문 완료: {result.message}")
 
     def _parse_order_argument(self, argument: str) -> tuple[str, int, int] | None:
         parts = argument.split()

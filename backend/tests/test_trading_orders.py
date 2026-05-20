@@ -11,6 +11,7 @@ from backend.trading_orders import (
     OfficialKisMcpOrderGateway,
     OrderExecutionResult,
     PendingOrder,
+    TradeRecorder,
     _mcp_first_text_or_error,
     call_official_kis_mcp,
     is_korean_market_open,
@@ -42,6 +43,42 @@ def test_market_closed_on_weekend():
     now = datetime(2026, 5, 23, 10, 0, tzinfo=KST)
 
     assert is_korean_market_open(now) is False
+
+
+def test_trade_recorder_creates_trade_history_and_commits():
+    class FakeSession:
+        def __init__(self):
+            self.added = []
+            self.committed = False
+
+        def add(self, item):
+            self.added.append(item)
+
+        def commit(self):
+            self.committed = True
+
+    session = FakeSession()
+    recorder = TradeRecorder(lambda: session)
+    result = OrderExecutionResult(
+        stock_code="005930",
+        stock_name="삼성전자",
+        side="BUY",
+        quantity=3,
+        price=75000,
+        message="주문 접수",
+        raw_result="{}",
+    )
+
+    recorder.record(result)
+
+    assert len(session.added) == 1
+    trade = session.added[0]
+    assert trade.stock_code == "005930"
+    assert trade.stock_name == "삼성전자"
+    assert trade.trade_type == "BUY"
+    assert trade.quantity == 3
+    assert trade.price == 75000.0
+    assert session.committed is True
 
 
 @pytest.mark.asyncio
