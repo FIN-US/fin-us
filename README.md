@@ -165,7 +165,13 @@ docker compose exec backend uv run --project /app/backend python /app/backend/sc
 /balance        # 예수금·총자산·보유 종목 조회
 /quote <종목명> # 현재가 조회
 /trend <종목명> # 외국인·기관·개인 수급 조회
+/buy <종목명> <수량> <지정가>  # 60초 매수 확인 대기 생성
+/sell <종목명> <수량> <지정가> # 60초 매도 확인 대기 생성
+/confirm       # 대기 중인 수동 주문 실행
+/cancel        # 대기 중인 수동 주문 취소
 ```
+
+`/buy`와 `/sell`은 60초 동안 유효한 지정가 주문 확인 대기를 만들고, `/confirm`은 공식 KIS Trading MCP를 통해 주문을 제출합니다. `/cancel`은 Telegram 확인 대기만 취소하며 이미 증권사에 제출된 주문은 취소하지 않습니다. `/balance`, `/quote`, `/trend` 조회 명령은 계속 로컬 `mcp-trading`을 사용합니다. 실계좌 주문은 `KIS_ORDER_ENV=real`과 `KIS_REAL_ORDER_ENABLED=true`가 모두 설정되어야 실행됩니다.
 
 슬래시 명령이 아닌 일반 텍스트는 NAT 채팅으로 전달됩니다. Telegram 채팅은 `telegram:{chat_id}` conversation id를 사용하므로 스케줄러 분석 리포트와 대화 이력이 섞이지 않습니다.
 
