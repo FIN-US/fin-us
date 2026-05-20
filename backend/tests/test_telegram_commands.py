@@ -309,11 +309,87 @@ async def test_buy_command_creates_pending_order_and_prompts_confirmation():
     assert "삼성전자 매수 주문 확인" in notifier.messages[-1]
     assert "/confirm" in notifier.messages[-1]
     assert "/cancel" in notifier.messages[-1]
+    assert "현재가: 현재가" not in notifier.messages[-1]
+    assert "잔고: 주문가능금액" not in notifier.messages[-1]
     assert handler.pending_orders["123"].stock_name == "삼성전자"
     assert handler.pending_orders["123"].stock_code == "005930"
     assert handler.pending_orders["123"].side == "BUY"
     assert handler.pending_orders["123"].quantity == 10
     assert handler.pending_orders["123"].price == 75000
+
+
+@pytest.mark.asyncio
+async def test_buy_command_accepts_stock_name_with_spaces():
+    calls = []
+
+    async def mcp_runner(server_params, tool_name, arguments):
+        calls.append((server_params, tool_name, arguments))
+        if tool_name == "resolve_stock_code":
+            return "LG 화학 (051910, KOSPI)"
+        if tool_name == "get_stock_quote":
+            return "현재가: 75,000원"
+        if tool_name == "get_balance":
+            return "주문가능금액: 1,000,000원"
+        raise AssertionError(f"unexpected tool: {tool_name}")
+
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        mcp_runner=mcp_runner,
+        now_factory=lambda: datetime(2026, 5, 20, 10, 0, tzinfo=KST),
+    )
+
+    await handler.handle_update(
+        {"message": {"chat": {"id": 123}, "text": "/buy LG 화학 10 75000"}}
+    )
+
+    assert calls[0] == (
+        TRADING_MCP_PARAMS,
+        "resolve_stock_code",
+        {"stock_name": "LG 화학"},
+    )
+    assert "LG 화학 매수 주문 확인" in notifier.messages[-1]
+    assert handler.pending_orders["123"].stock_name == "LG 화학"
+    assert handler.pending_orders["123"].quantity == 10
+    assert handler.pending_orders["123"].price == 75000
+
+
+@pytest.mark.asyncio
+async def test_confirm_after_pending_order_replies_with_placeholder_not_help():
+    async def mcp_runner(server_params, tool_name, arguments):
+        if tool_name == "resolve_stock_code":
+            return "삼성전자 (005930, KOSPI)"
+        if tool_name == "get_stock_quote":
+            return "현재가: 74,500원"
+        if tool_name == "get_balance":
+            return "주문가능금액: 1,000,000원"
+        raise AssertionError(f"unexpected tool: {tool_name}")
+
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        mcp_runner=mcp_runner,
+        now_factory=lambda: datetime(2026, 5, 20, 10, 0, tzinfo=KST),
+    )
+
+    await handler.handle_update(
+        {"message": {"chat": {"id": 123}, "text": "/buy 삼성전자 1 75000"}}
+    )
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/confirm"}})
+
+    assert notifier.messages[-1] == "주문 확정 기능은 아직 연결되지 않았습니다."
+    assert notifier.messages[-1] != TELEGRAM_INTERACTIVE_HELP
+
+
+@pytest.mark.asyncio
+async def test_cancel_replies_with_placeholder_not_help():
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(notifier=notifier)
+
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/cancel"}})
+
+    assert notifier.messages[-1] == "주문 취소 기능은 아직 연결되지 않았습니다."
+    assert notifier.messages[-1] != TELEGRAM_INTERACTIVE_HELP
 
 
 @pytest.mark.asyncio

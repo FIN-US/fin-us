@@ -18,6 +18,8 @@ logger = logging.getLogger(__name__)
 ALERT_COMMAND_HELP = "사용법: /alerts urgent | all | off | status"
 BUY_COMMAND_HELP = "사용법: /buy <종목명> <수량> <지정가>"
 SELL_COMMAND_HELP = "사용법: /sell <종목명> <수량> <지정가>"
+CONFIRM_PLACEHOLDER_MESSAGE = "주문 확정 기능은 아직 연결되지 않았습니다."
+CANCEL_PLACEHOLDER_MESSAGE = "주문 취소 기능은 아직 연결되지 않았습니다."
 ORDER_EXPIRES_AFTER = timedelta(seconds=60)
 TELEGRAM_INTERACTIVE_HELP = "\n".join(
     [
@@ -114,6 +116,12 @@ class TelegramCommandHandler:
             return
         if self._matches_command(command, bot_username, "/sell"):
             await self._handle_order_command("SELL", argument, str(chat.get("id", "")).strip())
+            return
+        if self._matches_command(command, bot_username, "/confirm"):
+            await self._send_text_or_raise(CONFIRM_PLACEHOLDER_MESSAGE)
+            return
+        if self._matches_command(command, bot_username, "/cancel"):
+            await self._send_text_or_raise(CANCEL_PLACEHOLDER_MESSAGE)
             return
         if text.startswith("/"):
             await self._send_text_or_raise(TELEGRAM_INTERACTIVE_HELP)
@@ -237,9 +245,12 @@ class TelegramCommandHandler:
 
     def _parse_order_argument(self, argument: str) -> tuple[str, int, int] | None:
         parts = argument.split()
-        if len(parts) != 3:
+        if len(parts) < 3:
             return None
-        stock_name, raw_quantity, raw_price = parts
+        stock_name = " ".join(parts[:-2]).strip()
+        raw_quantity, raw_price = parts[-2:]
+        if not stock_name:
+            return None
         try:
             quantity = int(raw_quantity.replace(",", ""))
             price = int(raw_price.replace(",", ""))
@@ -286,14 +297,14 @@ class TelegramCommandHandler:
             ("현재가", "price", "Price"),
         )
         if current_price:
-            lines.append(f"현재가: {current_price}")
+            lines.append(current_price)
 
         balance = self._first_line_containing(
             str(balance_result),
             ("주문가능", "예수금", "총자산", "balance"),
         )
         if balance:
-            lines.append(f"잔고: {balance}")
+            lines.append(balance)
 
         lines.extend(
             [
