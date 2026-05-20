@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -219,6 +220,53 @@ async def test_call_official_kis_mcp_wraps_timeout_as_gateway_timeout(monkeypatc
 
     assert exc_info.value.status_code == 504
     assert exc_info.value.detail == "KIS MCP 주문 요청 시간이 초과되었습니다."
+
+
+@pytest.mark.asyncio
+async def test_call_official_kis_mcp_wraps_httpx_timeout_as_gateway_timeout(monkeypatch):
+    async def fake_inner(**_kwargs):
+        raise httpx.ReadTimeout("read timed out")
+
+    monkeypatch.setattr(
+        trading_orders,
+        "_call_official_kis_mcp_inner",
+        fake_inner,
+        raising=False,
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await call_official_kis_mcp(
+            transport="sse",
+            url="http://127.0.0.1:3300/sse",
+            tool_name="domestic_stock",
+            arguments={},
+            timeout_sec=1.0,
+        )
+
+    assert exc_info.value.status_code == 504
+    assert exc_info.value.detail == "KIS MCP 주문 요청 시간이 초과되었습니다."
+
+
+@pytest.mark.asyncio
+async def test_call_official_kis_mcp_propagates_cancellation(monkeypatch):
+    async def fake_inner(**_kwargs):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(
+        trading_orders,
+        "_call_official_kis_mcp_inner",
+        fake_inner,
+        raising=False,
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await call_official_kis_mcp(
+            transport="sse",
+            url="http://127.0.0.1:3300/sse",
+            tool_name="domestic_stock",
+            arguments={},
+            timeout_sec=1.0,
+        )
 
 
 @pytest.mark.asyncio

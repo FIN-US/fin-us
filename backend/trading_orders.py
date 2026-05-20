@@ -104,7 +104,7 @@ async def call_official_kis_mcp(
         )
     except asyncio.CancelledError:
         raise
-    except TimeoutError as exc:
+    except (TimeoutError, httpx.TimeoutException) as exc:
         raise HTTPException(
             status_code=504,
             detail="KIS MCP 주문 요청 시간이 초과되었습니다.",
@@ -114,7 +114,7 @@ async def call_official_kis_mcp(
     except BaseExceptionGroup as exc:
         if _exception_group_contains(exc, asyncio.CancelledError):
             raise
-        if _exception_group_contains(exc, TimeoutError):
+        if _exception_group_contains(exc, (TimeoutError, httpx.TimeoutException)):
             raise HTTPException(
                 status_code=504,
                 detail="KIS MCP 주문 요청 시간이 초과되었습니다.",
