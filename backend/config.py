@@ -72,12 +72,6 @@ REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 # Telegram urgent alert settings.
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
-KIS_TRADING_MCP_URL = os.environ.get(
-    "FINUS_KIS_TRADING_MCP_URL",
-    "http://host.docker.internal:3300/sse",
-).strip()
-KIS_TRADING_MCP_TRANSPORT = os.environ.get("FINUS_KIS_TRADING_MCP_TRANSPORT", "sse").strip()
-KIS_TRADING_MCP_TOOL_NAME = os.environ.get("FINUS_KIS_TRADING_TOOL_NAME", "domestic_stock").strip()
 KIS_ORDER_ENV = os.environ.get("KIS_ORDER_ENV", "demo").strip().lower()
 KIS_REAL_ORDER_ENABLED = os.environ.get("KIS_REAL_ORDER_ENABLED", "").strip().lower() in {
     "1",

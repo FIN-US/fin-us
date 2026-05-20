@@ -1,5 +1,7 @@
 # Telegram Manual Trading Design
 
+> Superseded: 주문 실행 provider는 공식 KIS Trading MCP가 아니라 로컬 `mcp-trading`으로 전환되었습니다. 현재 기준 문서는 `docs/superpowers/specs/2026-05-20-telegram-mcp-trading-order-replacement-design.md`입니다.
+
 ## Context
 
 Issue #43 adds manual stock order commands to the Telegram bot:

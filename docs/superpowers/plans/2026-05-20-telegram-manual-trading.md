@@ -1,5 +1,7 @@
 # Telegram Manual Trading Implementation Plan
 
+> Superseded: 공식 KIS Trading MCP 실행 계획은 로컬 `mcp-trading` 주문 실행 계획으로 대체되었습니다. 현재 기준 문서는 `docs/superpowers/plans/2026-05-20-telegram-mcp-trading-order-replacement.md`입니다.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add Telegram `/buy`, `/sell`, `/confirm`, and `/cancel` commands that place confirmed manual stock orders through official KIS Trading MCP and record successful orders in `TradeHistory`.
