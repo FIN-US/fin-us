@@ -270,6 +270,83 @@ async def test_call_official_kis_mcp_propagates_cancellation(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_call_official_kis_mcp_passes_timeout_to_streamable_http_client(monkeypatch):
+    client_timeouts = []
+    streamable_calls = []
+    session_calls = []
+
+    class FakeAsyncClient:
+        def __init__(self, *, timeout):
+            self.timeout = timeout
+            client_timeouts.append(timeout)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class FakeStreamableClient:
+        def __init__(self, *, url, http_client):
+            self.url = url
+            self.http_client = http_client
+
+        async def __aenter__(self):
+            streamable_calls.append(
+                {
+                    "url": self.url,
+                    "timeout": self.http_client.timeout,
+                }
+            )
+            return "read", "write", lambda: "session-id"
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class FakeClientSession:
+        def __init__(self, read, write):
+            session_calls.append((read, write))
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def initialize(self):
+            return None
+
+        async def call_tool(self, tool_name, arguments):
+            session_calls.append((tool_name, arguments))
+            return _FakeMcpResult(content=[_FakeTextBlock("주문 접수")])
+
+    monkeypatch.setattr(trading_orders.httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(trading_orders, "streamable_http_client", FakeStreamableClient)
+    monkeypatch.setattr(trading_orders, "ClientSession", FakeClientSession)
+
+    result = await call_official_kis_mcp(
+        transport="streamable-http",
+        url="http://127.0.0.1:3300/mcp",
+        tool_name="domestic_stock",
+        arguments={"api_type": "order_cash"},
+        timeout_sec=7.5,
+    )
+
+    assert result == "주문 접수"
+    assert client_timeouts == [7.5]
+    assert streamable_calls == [
+        {
+            "url": "http://127.0.0.1:3300/mcp",
+            "timeout": 7.5,
+        }
+    ]
+    assert session_calls == [
+        ("read", "write"),
+        ("domestic_stock", {"api_type": "order_cash"}),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_call_official_kis_mcp_wraps_transport_error_as_bad_gateway(monkeypatch):
     async def fake_inner(**_kwargs):
         raise httpx.TransportError("connection failed")
