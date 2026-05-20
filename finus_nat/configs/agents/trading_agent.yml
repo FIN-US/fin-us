@@ -30,7 +30,7 @@ functions:
     parse_agent_response_max_retries: 5
     raise_on_parsing_failure: false
     # native tool calling 사용 시 텍스트에 Action: 없어도 native API로 도구가 호출되므로 허용
-    accept_direct_answer_without_react_format: true
+    accept_direct_answer_without_react_format: false
     max_tool_calls: 10
     additional_instructions: |
       주식·채권·선물옵션·해외·ETF 등의 질문에서는 `kis-trading-mcp-tool`을 호출합니다.

@@ -24,7 +24,7 @@ functions:
     max_history: 8000
     parse_agent_response_max_retries: 2
     raise_on_parsing_failure: false
-    accept_direct_answer_without_react_format: true
+    accept_direct_answer_without_react_format: false
     additional_instructions: |
       시장 뉴스·수급·DART 지분공시 분석가. 종목/시장 관련 질문에는 mcp-news·mcp-dart 도구로 데이터를 가져온 뒤 한국어로 요약·해석합니다.
       사용자가 성격, 선호, 투자 성향, 답변 스타일처럼 오래 유지될 정보를 말하면 `add_user_memory`에 저장하고,

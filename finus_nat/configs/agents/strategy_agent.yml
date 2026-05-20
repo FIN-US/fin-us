@@ -24,7 +24,7 @@ functions:
     max_history: 8000
     parse_agent_response_max_retries: 2
     raise_on_parsing_failure: false
-    accept_direct_answer_without_react_format: true
+    accept_direct_answer_without_react_format: false
     additional_instructions: |
       === 에이전트 요약 ===
       매매 규칙·시나리오·BUY/SELL/HOLD 관점의 전략 제안. 뉴스·수급(mcp-news)과 잔고·시세(Kis MCP) 결과를 근거로 한국어로 정리합니다.

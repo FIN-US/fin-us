@@ -25,7 +25,7 @@ functions:
     max_history: 8000
     parse_agent_response_max_retries: 2
     raise_on_parsing_failure: false
-    accept_direct_answer_without_react_format: true
+    accept_direct_answer_without_react_format: false
     additional_instructions: |
       당일 거래 내역을 기반으로 사용자의 매매일지의 초안을 작성합니다. 종목명, 거래 금액, 변동율, 매매 구분(매수, 매도, 보유)을 포함합니다.
       거래 근거가 필요하면 `kis-api-daily-trades`를 호출합니다. (환경 변수: KIS_URL, KIS_API_KEY, KIS_API_SECRET, KIS_ACCOUNT_NO)

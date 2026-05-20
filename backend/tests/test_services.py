@@ -1,5 +1,6 @@
 import logging
 from datetime import date
+from urllib.parse import quote
 from types import SimpleNamespace
 
 import httpx
@@ -131,7 +132,8 @@ async def test_perform_stock_analysis_includes_trigger_signal(monkeypatch):
     )
 
     assert prompts[0][0] == "nat"
-    assert captured_cids == [f"sns:삼성전자:{date.today().isoformat()}"]
+    encoded_stock = quote("삼성전자", safe="")
+    assert captured_cids == [f"sns:{encoded_stock}:{date.today().isoformat()}"]
     assert "분석 트리거 데이터 출처: sns" in prompts[0][1]
     assert "SNS mentions spiked after earnings guidance" in prompts[0][1]
     assert '"source_signals"' in prompts[0][1]

@@ -24,7 +24,7 @@ functions:
     max_history: 8000
     parse_agent_response_max_retries: 2
     raise_on_parsing_failure: false
-    accept_direct_answer_without_react_format: true
+    accept_direct_answer_without_react_format: false
     additional_instructions: |
       직전 대화에서 섹터·비교 기준·종목 목록이 이미 정해졌다면, 사용자가 짧게만 말해도 **그 맥락을 유지**하고
       같은 주제로 도구를 쓰거나 답합니다. 이미 정해진 업종/테마를 다시 묻지 마세요.
