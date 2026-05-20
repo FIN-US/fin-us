@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from typing import Any, Callable
 
 import httpx
+from fastapi import HTTPException
 from sqlmodel import Session
 
 from .config import (
@@ -251,7 +252,10 @@ class TelegramCommandHandler:
                 "resolve_stock_code",
                 {"stock_name": stock_name},
             )
-            stock_code = self._extract_stock_code(str(resolved)) or stock_name
+            stock_code = self._extract_stock_code(str(resolved))
+            if stock_code is None:
+                await self._send_text_or_raise("주문 준비 실패: 종목코드를 확인할 수 없습니다.")
+                return
             quote_result, balance_result = await asyncio.gather(
                 self.mcp_runner(
                     TRADING_MCP_PARAMS,
@@ -301,7 +305,16 @@ class TelegramCommandHandler:
         try:
             result = await self.order_gateway.place_order(order)
         except Exception as exc:
-            await self._send_text_or_raise(f"주문 실패: {_short_error(exc)}")
+            if isinstance(exc, HTTPException) and exc.status_code == 403:
+                await self._send_text_or_raise(f"주문 실패: {_short_error(exc)}")
+                return
+
+            self.pending_orders.pop(chat_id, None)
+            await self._send_text_or_raise(
+                "주문 실패 또는 상태 확인 필요: "
+                f"{_short_error(exc)}\n"
+                "중복 주문 방지를 위해 대기 주문을 제거했습니다."
+            )
             return
 
         self.pending_orders.pop(chat_id, None)

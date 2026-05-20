@@ -2,6 +2,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import pytest
+from fastapi import HTTPException
 
 import backend.telegram_commands as telegram_commands
 from backend.config import TRADING_MCP_PARAMS
@@ -388,6 +389,34 @@ async def test_buy_command_accepts_stock_name_with_spaces():
 
 
 @pytest.mark.asyncio
+async def test_buy_command_rejects_unresolved_stock_code_before_quote_and_balance():
+    calls = []
+
+    async def mcp_runner(server_params, tool_name, arguments):
+        calls.append((server_params, tool_name, arguments))
+        if tool_name == "resolve_stock_code":
+            return "종목을 찾지 못했습니다"
+        raise AssertionError(f"unexpected tool: {tool_name}")
+
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        mcp_runner=mcp_runner,
+        now_factory=lambda: datetime(2026, 5, 20, 10, 0, tzinfo=KST),
+    )
+
+    await handler.handle_update(
+        {"message": {"chat": {"id": 123}, "text": "/buy 알수없는종목 1 75000"}}
+    )
+
+    assert calls == [
+        (TRADING_MCP_PARAMS, "resolve_stock_code", {"stock_name": "알수없는종목"})
+    ]
+    assert notifier.messages[-1] == "주문 준비 실패: 종목코드를 확인할 수 없습니다."
+    assert handler.pending_orders == {}
+
+
+@pytest.mark.asyncio
 async def test_cancel_removes_pending_order():
     async def mcp_runner(server_params, tool_name, arguments):
         if tool_name == "resolve_stock_code":
@@ -523,7 +552,7 @@ async def test_confirm_without_gateway_keeps_pending_order():
 
 
 @pytest.mark.asyncio
-async def test_confirm_gateway_failure_keeps_pending_order():
+async def test_confirm_gateway_ambiguous_failure_clears_pending_order_and_blocks_retry():
     async def mcp_runner(server_params, tool_name, arguments):
         if tool_name == "resolve_stock_code":
             return "삼성전자 (005930, KOSPI)"
@@ -546,8 +575,50 @@ async def test_confirm_gateway_failure_keeps_pending_order():
         {"message": {"chat": {"id": 123}, "text": "/buy 삼성전자 1 75000"}}
     )
     await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/confirm"}})
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/confirm"}})
 
-    assert notifier.messages[-1] == "주문 실패: gateway down"
+    assert len(gateway.orders) == 1
+    assert notifier.messages[-2] == (
+        "주문 실패 또는 상태 확인 필요: gateway down\n"
+        "중복 주문 방지를 위해 대기 주문을 제거했습니다."
+    )
+    assert notifier.messages[-1] == "확정할 대기 주문이 없습니다."
+    assert handler.pending_orders == {}
+
+
+@pytest.mark.asyncio
+async def test_confirm_real_order_guard_failure_keeps_pending_order():
+    async def mcp_runner(server_params, tool_name, arguments):
+        if tool_name == "resolve_stock_code":
+            return "삼성전자 (005930, KOSPI)"
+        if tool_name == "get_stock_quote":
+            return "현재가: 74,500원"
+        if tool_name == "get_balance":
+            return "주문가능금액: 1,000,000원"
+        raise AssertionError(f"unexpected tool: {tool_name}")
+
+    gateway = FakeOrderGateway(
+        error=HTTPException(
+            status_code=403,
+            detail="실계좌 주문은 KIS_REAL_ORDER_ENABLED=true 설정이 필요합니다.",
+        )
+    )
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        mcp_runner=mcp_runner,
+        order_gateway=gateway,
+        now_factory=lambda: datetime(2026, 5, 20, 10, 0, tzinfo=KST),
+    )
+
+    await handler.handle_update(
+        {"message": {"chat": {"id": 123}, "text": "/buy 삼성전자 1 75000"}}
+    )
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/confirm"}})
+
+    assert notifier.messages[-1] == (
+        "주문 실패: 실계좌 주문은 KIS_REAL_ORDER_ENABLED=true 설정이 필요합니다."
+    )
     assert "123" in handler.pending_orders
 
 
