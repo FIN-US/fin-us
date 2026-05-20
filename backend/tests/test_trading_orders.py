@@ -1,9 +1,11 @@
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+import httpx
 import pytest
 from fastapi import HTTPException
 
+import backend.trading_orders as trading_orders
 from backend.trading_orders import (
     OfficialKisMcpOrderGateway,
     OrderExecutionResult,
@@ -169,6 +171,16 @@ def test_mcp_first_text_or_error_raises_bad_gateway_for_error_result():
     assert exc_info.value.detail == "KIS rejected order"
 
 
+def test_mcp_first_text_or_error_raises_bad_gateway_for_empty_success_content():
+    result = _FakeMcpResult(content=[])
+
+    with pytest.raises(HTTPException) as exc_info:
+        _mcp_first_text_or_error(result)
+
+    assert exc_info.value.status_code == 502
+    assert exc_info.value.detail == "KIS MCP 주문 응답이 비어 있습니다."
+
+
 @pytest.mark.asyncio
 async def test_call_official_kis_mcp_rejects_unsupported_transport_without_network():
     with pytest.raises(HTTPException) as exc_info:
@@ -182,3 +194,53 @@ async def test_call_official_kis_mcp_rejects_unsupported_transport_without_netwo
 
     assert exc_info.value.status_code == 500
     assert "지원하지 않는 KIS MCP transport" in str(exc_info.value.detail)
+
+
+@pytest.mark.asyncio
+async def test_call_official_kis_mcp_wraps_timeout_as_gateway_timeout(monkeypatch):
+    async def fake_inner(**_kwargs):
+        raise TimeoutError
+
+    monkeypatch.setattr(
+        trading_orders,
+        "_call_official_kis_mcp_inner",
+        fake_inner,
+        raising=False,
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await call_official_kis_mcp(
+            transport="sse",
+            url="http://127.0.0.1:3300/sse",
+            tool_name="domestic_stock",
+            arguments={},
+            timeout_sec=1.0,
+        )
+
+    assert exc_info.value.status_code == 504
+    assert exc_info.value.detail == "KIS MCP 주문 요청 시간이 초과되었습니다."
+
+
+@pytest.mark.asyncio
+async def test_call_official_kis_mcp_wraps_transport_error_as_bad_gateway(monkeypatch):
+    async def fake_inner(**_kwargs):
+        raise httpx.TransportError("connection failed")
+
+    monkeypatch.setattr(
+        trading_orders,
+        "_call_official_kis_mcp_inner",
+        fake_inner,
+        raising=False,
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await call_official_kis_mcp(
+            transport="sse",
+            url="http://127.0.0.1:3300/sse",
+            tool_name="domestic_stock",
+            arguments={},
+            timeout_sec=1.0,
+        )
+
+    assert exc_info.value.status_code == 502
+    assert exc_info.value.detail == "KIS MCP 주문 요청에 실패했습니다."

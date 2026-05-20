@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass
 from datetime import datetime, time
@@ -69,6 +70,11 @@ def _mcp_first_text_or_error(result: Any) -> str:
             status_code=502,
             detail=text or "KIS MCP 주문 실행 실패",
         )
+    if not str(text or "").strip():
+        raise HTTPException(
+            status_code=502,
+            detail="KIS MCP 주문 응답이 비어 있습니다.",
+        )
 
     return text
 
@@ -85,6 +91,68 @@ async def call_official_kis_mcp(
     arguments: dict[str, Any],
     timeout_sec: float,
 ) -> str:
+    try:
+        return await asyncio.wait_for(
+            _call_official_kis_mcp_inner(
+                transport=transport,
+                url=url,
+                tool_name=tool_name,
+                arguments=arguments,
+                timeout_sec=timeout_sec,
+            ),
+            timeout=timeout_sec,
+        )
+    except asyncio.CancelledError:
+        raise
+    except TimeoutError as exc:
+        raise HTTPException(
+            status_code=504,
+            detail="KIS MCP 주문 요청 시간이 초과되었습니다.",
+        ) from exc
+    except HTTPException:
+        raise
+    except BaseExceptionGroup as exc:
+        if _exception_group_contains(exc, asyncio.CancelledError):
+            raise
+        if _exception_group_contains(exc, TimeoutError):
+            raise HTTPException(
+                status_code=504,
+                detail="KIS MCP 주문 요청 시간이 초과되었습니다.",
+            ) from exc
+        if _exception_group_contains(exc, (httpx.HTTPError, OSError)):
+            raise HTTPException(
+                status_code=502,
+                detail="KIS MCP 주문 요청에 실패했습니다.",
+            ) from exc
+        raise
+    except (httpx.HTTPError, OSError) as exc:
+        raise HTTPException(
+            status_code=502,
+            detail="KIS MCP 주문 요청에 실패했습니다.",
+        ) from exc
+
+
+def _exception_group_contains(
+    exc: BaseExceptionGroup,
+    types: type[BaseException] | tuple[type[BaseException], ...],
+) -> bool:
+    for inner in exc.exceptions:
+        if isinstance(inner, BaseExceptionGroup):
+            if _exception_group_contains(inner, types):
+                return True
+        elif isinstance(inner, types):
+            return True
+    return False
+
+
+async def _call_official_kis_mcp_inner(
+    *,
+    transport: str,
+    url: str,
+    tool_name: str,
+    arguments: dict[str, Any],
+    timeout_sec: float,
+) -> str:
     if transport == "sse":
         conn = _sse_connect_timeout(timeout_sec)
         async with sse_client(url=url, timeout=conn, sse_read_timeout=timeout_sec) as (read, write):
@@ -93,7 +161,7 @@ async def call_official_kis_mcp(
                 return _mcp_first_text_or_error(await session.call_tool(tool_name, arguments))
 
     if transport == "streamable-http":
-        async with httpx.AsyncClient() as http_client:
+        async with httpx.AsyncClient(timeout=timeout_sec) as http_client:
             async with streamable_http_client(url=url, http_client=http_client) as (read, write, _get_sid):
                 async with ClientSession(read, write) as session:
                     await session.initialize()
