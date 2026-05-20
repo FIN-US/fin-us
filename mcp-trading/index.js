@@ -11,6 +11,10 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import axios from "axios";
 import dotenv from "dotenv";
+import {
+  createCashOrderRequest,
+  formatOrderResult,
+} from "./order.js";
 
 // Redirect console.log to console.error to prevent breaking MCP JSON-RPC on stdout
 console.log = console.error;
@@ -176,6 +180,26 @@ async function kisGet(pathname, trId, params) {
   return data;
 }
 
+async function kisPost(pathname, trId, body) {
+  const token = await getAccessToken();
+  const response = await axios.post(`${KIS_URL}${pathname}`, body, {
+    headers: {
+      "Content-Type": "application/json",
+      authorization: `Bearer ${token}`,
+      appkey: KIS_API_KEY,
+      appsecret: KIS_API_SECRET,
+      tr_id: trId,
+      custtype: "P",
+    },
+  });
+
+  const data = response.data;
+  if (data.rt_cd !== "0") {
+    throw new Error(`KIS API 오류: ${data.msg1 || data.msg_cd || "알 수 없는 오류"}`);
+  }
+  return data;
+}
+
 function formatWon(value) {
   if (value === undefined || value === null || value === "") return "-";
   return `${Number(value).toLocaleString("ko-KR")}원`;
@@ -276,6 +300,36 @@ ${stockList || "보유 종목이 없습니다."}
   `.trim();
 }
 
+async function placeOrder(args) {
+  requireKisCredentials({ accountRequired: true });
+
+  const stockCode = String(args?.stock_code ?? "").trim() || resolveStock(args?.stock_name).code;
+  const stockName = String(args?.stock_name ?? "").trim() || stockCode;
+  const side = String(args?.side ?? "").trim().toUpperCase();
+  const quantity = args?.quantity;
+  const price = args?.price;
+  const orderEnv = String(args?.order_env ?? "demo").trim().toLowerCase();
+  const request = createCashOrderRequest({
+    accountNo: KIS_ACCOUNT_NO,
+    kisUrl: KIS_URL,
+    orderEnv,
+    side,
+    stockCode,
+    quantity,
+    price,
+  });
+
+  const data = await kisPost(request.pathname, request.trId, request.body);
+  return formatOrderResult({
+    stockName,
+    stockCode,
+    side,
+    quantity,
+    price,
+    data,
+  });
+}
+
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
     {
@@ -328,6 +382,44 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         required: ["stock_name"],
       },
     },
+    {
+      name: "place_order",
+      description: "한국투자증권 Open API로 국내 주식 현금 지정가 주문을 실행합니다.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          stock_name: {
+            type: "string",
+            description: "주식 종목명 또는 6자리 종목코드",
+          },
+          stock_code: {
+            type: "string",
+            description: "KIS API용 종목코드",
+          },
+          side: {
+            type: "string",
+            enum: ["BUY", "SELL"],
+            description: "매수 또는 매도",
+          },
+          quantity: {
+            type: "integer",
+            minimum: 1,
+            description: "주문 수량",
+          },
+          price: {
+            type: "integer",
+            minimum: 1,
+            description: "지정가",
+          },
+          order_env: {
+            type: "string",
+            enum: ["demo", "real"],
+            description: "모의투자 또는 실계좌",
+          },
+        },
+        required: ["stock_code", "side", "quantity", "price", "order_env"],
+      },
+    },
   ],
 }));
 
@@ -352,6 +444,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
     if (name === "get_investor_trading") {
       return { content: [{ type: "text", text: await getInvestorTrading(args?.stock_name) }] };
+    }
+
+    if (name === "place_order") {
+      return { content: [{ type: "text", text: await placeOrder(args) }] };
     }
   } catch (error) {
     const prefix = name === "get_balance" ? "잔고 조회 중" : `${name} 실행 중`;

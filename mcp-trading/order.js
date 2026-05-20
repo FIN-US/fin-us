@@ -71,6 +71,20 @@ export function buildCashOrderBody({ accountNo, stockCode, quantity, price }) {
   };
 }
 
+export function createCashOrderRequest({ accountNo, kisUrl, orderEnv, side, stockCode, quantity, price }) {
+  validateOrderEnvMatchesUrl({ orderEnv, kisUrl });
+  return {
+    pathname: "/uapi/domestic-stock/v1/trading/order-cash",
+    trId: selectCashOrderTrId({ orderEnv, side }),
+    body: buildCashOrderBody({
+      accountNo,
+      stockCode,
+      quantity,
+      price,
+    }),
+  };
+}
+
 export function formatOrderResult({ stockName, stockCode, side, quantity, price, data }) {
   const output = data?.output || {};
   const message = data?.msg1 || data?.msg_cd || "주문 요청이 접수되었습니다.";
