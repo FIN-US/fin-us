@@ -6,12 +6,28 @@ from datetime import datetime, timedelta
 from typing import Any, Callable
 
 import httpx
+from sqlmodel import Session
 
-from .config import TRADING_MCP_PARAMS
+from .config import (
+    KIS_ORDER_ENV,
+    KIS_REAL_ORDER_ENABLED,
+    KIS_TRADING_MCP_TOOL_NAME,
+    KIS_TRADING_MCP_TRANSPORT,
+    KIS_TRADING_MCP_URL,
+    TRADING_MCP_PARAMS,
+)
+from .database import engine
 from .redis_state import RedisSchedulerState, redis_state
 from .services import llm_chat, run_mcp_tool
 from .telegram_notifier import TELEGRAM_ALERT_MODES, TelegramNotifier, telegram_notifier
-from .trading_orders import KST, PendingOrder, is_korean_market_open
+from .trading_orders import (
+    KST,
+    OfficialKisMcpOrderGateway,
+    PendingOrder,
+    TradeRecorder,
+    call_official_kis_mcp,
+    is_korean_market_open,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +76,27 @@ def _telegram_command_parts(text: str) -> tuple[str, str, str]:
     command, _, argument = text.partition(" ")
     command_name, separator, bot_username = command.partition("@")
     return command_name.lower(), bot_username.lower() if separator else "", argument.strip()
+
+
+def _create_order_gateway() -> OfficialKisMcpOrderGateway:
+    transport = (
+        KIS_TRADING_MCP_TRANSPORT
+        if KIS_TRADING_MCP_TRANSPORT in {"sse", "streamable-http"}
+        else "sse"
+    )
+    order_env = "real" if KIS_ORDER_ENV == "real" else "demo"
+    return OfficialKisMcpOrderGateway(
+        mcp_url=KIS_TRADING_MCP_URL,
+        mcp_transport=transport,
+        tool_name=KIS_TRADING_MCP_TOOL_NAME,
+        order_env=order_env,
+        real_order_enabled=KIS_REAL_ORDER_ENABLED,
+        remote_runner=call_official_kis_mcp,
+    )
+
+
+def _create_trade_recorder() -> TradeRecorder:
+    return TradeRecorder(lambda: Session(engine))
 
 
 class TelegramCommandHandler:
@@ -406,7 +443,13 @@ class TelegramCommandPoller:
         handler: TelegramCommandHandler | None = None,
     ):
         self.notifier = notifier
-        self.handler = handler or TelegramCommandHandler(notifier=notifier)
+        if handler is None:
+            handler = TelegramCommandHandler(
+                notifier=notifier,
+                order_gateway=_create_order_gateway(),
+                trade_recorder=_create_trade_recorder(),
+            )
+        self.handler = handler
         self.offset: int | None = None
 
     async def run(self) -> None:

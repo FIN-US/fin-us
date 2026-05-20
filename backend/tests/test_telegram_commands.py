@@ -3,6 +3,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+import backend.telegram_commands as telegram_commands
 from backend.config import TRADING_MCP_PARAMS
 from backend.telegram_commands import (
     BUY_COMMAND_HELP,
@@ -690,6 +691,62 @@ async def test_alerts_command_ignores_other_chats():
 
     assert state.mode == "urgent"
     assert notifier.messages == []
+
+
+def test_poller_default_handler_uses_order_gateway_and_trade_recorder_factories(monkeypatch):
+    gateway = object()
+    recorder = object()
+    notifier = FakeNotifier()
+
+    monkeypatch.setattr(telegram_commands, "_create_order_gateway", lambda: gateway)
+    monkeypatch.setattr(telegram_commands, "_create_trade_recorder", lambda: recorder)
+
+    poller = TelegramCommandPoller(notifier=notifier)
+
+    assert poller.handler.order_gateway is gateway
+    assert poller.handler.trade_recorder is recorder
+
+
+def test_poller_explicit_handler_does_not_call_dependency_factories(monkeypatch):
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(notifier=notifier)
+
+    def fail_factory():
+        raise AssertionError("factory must not be called for explicit handler")
+
+    monkeypatch.setattr(telegram_commands, "_create_order_gateway", fail_factory)
+    monkeypatch.setattr(telegram_commands, "_create_trade_recorder", fail_factory)
+
+    poller = TelegramCommandPoller(notifier=notifier, handler=handler)
+
+    assert poller.handler is handler
+
+
+def test_create_order_gateway_normalizes_transport_and_order_env(monkeypatch):
+    captured = {}
+
+    class FakeGateway:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr(telegram_commands, "OfficialKisMcpOrderGateway", FakeGateway)
+    monkeypatch.setattr(telegram_commands, "KIS_TRADING_MCP_TRANSPORT", "stdio")
+    monkeypatch.setattr(telegram_commands, "KIS_ORDER_ENV", "sandbox")
+    monkeypatch.setattr(telegram_commands, "KIS_TRADING_MCP_URL", "http://kis.example/sse")
+    monkeypatch.setattr(telegram_commands, "KIS_TRADING_MCP_TOOL_NAME", "domestic_stock")
+    monkeypatch.setattr(telegram_commands, "KIS_REAL_ORDER_ENABLED", True)
+
+    gateway = telegram_commands._create_order_gateway()
+
+    assert isinstance(gateway, FakeGateway)
+    assert captured == {
+        "mcp_url": "http://kis.example/sse",
+        "mcp_transport": "sse",
+        "tool_name": "domestic_stock",
+        "order_env": "demo",
+        "real_order_enabled": True,
+        "remote_runner": telegram_commands.call_official_kis_mcp,
+    }
 
 
 @pytest.mark.asyncio
