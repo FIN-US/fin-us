@@ -20,7 +20,7 @@ functions:
       - get_user_memory
     verbose: false
     include_tool_input_schema_in_tool_description: true
-    use_native_tool_calling: true
+    use_native_tool_calling: false
     max_history: 8000
     parse_agent_response_max_retries: 5
     raise_on_parsing_failure: false

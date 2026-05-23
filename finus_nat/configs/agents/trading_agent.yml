@@ -26,10 +26,10 @@ functions:
       - add_user_memory
       - get_user_memory
     verbose: true
-    use_native_tool_calling: true
+    use_native_tool_calling: false
     parse_agent_response_max_retries: 5
     raise_on_parsing_failure: false
-    # 도구 없이 hallucination으로 답변하는 것을 막기 위해 도구 사용을 강제
+    # native tool calling 사용 시 텍스트에 Action: 없어도 native API로 도구가 호출되므로 허용
     accept_direct_answer_without_react_format: false
     max_tool_calls: 10
     additional_instructions: |
