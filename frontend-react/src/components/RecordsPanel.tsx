@@ -6,12 +6,14 @@ import { formatNumber } from '../utils/formatters';
 interface RecordsPanelProps {
   resources: DashboardResources;
   loading: boolean;
-  diaryLoading: boolean;
+  diaryAiLoading: boolean;
+  diaryListLoading: boolean;
+  diarySaveLoading: boolean;
   showAllDiaries: boolean;
   diaryAgentReport: string;
   onSubmitDiary: (title: string, content: string) => Promise<void>;
   onLoadPastDiaries: () => Promise<void>;
-  onGenerateDiaryWithAi: () => Promise<{ title: string; content: string } | null>;
+  onGenerateDiaryWithAi: () => Promise<{ title: string; content: string; diaryId?: number } | null>;
 }
 
 function formatDiaryDate(value?: string) {
@@ -30,7 +32,9 @@ function formatDiaryDate(value?: string) {
 const RecordsPanel: React.FC<RecordsPanelProps> = ({
   resources,
   loading,
-  diaryLoading,
+  diaryAiLoading,
+  diaryListLoading,
+  diarySaveLoading,
   showAllDiaries,
   diaryAgentReport,
   onSubmitDiary,
@@ -41,7 +45,8 @@ const RecordsPanel: React.FC<RecordsPanelProps> = ({
   const [content, setContent] = useState('');
   const [selectedDiaryId, setSelectedDiaryId] = useState<number | undefined>();
 
-  const busy = loading || diaryLoading;
+  const diaryBusy = diaryAiLoading || diaryListLoading || diarySaveLoading;
+  const busy = loading || diaryBusy;
   const visibleDiaries = showAllDiaries ? resources.diaries : resources.diaries.slice(0, 6);
 
   const submit = async (e: React.FormEvent) => {
@@ -57,7 +62,7 @@ const RecordsPanel: React.FC<RecordsPanelProps> = ({
     if (draft) {
       setTitle(draft.title);
       setContent(draft.content);
-      setSelectedDiaryId(undefined);
+      setSelectedDiaryId(draft.diaryId);
     }
   };
 
@@ -151,7 +156,7 @@ const RecordsPanel: React.FC<RecordsPanelProps> = ({
               disabled={busy}
               className="inline-flex items-center gap-2 rounded-lg bg-violet-600 px-4 py-2.5 text-sm font-black text-white disabled:bg-slate-300"
             >
-              {diaryLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
+              {diaryAiLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
               AI로 작성하기
             </button>
             <button
@@ -160,7 +165,7 @@ const RecordsPanel: React.FC<RecordsPanelProps> = ({
               disabled={busy}
               className="inline-flex items-center gap-2 rounded-lg border border-amber-300 bg-amber-50 px-4 py-2.5 text-sm font-black text-amber-900 disabled:opacity-50"
             >
-              {diaryLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Archive className="w-4 h-4" />}
+              {diaryListLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Archive className="w-4 h-4" />}
               과거 매매일지 가져오기
             </button>
           </div>
@@ -195,7 +200,7 @@ const RecordsPanel: React.FC<RecordsPanelProps> = ({
             disabled={busy}
             className="rounded-lg bg-amber-500 px-5 py-3 text-sm font-black text-white disabled:bg-slate-300 lg:self-start"
           >
-            저장
+            {diarySaveLoading ? '저장 중…' : '저장'}
           </button>
         </form>
 

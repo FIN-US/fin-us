@@ -30,7 +30,9 @@ export function useFinUsDashboard() {
   const [provider, setProvider] = useState('openai');
   const [loading, setLoading] = useState(false);
   const [resourceLoading, setResourceLoading] = useState(false);
-  const [diaryLoading, setDiaryLoading] = useState(false);
+  const [diaryAiLoading, setDiaryAiLoading] = useState(false);
+  const [diaryListLoading, setDiaryListLoading] = useState(false);
+  const [diarySaveLoading, setDiarySaveLoading] = useState(false);
   const [showAllDiaries, setShowAllDiaries] = useState(false);
   const [diaryAgentReport, setDiaryAgentReport] = useState('');
   const [report, setReport] = useState<AnalysisReport | null>(null);
@@ -122,23 +124,26 @@ export function useFinUsDashboard() {
   const submitDiary = useCallback(
     async (title: string, content: string) => {
       if (!title.trim() || !content.trim()) return;
-      setDiaryLoading(true);
+      setDiarySaveLoading(true);
       setError('');
       try {
         const diary = await finUsApi.createDiary(title.trim(), content.trim());
-        setResources((current) => ({ ...current, diaries: [diary, ...current.diaries] }));
+        setResources((current) => {
+          const rest = current.diaries.filter((item) => item.id !== diary.id);
+          return { ...current, diaries: [diary, ...rest] };
+        });
         setShowAllDiaries(true);
       } catch (err: unknown) {
         setError(apiErrorMessage(err));
       } finally {
-        setDiaryLoading(false);
+        setDiarySaveLoading(false);
       }
     },
     [],
   );
 
   const loadPastDiaries = useCallback(async () => {
-    setDiaryLoading(true);
+    setDiaryListLoading(true);
     setError('');
     try {
       const diaries = await finUsApi.diaries();
@@ -147,12 +152,16 @@ export function useFinUsDashboard() {
     } catch (err: unknown) {
       setError(apiErrorMessage(err));
     } finally {
-      setDiaryLoading(false);
+      setDiaryListLoading(false);
     }
   }, []);
 
-  const generateDiaryWithAi = useCallback(async (): Promise<{ title: string; content: string } | null> => {
-    setDiaryLoading(true);
+  const generateDiaryWithAi = useCallback(async (): Promise<{
+    title: string;
+    content: string;
+    diaryId?: number;
+  } | null> => {
+    setDiaryAiLoading(true);
     setError('');
     setDiaryAgentReport('');
     try {
@@ -160,14 +169,18 @@ export function useFinUsDashboard() {
       setDiaryAgentReport(result.report || '');
       const draft = result.draft;
       if (draft?.title && draft?.content) {
-        return { title: draft.title, content: draft.content };
+        return {
+          title: draft.title,
+          content: draft.content,
+          diaryId: result.source === 'existing' ? result.diary_id ?? undefined : undefined,
+        };
       }
       return null;
     } catch (err: unknown) {
       setError(apiErrorMessage(err));
       return null;
     } finally {
-      setDiaryLoading(false);
+      setDiaryAiLoading(false);
     }
   }, []);
 
@@ -225,7 +238,9 @@ export function useFinUsDashboard() {
     setProvider,
     loading,
     resourceLoading,
-    diaryLoading,
+    diaryAiLoading,
+    diaryListLoading,
+    diarySaveLoading,
     showAllDiaries,
     diaryAgentReport,
     report,

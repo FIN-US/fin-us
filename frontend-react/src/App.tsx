@@ -30,7 +30,9 @@ export default function App() {
     handleFetchData,
     loadResources,
     submitDiary,
-    diaryLoading,
+    diaryAiLoading,
+    diaryListLoading,
+    diarySaveLoading,
     showAllDiaries,
     diaryAgentReport,
     loadPastDiaries,
@@ -78,7 +80,9 @@ export default function App() {
           <RecordsPanel
             resources={resources}
             loading={resourceLoading}
-            diaryLoading={diaryLoading}
+            diaryAiLoading={diaryAiLoading}
+            diaryListLoading={diaryListLoading}
+            diarySaveLoading={diarySaveLoading}
             showAllDiaries={showAllDiaries}
             diaryAgentReport={diaryAgentReport}
             onSubmitDiary={submitDiary}

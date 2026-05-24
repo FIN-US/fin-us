@@ -35,6 +35,7 @@ services:
       TRADING_MCP_DIR: /opt/mcp-trading
       DART_MCP_DIR: /opt/mcp-dart
       REDIS_URL: redis://redis:6379/0
+      KIS_TOKEN_CACHE_PATH: /app/.state/kis-token-cache.json
     depends_on:
       finus-nat:
         condition: service_healthy
@@ -55,10 +56,15 @@ services:
       dockerfile: finus_nat/Dockerfile
     ports:
       - "8001:8000"
+    volumes:
+      - .:/workspace
     env_file:
       - ./.env
     environment:
       FINUS_VENDOR_ROOT: /workspace
+      FINUS_ROOT: /workspace
+      FINUS_ENV_PATH: /workspace/.env
+      FINUS_BACKEND_URL: http://backend:8000
       KIS_TOKEN_CACHE_PATH: /workspace/.state/kis-token-cache.json
     extra_hosts:
       - "host.docker.internal:host-gateway"

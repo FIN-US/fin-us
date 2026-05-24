@@ -80,6 +80,8 @@ export interface DiaryDraft {
 }
 
 export interface DiaryGenerateResult {
+  source?: 'existing' | 'generated';
+  diary_id?: number | null;
   report: string;
   draft: DiaryDraft;
 }
