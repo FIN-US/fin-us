@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { apiErrorMessage, finUsApi } from '../api';
-import type { AnalysisReport, ChatMessage, DashboardResources } from '../types';
+import type { AnalysisReport, ChatMessage, DashboardResources, DiaryItem } from '../types';
 
 const initialResources: DashboardResources = {
   health: null,
@@ -30,6 +30,9 @@ export function useFinUsDashboard() {
   const [provider, setProvider] = useState('openai');
   const [loading, setLoading] = useState(false);
   const [resourceLoading, setResourceLoading] = useState(false);
+  const [diaryLoading, setDiaryLoading] = useState(false);
+  const [showAllDiaries, setShowAllDiaries] = useState(false);
+  const [diaryAgentReport, setDiaryAgentReport] = useState('');
   const [report, setReport] = useState<AnalysisReport | null>(null);
   const [rawNews, setRawNews] = useState<string[]>([]);
   const [rawTrend, setRawTrend] = useState<string | null>(null);
@@ -119,19 +122,54 @@ export function useFinUsDashboard() {
   const submitDiary = useCallback(
     async (title: string, content: string) => {
       if (!title.trim() || !content.trim()) return;
-      setResourceLoading(true);
+      setDiaryLoading(true);
       setError('');
       try {
         const diary = await finUsApi.createDiary(title.trim(), content.trim());
         setResources((current) => ({ ...current, diaries: [diary, ...current.diaries] }));
+        setShowAllDiaries(true);
       } catch (err: unknown) {
         setError(apiErrorMessage(err));
       } finally {
-        setResourceLoading(false);
+        setDiaryLoading(false);
       }
     },
     [],
   );
+
+  const loadPastDiaries = useCallback(async () => {
+    setDiaryLoading(true);
+    setError('');
+    try {
+      const diaries = await finUsApi.diaries();
+      setResources((current) => ({ ...current, diaries }));
+      setShowAllDiaries(true);
+    } catch (err: unknown) {
+      setError(apiErrorMessage(err));
+    } finally {
+      setDiaryLoading(false);
+    }
+  }, []);
+
+  const generateDiaryWithAi = useCallback(async (): Promise<{ title: string; content: string } | null> => {
+    setDiaryLoading(true);
+    setError('');
+    setDiaryAgentReport('');
+    try {
+      const result = await finUsApi.generateDiary();
+      setDiaryAgentReport(result.report || '');
+      const draft = result.draft;
+      if (draft?.title && draft?.content) {
+        return { title: draft.title, content: draft.content };
+      }
+      return null;
+    } catch (err: unknown) {
+      setError(apiErrorMessage(err));
+      return null;
+    } finally {
+      setDiaryLoading(false);
+    }
+  }, []);
 
   const sendChatMessage = useCallback((text: string) => {
     const message = text.trim();
@@ -187,6 +225,9 @@ export function useFinUsDashboard() {
     setProvider,
     loading,
     resourceLoading,
+    diaryLoading,
+    showAllDiaries,
+    diaryAgentReport,
     report,
     rawNews,
     rawTrend,
@@ -198,6 +239,8 @@ export function useFinUsDashboard() {
     handleFetchData,
     loadResources,
     submitDiary,
+    loadPastDiaries,
+    generateDiaryWithAi,
     sendChatMessage,
   };
 }

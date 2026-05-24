@@ -40,6 +40,51 @@ def test_vendor_root_detection_keeps_nested_news_trading_layout(monkeypatch, tmp
     assert finus_paths.fin_us_vendor_root() == finus_home
 
 
+def test_finus_backend_base_url(monkeypatch):
+    monkeypatch.delenv("FINUS_BACKEND_URL", raising=False)
+    assert finus_api._finus_backend_base_url("") == "http://127.0.0.1:8000"
+    monkeypatch.setenv("FINUS_BACKEND_URL", "http://backend:8000/")
+    assert finus_api._finus_backend_base_url("") == "http://backend:8000"
+    assert finus_api._finus_backend_base_url("http://custom:9000") == "http://custom:9000"
+
+
+def test_save_trading_diary_posts_to_backend(monkeypatch):
+    captured = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"status": "success", "data": {"id": 1, "title": "T", "content": "C"}}
+
+    class FakeClient:
+        def __init__(self, timeout):
+            captured["timeout"] = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, json):
+            captured["url"] = url
+            captured["json"] = json
+            return FakeResponse()
+
+    monkeypatch.setattr(finus_api.httpx, "AsyncClient", FakeClient)
+
+    config = finus_api.FinusSaveDiaryConfig(backend_url="http://test-backend:8000")
+    gen = finus_api.finus_save_diary(config, None)
+    info = asyncio.run(gen.__anext__())
+    result = asyncio.run(info.fn(title="매매일지 2026-05-24", content="본문"))
+
+    assert captured["url"] == "http://test-backend:8000/api/v1/db/diary"
+    assert captured["json"] == {"title": "매매일지 2026-05-24", "content": "본문"}
+    assert '"id": 1' in result
+
+
 def test_mcp_call_tool_passes_environment_to_child_process(monkeypatch, tmp_path):
     server_dir = tmp_path / "mcp-news"
     server_dir.mkdir()

@@ -1,23 +1,74 @@
 import React, { useState } from 'react';
-import { BookOpen, ClipboardList, FileText, History } from 'lucide-react';
-import type { DashboardResources } from '../types';
+import { BookOpen, ClipboardList, FileText, History, Loader2, Sparkles, Archive } from 'lucide-react';
+import type { DashboardResources, DiaryItem } from '../types';
 import { formatNumber } from '../utils/formatters';
 
 interface RecordsPanelProps {
   resources: DashboardResources;
   loading: boolean;
+  diaryLoading: boolean;
+  showAllDiaries: boolean;
+  diaryAgentReport: string;
   onSubmitDiary: (title: string, content: string) => Promise<void>;
+  onLoadPastDiaries: () => Promise<void>;
+  onGenerateDiaryWithAi: () => Promise<{ title: string; content: string } | null>;
 }
 
-const RecordsPanel: React.FC<RecordsPanelProps> = ({ resources, loading, onSubmitDiary }) => {
+function formatDiaryDate(value?: string) {
+  if (!value) return '';
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return value;
+  return parsed.toLocaleString('ko-KR', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
+const RecordsPanel: React.FC<RecordsPanelProps> = ({
+  resources,
+  loading,
+  diaryLoading,
+  showAllDiaries,
+  diaryAgentReport,
+  onSubmitDiary,
+  onLoadPastDiaries,
+  onGenerateDiaryWithAi,
+}) => {
   const [title, setTitle] = useState('');
   const [content, setContent] = useState('');
+  const [selectedDiaryId, setSelectedDiaryId] = useState<number | undefined>();
+
+  const busy = loading || diaryLoading;
+  const visibleDiaries = showAllDiaries ? resources.diaries : resources.diaries.slice(0, 6);
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     await onSubmitDiary(title, content);
     setTitle('');
     setContent('');
+    setSelectedDiaryId(undefined);
+  };
+
+  const handleGenerateAi = async () => {
+    const draft = await onGenerateDiaryWithAi();
+    if (draft) {
+      setTitle(draft.title);
+      setContent(draft.content);
+      setSelectedDiaryId(undefined);
+    }
+  };
+
+  const handleLoadPast = async () => {
+    await onLoadPastDiaries();
+  };
+
+  const selectDiary = (item: DiaryItem) => {
+    setTitle(item.title);
+    setContent(item.content);
+    setSelectedDiaryId(item.id);
   };
 
   return (
@@ -88,10 +139,43 @@ const RecordsPanel: React.FC<RecordsPanelProps> = ({ resources, loading, onSubmi
       </div>
 
       <div className="xl:col-span-3 bg-white p-6 rounded-lg shadow-xl border border-slate-100">
-        <div className="flex items-center gap-3 mb-5">
-          <div className="p-2 bg-amber-50 rounded-lg"><BookOpen className="w-5 h-5 text-amber-600" /></div>
-          <h3 className="text-slate-900 font-black">Diary</h3>
+        <div className="flex flex-wrap items-center justify-between gap-3 mb-5">
+          <div className="flex items-center gap-3">
+            <div className="p-2 bg-amber-50 rounded-lg"><BookOpen className="w-5 h-5 text-amber-600" /></div>
+            <h3 className="text-slate-900 font-black">Diary</h3>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={handleGenerateAi}
+              disabled={busy}
+              className="inline-flex items-center gap-2 rounded-lg bg-violet-600 px-4 py-2.5 text-sm font-black text-white disabled:bg-slate-300"
+            >
+              {diaryLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
+              AI로 작성하기
+            </button>
+            <button
+              type="button"
+              onClick={handleLoadPast}
+              disabled={busy}
+              className="inline-flex items-center gap-2 rounded-lg border border-amber-300 bg-amber-50 px-4 py-2.5 text-sm font-black text-amber-900 disabled:opacity-50"
+            >
+              {diaryLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Archive className="w-4 h-4" />}
+              과거 매매일지 가져오기
+            </button>
+          </div>
         </div>
+
+        {diaryAgentReport && (
+          <div className="mb-4 rounded-lg border border-violet-100 bg-violet-50/80 p-4">
+            <p className="text-xs font-black uppercase tracking-wide text-violet-700">AI 초안 (미저장)</p>
+            <p className="mt-1 text-xs text-violet-600">내용을 확인·수정한 뒤 아래 「저장」 버튼을 눌러 backend에 저장하세요.</p>
+            <p className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap text-sm leading-relaxed text-slate-700">
+              {diaryAgentReport}
+            </p>
+          </div>
+        )}
+
         <form onSubmit={submit} className="grid grid-cols-1 lg:grid-cols-[240px_1fr_auto] gap-3 mb-5">
           <input
             value={title}
@@ -99,28 +183,53 @@ const RecordsPanel: React.FC<RecordsPanelProps> = ({ resources, loading, onSubmi
             placeholder="일지 제목"
             className="rounded-lg border border-slate-200 px-4 py-3 text-sm focus:outline-none focus:ring-4 focus:ring-amber-100"
           />
-          <input
+          <textarea
             value={content}
             onChange={(e) => setContent(e.target.value)}
             placeholder="일지 내용"
-            className="rounded-lg border border-slate-200 px-4 py-3 text-sm focus:outline-none focus:ring-4 focus:ring-amber-100"
+            rows={3}
+            className="min-h-[88px] resize-y rounded-lg border border-slate-200 px-4 py-3 text-sm focus:outline-none focus:ring-4 focus:ring-amber-100"
           />
           <button
             type="submit"
-            disabled={loading}
-            className="rounded-lg bg-amber-500 px-5 py-3 text-sm font-black text-white disabled:bg-slate-300"
+            disabled={busy}
+            className="rounded-lg bg-amber-500 px-5 py-3 text-sm font-black text-white disabled:bg-slate-300 lg:self-start"
           >
             저장
           </button>
         </form>
-        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-          {resources.diaries.length === 0 && <p className="text-sm text-slate-400">저장된 투자 일지가 없습니다.</p>}
-          {resources.diaries.slice(0, 6).map((item) => (
-            <div key={item.id ?? item.created_at} className="rounded-lg bg-slate-50 p-4">
-              <div className="font-black text-slate-800">{item.title}</div>
-              <p className="mt-2 text-sm leading-relaxed text-slate-500">{item.content}</p>
-            </div>
-          ))}
+
+        <p className="mb-3 text-xs text-slate-500">
+          {showAllDiaries
+            ? `저장된 일지 ${resources.diaries.length}건 · 카드를 클릭하면 편집란에 불러옵니다.`
+            : `최근 ${visibleDiaries.length}건 미리보기 · 전체 목록은 「과거 매매일지 가져오기」를 누르세요.`}
+        </p>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3 max-h-[28rem] overflow-auto">
+          {visibleDiaries.length === 0 && (
+            <p className="text-sm text-slate-400 md:col-span-2 xl:col-span-3">저장된 투자 일지가 없습니다.</p>
+          )}
+          {visibleDiaries.map((item) => {
+            const isSelected = selectedDiaryId !== undefined && item.id === selectedDiaryId;
+            return (
+              <button
+                key={item.id ?? item.created_at}
+                type="button"
+                onClick={() => selectDiary(item)}
+                className={`rounded-lg p-4 text-left transition ${
+                  isSelected
+                    ? 'bg-amber-100 ring-2 ring-amber-400'
+                    : 'bg-slate-50 hover:bg-amber-50/60'
+                }`}
+              >
+                <div className="font-black text-slate-800">{item.title}</div>
+                {item.created_at && (
+                  <div className="mt-1 text-xs font-bold text-slate-400">{formatDiaryDate(item.created_at)}</div>
+                )}
+                <p className="mt-2 line-clamp-4 text-sm leading-relaxed text-slate-500">{item.content}</p>
+              </button>
+            );
+          })}
         </div>
       </div>
     </section>

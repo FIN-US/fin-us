@@ -74,6 +74,16 @@ export interface DiaryItem {
   created_at: string;
 }
 
+export interface DiaryDraft {
+  title: string;
+  content: string;
+}
+
+export interface DiaryGenerateResult {
+  report: string;
+  draft: DiaryDraft;
+}
+
 export interface AccountBalance {
   report: string;
 }
