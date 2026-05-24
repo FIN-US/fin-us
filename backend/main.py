@@ -15,7 +15,8 @@ from .services import (
     normalize_llm_provider,
     llm_chat,
     analysis_from_nat_text,
-    perform_stock_analysis
+    perform_stock_analysis,
+    generate_trading_diary_via_nat,
 )
 from .database import init_db, get_session
 from .models import Portfolio, TradeHistory, AgentReport, Diary
@@ -140,6 +141,13 @@ async def create_db_diary(
     session.commit()
     session.refresh(diary)
     return {"status": "success", "data": diary}
+
+
+@app.post("/api/v1/diary/generate", response_model=CommonResponse, tags=["AI Agent"])
+async def generate_diary():
+    """NAT diary_agent로 당일 매매일지 초안을 작성합니다 (저장은 frontend에서 수동)."""
+    data = await generate_trading_diary_via_nat()
+    return {"status": "success", "data": data}
 
 
 @app.get("/health", tags=["System"])
