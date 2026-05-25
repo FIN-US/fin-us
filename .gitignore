@@ -57,6 +57,7 @@ AGENTS.md
 .cursor/
 .codex/
 *.db
+.state/
 CLAUDE.md
 
 mcp-dart/data/corp-codes.json
