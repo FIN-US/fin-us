@@ -533,7 +533,7 @@ def _prepare_kis_trading_mcp_call(
     return tool_name, {"api_type": str(api_type).strip(), "params": params}
 
 
-# ---------- registered functions ----------
+# KIS Trading MCP 도구 가이드
 _KIS_TRADING_TOOL_GUIDE = """
 ### Fin-Us KIS 호출 규칙
 - ReAct 형식: `Action Input:` 한 줄에는 JSON만 두세요. JSON 뒤에 같은 줄·바로 다음 줄에 설명을 붙이면 도구 입력이 깨질 수 있습니다. 설명은 Observation 이후 또는 `Final Answer:` 에 쓰세요.
@@ -816,14 +816,14 @@ async def finus_save_diary(config: FinusSaveDiaryConfig, _builder: Builder):
     base_url = _finus_backend_base_url(config.backend_url)
 
     async def save_trading_diary(inp: FinusSaveDiaryInput) -> str:
-        """Fin-Us backend에 매매일지를 저장합니다.
+        """Fin-Us backend db에 매매일지를 저장합니다.
 
         Args:
             title: 일지 제목 (예: ``매매일지 2026-05-24``).
             content: 일지 본문(종목·매매 구분·금액·변동률·회고 등).
 
         Returns:
-            저장된 일지 메타데이터 JSON 문자열. 실패 시 ``error`` 필드가 있는 JSON.
+            저장된 일지 메타데이터 JSON 문자열. 실패 시 ``error`` 필드를 가진 JSON.
         """
         title = (inp.title or "").strip()
         content = (inp.content or "").strip()
@@ -867,7 +867,7 @@ async def finus_list_diaries(config: FinusListDiariesConfig, _builder: Builder):
         """Fin-Us backend에 저장된 매매일지 목록을 조회합니다.
 
         Returns:
-            일지 배열 JSON 문자열. 실패 시 ``error`` 필드가 있는 JSON.
+            일지 배열 JSON 문자열. 실패 시 ``error`` 필드를 가진 JSON.
         """
         url = f"{base_url}/api/v1/db/diary"
         try:

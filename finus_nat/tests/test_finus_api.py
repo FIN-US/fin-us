@@ -76,9 +76,16 @@ def test_save_trading_diary_posts_to_backend(monkeypatch):
     monkeypatch.setattr(finus_api.httpx, "AsyncClient", FakeClient)
 
     config = finus_api.FinusSaveDiaryConfig(backend_url="http://test-backend:8000")
-    gen = finus_api.finus_save_diary(config, None)
-    info = asyncio.run(gen.__anext__())
-    result = asyncio.run(info.fn(title="매매일지 2026-05-24", content="본문"))
+
+    # ``@register_function`` 은 빌더를 ``asynccontextmanager`` 로 감싸고,
+    # 노출되는 호출 핸들은 ``FunctionInfo.single_fn`` 이며 입력은 pydantic 스키마 인스턴스다.
+    async def run_tool():
+        async with finus_api.finus_save_diary(config, None) as info:
+            return await info.single_fn(
+                finus_api.FinusSaveDiaryInput(title="매매일지 2026-05-24", content="본문")
+            )
+
+    result = asyncio.run(run_tool())
 
     assert captured["url"] == "http://test-backend:8000/api/v1/db/diary"
     assert captured["json"] == {"title": "매매일지 2026-05-24", "content": "본문"}

@@ -41,13 +41,8 @@ if [[ -z "${OPENAI_API_BASE_URL:-}" && -n "${OPENAI_BASE_URL:-}" ]]; then
   export OPENAI_API_BASE_URL="${OPENAI_BASE_URL}"
 fi
 
-# Mem0 등 NAT 전용 비밀: finus_nat/.env 를 마지막에 로드해 fin-us/.env 보다 우선한다.
-if [[ -f "${FE_PKG_ABS}/.env" ]]; then
-  set -a
-  # shellcheck disable=SC1090
-  source "${FE_PKG_ABS}/.env"
-  set +a
-fi
+# Mem0 등 NAT 전용 비밀(MEM0_API_KEY, FINUS_MEM0_*, FINUS_KIS_TRADING_MCP_URL,
+# FINUS_BACKEND_URL)도 fin-us/.env 로 통합되었습니다. 별도 finus_nat/.env 는 더 이상 사용하지 않습니다.
 
 # Self-hosted Mem0 compatibility for local `run.sh` execution:
 # mem0 OSS endpoints may not implement cloud `/v1/ping` validation.
