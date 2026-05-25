@@ -11,6 +11,8 @@ import {
 import axios from "axios";
 import dotenv from "dotenv";
 
+import { buildTokenCachePath } from "./lib/token-cache-path.js";
+
 // Redirect console.log to console.error to prevent breaking MCP JSON-RPC on stdout
 console.log = console.error;
 
@@ -121,12 +123,13 @@ const TOKEN_TTL_MARGIN_MS = 60_000;
 const TOKEN_RATE_LIMIT_CODE = "EGW00133";
 
 function resolveTokenCachePath() {
-  const explicit = (process.env.KIS_TOKEN_CACHE_PATH || "").trim();
-  if (explicit) return explicit;
-
-  // fin-us/.state — host·Docker·여러 mcp-trading stdio 프로세스가 토큰 공유
-  const finUsState = path.join(__dirname, "..", ".state", "kis-token-cache.json");
-  return finUsState;
+  return buildTokenCachePath({
+    url: KIS_URL,
+    apiKey: KIS_API_KEY,
+    accountNo: KIS_ACCOUNT_NO,
+    explicit: process.env.KIS_TOKEN_CACHE_PATH,
+    fallbackDir: path.join(__dirname, "..", ".state"),
+  });
 }
 
 const TOKEN_CACHE_PATH = resolveTokenCachePath();
