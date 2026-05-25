@@ -4,6 +4,7 @@ import logging
 from datetime import date
 from typing import Any, Literal, Optional
 from urllib.parse import quote as _url_quote
+from uuid import uuid4
 from fastapi import HTTPException
 from anthropic import AsyncAnthropic
 from openai import AsyncOpenAI
@@ -471,7 +472,7 @@ async def generate_trading_diary_via_nat() -> dict[str, Any]:
         f"오늘(KST, {today}) 매매일지 초안만 작성하세요.\n"
         f'응답 마지막에 JSON 한 개: {{"title":"매매일지 {today}","content":"..."}}'
     )
-    conv_id = f"diary:frontend:draft:{today}"
+    conv_id = f"diary:frontend:draft:{today}:{uuid4().hex}"
     raw = await llm_chat("nat", user_msg, conversation_id=conv_id, timeout_sec=300.0)
     draft = _diary_draft_from_nat_text(raw, today)
     return {"report": raw, "draft": draft}
