@@ -58,6 +58,7 @@ test("buildCashOrderBody creates uppercase KIS order body", () => {
       stockCode: "005930",
       quantity: 2,
       price: 70000,
+      orderType: "LIMIT",
     }),
     {
       CANO: "12345678",
@@ -73,6 +74,29 @@ test("buildCashOrderBody creates uppercase KIS order body", () => {
   );
 });
 
+test("buildCashOrderBody creates market KIS order body", () => {
+  assert.deepEqual(
+    buildCashOrderBody({
+      accountNo: "1234567801",
+      stockCode: "005930",
+      quantity: 2,
+      price: 0,
+      orderType: "MARKET",
+    }),
+    {
+      CANO: "12345678",
+      ACNT_PRDT_CD: "01",
+      PDNO: "005930",
+      ORD_DVSN: "01",
+      ORD_QTY: "2",
+      ORD_UNPR: "0",
+      EXCG_ID_DVSN_CD: "SOR",
+      SLL_TYPE: "",
+      CNDT_PRIC: "",
+    },
+  );
+});
+
 test("formatOrderResult includes order number when present", () => {
   assert.equal(
     formatOrderResult({
@@ -81,6 +105,7 @@ test("formatOrderResult includes order number when present", () => {
       side: "BUY",
       quantity: 1,
       price: 70000,
+      orderType: "LIMIT",
       data: { output: { ODNO: "12345", ORD_TMD: "101010" }, msg1: "주문이 완료되었습니다" },
     }),
     "[삼성전자] BUY 주문 접수\n- 종목코드: 005930\n- 수량/가격: 1주 / 70,000원\n- 주문번호: 12345\n- 주문시간: 101010\n- 메시지: 주문이 완료되었습니다",
@@ -97,6 +122,7 @@ test("createCashOrderRequest builds KIS endpoint, TR ID, and body", () => {
       stockCode: "005930",
       quantity: 3,
       price: 68000,
+      orderType: "LIMIT",
     }),
     {
       pathname: "/uapi/domestic-stock/v1/trading/order-cash",
@@ -108,6 +134,36 @@ test("createCashOrderRequest builds KIS endpoint, TR ID, and body", () => {
         ORD_DVSN: "00",
         ORD_QTY: "3",
         ORD_UNPR: "68000",
+        EXCG_ID_DVSN_CD: "SOR",
+        SLL_TYPE: "",
+        CNDT_PRIC: "",
+      },
+    },
+  );
+});
+
+test("createCashOrderRequest builds market order body", () => {
+  assert.deepEqual(
+    createCashOrderRequest({
+      accountNo: "1234567801",
+      kisUrl: "https://openapivts.koreainvestment.com:29443",
+      orderEnv: "demo",
+      side: "BUY",
+      stockCode: "005930",
+      quantity: 3,
+      price: 0,
+      orderType: "MARKET",
+    }),
+    {
+      pathname: "/uapi/domestic-stock/v1/trading/order-cash",
+      trId: "VTTC0012U",
+      body: {
+        CANO: "12345678",
+        ACNT_PRDT_CD: "01",
+        PDNO: "005930",
+        ORD_DVSN: "01",
+        ORD_QTY: "3",
+        ORD_UNPR: "0",
         EXCG_ID_DVSN_CD: "SOR",
         SLL_TYPE: "",
         CNDT_PRIC: "",

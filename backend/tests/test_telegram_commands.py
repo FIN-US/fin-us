@@ -135,8 +135,8 @@ async def test_help_command_replies_with_supported_commands():
     assert "/balance - 예수금·총자산·보유 종목 조회" in notifier.messages[-1]
     assert "/quote <종목명> - 현재가 조회" in notifier.messages[-1]
     assert "/trend <종목명> - 외국인·기관·개인 수급 조회" in notifier.messages[-1]
-    assert "/buy <종목명> <수량> <지정가> - 지정가 매수 주문 준비" in notifier.messages[-1]
-    assert "/sell <종목명> <수량> <지정가> - 지정가 매도 주문 준비" in notifier.messages[-1]
+    assert "/buy <종목명> <수량> [지정가] - 매수 주문 준비" in notifier.messages[-1]
+    assert "/sell <종목명> <수량> [지정가] - 매도 주문 준비" in notifier.messages[-1]
     assert "/confirm - 대기 주문 확정" in notifier.messages[-1]
     assert "/cancel - 대기 주문 취소" in notifier.messages[-1]
     assert "일반 문장은 NAT에게 바로 질문합니다." in notifier.messages[-1]
@@ -350,6 +350,51 @@ async def test_buy_command_creates_pending_order_and_prompts_confirmation():
     assert handler.pending_orders["123"].side == "BUY"
     assert handler.pending_orders["123"].quantity == 10
     assert handler.pending_orders["123"].price == 75000
+    assert handler.pending_orders["123"].order_type == "LIMIT"
+
+
+@pytest.mark.asyncio
+async def test_buy_command_without_price_creates_market_order_and_prompts_confirmation():
+    calls = []
+
+    async def mcp_runner(server_params, tool_name, arguments):
+        calls.append((server_params, tool_name, arguments))
+        if tool_name == "resolve_stock_code":
+            return "삼성전자 (005930, KOSPI)"
+        if tool_name == "get_stock_quote":
+            return "현재가: 74,500원"
+        if tool_name == "get_balance":
+            return "주문가능금액: 1,000,000원"
+        raise AssertionError(f"unexpected tool: {tool_name}")
+
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        mcp_runner=mcp_runner,
+        now_factory=lambda: datetime(2026, 5, 20, 10, 0, tzinfo=KST),
+    )
+
+    await handler.handle_update(
+        {"message": {"chat": {"id": 123}, "text": "/buy 삼성전자 10"}}
+    )
+
+    assert calls == [
+        (TRADING_MCP_PARAMS, "resolve_stock_code", {"stock_name": "삼성전자"}),
+        (TRADING_MCP_PARAMS, "get_stock_quote", {"stock_name": "삼성전자"}),
+        (TRADING_MCP_PARAMS, "get_balance", {}),
+    ]
+    assert "삼성전자 매수 주문 확인" in notifier.messages[-1]
+    assert "주문유형: 시장가" in notifier.messages[-1]
+    assert "지정가:" not in notifier.messages[-1]
+    assert "주문금액:" not in notifier.messages[-1]
+    assert "/confirm" in notifier.messages[-1]
+    assert "/cancel" in notifier.messages[-1]
+    assert handler.pending_orders["123"].stock_name == "삼성전자"
+    assert handler.pending_orders["123"].stock_code == "005930"
+    assert handler.pending_orders["123"].side == "BUY"
+    assert handler.pending_orders["123"].quantity == 10
+    assert handler.pending_orders["123"].price == 0
+    assert handler.pending_orders["123"].order_type == "MARKET"
 
 
 @pytest.mark.asyncio
@@ -386,6 +431,7 @@ async def test_buy_command_accepts_stock_name_with_spaces():
     assert handler.pending_orders["123"].stock_name == "LG 화학"
     assert handler.pending_orders["123"].quantity == 10
     assert handler.pending_orders["123"].price == 75000
+    assert handler.pending_orders["123"].order_type == "LIMIT"
 
 
 @pytest.mark.asyncio
@@ -654,9 +700,7 @@ async def test_buy_command_rejects_invalid_args_with_usage():
         now_factory=lambda: datetime(2026, 5, 20, 10, 0, tzinfo=KST),
     )
 
-    await handler.handle_update(
-        {"message": {"chat": {"id": 123}, "text": "/buy 삼성전자 x 75000"}}
-    )
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/buy 삼성전자 x"}})
 
     assert notifier.messages == [BUY_COMMAND_HELP]
 

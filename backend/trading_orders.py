@@ -11,6 +11,7 @@ from fastapi import HTTPException
 
 KST = ZoneInfo("Asia/Seoul")
 OrderSide = Literal["BUY", "SELL"]
+OrderType = Literal["LIMIT", "MARKET"]
 
 
 @dataclass(frozen=True)
@@ -22,6 +23,7 @@ class PendingOrder:
     quantity: int
     price: int
     created_at: datetime
+    order_type: OrderType = "LIMIT"
 
 
 @dataclass(frozen=True)
@@ -33,6 +35,7 @@ class OrderExecutionResult:
     price: int
     message: str
     raw_result: str
+    order_type: OrderType = "LIMIT"
 
 
 class TradeRecorder:
@@ -100,17 +103,21 @@ class McpTradingOrderGateway:
                 detail="실계좌 주문은 KIS_REAL_ORDER_ENABLED=true 설정이 필요합니다.",
             )
 
+        arguments: dict[str, Any] = {
+            "stock_name": order.stock_name,
+            "stock_code": order.stock_code,
+            "side": order.side,
+            "quantity": order.quantity,
+            "price": order.price,
+            "order_env": self.order_env,
+        }
+        if order.order_type == "MARKET":
+            arguments["order_type"] = "MARKET"
+
         raw_result = await self.mcp_runner(
             self.server_params,
             "place_order",
-            {
-                "stock_name": order.stock_name,
-                "stock_code": order.stock_code,
-                "side": order.side,
-                "quantity": order.quantity,
-                "price": order.price,
-                "order_env": self.order_env,
-            },
+            arguments,
         )
 
         return OrderExecutionResult(
@@ -121,6 +128,7 @@ class McpTradingOrderGateway:
             price=order.price,
             message=_extract_order_message(raw_result),
             raw_result=raw_result,
+            order_type=order.order_type,
         )
 
 

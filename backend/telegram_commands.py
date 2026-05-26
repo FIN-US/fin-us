@@ -21,6 +21,7 @@ from .telegram_notifier import TELEGRAM_ALERT_MODES, TelegramNotifier, telegram_
 from .trading_orders import (
     KST,
     McpTradingOrderGateway,
+    OrderType,
     PendingOrder,
     TradeRecorder,
     is_korean_market_open,
@@ -29,8 +30,8 @@ from .trading_orders import (
 logger = logging.getLogger(__name__)
 
 ALERT_COMMAND_HELP = "사용법: /alerts urgent | all | off | status"
-BUY_COMMAND_HELP = "사용법: /buy <종목명> <수량> <지정가>"
-SELL_COMMAND_HELP = "사용법: /sell <종목명> <수량> <지정가>"
+BUY_COMMAND_HELP = "사용법: /buy <종목명> <수량> [지정가]"
+SELL_COMMAND_HELP = "사용법: /sell <종목명> <수량> [지정가]"
 ORDER_EXPIRES_AFTER = timedelta(seconds=60)
 TELEGRAM_INTERACTIVE_HELP = "\n".join(
     [
@@ -39,8 +40,8 @@ TELEGRAM_INTERACTIVE_HELP = "\n".join(
         "/balance - 예수금·총자산·보유 종목 조회",
         "/quote <종목명> - 현재가 조회",
         "/trend <종목명> - 외국인·기관·개인 수급 조회",
-        "/buy <종목명> <수량> <지정가> - 지정가 매수 주문 준비",
-        "/sell <종목명> <수량> <지정가> - 지정가 매도 주문 준비",
+        "/buy <종목명> <수량> [지정가] - 매수 주문 준비",
+        "/sell <종목명> <수량> [지정가] - 매도 주문 준비",
         "/confirm - 대기 주문 확정",
         "/cancel - 대기 주문 취소",
         "일반 문장은 NAT에게 바로 질문합니다.",
@@ -219,7 +220,7 @@ class TelegramCommandHandler:
             await self._send_text_or_raise(usage)
             return
 
-        stock_name, quantity, price = parsed
+        stock_name, quantity, price, order_type = parsed
         now = self.now_factory()
         if not is_korean_market_open(now):
             await self._send_text_or_raise(
@@ -265,6 +266,7 @@ class TelegramCommandHandler:
             quantity=quantity,
             price=price,
             created_at=now,
+            order_type=order_type,
         )
         self.pending_orders[chat_id] = order
         await self._send_text_or_raise(
@@ -316,22 +318,37 @@ class TelegramCommandHandler:
                 record_warning = f"\n거래 이력 기록 실패: {_short_error(exc)}"
         await self._send_text_or_raise(f"주문 완료: {result.message}{record_warning}")
 
-    def _parse_order_argument(self, argument: str) -> tuple[str, int, int] | None:
+    def _parse_order_argument(self, argument: str) -> tuple[str, int, int, OrderType] | None:
         parts = argument.split()
-        if len(parts) < 3:
+        if len(parts) < 2:
             return None
-        stock_name = " ".join(parts[:-2]).strip()
-        raw_quantity, raw_price = parts[-2:]
+
+        last_value = self._parse_positive_int(parts[-1])
+        if last_value is None:
+            return None
+
+        previous_value = self._parse_positive_int(parts[-2]) if len(parts) >= 3 else None
+        if previous_value is None:
+            stock_name = " ".join(parts[:-1]).strip()
+            quantity = last_value
+            price = 0
+            order_type: OrderType = "MARKET"
+        else:
+            stock_name = " ".join(parts[:-2]).strip()
+            quantity = previous_value
+            price = last_value
+            order_type = "LIMIT"
+
         if not stock_name:
             return None
+        return stock_name, quantity, price, order_type
+
+    def _parse_positive_int(self, raw_value: str) -> int | None:
         try:
-            quantity = int(raw_quantity.replace(",", ""))
-            price = int(raw_price.replace(",", ""))
+            value = int(raw_value.replace(",", ""))
         except ValueError:
             return None
-        if quantity <= 0 or price <= 0:
-            return None
-        return stock_name, quantity, price
+        return value if value > 0 else None
 
     def _drop_expired_pending_order(self, chat_id: str, now: datetime) -> None:
         order = self.pending_orders.get(chat_id)
@@ -356,14 +373,20 @@ class TelegramCommandHandler:
         balance_result: str,
     ) -> str:
         side_text = "매수" if order.side == "BUY" else "매도"
-        amount = order.quantity * order.price
         lines = [
             f"{order.stock_name} {side_text} 주문 확인",
             f"종목코드: {order.stock_code}",
             f"수량: {order.quantity:,}주",
-            f"지정가: {order.price:,}원",
-            f"주문금액: {amount:,}원",
+            f"주문유형: {'시장가' if order.order_type == 'MARKET' else '지정가'}",
         ]
+        if order.order_type == "LIMIT":
+            amount = order.quantity * order.price
+            lines.extend(
+                [
+                    f"지정가: {order.price:,}원",
+                    f"주문금액: {amount:,}원",
+                ]
+            )
 
         current_price = self._first_line_containing(
             str(quote_result),

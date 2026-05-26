@@ -14,6 +14,14 @@ function normalizeOrderEnv(orderEnv) {
   return normalized;
 }
 
+function normalizeOrderType(orderType) {
+  const normalized = String(orderType ?? "LIMIT").trim().toUpperCase();
+  if (normalized !== "LIMIT" && normalized !== "MARKET") {
+    throw new Error("order_type은 LIMIT 또는 MARKET이어야 합니다.");
+  }
+  return normalized;
+}
+
 function assertPositiveInteger(value, fieldName) {
   const number = Number(value);
   if (!Number.isInteger(number) || number <= 0) {
@@ -45,11 +53,12 @@ export function validateOrderEnvMatchesUrl({ orderEnv, kisUrl }) {
   }
 }
 
-export function buildCashOrderBody({ accountNo, stockCode, quantity, price }) {
+export function buildCashOrderBody({ accountNo, stockCode, quantity, price, orderType }) {
   const account = String(accountNo ?? "").trim();
   const code = String(stockCode ?? "").trim();
   const orderQuantity = assertPositiveInteger(quantity, "quantity");
-  const orderPrice = assertPositiveInteger(price, "price");
+  const normalizedOrderType = normalizeOrderType(orderType);
+  const orderPrice = normalizedOrderType === "MARKET" ? 0 : assertPositiveInteger(price, "price");
 
   if (account.length < 10) {
     throw new Error("KIS_ACCOUNT_NO가 올바르지 않습니다. 계좌번호 앞 8자리와 상품코드 2자리를 붙여 설정하세요.");
@@ -62,7 +71,7 @@ export function buildCashOrderBody({ accountNo, stockCode, quantity, price }) {
     CANO: account.substring(0, 8),
     ACNT_PRDT_CD: account.substring(8, 10),
     PDNO: code,
-    ORD_DVSN: "00",
+    ORD_DVSN: normalizedOrderType === "MARKET" ? "01" : "00",
     ORD_QTY: String(orderQuantity),
     ORD_UNPR: String(orderPrice),
     EXCG_ID_DVSN_CD: "SOR",
@@ -71,7 +80,7 @@ export function buildCashOrderBody({ accountNo, stockCode, quantity, price }) {
   };
 }
 
-export function createCashOrderRequest({ accountNo, kisUrl, orderEnv, side, stockCode, quantity, price }) {
+export function createCashOrderRequest({ accountNo, kisUrl, orderEnv, side, stockCode, quantity, price, orderType }) {
   validateOrderEnvMatchesUrl({ orderEnv, kisUrl });
   return {
     pathname: "/uapi/domestic-stock/v1/trading/order-cash",
@@ -81,20 +90,24 @@ export function createCashOrderRequest({ accountNo, kisUrl, orderEnv, side, stoc
       stockCode,
       quantity,
       price,
+      orderType,
     }),
   };
 }
 
-export function formatOrderResult({ stockName, stockCode, side, quantity, price, data }) {
+export function formatOrderResult({ stockName, stockCode, side, quantity, price, orderType, data }) {
   const output = data?.output || {};
   const message = data?.msg1 || data?.msg_cd || "주문 요청이 접수되었습니다.";
   const orderNo = output.ODNO || "-";
   const orderTime = output.ORD_TMD || "-";
+  const priceText = normalizeOrderType(orderType) === "MARKET"
+    ? "시장가"
+    : `${Number(price).toLocaleString("ko-KR")}원`;
 
   return [
     `[${stockName}] ${normalizeSide(side)} 주문 접수`,
     `- 종목코드: ${stockCode}`,
-    `- 수량/가격: ${Number(quantity).toLocaleString("ko-KR")}주 / ${Number(price).toLocaleString("ko-KR")}원`,
+    `- 수량/가격: ${Number(quantity).toLocaleString("ko-KR")}주 / ${priceText}`,
     `- 주문번호: ${orderNo}`,
     `- 주문시간: ${orderTime}`,
     `- 메시지: ${message}`,

@@ -297,7 +297,8 @@ async function placeOrder(args) {
   const stockName = String(args?.stock_name ?? "").trim() || stockCode;
   const side = String(args?.side ?? "").trim().toUpperCase();
   const quantity = args?.quantity;
-  const price = args?.price;
+  const orderType = String(args?.order_type ?? "LIMIT").trim().toUpperCase();
+  const price = args?.price ?? 0;
   const orderEnv = String(args?.order_env ?? "demo").trim().toLowerCase();
   const request = createCashOrderRequest({
     accountNo: KIS_ACCOUNT_NO,
@@ -307,6 +308,7 @@ async function placeOrder(args) {
     stockCode,
     quantity,
     price,
+    orderType,
   });
 
   const data = await kisPost(request.pathname, request.trId, request.body);
@@ -316,6 +318,7 @@ async function placeOrder(args) {
     side,
     quantity,
     price,
+    orderType,
     data,
   });
 }
@@ -374,7 +377,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: "place_order",
-      description: "한국투자증권 Open API로 국내 주식 현금 지정가 주문을 실행합니다.",
+      description: "한국투자증권 Open API로 국내 주식 현금 주문을 실행합니다.",
       inputSchema: {
         type: "object",
         properties: {
@@ -398,8 +401,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           },
           price: {
             type: "integer",
-            minimum: 1,
-            description: "지정가",
+            minimum: 0,
+            description: "지정가. 시장가 주문은 0 또는 생략",
+          },
+          order_type: {
+            type: "string",
+            enum: ["LIMIT", "MARKET"],
+            description: "지정가 또는 시장가",
           },
           order_env: {
             type: "string",
@@ -407,7 +415,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
             description: "모의투자 또는 실계좌",
           },
         },
-        required: ["stock_code", "side", "quantity", "price", "order_env"],
+        required: ["stock_code", "side", "quantity", "order_env"],
       },
     },
   ],

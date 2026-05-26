@@ -204,6 +204,59 @@ async def test_demo_order_calls_local_mcp_runner_and_returns_normalized_result()
         side="SELL",
         quantity=5,
         price=76000,
+        order_type="LIMIT",
         message="주문 접수",
         raw_result='{"msg1":"주문 접수"}',
     )
+
+
+@pytest.mark.asyncio
+async def test_market_order_calls_local_mcp_runner_with_order_type():
+    calls = []
+
+    async def fake_mcp_runner(server_params, tool_name, arguments):
+        calls.append(
+            {
+                "server_params": server_params,
+                "tool_name": tool_name,
+                "arguments": arguments,
+            }
+        )
+        return '{"msg1":"시장가 주문 접수"}'
+
+    gateway = McpTradingOrderGateway(
+        server_params="trading-params",
+        mcp_runner=fake_mcp_runner,
+        order_env="demo",
+        real_order_enabled=False,
+    )
+    order = PendingOrder(
+        chat_id="123",
+        stock_name="삼성전자",
+        stock_code="005930",
+        side="BUY",
+        quantity=5,
+        price=0,
+        order_type="MARKET",
+        created_at=datetime(2026, 5, 20, 10, 0, tzinfo=KST),
+    )
+
+    result = await gateway.place_order(order)
+
+    assert calls == [
+        {
+            "server_params": "trading-params",
+            "tool_name": "place_order",
+            "arguments": {
+                "stock_name": "삼성전자",
+                "stock_code": "005930",
+                "side": "BUY",
+                "quantity": 5,
+                "price": 0,
+                "order_type": "MARKET",
+                "order_env": "demo",
+            },
+        }
+    ]
+    assert result.order_type == "MARKET"
+    assert result.price == 0
