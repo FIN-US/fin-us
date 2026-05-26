@@ -413,6 +413,133 @@ async def test_buy_command_without_price_creates_market_order_and_prompts_confir
 
 
 @pytest.mark.asyncio
+async def test_natural_language_market_buy_creates_pending_order_without_nat():
+    calls = []
+    nat_calls = []
+
+    async def mcp_runner(server_params, tool_name, arguments):
+        calls.append((server_params, tool_name, arguments))
+        if tool_name == "resolve_stock_code":
+            return "삼성전자 (005930, KOSPI)"
+        if tool_name == "get_stock_quote":
+            return "현재가: 74,500원"
+        if tool_name == "get_balance":
+            return "주문가능금액: 1,000,000원"
+        raise AssertionError(f"unexpected tool: {tool_name}")
+
+    async def fake_llm_runner(provider, text, *, conversation_id=None):
+        nat_calls.append((provider, text, conversation_id))
+        raise AssertionError("natural language order must not call NAT")
+
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        mcp_runner=mcp_runner,
+        llm_runner=fake_llm_runner,
+        now_factory=lambda: datetime(2026, 5, 20, 10, 0, tzinfo=KST),
+    )
+
+    await handler.handle_update(
+        {"message": {"chat": {"id": 123}, "text": "삼성전자 1주 시장가로 매수해줘"}}
+    )
+
+    assert nat_calls == []
+    assert calls == [
+        (TRADING_MCP_PARAMS, "resolve_stock_code", {"stock_name": "삼성전자"}),
+        (TRADING_MCP_PARAMS, "get_stock_quote", {"stock_name": "삼성전자"}),
+        (TRADING_MCP_PARAMS, "get_balance", {}),
+    ]
+    assert "삼성전자 매수 주문 확인" in notifier.messages[-1]
+    assert "주문유형: 시장가" in notifier.messages[-1]
+    assert notifier.reply_markups[-1] == {
+        "inline_keyboard": [
+            [
+                {"text": "✅ 확정", "callback_data": "order:confirm"},
+                {"text": "❌ 취소", "callback_data": "order:cancel"},
+            ]
+        ]
+    }
+    assert handler.pending_orders["123"].stock_name == "삼성전자"
+    assert handler.pending_orders["123"].side == "BUY"
+    assert handler.pending_orders["123"].quantity == 1
+    assert handler.pending_orders["123"].price == 0
+    assert handler.pending_orders["123"].order_type == "MARKET"
+
+
+@pytest.mark.asyncio
+async def test_natural_language_limit_sell_creates_pending_order_without_nat():
+    calls = []
+    nat_calls = []
+
+    async def mcp_runner(server_params, tool_name, arguments):
+        calls.append((server_params, tool_name, arguments))
+        if tool_name == "resolve_stock_code":
+            return "NAVER (035420, KOSPI)"
+        if tool_name == "get_stock_quote":
+            return "현재가: 200,500원"
+        if tool_name == "get_balance":
+            return "주문가능금액: 1,000,000원"
+        raise AssertionError(f"unexpected tool: {tool_name}")
+
+    async def fake_llm_runner(provider, text, *, conversation_id=None):
+        nat_calls.append((provider, text, conversation_id))
+        raise AssertionError("natural language order must not call NAT")
+
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        mcp_runner=mcp_runner,
+        llm_runner=fake_llm_runner,
+        now_factory=lambda: datetime(2026, 5, 20, 10, 0, tzinfo=KST),
+    )
+
+    await handler.handle_update(
+        {"message": {"chat": {"id": 123}, "text": "NAVER 2주 200,000원에 매도해줘"}}
+    )
+
+    assert nat_calls == []
+    assert calls[0] == (
+        TRADING_MCP_PARAMS,
+        "resolve_stock_code",
+        {"stock_name": "NAVER"},
+    )
+    assert "NAVER 매도 주문 확인" in notifier.messages[-1]
+    assert "주문유형: 지정가" in notifier.messages[-1]
+    assert "지정가: 200,000원" in notifier.messages[-1]
+    assert handler.pending_orders["123"].stock_name == "NAVER"
+    assert handler.pending_orders["123"].side == "SELL"
+    assert handler.pending_orders["123"].quantity == 2
+    assert handler.pending_orders["123"].price == 200000
+    assert handler.pending_orders["123"].order_type == "LIMIT"
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_natural_language_order_replies_with_usage_without_nat():
+    nat_calls = []
+
+    async def fake_llm_runner(provider, text, *, conversation_id=None):
+        nat_calls.append((provider, text, conversation_id))
+        raise AssertionError("ambiguous natural language order must not call NAT")
+
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        llm_runner=fake_llm_runner,
+        now_factory=lambda: datetime(2026, 5, 20, 10, 0, tzinfo=KST),
+    )
+
+    await handler.handle_update(
+        {"message": {"chat": {"id": 123}, "text": "삼성전자 1주 시장가 75000원에 매수해줘"}}
+    )
+
+    assert nat_calls == []
+    assert notifier.messages == [
+        "자연어 주문을 해석할 수 없습니다. /buy 또는 /sell 형식으로 입력하세요."
+    ]
+    assert handler.pending_orders == {}
+
+
+@pytest.mark.asyncio
 async def test_buy_command_accepts_stock_name_with_spaces():
     calls = []
 

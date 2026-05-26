@@ -32,6 +32,7 @@ logger = logging.getLogger(__name__)
 ALERT_COMMAND_HELP = "사용법: /alerts urgent | all | off | status"
 BUY_COMMAND_HELP = "사용법: /buy <종목명> <수량> [지정가]"
 SELL_COMMAND_HELP = "사용법: /sell <종목명> <수량> [지정가]"
+NATURAL_ORDER_HELP = "자연어 주문을 해석할 수 없습니다. /buy 또는 /sell 형식으로 입력하세요."
 ORDER_EXPIRES_AFTER = timedelta(seconds=60)
 ORDER_CONFIRM_CALLBACK = "order:confirm"
 ORDER_CANCEL_CALLBACK = "order:cancel"
@@ -166,6 +167,20 @@ class TelegramCommandHandler:
             return
         if text.startswith("/"):
             await self._send_text_or_raise(TELEGRAM_INTERACTIVE_HELP)
+            return
+
+        if self._looks_like_natural_order(text):
+            natural_order = self._parse_natural_order_text(text)
+            if natural_order is None:
+                await self._send_text_or_raise(NATURAL_ORDER_HELP)
+                return
+
+            side, order_argument = natural_order
+            await self._handle_order_command(
+                side,
+                order_argument,
+                str(chat.get("id", "")).strip(),
+            )
             return
 
         await self._handle_chat_fallback(text, str(chat.get("id", "")).strip())
@@ -393,6 +408,51 @@ class TelegramCommandHandler:
         if not stock_name:
             return None
         return stock_name, quantity, price, order_type
+
+    def _looks_like_natural_order(self, text: str) -> bool:
+        return (
+            ("매수" in text or "매도" in text)
+            and re.search(r"\d[\d,]*\s*주", text) is not None
+        )
+
+    def _parse_natural_order_text(self, text: str) -> tuple[str, str] | None:
+        buy_count = text.count("매수")
+        sell_count = text.count("매도")
+        if buy_count + sell_count != 1:
+            return None
+        side = "BUY" if buy_count == 1 else "SELL"
+
+        quantity_match = re.search(r"(?P<quantity>\d[\d,]*)\s*주", text)
+        if quantity_match is None:
+            return None
+        quantity = self._parse_positive_int(quantity_match.group("quantity"))
+        if quantity is None:
+            return None
+
+        has_market = "시장가" in text
+        price_matches = list(re.finditer(r"(?P<price>\d[\d,]*)\s*원", text))
+        if has_market and price_matches:
+            return None
+        price = 0
+        if price_matches:
+            price = self._parse_positive_int(price_matches[-1].group("price")) or 0
+            if price <= 0:
+                return None
+
+        stock_name = text[: quantity_match.start()].strip()
+        if not stock_name:
+            side_word = "매수" if side == "BUY" else "매도"
+            side_index = text.find(side_word)
+            if side_index < quantity_match.start():
+                stock_name = text[
+                    side_index + len(side_word) : quantity_match.start()
+                ].strip()
+        if not stock_name:
+            return None
+
+        if price > 0:
+            return side, f"{stock_name} {quantity} {price}"
+        return side, f"{stock_name} {quantity}"
 
     def _parse_positive_int(self, raw_value: str) -> int | None:
         try:
