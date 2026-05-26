@@ -16,7 +16,18 @@ export function buildBalanceParams(accountNo) {
 
 export function formatPercent(value) {
   if (value === undefined || value === null || value === "") return "-";
-  return `${value}%`;
+  const numeric = Number(String(value).replace("%", ""));
+  if (!Number.isFinite(numeric)) {
+    return `${value}%`;
+  }
+  const formatted = (Math.floor(numeric * 100) / 100).toFixed(2);
+  if (numeric > 0) {
+    return `🔴 ▲ +${formatted}%`;
+  }
+  if (numeric < 0) {
+    return `🔵 ▼ ${formatted}%`;
+  }
+  return `⚪ ${formatted}%`;
 }
 
 function formatAmount(value) {
@@ -37,6 +48,15 @@ function formatQuantity(value) {
   return number.toLocaleString("ko-KR");
 }
 
+function formatSignedAmount(value) {
+  const formatted = formatAmount(value);
+  const number = Number(String(value ?? "").replaceAll(",", ""));
+  if (!Number.isFinite(number) || number <= 0) {
+    return formatted;
+  }
+  return `+${formatted}`;
+}
+
 export function formatBalanceReport(data) {
   const summary = data.output2?.[0] || {};
   const holdings = data.output1 || [];
@@ -45,13 +65,12 @@ export function formatBalanceReport(data) {
     .map((h) => {
       const returnRate = h.evlu_pfls_rt || h.evlu_erng_rt;
       return (
-        `- ${h.prdt_name} (${h.pdno}): ${formatQuantity(h.hldg_qty)}주 ` +
-        `(평가금액: ${formatAmount(h.evlu_amt)}, ` +
-        `평가손익: ${formatAmount(h.evlu_pfls_amt)}, ` +
-        `수익률: ${formatPercent(returnRate)})`
+        `- ${h.prdt_name} (${h.pdno}) · ${formatQuantity(h.hldg_qty)}주\n` +
+        `  평단가 ${formatAmount(h.pchs_avg_pric)} → 평가금액 ${formatAmount(h.evlu_amt)}\n` +
+        `  손익 ${formatSignedAmount(h.evlu_pfls_amt)} · 수익률 ${formatPercent(returnRate)}`
       );
     })
-    .join("\n");
+    .join("\n\n");
 
   const accountReturnRate = summary.asst_icdc_erng_rt || summary.evlu_pfls_rt;
 
