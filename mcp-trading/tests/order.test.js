@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildBalanceParams, formatPercent } from "../balance.js";
+import { buildBalanceParams, formatBalanceReport, formatPercent } from "../balance.js";
 import {
   buildCashOrderBody,
   createCashOrderRequest,
@@ -49,6 +49,47 @@ test("buildBalanceParams includes required KIS inquire-balance fields", () => {
 test("formatPercent avoids undefined balance rates", () => {
   assert.equal(formatPercent(undefined), "-");
   assert.equal(formatPercent("1.23"), "1.23%");
+});
+
+test("formatBalanceReport displays unsettled cash fields and account return rate", () => {
+  assert.equal(
+    formatBalanceReport({
+      output1: [
+        {
+          prdt_name: "삼성전자",
+          pdno: "005930",
+          hldg_qty: "3",
+          evlu_amt: "210000",
+          evlu_pfls_amt: "9000",
+          evlu_pfls_rt: "4.48",
+        },
+      ],
+      output2: [
+        {
+          tot_evlu_amt: "1210000",
+          nass_amt: "1210000",
+          evlu_pfls_smtl_amt: "9000",
+          asst_icdc_erng_rt: "0.75",
+          dnca_tot_amt: "1000000",
+          nxdy_excc_amt: "790000",
+          prvs_rcdl_excc_amt: "1009000",
+          thdt_buy_amt: "210000",
+          thdt_sll_amt: "0",
+        },
+      ],
+    }),
+    `[계좌 잔고 현황]
+- 총 평가금액: 1,210,000원
+- 순자산금액: 1,210,000원
+- 총 손익: 9,000원 (수익률: 0.75%)
+- 예수금총액: 1,000,000원
+- 가수도정산금액: 1,009,000원
+- 익일정산금액: 790,000원
+- 금일 매수/매도: 210,000원 / 0원
+
+[보유 종목 리스트]
+- 삼성전자 (005930): 3주 (평가금액: 210,000원, 평가손익: 9,000원, 수익률: 4.48%)`,
+  );
 });
 
 test("buildCashOrderBody creates uppercase KIS order body", () => {
