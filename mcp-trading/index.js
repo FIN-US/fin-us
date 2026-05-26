@@ -16,6 +16,7 @@ import {
   createCashOrderRequest,
   formatOrderResult,
 } from "./order.js";
+import { resolveStock } from "./stock-master.js";
 
 // Redirect console.log to console.error to prevent breaking MCP JSON-RPC on stdout
 console.log = console.error;
@@ -32,7 +33,6 @@ const {
 } = process.env;
 
 const KIS_BALANCE_TR_ID = KIS_URL?.includes("openapivts") ? "VTTC8434R" : "TTTC8434R";
-const STOCKS_PATH = path.join(__dirname, "data", "stocks.json");
 const TOKEN_TTL_MARGIN_MS = 60_000;
 const TOKEN_CACHE_PATH = process.env.KIS_TOKEN_CACHE_PATH || path.join(
   os.tmpdir(),
@@ -95,43 +95,6 @@ function writeTokenCache(cache) {
   } catch (error) {
     console.error(`KIS token cache write failed: ${error.message}`);
   }
-}
-
-function loadStocks() {
-  const text = fs.readFileSync(STOCKS_PATH, "utf8");
-  return JSON.parse(text);
-}
-
-function normalizeStockInput(value) {
-  return String(value ?? "").trim();
-}
-
-function resolveStock(stockName) {
-  const input = normalizeStockInput(stockName);
-  if (!input) {
-    throw new Error("stock_name 파라미터가 누락되었습니다.");
-  }
-
-  if (/^\d{6}$/.test(input)) {
-    return { code: input, name: input, market: "UNKNOWN" };
-  }
-
-  const stocks = loadStocks();
-  const matches = stocks.filter((stock) => {
-    const aliases = Array.isArray(stock.aliases) ? stock.aliases : [];
-    return stock.name === input || aliases.includes(input);
-  });
-
-  if (matches.length === 0) {
-    throw new Error(`'${input}'의 종목 코드를 찾을 수 없습니다. mcp-trading/data/stocks.json을 갱신하세요.`);
-  }
-
-  if (matches.length > 1) {
-    const candidates = matches.map((stock) => `${stock.name}(${stock.code}, ${stock.market})`).join(", ");
-    throw new Error(`'${input}'의 종목 매칭이 모호합니다: ${candidates}. 6자리 종목코드를 직접 입력하세요.`);
-  }
-
-  return matches[0];
 }
 
 async function getAccessToken() {
