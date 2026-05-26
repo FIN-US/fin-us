@@ -1,5 +1,10 @@
 FROM python:3.13-slim
 
+# 파이프 도중 실패(curl 등)를 다음 명령으로 무시하지 않도록 bash pipefail 사용
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+# DL3008: python:3.13-slim의 Debian 저장소는 패키지 구버전을 주기적으로 제거해 버전 핀은 오히려 재현성을 해친다.
+# hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates gnupg \
     && curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
@@ -28,6 +33,8 @@ RUN npm ci
 
 WORKDIR /workspace/finus_nat
 RUN uv sync --no-dev
+# DL3059: uv sync와 mem0ai 패치는 캐시 무효화 시점이 다르므로 일부러 RUN을 분리한다.
+# hadolint ignore=DL3059
 RUN python - <<'PY'
 from pathlib import Path
 
