@@ -33,6 +33,16 @@ ALERT_COMMAND_HELP = "사용법: /alerts urgent | all | off | status"
 BUY_COMMAND_HELP = "사용법: /buy <종목명> <수량> [지정가]"
 SELL_COMMAND_HELP = "사용법: /sell <종목명> <수량> [지정가]"
 ORDER_EXPIRES_AFTER = timedelta(seconds=60)
+ORDER_CONFIRM_CALLBACK = "order:confirm"
+ORDER_CANCEL_CALLBACK = "order:cancel"
+ORDER_CONFIRM_REPLY_MARKUP = {
+    "inline_keyboard": [
+        [
+            {"text": "✅ 확정", "callback_data": ORDER_CONFIRM_CALLBACK},
+            {"text": "❌ 취소", "callback_data": ORDER_CANCEL_CALLBACK},
+        ]
+    ]
+}
 TELEGRAM_INTERACTIVE_HELP = "\n".join(
     [
         "사용 가능한 명령:",
@@ -112,6 +122,11 @@ class TelegramCommandHandler:
         self.pending_orders: dict[str, PendingOrder] = {}
 
     async def handle_update(self, update: dict[str, Any]) -> None:
+        callback_query = update.get("callback_query") or {}
+        if callback_query:
+            await self._handle_callback_query(callback_query)
+            return
+
         message = update.get("message") or {}
         chat = message.get("chat") or {}
         if str(chat.get("id", "")).strip() != self.notifier.chat_id:
@@ -155,10 +170,45 @@ class TelegramCommandHandler:
 
         await self._handle_chat_fallback(text, str(chat.get("id", "")).strip())
 
-    async def _send_text_or_raise(self, text: str) -> None:
-        sent = await self.notifier.send_text(text)
+    async def _send_text_or_raise(
+        self,
+        text: str,
+        *,
+        reply_markup: dict[str, Any] | None = None,
+    ) -> None:
+        sent = await self.notifier.send_text(text, reply_markup=reply_markup)
         if sent is False:
             raise RuntimeError("telegram send failed")
+
+    async def _handle_callback_query(self, callback_query: dict[str, Any]) -> None:
+        message = callback_query.get("message") or {}
+        chat = message.get("chat") or {}
+        chat_id = str(chat.get("id", "")).strip()
+        if chat_id != self.notifier.chat_id:
+            return
+
+        callback_query_id = str(callback_query.get("id", "")).strip()
+        data = str(callback_query.get("data") or "").strip()
+        if data == ORDER_CONFIRM_CALLBACK:
+            await self._answer_callback_query(callback_query_id)
+            await self._handle_confirm(chat_id)
+            return
+        if data == ORDER_CANCEL_CALLBACK:
+            await self._answer_callback_query(callback_query_id)
+            await self._handle_cancel(chat_id)
+            return
+
+        await self._answer_callback_query(callback_query_id, text="지원하지 않는 버튼입니다.")
+
+    async def _answer_callback_query(
+        self,
+        callback_query_id: str,
+        *,
+        text: str | None = None,
+    ) -> None:
+        if not callback_query_id:
+            return
+        await self.notifier.answer_callback_query(callback_query_id, text=text)
 
     def _matches_command(self, command: str, bot_username: str, expected: str) -> bool:
         if command != expected:
@@ -270,7 +320,8 @@ class TelegramCommandHandler:
         )
         self.pending_orders[chat_id] = order
         await self._send_text_or_raise(
-            self._format_order_prompt(order, str(quote_result), str(balance_result))
+            self._format_order_prompt(order, str(quote_result), str(balance_result)),
+            reply_markup=ORDER_CONFIRM_REPLY_MARKUP,
         )
 
     async def _handle_cancel(self, chat_id: str) -> None:

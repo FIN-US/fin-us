@@ -139,15 +139,42 @@ class TelegramNotifier:
             logger.error("Telegram alert send failed for %s/%s: %s", source, stock, exc)
             return False
 
-    async def send_text(self, text: str) -> bool:
+    async def send_text(
+        self,
+        text: str,
+        *,
+        reply_markup: dict[str, Any] | None = None,
+    ) -> bool:
         if not self.enabled:
             return False
 
         try:
-            await self._post_message(text[:4000])
+            await self._post_message(text[:4000], reply_markup=reply_markup)
             return True
         except Exception as exc:
             logger.error("Telegram message send failed: %s", exc)
+            return False
+
+    async def answer_callback_query(
+        self,
+        callback_query_id: str,
+        *,
+        text: str | None = None,
+    ) -> bool:
+        if not self.enabled:
+            return False
+
+        url = f"https://api.telegram.org/bot{self.bot_token}/answerCallbackQuery"
+        payload = {"callback_query_id": callback_query_id}
+        if text:
+            payload["text"] = text
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.post(url, json=payload)
+                response.raise_for_status()
+            return True
+        except Exception as exc:
+            logger.error("Telegram callback answer failed: %s", exc)
             return False
 
     async def send_chat_action(self, action: str = "typing") -> bool:
@@ -187,17 +214,22 @@ class TelegramNotifier:
             logger.error("Telegram bot username lookup failed: %s", exc)
             return ""
 
-    async def _post_message(self, text: str) -> None:
+    async def _post_message(
+        self,
+        text: str,
+        *,
+        reply_markup: dict[str, Any] | None = None,
+    ) -> None:
         url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
+        payload = {
+            "chat_id": self.chat_id,
+            "text": text,
+            "disable_web_page_preview": True,
+        }
+        if reply_markup is not None:
+            payload["reply_markup"] = reply_markup
         async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.post(
-                url,
-                json={
-                    "chat_id": self.chat_id,
-                    "text": text,
-                    "disable_web_page_preview": True,
-                },
-            )
+            response = await client.post(url, json=payload)
             response.raise_for_status()
 
 
