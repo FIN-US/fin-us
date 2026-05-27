@@ -44,6 +44,11 @@ MARKET_QUOTE_CALLBACK = "market:quote"
 MARKET_TREND_CALLBACK = "market:trend"
 MARKET_STALE_CALLBACK_TEXT = "이전 조회 버튼입니다. 최신 조회 메시지에서 다시 선택하세요."
 MARKET_CALLBACK_LIMIT = 100
+ALERT_MODE_EMOJIS = {
+    "urgent": "🚨",
+    "all": "📣",
+    "off": "🔕",
+}
 TELEGRAM_INTERACTIVE_HELP = "\n".join(
     [
         "사용 가능한 명령:",
@@ -337,7 +342,7 @@ class TelegramCommandHandler:
             if action == "status":
                 mode = await state.get_telegram_alert_mode()
                 await self._send_text_or_raise(
-                    f"현재 Telegram 알림 모드: {mode}",
+                    f"현재 Telegram 알림 모드: {self._format_alert_mode(mode)}",
                     reply_markup=self._alerts_reply_markup(),
                 )
                 return
@@ -351,7 +356,7 @@ class TelegramCommandHandler:
 
             await state.set_telegram_alert_mode(action)
             await self._send_text_or_raise(
-                f"Telegram 알림 모드가 {action}(으)로 변경되었습니다.",
+                f"Telegram 알림 모드가 {self._format_alert_mode(action)}(으)로 변경되었습니다.",
                 reply_markup=self._alerts_reply_markup(),
             )
 
@@ -622,6 +627,12 @@ class TelegramCommandHandler:
                 ],
             ]
         }
+
+    def _format_alert_mode(self, mode: str) -> str:
+        emoji = ALERT_MODE_EMOJIS.get(mode)
+        if emoji is None:
+            return mode
+        return f"{emoji} {mode}"
 
     def _balance_reply_markup(self) -> dict[str, Any]:
         return {

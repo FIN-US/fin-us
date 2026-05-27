@@ -114,7 +114,7 @@ async def test_alerts_status_reports_current_mode():
     await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/alerts status"}})
 
     assert state.mode == "off"
-    assert "off" in notifier.messages[-1]
+    assert notifier.messages[-1].startswith("현재 Telegram 알림 모드: 🔕 off")
 
 
 @pytest.mark.asyncio
@@ -175,7 +175,7 @@ async def test_alerts_button_updates_mode_and_replies():
 
     assert state.mode == "off"
     assert notifier.callback_answers == [("alert-callback", None)]
-    assert "off" in notifier.messages[-1]
+    assert "🔕 off" in notifier.messages[-1]
     assert notifier.reply_markups[-1]["inline_keyboard"][0][0]["text"] == "🚨 긴급만"
     assert notifier.reply_markups[-1]["inline_keyboard"][0][1]["text"] == "📣 전체"
     assert notifier.reply_markups[-1]["inline_keyboard"][0][2]["text"] == "🔕 끄기"
