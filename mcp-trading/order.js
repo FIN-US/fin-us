@@ -70,6 +70,9 @@ export function buildCashOrderBody({ accountNo, stockCode, quantity, price, orde
   if (account.length < 10) {
     throw new Error("KIS_ACCOUNT_NO가 올바르지 않습니다. 계좌번호 앞 8자리와 상품코드 2자리를 붙여 설정하세요.");
   }
+  if (/^[0-9A-Z]{6,7}$/i.test(code) && !/^\d{6,7}$/.test(code)) {
+    throw new Error("이 종목은 현재 주문을 지원하지 않습니다.");
+  }
   if (!/^\d{6,7}$/.test(code)) {
     throw new Error("stock_code는 6자리 또는 7자리 종목코드여야 합니다.");
   }
