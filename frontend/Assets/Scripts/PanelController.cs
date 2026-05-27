@@ -10,8 +10,9 @@ public class PanelController : MonoBehaviour
     private Label returnRate;
     private Label totalAsset;
     private Label totalReturnRate;
+    private Label quantity;
 
-    void Start()
+    void Awake()
     {
         var root = GetComponent<UIDocument>().rootVisualElement;
         stockName = root.Q<Label>("stock-name");
@@ -20,6 +21,7 @@ public class PanelController : MonoBehaviour
         returnRate = root.Q<Label>("return-rate");
         totalAsset = root.Q<Label>("total-asset");
         totalReturnRate = root.Q<Label>("total-return-rate");
+        quantity = root.Q<Label>("quantity");
     }
 
     void Update()
@@ -45,6 +47,7 @@ public class PanelController : MonoBehaviour
         currentPrice.text = "현재가: " + h.current_price.ToString("N0") + "원";
         avgPrice.text = "평단가: " + h.avg_price.ToString("N0") + "원";
         returnRate.text = "수익률: " + h.return_rate.ToString("F2") + "%";
+        quantity.text = "보유수량: " + h.quantity + "주";
     }
 
     public void UpdateTopBar(PortfolioData data)

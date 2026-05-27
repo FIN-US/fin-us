@@ -3,6 +3,7 @@
         <ui:Label text="종목명" name="stock-name" style="background-color: rgb(255, 255, 255); font-size: 30px;"/>
         <ui:Label text="현재가: -" name="current-price" style="background-color: rgb(255, 255, 255); font-size: 30px;"/>
         <ui:Label text="평단가: -" name="avg-price" style="background-color: rgb(255, 255, 255); font-size: 30px;"/>
+        <ui:Label text="보유 수량: -" name="quantity" style="background-color: rgb(255, 255, 255); font-size: 30px;"/>
         <ui:Label text="수익률: -" name="return-rate" style="background-color: rgb(255, 255, 255); font-size: 30px;"/>
     </ui:VisualElement>
     <ui:VisualElement name="top-bar" style="flex-grow: 1; bottom: auto; top: auto; position: absolute;">
