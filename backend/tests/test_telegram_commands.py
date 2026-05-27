@@ -10,6 +10,8 @@ from backend.telegram_commands import (
     BUY_COMMAND_HELP,
     QUOTE_COMMAND_HELP,
     TELEGRAM_INTERACTIVE_HELP,
+    TRADE_COMMAND_HELP,
+    LOOKUP_COMMAND_HELP,
     TELEGRAM_MESSAGE_LIMIT,
     TELEGRAM_TRUNCATION_SUFFIX,
     TREND_COMMAND_HELP,
@@ -145,6 +147,8 @@ async def test_help_command_replies_with_supported_commands():
 
     assert notifier.messages == [TELEGRAM_INTERACTIVE_HELP]
     assert "/balance - 예수금·총자산·보유 종목 조회" in notifier.messages[-1]
+    assert "/trade - 매수·매도 주문 입력 안내" in notifier.messages[-1]
+    assert "/lookup - 현재가·수급 조회 입력 안내" in notifier.messages[-1]
     assert "/quote <종목명> - 현재가 조회" in notifier.messages[-1]
     assert "/trend <종목명> - 외국인·기관·개인 수급 조회" in notifier.messages[-1]
     assert "/buy <종목명> <수량> [지정가] - 매수 주문 준비" in notifier.messages[-1]
@@ -157,7 +161,11 @@ async def test_help_command_replies_with_supported_commands():
             [
                 {"text": "💰 잔고", "callback_data": "balance:refresh"},
                 {"text": "🔔 알림", "callback_data": "alerts:status"},
-            ]
+            ],
+            [
+                {"text": "🧾 매매", "callback_data": "trade:menu"},
+                {"text": "🔎 조회", "callback_data": "lookup:menu"},
+            ],
         ]
     }
 
@@ -198,6 +206,90 @@ async def test_unknown_slash_command_replies_with_help():
     await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/unknown"}})
 
     assert notifier.messages == [TELEGRAM_INTERACTIVE_HELP]
+
+
+@pytest.mark.asyncio
+async def test_trade_command_replies_with_entrypoint_buttons():
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(notifier=notifier)
+
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/trade"}})
+
+    assert notifier.messages == [TRADE_COMMAND_HELP]
+    assert notifier.reply_markups[-1] == {
+        "inline_keyboard": [
+            [
+                {"text": "🛒 매수 입력법", "callback_data": "trade:buy"},
+                {"text": "💸 매도 입력법", "callback_data": "trade:sell"},
+            ]
+        ]
+    }
+
+
+@pytest.mark.asyncio
+async def test_lookup_command_replies_with_entrypoint_buttons():
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(notifier=notifier)
+
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/lookup"}})
+
+    assert notifier.messages == [LOOKUP_COMMAND_HELP]
+    assert notifier.reply_markups[-1] == {
+        "inline_keyboard": [
+            [
+                {"text": "💵 현재가 입력법", "callback_data": "lookup:quote"},
+                {"text": "📊 수급 입력법", "callback_data": "lookup:trend"},
+            ]
+        ]
+    }
+
+
+@pytest.mark.asyncio
+async def test_trade_menu_button_replies_with_buy_and_sell_guidance():
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(notifier=notifier)
+
+    await handler.handle_update(
+        {
+            "callback_query": {
+                "id": "trade-menu",
+                "data": "trade:menu",
+                "message": {"chat": {"id": 123}},
+            }
+        }
+    )
+
+    assert notifier.callback_answers == [("trade-menu", None)]
+    assert notifier.messages == [TRADE_COMMAND_HELP]
+
+
+@pytest.mark.asyncio
+async def test_lookup_quote_button_replies_with_quote_guidance():
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(notifier=notifier)
+
+    await handler.handle_update(
+        {
+            "callback_query": {
+                "id": "lookup-quote",
+                "data": "lookup:quote",
+                "message": {"chat": {"id": 123}},
+            }
+        }
+    )
+
+    assert notifier.callback_answers == [("lookup-quote", None)]
+    assert notifier.messages == [QUOTE_COMMAND_HELP]
+
+
+def test_bot_command_menu_uses_entrypoints_for_parameterized_commands():
+    commands = [command["command"] for command in telegram_commands.TELEGRAM_BOT_COMMANDS]
+
+    assert commands == ["help", "balance", "alerts", "trade", "lookup"]
+    assert "buy" not in commands
+    assert "sell" not in commands
+    assert "quote" not in commands
+    assert "trend" not in commands
 
 
 @pytest.mark.asyncio

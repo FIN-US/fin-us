@@ -163,6 +163,8 @@ docker compose exec backend uv run --project /app/backend python /app/backend/sc
 /alerts status  # 현재 알림 모드 확인
 /help           # 사용 가능한 Telegram 명령 확인
 /balance        # 예수금·총자산·보유 종목 조회
+/trade          # 수동 매수·매도 입력 안내
+/lookup         # 현재가·수급 조회 입력 안내
 /quote <종목명> # 현재가 조회
 /trend <종목명> # 외국인·기관·개인 수급 조회
 /buy <종목명|6자리코드> <수량> [지정가]  # 60초 매수 확인 대기 생성
@@ -173,9 +175,9 @@ docker compose exec backend uv run --project /app/backend python /app/backend/sc
 
 `/buy`와 `/sell`은 60초 동안 유효한 주문 확인 대기를 만들고, 지정가를 생략하면 시장가 주문으로 준비합니다. 주문 확인 메시지의 `확정`/`취소` 버튼 또는 `/confirm`/`/cancel` 명령으로 처리할 수 있습니다. `/confirm`은 로컬 `mcp-trading`의 `place_order` 도구를 통해 한국투자증권 Open API 현금 주문을 제출합니다. `/cancel`은 Telegram 확인 대기만 취소하며 이미 증권사에 제출된 주문은 취소하지 않습니다. `/balance`, `/quote`, `/trend` 조회 명령도 같은 로컬 `mcp-trading`을 사용합니다. 실계좌 주문은 `KIS_ORDER_ENV=real`과 `KIS_REAL_ORDER_ENABLED=true`가 모두 설정되어야 실행됩니다.
 
-Telegram 명령은 슬래시 명령을 계속 지원하면서 일부 응답에 버튼을 함께 제공합니다. `/help`는 잔고 조회와 알림 상태 버튼을 제공하고, `/alerts` 응답은 `🚨 긴급만`·`📣 전체`·`🔕 끄기`·`🔎 현재 상태` 버튼으로 모드를 바꿀 수 있습니다. `/balance` 결과는 새로고침 버튼을 제공하며, `/quote`와 `/trend` 결과는 같은 종목의 현재가·수급 조회를 오가는 버튼을 제공합니다.
+Telegram 명령은 슬래시 명령을 계속 지원하면서 일부 응답에 버튼을 함께 제공합니다. `/help`는 잔고 조회와 알림 상태 버튼을 제공하고, `/alerts` 응답은 `🚨 긴급만`·`📣 전체`·`🔕 끄기`·`🔎 현재 상태` 버튼으로 모드를 바꿀 수 있습니다. `/trade`는 수동 매수·매도 입력을 안내하고, `/lookup`은 현재가·수급 조회 입력을 안내합니다. `/balance` 결과는 새로고침 버튼을 제공하며, `/quote`와 `/trend` 결과는 같은 종목의 현재가·수급 조회를 오가는 버튼을 제공합니다.
 
-봇 시작 시 Telegram Bot Command Menu도 등록합니다. Telegram 채팅방의 명령 메뉴에서 `/help`, `/balance`, `/alerts`, `/quote`, `/trend`, `/buy`, `/sell`, `/confirm`, `/cancel`을 선택할 수 있으며, 기존 슬래시 명령과 인라인 버튼은 그대로 사용할 수 있습니다.
+봇 시작 시 Telegram Bot Command Menu도 등록합니다. Telegram 채팅방의 명령 메뉴에는 인자 없이 시작하는 `/help`, `/balance`, `/alerts`, `/trade`, `/lookup` 진입점을 노출합니다. 기존 슬래시 명령인 `/buy`, `/sell`, `/quote`, `/trend`, `/confirm`, `/cancel`과 인라인 버튼은 메뉴 노출 여부와 관계없이 계속 사용할 수 있습니다.
 
 슬래시 명령 대신 `삼성전자 1주 시장가로 매수해줘`, `NAVER 2주 200,000원에 매도해줘`처럼 입력해도 같은 주문 확인 대기가 생성됩니다. 자연어 주문도 실제 제출 전에는 반드시 `확정` 버튼 또는 `/confirm`이 필요합니다.
 

@@ -40,6 +40,8 @@ ORDER_CANCEL_CALLBACK = "order:cancel"
 ORDER_STALE_CALLBACK_TEXT = "이전 주문 버튼입니다. 최신 주문 메시지에서 다시 선택하세요."
 ALERT_CALLBACK_PREFIX = "alerts:"
 BALANCE_REFRESH_CALLBACK = "balance:refresh"
+TRADE_CALLBACK_PREFIX = "trade:"
+LOOKUP_CALLBACK_PREFIX = "lookup:"
 MARKET_QUOTE_CALLBACK = "market:quote"
 MARKET_TREND_CALLBACK = "market:trend"
 MARKET_STALE_CALLBACK_TEXT = "이전 조회 버튼입니다. 최신 조회 메시지에서 다시 선택하세요."
@@ -54,6 +56,8 @@ TELEGRAM_INTERACTIVE_HELP = "\n".join(
         "사용 가능한 명령:",
         "/alerts urgent|all|off|status - Telegram 알림 모드 변경",
         "/balance - 예수금·총자산·보유 종목 조회",
+        "/trade - 매수·매도 주문 입력 안내",
+        "/lookup - 현재가·수급 조회 입력 안내",
         "/quote <종목명> - 현재가 조회",
         "/trend <종목명> - 외국인·기관·개인 수급 조회",
         "/buy <종목명> <수량> [지정가] - 매수 주문 준비",
@@ -67,15 +71,26 @@ TELEGRAM_BOT_COMMANDS = [
     {"command": "help", "description": "사용 가능한 명령 확인"},
     {"command": "balance", "description": "예수금·총자산·보유 종목 조회"},
     {"command": "alerts", "description": "Telegram 알림 모드 변경"},
-    {"command": "quote", "description": "현재가 조회"},
-    {"command": "trend", "description": "외국인·기관·개인 수급 조회"},
-    {"command": "buy", "description": "매수 주문 준비"},
-    {"command": "sell", "description": "매도 주문 준비"},
-    {"command": "confirm", "description": "대기 주문 확정"},
-    {"command": "cancel", "description": "대기 주문 취소"},
+    {"command": "trade", "description": "매수·매도 주문 입력 안내"},
+    {"command": "lookup", "description": "현재가·수급 조회 입력 안내"},
 ]
 QUOTE_COMMAND_HELP = "사용법: /quote <종목명>"
 TREND_COMMAND_HELP = "사용법: /trend <종목명>"
+TRADE_COMMAND_HELP = "\n".join(
+    [
+        "매매 주문 입력 안내:",
+        f"{BUY_COMMAND_HELP}  예: /buy 삼성전자 1",
+        f"{SELL_COMMAND_HELP}  예: /sell NAVER 1 200000",
+        "주문은 실제 제출 전 반드시 확정이 필요합니다.",
+    ]
+)
+LOOKUP_COMMAND_HELP = "\n".join(
+    [
+        "조회 입력 안내:",
+        f"{QUOTE_COMMAND_HELP}  예: /quote 삼성전자",
+        f"{TREND_COMMAND_HELP}  예: /trend 삼성전자",
+    ]
+)
 TELEGRAM_MESSAGE_LIMIT = 4000
 TELEGRAM_TRUNCATION_SUFFIX = "...(이하 생략)"
 _telegram_command_task: asyncio.Task | None = None
@@ -167,6 +182,18 @@ class TelegramCommandHandler:
         if self._matches_command(command, bot_username, "/balance"):
             await self._handle_balance()
             return
+        if self._matches_command(command, bot_username, "/trade"):
+            await self._send_text_or_raise(
+                TRADE_COMMAND_HELP,
+                reply_markup=self._trade_reply_markup(),
+            )
+            return
+        if self._matches_command(command, bot_username, "/lookup"):
+            await self._send_text_or_raise(
+                LOOKUP_COMMAND_HELP,
+                reply_markup=self._lookup_reply_markup(),
+            )
+            return
         if self._matches_command(command, bot_username, "/quote"):
             await self._handle_quote(argument, str(chat.get("id", "")).strip())
             return
@@ -253,6 +280,14 @@ class TelegramCommandHandler:
             await self._handle_balance()
             return
 
+        if data.startswith(TRADE_CALLBACK_PREFIX):
+            await self._handle_trade_callback(callback_query_id, data)
+            return
+
+        if data.startswith(LOOKUP_CALLBACK_PREFIX):
+            await self._handle_lookup_callback(callback_query_id, data)
+            return
+
         if data.startswith(f"{MARKET_QUOTE_CALLBACK}:"):
             await self._handle_market_callback(callback_query_id, chat_id, "quote", data)
             return
@@ -307,6 +342,50 @@ class TelegramCommandHandler:
 
         await self._answer_callback_query(callback_query_id)
         await self._handle_alerts(action)
+
+    async def _handle_trade_callback(
+        self,
+        callback_query_id: str,
+        data: str,
+    ) -> None:
+        action = data.removeprefix(TRADE_CALLBACK_PREFIX).strip()
+        if action == "menu":
+            text = TRADE_COMMAND_HELP
+            reply_markup = self._trade_reply_markup()
+        elif action == "buy":
+            text = BUY_COMMAND_HELP
+            reply_markup = None
+        elif action == "sell":
+            text = SELL_COMMAND_HELP
+            reply_markup = None
+        else:
+            await self._answer_callback_query(callback_query_id, text="지원하지 않는 버튼입니다.")
+            return
+
+        await self._answer_callback_query(callback_query_id)
+        await self._send_text_or_raise(text, reply_markup=reply_markup)
+
+    async def _handle_lookup_callback(
+        self,
+        callback_query_id: str,
+        data: str,
+    ) -> None:
+        action = data.removeprefix(LOOKUP_CALLBACK_PREFIX).strip()
+        if action == "menu":
+            text = LOOKUP_COMMAND_HELP
+            reply_markup = self._lookup_reply_markup()
+        elif action == "quote":
+            text = QUOTE_COMMAND_HELP
+            reply_markup = None
+        elif action == "trend":
+            text = TREND_COMMAND_HELP
+            reply_markup = None
+        else:
+            await self._answer_callback_query(callback_query_id, text="지원하지 않는 버튼입니다.")
+            return
+
+        await self._answer_callback_query(callback_query_id)
+        await self._send_text_or_raise(text, reply_markup=reply_markup)
 
     async def _handle_market_callback(
         self,
@@ -621,7 +700,11 @@ class TelegramCommandHandler:
                 [
                     {"text": "💰 잔고", "callback_data": BALANCE_REFRESH_CALLBACK},
                     {"text": "🔔 알림", "callback_data": f"{ALERT_CALLBACK_PREFIX}status"},
-                ]
+                ],
+                [
+                    {"text": "🧾 매매", "callback_data": f"{TRADE_CALLBACK_PREFIX}menu"},
+                    {"text": "🔎 조회", "callback_data": f"{LOOKUP_CALLBACK_PREFIX}menu"},
+                ],
             ]
         }
 
@@ -649,6 +732,32 @@ class TelegramCommandHandler:
         return {
             "inline_keyboard": [
                 [{"text": "🔄 새로고침", "callback_data": BALANCE_REFRESH_CALLBACK}]
+            ]
+        }
+
+    def _trade_reply_markup(self) -> dict[str, Any]:
+        return {
+            "inline_keyboard": [
+                [
+                    {"text": "🛒 매수 입력법", "callback_data": f"{TRADE_CALLBACK_PREFIX}buy"},
+                    {"text": "💸 매도 입력법", "callback_data": f"{TRADE_CALLBACK_PREFIX}sell"},
+                ]
+            ]
+        }
+
+    def _lookup_reply_markup(self) -> dict[str, Any]:
+        return {
+            "inline_keyboard": [
+                [
+                    {
+                        "text": "💵 현재가 입력법",
+                        "callback_data": f"{LOOKUP_CALLBACK_PREFIX}quote",
+                    },
+                    {
+                        "text": "📊 수급 입력법",
+                        "callback_data": f"{LOOKUP_CALLBACK_PREFIX}trend",
+                    },
+                ]
             ]
         }
 
