@@ -165,6 +165,20 @@ docker compose exec backend uv run --project /app/backend python /app/backend/sc
 /balance        # 예수금·총자산·보유 종목 조회
 /quote <종목명> # 현재가 조회
 /trend <종목명> # 외국인·기관·개인 수급 조회
+/buy <종목명|6자리코드> <수량> [지정가]  # 60초 매수 확인 대기 생성
+/sell <종목명|6자리코드> <수량> [지정가] # 60초 매도 확인 대기 생성
+/confirm       # 대기 중인 수동 주문 실행
+/cancel        # 대기 중인 수동 주문 취소
+```
+
+`/buy`와 `/sell`은 60초 동안 유효한 주문 확인 대기를 만들고, 지정가를 생략하면 시장가 주문으로 준비합니다. 주문 확인 메시지의 `확정`/`취소` 버튼 또는 `/confirm`/`/cancel` 명령으로 처리할 수 있습니다. `/confirm`은 로컬 `mcp-trading`의 `place_order` 도구를 통해 한국투자증권 Open API 현금 주문을 제출합니다. `/cancel`은 Telegram 확인 대기만 취소하며 이미 증권사에 제출된 주문은 취소하지 않습니다. `/balance`, `/quote`, `/trend` 조회 명령도 같은 로컬 `mcp-trading`을 사용합니다. 실계좌 주문은 `KIS_ORDER_ENV=real`과 `KIS_REAL_ORDER_ENABLED=true`가 모두 설정되어야 실행됩니다.
+
+슬래시 명령 대신 `삼성전자 1주 시장가로 매수해줘`, `NAVER 2주 200,000원에 매도해줘`처럼 입력해도 같은 주문 확인 대기가 생성됩니다. 자연어 주문도 실제 제출 전에는 반드시 `확정` 버튼 또는 `/confirm`이 필요합니다.
+
+`mcp-trading/data/stocks.json`은 KIS 공개 코스피/코스닥 종목 마스터 기반의 종목명 해석 캐시입니다. 신규 상장 등으로 종목명이 잡히지 않으면 6자리 종목코드를 직접 입력하거나 아래 명령으로 캐시를 갱신합니다.
+
+```bash
+python3 mcp-trading/scripts/update_stock_master.py
 ```
 
 슬래시 명령이 아닌 일반 텍스트는 NAT 채팅으로 전달됩니다. Telegram 채팅은 `telegram:{chat_id}` conversation id를 사용하므로 스케줄러 분석 리포트와 대화 이력이 섞이지 않습니다.

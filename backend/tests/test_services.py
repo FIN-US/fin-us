@@ -173,6 +173,21 @@ def test_analysis_from_nat_text_defaults_telegram_urgency_fields():
     assert data["telegram_alert"] is False
 
 
+def test_find_http_exception_unwraps_nested_exception_group():
+    http_exc = HTTPException(status_code=500, detail="잔고 조회 에러 발생: 인증 실패")
+    grouped = ExceptionGroup(
+        "unhandled errors in a TaskGroup",
+        [
+            ExceptionGroup(
+                "unhandled errors in a TaskGroup",
+                [http_exc],
+            )
+        ],
+    )
+
+    assert services._find_http_exception(grouped) is http_exc
+
+
 def test_analysis_from_nat_text_parses_telegram_urgency_fields():
     data = services.analysis_from_nat_text(
         (

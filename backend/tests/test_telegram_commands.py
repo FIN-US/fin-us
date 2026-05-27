@@ -1,7 +1,13 @@
-import pytest
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
+import pytest
+from fastapi import HTTPException
+
+import backend.telegram_commands as telegram_commands
 from backend.config import TRADING_MCP_PARAMS
 from backend.telegram_commands import (
+    BUY_COMMAND_HELP,
     QUOTE_COMMAND_HELP,
     TELEGRAM_INTERACTIVE_HELP,
     TELEGRAM_MESSAGE_LIMIT,
@@ -10,6 +16,9 @@ from backend.telegram_commands import (
     TelegramCommandHandler,
     TelegramCommandPoller,
 )
+from backend.trading_orders import OrderExecutionResult, PendingOrder
+
+KST = ZoneInfo("Asia/Seoul")
 
 
 class FakeState:
@@ -30,19 +39,57 @@ class FakeNotifier:
         self.bot_username = bot_username
         self.loaded_bot_username = False
         self.messages = []
+        self.reply_markups = []
         self.actions = []
+        self.callback_answers = []
 
-    async def send_text(self, text):
+    async def send_text(self, text, *, reply_markup=None):
         self.messages.append(text)
+        self.reply_markups.append(reply_markup)
         return self.send_text_result
 
     async def send_chat_action(self, action="typing"):
         self.actions.append(action)
         return True
 
+    async def answer_callback_query(self, callback_query_id, text=None):
+        self.callback_answers.append((callback_query_id, text))
+        return True
+
     async def load_bot_username(self):
         self.loaded_bot_username = True
         return self.bot_username
+
+
+class FakeOrderGateway:
+    def __init__(self, *, error=None):
+        self.error = error
+        self.orders = []
+
+    async def place_order(self, order):
+        self.orders.append(order)
+        if self.error is not None:
+            raise self.error
+        return OrderExecutionResult(
+            stock_code=order.stock_code,
+            stock_name=order.stock_name,
+            side=order.side,
+            quantity=order.quantity,
+            price=order.price,
+            message="주문 접수",
+            raw_result="{}",
+        )
+
+
+class FakeTradeRecorder:
+    def __init__(self, *, error=None):
+        self.error = error
+        self.results = []
+
+    def record(self, result):
+        self.results.append(result)
+        if self.error is not None:
+            raise self.error
 
 
 @pytest.mark.asyncio
@@ -95,6 +142,10 @@ async def test_help_command_replies_with_supported_commands():
     assert "/balance - 예수금·총자산·보유 종목 조회" in notifier.messages[-1]
     assert "/quote <종목명> - 현재가 조회" in notifier.messages[-1]
     assert "/trend <종목명> - 외국인·기관·개인 수급 조회" in notifier.messages[-1]
+    assert "/buy <종목명> <수량> [지정가] - 매수 주문 준비" in notifier.messages[-1]
+    assert "/sell <종목명> <수량> [지정가] - 매도 주문 준비" in notifier.messages[-1]
+    assert "/confirm - 대기 주문 확정" in notifier.messages[-1]
+    assert "/cancel - 대기 주문 취소" in notifier.messages[-1]
     assert "일반 문장은 NAT에게 바로 질문합니다." in notifier.messages[-1]
 
 
@@ -267,6 +318,708 @@ async def test_quote_and_trend_missing_args_reply_with_usage():
 
 
 @pytest.mark.asyncio
+async def test_buy_command_creates_pending_order_and_prompts_confirmation():
+    calls = []
+
+    async def mcp_runner(server_params, tool_name, arguments):
+        calls.append((server_params, tool_name, arguments))
+        if tool_name == "resolve_stock_code":
+            return "삼성전자 (005930, KOSPI)"
+        if tool_name == "get_stock_quote":
+            return "현재가: 74,500원"
+        if tool_name == "get_balance":
+            return "주문가능금액: 1,000,000원"
+        raise AssertionError(f"unexpected tool: {tool_name}")
+
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        mcp_runner=mcp_runner,
+        now_factory=lambda: datetime(2026, 5, 20, 10, 0, tzinfo=KST),
+    )
+
+    await handler.handle_update(
+        {"message": {"chat": {"id": 123}, "text": "/buy 삼성전자 10 75,000"}}
+    )
+
+    assert calls == [
+        (TRADING_MCP_PARAMS, "resolve_stock_code", {"stock_name": "삼성전자"}),
+        (TRADING_MCP_PARAMS, "get_stock_quote", {"stock_name": "삼성전자"}),
+        (TRADING_MCP_PARAMS, "get_balance", {}),
+    ]
+    assert "삼성전자 매수 주문 확인" in notifier.messages[-1]
+    assert "/confirm" in notifier.messages[-1]
+    assert "/cancel" in notifier.messages[-1]
+    assert notifier.reply_markups[-1] == {
+        "inline_keyboard": [
+            [
+                {
+                    "text": "✅ 확정",
+                    "callback_data": (
+                        f"order:confirm:{handler.pending_orders['123'].callback_token}"
+                    ),
+                },
+                {
+                    "text": "❌ 취소",
+                    "callback_data": (
+                        f"order:cancel:{handler.pending_orders['123'].callback_token}"
+                    ),
+                },
+            ]
+        ]
+    }
+    assert "현재가: 현재가" not in notifier.messages[-1]
+    assert "잔고: 주문가능금액" not in notifier.messages[-1]
+    assert handler.pending_orders["123"].stock_name == "삼성전자"
+    assert handler.pending_orders["123"].stock_code == "005930"
+    assert handler.pending_orders["123"].side == "BUY"
+    assert handler.pending_orders["123"].quantity == 10
+    assert handler.pending_orders["123"].price == 75000
+    assert handler.pending_orders["123"].order_type == "LIMIT"
+
+
+@pytest.mark.asyncio
+async def test_buy_command_without_price_creates_market_order_and_prompts_confirmation():
+    calls = []
+
+    async def mcp_runner(server_params, tool_name, arguments):
+        calls.append((server_params, tool_name, arguments))
+        if tool_name == "resolve_stock_code":
+            return "삼성전자 (005930, KOSPI)"
+        if tool_name == "get_stock_quote":
+            return "현재가: 74,500원"
+        if tool_name == "get_balance":
+            return "주문가능금액: 1,000,000원"
+        raise AssertionError(f"unexpected tool: {tool_name}")
+
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        mcp_runner=mcp_runner,
+        now_factory=lambda: datetime(2026, 5, 20, 10, 0, tzinfo=KST),
+    )
+
+    await handler.handle_update(
+        {"message": {"chat": {"id": 123}, "text": "/buy 삼성전자 10"}}
+    )
+
+    assert calls == [
+        (TRADING_MCP_PARAMS, "resolve_stock_code", {"stock_name": "삼성전자"}),
+        (TRADING_MCP_PARAMS, "get_stock_quote", {"stock_name": "삼성전자"}),
+        (TRADING_MCP_PARAMS, "get_balance", {}),
+    ]
+    assert "삼성전자 매수 주문 확인" in notifier.messages[-1]
+    assert "주문유형: 시장가" in notifier.messages[-1]
+    assert "지정가:" not in notifier.messages[-1]
+    assert "주문금액:" not in notifier.messages[-1]
+    assert "/confirm" in notifier.messages[-1]
+    assert "/cancel" in notifier.messages[-1]
+    assert handler.pending_orders["123"].stock_name == "삼성전자"
+    assert handler.pending_orders["123"].stock_code == "005930"
+    assert handler.pending_orders["123"].side == "BUY"
+    assert handler.pending_orders["123"].quantity == 10
+    assert handler.pending_orders["123"].price == 0
+    assert handler.pending_orders["123"].order_type == "MARKET"
+
+
+@pytest.mark.asyncio
+async def test_natural_language_market_buy_creates_pending_order_without_nat():
+    calls = []
+    nat_calls = []
+
+    async def mcp_runner(server_params, tool_name, arguments):
+        calls.append((server_params, tool_name, arguments))
+        if tool_name == "resolve_stock_code":
+            return "삼성전자 (005930, KOSPI)"
+        if tool_name == "get_stock_quote":
+            return "현재가: 74,500원"
+        if tool_name == "get_balance":
+            return "주문가능금액: 1,000,000원"
+        raise AssertionError(f"unexpected tool: {tool_name}")
+
+    async def fake_llm_runner(provider, text, *, conversation_id=None):
+        nat_calls.append((provider, text, conversation_id))
+        raise AssertionError("natural language order must not call NAT")
+
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        mcp_runner=mcp_runner,
+        llm_runner=fake_llm_runner,
+        now_factory=lambda: datetime(2026, 5, 20, 10, 0, tzinfo=KST),
+    )
+
+    await handler.handle_update(
+        {"message": {"chat": {"id": 123}, "text": "삼성전자 1주 시장가로 매수해줘"}}
+    )
+
+    assert nat_calls == []
+    assert calls == [
+        (TRADING_MCP_PARAMS, "resolve_stock_code", {"stock_name": "삼성전자"}),
+        (TRADING_MCP_PARAMS, "get_stock_quote", {"stock_name": "삼성전자"}),
+        (TRADING_MCP_PARAMS, "get_balance", {}),
+    ]
+    assert "삼성전자 매수 주문 확인" in notifier.messages[-1]
+    assert "주문유형: 시장가" in notifier.messages[-1]
+    assert notifier.reply_markups[-1] == {
+        "inline_keyboard": [
+            [
+                {
+                    "text": "✅ 확정",
+                    "callback_data": (
+                        f"order:confirm:{handler.pending_orders['123'].callback_token}"
+                    ),
+                },
+                {
+                    "text": "❌ 취소",
+                    "callback_data": (
+                        f"order:cancel:{handler.pending_orders['123'].callback_token}"
+                    ),
+                },
+            ]
+        ]
+    }
+    assert handler.pending_orders["123"].stock_name == "삼성전자"
+    assert handler.pending_orders["123"].side == "BUY"
+    assert handler.pending_orders["123"].quantity == 1
+    assert handler.pending_orders["123"].price == 0
+    assert handler.pending_orders["123"].order_type == "MARKET"
+
+
+@pytest.mark.asyncio
+async def test_natural_language_limit_sell_creates_pending_order_without_nat():
+    calls = []
+    nat_calls = []
+
+    async def mcp_runner(server_params, tool_name, arguments):
+        calls.append((server_params, tool_name, arguments))
+        if tool_name == "resolve_stock_code":
+            return "NAVER (035420, KOSPI)"
+        if tool_name == "get_stock_quote":
+            return "현재가: 200,500원"
+        if tool_name == "get_balance":
+            return "주문가능금액: 1,000,000원"
+        raise AssertionError(f"unexpected tool: {tool_name}")
+
+    async def fake_llm_runner(provider, text, *, conversation_id=None):
+        nat_calls.append((provider, text, conversation_id))
+        raise AssertionError("natural language order must not call NAT")
+
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        mcp_runner=mcp_runner,
+        llm_runner=fake_llm_runner,
+        now_factory=lambda: datetime(2026, 5, 20, 10, 0, tzinfo=KST),
+    )
+
+    await handler.handle_update(
+        {"message": {"chat": {"id": 123}, "text": "NAVER 2주 200,000원에 매도해줘"}}
+    )
+
+    assert nat_calls == []
+    assert calls[0] == (
+        TRADING_MCP_PARAMS,
+        "resolve_stock_code",
+        {"stock_name": "NAVER"},
+    )
+    assert "NAVER 매도 주문 확인" in notifier.messages[-1]
+    assert "주문유형: 지정가" in notifier.messages[-1]
+    assert "지정가: 200,000원" in notifier.messages[-1]
+    assert handler.pending_orders["123"].stock_name == "NAVER"
+    assert handler.pending_orders["123"].side == "SELL"
+    assert handler.pending_orders["123"].quantity == 2
+    assert handler.pending_orders["123"].price == 200000
+    assert handler.pending_orders["123"].order_type == "LIMIT"
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_natural_language_order_replies_with_usage_without_nat():
+    nat_calls = []
+
+    async def fake_llm_runner(provider, text, *, conversation_id=None):
+        nat_calls.append((provider, text, conversation_id))
+        raise AssertionError("ambiguous natural language order must not call NAT")
+
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        llm_runner=fake_llm_runner,
+        now_factory=lambda: datetime(2026, 5, 20, 10, 0, tzinfo=KST),
+    )
+
+    await handler.handle_update(
+        {"message": {"chat": {"id": 123}, "text": "삼성전자 1주 시장가 75000원에 매수해줘"}}
+    )
+
+    assert nat_calls == []
+    assert notifier.messages == [
+        "자연어 주문을 해석할 수 없습니다. /buy 또는 /sell 형식으로 입력하세요."
+    ]
+    assert handler.pending_orders == {}
+
+
+@pytest.mark.asyncio
+async def test_buy_command_accepts_stock_name_with_spaces():
+    calls = []
+
+    async def mcp_runner(server_params, tool_name, arguments):
+        calls.append((server_params, tool_name, arguments))
+        if tool_name == "resolve_stock_code":
+            return "LG 화학 (051910, KOSPI)"
+        if tool_name == "get_stock_quote":
+            return "현재가: 75,000원"
+        if tool_name == "get_balance":
+            return "주문가능금액: 1,000,000원"
+        raise AssertionError(f"unexpected tool: {tool_name}")
+
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        mcp_runner=mcp_runner,
+        now_factory=lambda: datetime(2026, 5, 20, 10, 0, tzinfo=KST),
+    )
+
+    await handler.handle_update(
+        {"message": {"chat": {"id": 123}, "text": "/buy LG 화학 10 75000"}}
+    )
+
+    assert calls[0] == (
+        TRADING_MCP_PARAMS,
+        "resolve_stock_code",
+        {"stock_name": "LG 화학"},
+    )
+    assert "LG 화학 매수 주문 확인" in notifier.messages[-1]
+    assert handler.pending_orders["123"].stock_name == "LG 화학"
+    assert handler.pending_orders["123"].quantity == 10
+    assert handler.pending_orders["123"].price == 75000
+    assert handler.pending_orders["123"].order_type == "LIMIT"
+
+
+@pytest.mark.asyncio
+async def test_buy_command_rejects_unresolved_stock_code_before_quote_and_balance():
+    calls = []
+
+    async def mcp_runner(server_params, tool_name, arguments):
+        calls.append((server_params, tool_name, arguments))
+        if tool_name == "resolve_stock_code":
+            return "종목을 찾지 못했습니다"
+        raise AssertionError(f"unexpected tool: {tool_name}")
+
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        mcp_runner=mcp_runner,
+        now_factory=lambda: datetime(2026, 5, 20, 10, 0, tzinfo=KST),
+    )
+
+    await handler.handle_update(
+        {"message": {"chat": {"id": 123}, "text": "/buy 알수없는종목 1 75000"}}
+    )
+
+    assert calls == [
+        (TRADING_MCP_PARAMS, "resolve_stock_code", {"stock_name": "알수없는종목"})
+    ]
+    assert notifier.messages[-1] == "주문 준비 실패: 종목코드를 확인할 수 없습니다."
+    assert handler.pending_orders == {}
+
+
+@pytest.mark.asyncio
+async def test_cancel_removes_pending_order():
+    async def mcp_runner(server_params, tool_name, arguments):
+        if tool_name == "resolve_stock_code":
+            return "삼성전자 (005930, KOSPI)"
+        if tool_name == "get_stock_quote":
+            return "현재가: 74,500원"
+        if tool_name == "get_balance":
+            return "주문가능금액: 1,000,000원"
+        raise AssertionError(f"unexpected tool: {tool_name}")
+
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        mcp_runner=mcp_runner,
+        now_factory=lambda: datetime(2026, 5, 20, 10, 0, tzinfo=KST),
+    )
+
+    await handler.handle_update(
+        {"message": {"chat": {"id": 123}, "text": "/buy 삼성전자 1 75000"}}
+    )
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/cancel"}})
+
+    assert "대기 주문을 취소했습니다." in notifier.messages[-1]
+    assert handler.pending_orders == {}
+
+
+@pytest.mark.asyncio
+async def test_cancel_button_removes_pending_order():
+    async def mcp_runner(server_params, tool_name, arguments):
+        if tool_name == "resolve_stock_code":
+            return "삼성전자 (005930, KOSPI)"
+        if tool_name == "get_stock_quote":
+            return "현재가: 74,500원"
+        if tool_name == "get_balance":
+            return "주문가능금액: 1,000,000원"
+        raise AssertionError(f"unexpected tool: {tool_name}")
+
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        mcp_runner=mcp_runner,
+        now_factory=lambda: datetime(2026, 5, 20, 10, 0, tzinfo=KST),
+    )
+
+    await handler.handle_update(
+        {"message": {"chat": {"id": 123}, "text": "/buy 삼성전자 1 75000"}}
+    )
+    callback_data = notifier.reply_markups[-1]["inline_keyboard"][0][1]["callback_data"]
+    await handler.handle_update(
+        {
+            "callback_query": {
+                "id": "callback-1",
+                "data": callback_data,
+                "message": {"chat": {"id": 123}},
+            }
+        }
+    )
+
+    assert notifier.callback_answers == [("callback-1", None)]
+    assert "대기 주문을 취소했습니다." in notifier.messages[-1]
+    assert handler.pending_orders == {}
+
+
+@pytest.mark.asyncio
+async def test_cancel_without_pending_order_replies():
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(notifier=notifier)
+
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/cancel"}})
+
+    assert notifier.messages[-1] == "취소할 대기 주문이 없습니다."
+
+
+@pytest.mark.asyncio
+async def test_confirm_executes_gateway_and_records_trade():
+    async def mcp_runner(server_params, tool_name, arguments):
+        if tool_name == "resolve_stock_code":
+            return "삼성전자 (005930, KOSPI)"
+        if tool_name == "get_stock_quote":
+            return "현재가: 74,500원"
+        if tool_name == "get_balance":
+            return "주문가능금액: 1,000,000원"
+        raise AssertionError(f"unexpected tool: {tool_name}")
+
+    gateway = FakeOrderGateway()
+    recorder = FakeTradeRecorder()
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        mcp_runner=mcp_runner,
+        order_gateway=gateway,
+        trade_recorder=recorder,
+        now_factory=lambda: datetime(2026, 5, 20, 10, 0, tzinfo=KST),
+    )
+
+    await handler.handle_update(
+        {"message": {"chat": {"id": 123}, "text": "/buy 삼성전자 1 75000"}}
+    )
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/confirm"}})
+
+    assert len(gateway.orders) == 1
+    assert isinstance(gateway.orders[0], PendingOrder)
+    assert len(recorder.results) == 1
+    assert recorder.results[0].stock_code == "005930"
+    assert notifier.actions == ["typing", "typing"]
+    assert "주문 완료" in notifier.messages[-1]
+    assert handler.pending_orders == {}
+
+
+@pytest.mark.asyncio
+async def test_confirm_button_executes_gateway_and_records_trade():
+    async def mcp_runner(server_params, tool_name, arguments):
+        if tool_name == "resolve_stock_code":
+            return "삼성전자 (005930, KOSPI)"
+        if tool_name == "get_stock_quote":
+            return "현재가: 74,500원"
+        if tool_name == "get_balance":
+            return "주문가능금액: 1,000,000원"
+        raise AssertionError(f"unexpected tool: {tool_name}")
+
+    gateway = FakeOrderGateway()
+    recorder = FakeTradeRecorder()
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        mcp_runner=mcp_runner,
+        order_gateway=gateway,
+        trade_recorder=recorder,
+        now_factory=lambda: datetime(2026, 5, 20, 10, 0, tzinfo=KST),
+    )
+
+    await handler.handle_update(
+        {"message": {"chat": {"id": 123}, "text": "/buy 삼성전자 1 75000"}}
+    )
+    callback_data = notifier.reply_markups[-1]["inline_keyboard"][0][0]["callback_data"]
+    await handler.handle_update(
+        {
+            "callback_query": {
+                "id": "callback-2",
+                "data": callback_data,
+                "message": {"chat": {"id": 123}},
+            }
+        }
+    )
+
+    assert notifier.callback_answers == [("callback-2", None)]
+    assert len(gateway.orders) == 1
+    assert len(recorder.results) == 1
+    assert "주문 완료" in notifier.messages[-1]
+    assert handler.pending_orders == {}
+
+
+@pytest.mark.asyncio
+async def test_tokenless_old_confirm_button_does_not_execute_current_pending_order():
+    async def mcp_runner(server_params, tool_name, arguments):
+        if tool_name == "resolve_stock_code":
+            return "삼성전자 (005930, KOSPI)"
+        if tool_name == "get_stock_quote":
+            return "현재가: 74,500원"
+        if tool_name == "get_balance":
+            return "주문가능금액: 1,000,000원"
+        raise AssertionError(f"unexpected tool: {tool_name}")
+
+    gateway = FakeOrderGateway()
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        mcp_runner=mcp_runner,
+        order_gateway=gateway,
+        now_factory=lambda: datetime(2026, 5, 20, 10, 0, tzinfo=KST),
+    )
+
+    await handler.handle_update(
+        {"message": {"chat": {"id": 123}, "text": "/buy 삼성전자 1 75000"}}
+    )
+    await handler.handle_update(
+        {
+            "callback_query": {
+                "id": "old-callback",
+                "data": "order:confirm",
+                "message": {"chat": {"id": 123}},
+            }
+        }
+    )
+
+    assert notifier.callback_answers == [
+        ("old-callback", "이전 주문 버튼입니다. 최신 주문 메시지에서 다시 선택하세요.")
+    ]
+    assert gateway.orders == []
+    assert "123" in handler.pending_orders
+
+
+@pytest.mark.asyncio
+async def test_confirm_gateway_success_recorder_failure_clears_pending_order():
+    async def mcp_runner(server_params, tool_name, arguments):
+        if tool_name == "resolve_stock_code":
+            return "삼성전자 (005930, KOSPI)"
+        if tool_name == "get_stock_quote":
+            return "현재가: 74,500원"
+        if tool_name == "get_balance":
+            return "주문가능금액: 1,000,000원"
+        raise AssertionError(f"unexpected tool: {tool_name}")
+
+    gateway = FakeOrderGateway()
+    recorder = FakeTradeRecorder(error=RuntimeError("db commit failed"))
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        mcp_runner=mcp_runner,
+        order_gateway=gateway,
+        trade_recorder=recorder,
+        now_factory=lambda: datetime(2026, 5, 20, 10, 0, tzinfo=KST),
+    )
+
+    await handler.handle_update(
+        {"message": {"chat": {"id": 123}, "text": "/buy 삼성전자 1 75000"}}
+    )
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/confirm"}})
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/confirm"}})
+
+    assert len(gateway.orders) == 1
+    assert len(recorder.results) == 1
+    assert notifier.messages[-2] == "주문 완료: 주문 접수\n거래 이력 기록 실패: db commit failed"
+    assert notifier.messages[-1] == "확정할 대기 주문이 없습니다."
+    assert handler.pending_orders == {}
+
+
+@pytest.mark.asyncio
+async def test_confirm_without_gateway_keeps_pending_order():
+    async def mcp_runner(server_params, tool_name, arguments):
+        if tool_name == "resolve_stock_code":
+            return "삼성전자 (005930, KOSPI)"
+        if tool_name == "get_stock_quote":
+            return "현재가: 74,500원"
+        if tool_name == "get_balance":
+            return "주문가능금액: 1,000,000원"
+        raise AssertionError(f"unexpected tool: {tool_name}")
+
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        mcp_runner=mcp_runner,
+        now_factory=lambda: datetime(2026, 5, 20, 10, 0, tzinfo=KST),
+    )
+
+    await handler.handle_update(
+        {"message": {"chat": {"id": 123}, "text": "/buy 삼성전자 1 75000"}}
+    )
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/confirm"}})
+
+    assert notifier.messages[-1] == "주문 실행 설정이 준비되지 않았습니다."
+    assert "123" in handler.pending_orders
+
+
+@pytest.mark.asyncio
+async def test_confirm_gateway_ambiguous_failure_clears_pending_order_and_blocks_retry():
+    async def mcp_runner(server_params, tool_name, arguments):
+        if tool_name == "resolve_stock_code":
+            return "삼성전자 (005930, KOSPI)"
+        if tool_name == "get_stock_quote":
+            return "현재가: 74,500원"
+        if tool_name == "get_balance":
+            return "주문가능금액: 1,000,000원"
+        raise AssertionError(f"unexpected tool: {tool_name}")
+
+    gateway = FakeOrderGateway(error=RuntimeError("gateway down"))
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        mcp_runner=mcp_runner,
+        order_gateway=gateway,
+        now_factory=lambda: datetime(2026, 5, 20, 10, 0, tzinfo=KST),
+    )
+
+    await handler.handle_update(
+        {"message": {"chat": {"id": 123}, "text": "/buy 삼성전자 1 75000"}}
+    )
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/confirm"}})
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/confirm"}})
+
+    assert len(gateway.orders) == 1
+    assert notifier.messages[-2] == (
+        "주문 실패 또는 상태 확인 필요: gateway down\n"
+        "중복 주문 방지를 위해 대기 주문을 제거했습니다."
+    )
+    assert notifier.messages[-1] == "확정할 대기 주문이 없습니다."
+    assert handler.pending_orders == {}
+
+
+@pytest.mark.asyncio
+async def test_confirm_real_order_guard_failure_keeps_pending_order():
+    async def mcp_runner(server_params, tool_name, arguments):
+        if tool_name == "resolve_stock_code":
+            return "삼성전자 (005930, KOSPI)"
+        if tool_name == "get_stock_quote":
+            return "현재가: 74,500원"
+        if tool_name == "get_balance":
+            return "주문가능금액: 1,000,000원"
+        raise AssertionError(f"unexpected tool: {tool_name}")
+
+    gateway = FakeOrderGateway(
+        error=HTTPException(
+            status_code=403,
+            detail="실계좌 주문은 KIS_REAL_ORDER_ENABLED=true 설정이 필요합니다.",
+        )
+    )
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        mcp_runner=mcp_runner,
+        order_gateway=gateway,
+        now_factory=lambda: datetime(2026, 5, 20, 10, 0, tzinfo=KST),
+    )
+
+    await handler.handle_update(
+        {"message": {"chat": {"id": 123}, "text": "/buy 삼성전자 1 75000"}}
+    )
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/confirm"}})
+
+    assert notifier.messages[-1] == (
+        "주문 실패: 실계좌 주문은 KIS_REAL_ORDER_ENABLED=true 설정이 필요합니다."
+    )
+    assert "123" in handler.pending_orders
+
+
+@pytest.mark.asyncio
+async def test_sell_command_rejects_market_closed():
+    calls = []
+
+    async def mcp_runner(server_params, tool_name, arguments):
+        calls.append((server_params, tool_name, arguments))
+        return "should not be called"
+
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        mcp_runner=mcp_runner,
+        now_factory=lambda: datetime(2026, 5, 20, 8, 59, tzinfo=KST),
+    )
+
+    await handler.handle_update(
+        {"message": {"chat": {"id": 123}, "text": "/sell 삼성전자 10 75,000"}}
+    )
+
+    assert notifier.messages == ["주문 불가: 현재 장 운영 시간이 아닙니다. (평일 09:00~15:30)"]
+    assert handler.pending_orders == {}
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_buy_command_rejects_invalid_args_with_usage():
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        now_factory=lambda: datetime(2026, 5, 20, 10, 0, tzinfo=KST),
+    )
+
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/buy 삼성전자 x"}})
+
+    assert notifier.messages == [BUY_COMMAND_HELP]
+
+
+@pytest.mark.asyncio
+async def test_sell_command_rejects_duplicate_pending_order():
+    async def mcp_runner(server_params, tool_name, arguments):
+        if tool_name == "resolve_stock_code":
+            return "삼성전자 (005930, KOSPI)"
+        if tool_name == "get_stock_quote":
+            return "현재가: 74,500원"
+        if tool_name == "get_balance":
+            return "주문가능금액: 1,000,000원"
+        raise AssertionError(f"unexpected tool: {tool_name}")
+
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        mcp_runner=mcp_runner,
+        now_factory=lambda: datetime(2026, 5, 20, 10, 0, tzinfo=KST),
+    )
+
+    await handler.handle_update(
+        {"message": {"chat": {"id": 123}, "text": "/buy 삼성전자 1 75000"}}
+    )
+    await handler.handle_update(
+        {"message": {"chat": {"id": 123}, "text": "/sell 삼성전자 1 75000"}}
+    )
+
+    assert (
+        notifier.messages[-1]
+        == "이미 대기 중인 주문이 있습니다. /confirm 또는 /cancel로 먼저 처리하세요."
+    )
+    assert handler.pending_orders["123"].side == "BUY"
+
+
+@pytest.mark.asyncio
 async def test_mcp_failure_replies_with_short_failure_message():
     class DetailedError(Exception):
         detail = "x" * 400
@@ -335,6 +1088,57 @@ async def test_alerts_command_ignores_other_chats():
 
     assert state.mode == "urgent"
     assert notifier.messages == []
+
+
+def test_poller_default_handler_uses_order_gateway_and_trade_recorder_factories(monkeypatch):
+    gateway = object()
+    recorder = object()
+    notifier = FakeNotifier()
+
+    monkeypatch.setattr(telegram_commands, "_create_order_gateway", lambda: gateway)
+    monkeypatch.setattr(telegram_commands, "_create_trade_recorder", lambda: recorder)
+
+    poller = TelegramCommandPoller(notifier=notifier)
+
+    assert poller.handler.order_gateway is gateway
+    assert poller.handler.trade_recorder is recorder
+
+
+def test_poller_explicit_handler_does_not_call_dependency_factories(monkeypatch):
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(notifier=notifier)
+
+    def fail_factory():
+        raise AssertionError("factory must not be called for explicit handler")
+
+    monkeypatch.setattr(telegram_commands, "_create_order_gateway", fail_factory)
+    monkeypatch.setattr(telegram_commands, "_create_trade_recorder", fail_factory)
+
+    poller = TelegramCommandPoller(notifier=notifier, handler=handler)
+
+    assert poller.handler is handler
+
+
+def test_create_order_gateway_uses_local_mcp_trading(monkeypatch):
+    captured = {}
+
+    class FakeGateway:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr(telegram_commands, "McpTradingOrderGateway", FakeGateway)
+    monkeypatch.setattr(telegram_commands, "KIS_ORDER_ENV", "sandbox")
+    monkeypatch.setattr(telegram_commands, "KIS_REAL_ORDER_ENABLED", True)
+
+    gateway = telegram_commands._create_order_gateway()
+
+    assert isinstance(gateway, FakeGateway)
+    assert captured == {
+        "server_params": TRADING_MCP_PARAMS,
+        "mcp_runner": telegram_commands.run_mcp_tool,
+        "order_env": "demo",
+        "real_order_enabled": True,
+    }
 
 
 @pytest.mark.asyncio
