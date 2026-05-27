@@ -1,0 +1,12 @@
+{
+  "total_asset": 12430000,
+  "total_return_rate": 4.23,
+  "holdings": [
+    { "name": "삼성전자", "current_price": 74500, "avg_price": 70100, "return_rate": 6.28, "quantity": 38 },
+    { "name": "SK하이닉스", "current_price": 198000, "avg_price": 192000, "return_rate": 3.13, "quantity": 14 },
+    { "name": "LG전자", "current_price": 84200, "avg_price": 83900, "return_rate": 0.36, "quantity": 27 },
+    { "name": "카카오", "current_price": 41300, "avg_price": 42500, "return_rate": -2.82, "quantity": 42 },
+    { "name": "NAVER", "current_price": 183500, "avg_price": 180100, "return_rate": 1.89, "quantity": 7 },
+    { "name": "현대차", "current_price": 214000, "avg_price": 217000, "return_rate": -1.38, "quantity": 4 }
+  ]
+}
