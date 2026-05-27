@@ -23,13 +23,13 @@ COPY mcp-trading /workspace/mcp-trading
 COPY mcp-dart /workspace/mcp-dart
 
 WORKDIR /workspace/mcp-news
-RUN npm ci
+RUN npm ci --omit=dev
 
 WORKDIR /workspace/mcp-trading
-RUN npm ci
+RUN npm ci --omit=dev
 
 WORKDIR /workspace/mcp-dart
-RUN npm ci
+RUN npm ci --omit=dev
 
 WORKDIR /workspace/finus_nat
 RUN uv sync --no-dev

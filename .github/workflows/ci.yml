@@ -84,6 +84,9 @@ jobs:
         dockerfile:
           - backend/Dockerfile
           - finus_nat/Dockerfile
+          - frontend-react/Dockerfile
+          - mcp-news/Dockerfile
+          - mcp-trading/Dockerfile
     steps:
       - uses: actions/checkout@v4
 
