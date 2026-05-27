@@ -250,6 +250,43 @@ async def test_send_chat_action_posts_typing_payload(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_set_bot_commands_posts_command_menu_payload(monkeypatch):
+    captured = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+    class FakeAsyncClient:
+        def __init__(self, *, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return None
+
+        async def post(self, url, *, json):
+            captured["url"] = url
+            captured["json"] = json
+            return FakeResponse()
+
+    commands = [
+        {"command": "balance", "description": "잔고 조회"},
+        {"command": "alerts", "description": "알림 모드 변경"},
+    ]
+    monkeypatch.setattr("backend.telegram_notifier.httpx.AsyncClient", FakeAsyncClient)
+    notifier = TelegramNotifier("token", "123")
+
+    result = await notifier.set_bot_commands(commands)
+
+    assert result is True
+    assert captured["url"] == "https://api.telegram.org/bottoken/setMyCommands"
+    assert captured["json"] == {"commands": commands}
+
+
+@pytest.mark.asyncio
 async def test_load_bot_username_fetches_and_caches_get_me(monkeypatch):
     calls = []
 

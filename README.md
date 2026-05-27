@@ -175,6 +175,8 @@ docker compose exec backend uv run --project /app/backend python /app/backend/sc
 
 Telegram 명령은 슬래시 명령을 계속 지원하면서 일부 응답에 버튼을 함께 제공합니다. `/help`는 잔고 조회와 알림 상태 버튼을 제공하고, `/alerts` 응답은 `🚨 긴급만`·`📣 전체`·`🔕 끄기`·`🔎 현재 상태` 버튼으로 모드를 바꿀 수 있습니다. `/balance` 결과는 새로고침 버튼을 제공하며, `/quote`와 `/trend` 결과는 같은 종목의 현재가·수급 조회를 오가는 버튼을 제공합니다.
 
+봇 시작 시 Telegram Bot Command Menu도 등록합니다. Telegram 채팅방의 명령 메뉴에서 `/help`, `/balance`, `/alerts`, `/quote`, `/trend`, `/buy`, `/sell`, `/confirm`, `/cancel`을 선택할 수 있으며, 기존 슬래시 명령과 인라인 버튼은 그대로 사용할 수 있습니다.
+
 슬래시 명령 대신 `삼성전자 1주 시장가로 매수해줘`, `NAVER 2주 200,000원에 매도해줘`처럼 입력해도 같은 주문 확인 대기가 생성됩니다. 자연어 주문도 실제 제출 전에는 반드시 `확정` 버튼 또는 `/confirm`이 필요합니다.
 
 `mcp-trading/data/stocks.json`은 KIS 공개 코스피/코스닥 종목 마스터 기반의 종목명 해석 캐시입니다. 신규 상장 등으로 종목명이 잡히지 않으면 6자리 종목코드를 직접 입력하거나 아래 명령으로 캐시를 갱신합니다.

@@ -63,6 +63,17 @@ TELEGRAM_INTERACTIVE_HELP = "\n".join(
         "일반 문장은 NAT에게 바로 질문합니다.",
     ]
 )
+TELEGRAM_BOT_COMMANDS = [
+    {"command": "help", "description": "사용 가능한 명령 확인"},
+    {"command": "balance", "description": "예수금·총자산·보유 종목 조회"},
+    {"command": "alerts", "description": "Telegram 알림 모드 변경"},
+    {"command": "quote", "description": "현재가 조회"},
+    {"command": "trend", "description": "외국인·기관·개인 수급 조회"},
+    {"command": "buy", "description": "매수 주문 준비"},
+    {"command": "sell", "description": "매도 주문 준비"},
+    {"command": "confirm", "description": "대기 주문 확정"},
+    {"command": "cancel", "description": "대기 주문 취소"},
+]
 QUOTE_COMMAND_HELP = "사용법: /quote <종목명>"
 TREND_COMMAND_HELP = "사용법: /trend <종목명>"
 TELEGRAM_MESSAGE_LIMIT = 4000
@@ -810,9 +821,7 @@ class TelegramCommandPoller:
     async def run(self) -> None:
         if not self.notifier.enabled:
             return
-        load_bot_username = getattr(self.notifier, "load_bot_username", None)
-        if callable(load_bot_username):
-            await load_bot_username()
+        await self._setup_bot_profile()
 
         while True:
             try:
@@ -827,6 +836,21 @@ class TelegramCommandPoller:
             except Exception as exc:
                 logger.error("Telegram command polling failed: %s", exc)
                 await asyncio.sleep(5)
+
+    async def _setup_bot_profile(self) -> None:
+        load_bot_username = getattr(self.notifier, "load_bot_username", None)
+        if callable(load_bot_username):
+            try:
+                await load_bot_username()
+            except Exception as exc:
+                logger.error("Telegram bot username setup failed: %s", exc)
+
+        set_bot_commands = getattr(self.notifier, "set_bot_commands", None)
+        if callable(set_bot_commands):
+            try:
+                await set_bot_commands(TELEGRAM_BOT_COMMANDS)
+            except Exception as exc:
+                logger.error("Telegram bot command menu setup failed: %s", exc)
 
     async def _get_updates(self) -> list[dict[str, Any]]:
         url = f"https://api.telegram.org/bot{self.notifier.bot_token}/getUpdates"

@@ -38,6 +38,7 @@ class FakeNotifier:
         self.send_text_result = send_text_result
         self.bot_username = bot_username
         self.loaded_bot_username = False
+        self.bot_commands = None
         self.messages = []
         self.reply_markups = []
         self.actions = []
@@ -59,6 +60,10 @@ class FakeNotifier:
     async def load_bot_username(self):
         self.loaded_bot_username = True
         return self.bot_username
+
+    async def set_bot_commands(self, commands):
+        self.bot_commands = commands
+        return True
 
 
 class FakeOrderGateway:
@@ -1350,6 +1355,34 @@ async def test_poller_loads_bot_username_before_updates(monkeypatch):
     async def fake_get_updates():
         assert notifier.loaded_bot_username is True
         raise RuntimeError("stop after username load")
+
+    async def stop_after_failure(delay):
+        raise pytest.fail.Exception("stop after first failed polling iteration")
+
+    monkeypatch.setattr(poller, "_get_updates", fake_get_updates)
+    monkeypatch.setattr("backend.telegram_commands.asyncio.sleep", stop_after_failure)
+
+    with pytest.raises(pytest.fail.Exception):
+        await poller.run()
+
+    assert poller.offset is None
+
+
+@pytest.mark.asyncio
+async def test_poller_sets_bot_command_menu_before_updates(monkeypatch):
+    notifier = FakeNotifier(bot_username="finus_bot")
+    notifier.enabled = True
+    notifier.bot_token = "token"
+
+    class NoopHandler:
+        async def handle_update(self, update):
+            return None
+
+    poller = TelegramCommandPoller(notifier=notifier, handler=NoopHandler())
+
+    async def fake_get_updates():
+        assert notifier.bot_commands == telegram_commands.TELEGRAM_BOT_COMMANDS
+        raise RuntimeError("stop after bot command setup")
 
     async def stop_after_failure(delay):
         raise pytest.fail.Exception("stop after first failed polling iteration")
