@@ -147,6 +147,38 @@ async def test_help_command_replies_with_supported_commands():
     assert "/confirm - 대기 주문 확정" in notifier.messages[-1]
     assert "/cancel - 대기 주문 취소" in notifier.messages[-1]
     assert "일반 문장은 NAT에게 바로 질문합니다." in notifier.messages[-1]
+    assert notifier.reply_markups[-1] == {
+        "inline_keyboard": [
+            [
+                {"text": "💰 잔고", "callback_data": "balance:refresh"},
+                {"text": "🔔 알림", "callback_data": "alerts:status"},
+            ]
+        ]
+    }
+
+
+@pytest.mark.asyncio
+async def test_alerts_button_updates_mode_and_replies():
+    state = FakeState()
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(notifier=notifier, state_factory=lambda: state)
+
+    await handler.handle_update(
+        {
+            "callback_query": {
+                "id": "alert-callback",
+                "data": "alerts:off",
+                "message": {"chat": {"id": 123}},
+            }
+        }
+    )
+
+    assert state.mode == "off"
+    assert notifier.callback_answers == [("alert-callback", None)]
+    assert "off" in notifier.messages[-1]
+    assert notifier.reply_markups[-1]["inline_keyboard"][0][0]["callback_data"] == (
+        "alerts:urgent"
+    )
 
 
 @pytest.mark.asyncio
@@ -226,6 +258,38 @@ async def test_balance_command_calls_mcp_runner():
     assert calls == [(TRADING_MCP_PARAMS, "get_balance", {})]
     assert notifier.actions == ["typing"]
     assert notifier.messages == ["잔고 응답"]
+    assert notifier.reply_markups[-1] == {
+        "inline_keyboard": [
+            [{"text": "🔄 새로고침", "callback_data": "balance:refresh"}]
+        ]
+    }
+
+
+@pytest.mark.asyncio
+async def test_balance_refresh_button_calls_mcp_runner():
+    calls = []
+
+    async def mcp_runner(server_params, tool_name, arguments):
+        calls.append((server_params, tool_name, arguments))
+        return "잔고 응답"
+
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(notifier=notifier, mcp_runner=mcp_runner)
+
+    await handler.handle_update(
+        {
+            "callback_query": {
+                "id": "balance-callback",
+                "data": "balance:refresh",
+                "message": {"chat": {"id": 123}},
+            }
+        }
+    )
+
+    assert calls == [(TRADING_MCP_PARAMS, "get_balance", {})]
+    assert notifier.callback_answers == [("balance-callback", None)]
+    assert notifier.actions == ["typing"]
+    assert notifier.messages == ["잔고 응답"]
 
 
 @pytest.mark.asyncio
@@ -244,6 +308,42 @@ async def test_quote_command_calls_mcp_runner_with_stock_name():
     assert calls == [(TRADING_MCP_PARAMS, "get_stock_quote", {"stock_name": "삼성전자"})]
     assert notifier.actions == ["typing"]
     assert notifier.messages == ["현재가 응답"]
+    assert notifier.reply_markups[-1]["inline_keyboard"][0][0]["text"] == "📊 수급 보기"
+
+
+@pytest.mark.asyncio
+async def test_quote_result_trend_button_uses_same_stock_name():
+    calls = []
+
+    async def mcp_runner(server_params, tool_name, arguments):
+        calls.append((server_params, tool_name, arguments))
+        if tool_name == "get_stock_quote":
+            return "현재가 응답"
+        if tool_name == "get_investor_trading":
+            return "수급 응답"
+        raise AssertionError(f"unexpected tool: {tool_name}")
+
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(notifier=notifier, mcp_runner=mcp_runner)
+
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/quote 삼성전자"}})
+    callback_data = notifier.reply_markups[-1]["inline_keyboard"][0][0]["callback_data"]
+    await handler.handle_update(
+        {
+            "callback_query": {
+                "id": "trend-callback",
+                "data": callback_data,
+                "message": {"chat": {"id": 123}},
+            }
+        }
+    )
+
+    assert calls == [
+        (TRADING_MCP_PARAMS, "get_stock_quote", {"stock_name": "삼성전자"}),
+        (TRADING_MCP_PARAMS, "get_investor_trading", {"stock_name": "삼성전자"}),
+    ]
+    assert notifier.callback_answers == [("trend-callback", None)]
+    assert notifier.messages[-1] == "수급 응답"
 
 
 @pytest.mark.asyncio
@@ -304,6 +404,69 @@ async def test_trend_command_calls_mcp_runner_with_stock_name():
     ]
     assert notifier.actions == ["typing"]
     assert notifier.messages == ["수급 응답"]
+    assert notifier.reply_markups[-1]["inline_keyboard"][0][0]["text"] == "💵 현재가 보기"
+
+
+@pytest.mark.asyncio
+async def test_trend_result_quote_button_uses_same_stock_name():
+    calls = []
+
+    async def mcp_runner(server_params, tool_name, arguments):
+        calls.append((server_params, tool_name, arguments))
+        if tool_name == "get_stock_quote":
+            return "현재가 응답"
+        if tool_name == "get_investor_trading":
+            return "수급 응답"
+        raise AssertionError(f"unexpected tool: {tool_name}")
+
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(notifier=notifier, mcp_runner=mcp_runner)
+
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/trend 삼성전자"}})
+    callback_data = notifier.reply_markups[-1]["inline_keyboard"][0][0]["callback_data"]
+    await handler.handle_update(
+        {
+            "callback_query": {
+                "id": "quote-callback",
+                "data": callback_data,
+                "message": {"chat": {"id": 123}},
+            }
+        }
+    )
+
+    assert calls == [
+        (TRADING_MCP_PARAMS, "get_investor_trading", {"stock_name": "삼성전자"}),
+        (TRADING_MCP_PARAMS, "get_stock_quote", {"stock_name": "삼성전자"}),
+    ]
+    assert notifier.callback_answers == [("quote-callback", None)]
+    assert notifier.messages[-1] == "현재가 응답"
+
+
+@pytest.mark.asyncio
+async def test_stale_market_button_does_not_call_mcp_runner():
+    calls = []
+
+    async def mcp_runner(server_params, tool_name, arguments):
+        calls.append((server_params, tool_name, arguments))
+        return "응답"
+
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(notifier=notifier, mcp_runner=mcp_runner)
+
+    await handler.handle_update(
+        {
+            "callback_query": {
+                "id": "stale-market-callback",
+                "data": "market:quote:old-token",
+                "message": {"chat": {"id": 123}},
+            }
+        }
+    )
+
+    assert calls == []
+    assert notifier.callback_answers == [
+        ("stale-market-callback", "이전 조회 버튼입니다. 최신 조회 메시지에서 다시 선택하세요.")
+    ]
 
 
 @pytest.mark.asyncio
