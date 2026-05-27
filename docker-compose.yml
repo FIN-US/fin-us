@@ -3,13 +3,8 @@ services:
     build:
       context: ./frontend-react
     ports:
-      - "5173:5173"
-    volumes:
-      - ./frontend-react:/app
-      - /app/node_modules
-    environment:
-      - VITE_API_BASE_URL=http://localhost:8000/api/v1
-      - VITE_BACKEND_TARGET=http://backend:8000
+      # nginx 컨테이너는 80번 포트로 서빙 (호스트 5173 → 컨테이너 80)
+      - "5173:80"
     depends_on:
       backend:
         condition: service_healthy
