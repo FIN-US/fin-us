@@ -94,3 +94,10 @@ public class ErrorDetailResponse
 {
     public string detail;
 }
+
+[Serializable]
+public class PortfolioApiResponse
+{
+    public string status;
+    public PortfolioData data;
+}

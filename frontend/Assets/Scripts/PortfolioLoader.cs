@@ -5,20 +5,30 @@ public class PortfolioLoader : MonoBehaviour
 {
     public PortfolioData data;
     public GameObject[] treePrefabs;
+    private ApiClient apiClient;
 
     [SerializeField] private float _lerpMin = 0.5f;
     [SerializeField] private float _lerpMax = 1.7f;
 
     void Awake()
     {
-        TextAsset json = Resources.Load<TextAsset>("data");
-        data = JsonUtility.FromJson<PortfolioData>(json.text);
+        apiClient = new ApiClient("http://localhost:8000");
     }
 
     void Start()
     {
-        SpawnSpheres();
-        FindAnyObjectByType<PanelController>().UpdateTopBar(data);
+        StartCoroutine(apiClient.FetchPortfolio(
+            onSuccess: (portfolioData) =>
+            {
+                data = portfolioData;
+                SpawnSpheres();
+                FindAnyObjectByType<PanelController>().UpdateTopBar(data);
+            },
+            onError: (err) =>
+            {
+                Debug.LogError("포트폴리오 오류: " + err);
+            }
+        ));
     }
 
     void SpawnSpheres()
