@@ -15,7 +15,6 @@ functions:
       - kis-trading-mcp-tool
       # news agent가 실수로 주식거래를 해버리는 위험을 막기 위해 향후에 다른 것으로 변경
       - mcp-news-get-market-news
-      - mcp-news-get-investor-trading
       - mcp-dart-get-disclosure-signal
       - add_user_memory
       - get_user_memory
@@ -31,7 +30,6 @@ functions:
       개인화가 필요하면 `get_user_memory`로 먼저 확인하십시오.
 
       - 최신 뉴스·헤드라인: `mcp-news-get-market-news` (stock_name = 종목명 또는 6자리 코드).
-      - 투자자별 수급(외인·기관 등): `mcp-news-get-investor-trading` (동일하게 stock_name).
       - DART 지분공시 signal(5% 룰·임원/주요주주): `mcp-dart-get-disclosure-signal` (stock_name). 매매 지시가 아닌 리스크·맥락 참고용.
       - `kis-trading-mcp-tool`: 보유종목/포트폴리오 확인이 필요할 때 사용합니다.
         기본 잔고 조회는 `api_type:"inquire_balance"`, `params:{{"env_dv":"real","inqr_dvsn":"01"}}`로 시작하십시오.

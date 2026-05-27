@@ -146,34 +146,6 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         required: ["stock_name"],
       },
     },
-    {
-      name: "get_investor_trading",
-      description: "deprecated: mcp-trading의 get_investor_trading으로 이동되었습니다.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          stock_name: {
-            type: "string",
-            description: "주식 종목명 (예: 삼성전자, SK하이닉스)",
-          },
-        },
-        required: ["stock_name"],
-      },
-    },
-    {
-      name: "get_research_reports",
-      description: "deprecated: 공식 대체 API가 확정되지 않아 비활성화되었습니다.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          stock_name: {
-            type: "string",
-            description: "주식 종목명 (예: 삼성전자, SK하이닉스)",
-          },
-        },
-        required: ["stock_name"],
-      },
-    },
   ],
 }));
 
