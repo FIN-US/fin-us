@@ -613,12 +613,12 @@ class TelegramCommandHandler:
         return {
             "inline_keyboard": [
                 [
-                    {"text": "긴급만", "callback_data": f"{ALERT_CALLBACK_PREFIX}urgent"},
-                    {"text": "전체", "callback_data": f"{ALERT_CALLBACK_PREFIX}all"},
-                    {"text": "끄기", "callback_data": f"{ALERT_CALLBACK_PREFIX}off"},
+                    {"text": "🚨 긴급만", "callback_data": f"{ALERT_CALLBACK_PREFIX}urgent"},
+                    {"text": "📣 전체", "callback_data": f"{ALERT_CALLBACK_PREFIX}all"},
+                    {"text": "🔕 끄기", "callback_data": f"{ALERT_CALLBACK_PREFIX}off"},
                 ],
                 [
-                    {"text": "현재 상태", "callback_data": f"{ALERT_CALLBACK_PREFIX}status"}
+                    {"text": "🔎 현재 상태", "callback_data": f"{ALERT_CALLBACK_PREFIX}status"}
                 ],
             ]
         }
