@@ -348,7 +348,9 @@ async def run_mcp_tool(
     tool_name: str,
     arguments: dict[str, Any],
 ) -> str:
-    try:
+    import asyncio
+
+    async def _call() -> str:
         async with stdio_client(server_params) as (read, write):
             async with ClientSession(read, write) as session:
                 await session.initialize()
@@ -361,6 +363,16 @@ async def run_mcp_tool(
                     return ""
                 block = result.content[0]
                 return getattr(block, "text", str(block))
+
+    try:
+        # MCP 서브프로세스 호출에 30초 타임아웃 적용 — 무기한 블로킹 방지
+        return await asyncio.wait_for(_call(), timeout=30.0)
+    except asyncio.TimeoutError as exc:
+        logger.error("MCP call_tool timed out for %s", tool_name)
+        raise HTTPException(
+            status_code=504,
+            detail=f"데이터 공급원({tool_name}) 응답 타임아웃 (30초)",
+        ) from exc
     except HTTPException:
         raise
     except Exception as exc:
