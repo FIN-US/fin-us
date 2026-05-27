@@ -30,6 +30,7 @@ const {
   KIS_API_SECRET,
   KIS_ACCOUNT_NO,
   KIS_URL,
+  KIS_REAL_ORDER_ENABLED,
 } = process.env;
 
 const KIS_BALANCE_TR_ID = KIS_URL?.includes("openapivts") ? "VTTC8434R" : "TTTC8434R";
@@ -256,6 +257,7 @@ async function placeOrder(args) {
     quantity,
     price,
     orderType,
+    realOrderEnabled: KIS_REAL_ORDER_ENABLED === "true",
   });
 
   const data = await kisPost(request.pathname, request.trId, request.body);

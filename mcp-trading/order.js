@@ -53,6 +53,13 @@ export function validateOrderEnvMatchesUrl({ orderEnv, kisUrl }) {
   }
 }
 
+export function validateRealOrderGuard({ orderEnv, realOrderEnabled }) {
+  const env = normalizeOrderEnv(orderEnv);
+  if (env === "real" && realOrderEnabled !== true) {
+    throw new Error("실계좌 주문은 KIS_REAL_ORDER_ENABLED=true 설정이 필요합니다.");
+  }
+}
+
 export function buildCashOrderBody({ accountNo, stockCode, quantity, price, orderType }) {
   const account = String(accountNo ?? "").trim();
   const code = String(stockCode ?? "").trim();
@@ -80,7 +87,18 @@ export function buildCashOrderBody({ accountNo, stockCode, quantity, price, orde
   };
 }
 
-export function createCashOrderRequest({ accountNo, kisUrl, orderEnv, side, stockCode, quantity, price, orderType }) {
+export function createCashOrderRequest({
+  accountNo,
+  kisUrl,
+  orderEnv,
+  side,
+  stockCode,
+  quantity,
+  price,
+  orderType,
+  realOrderEnabled = false,
+}) {
+  validateRealOrderGuard({ orderEnv, realOrderEnabled });
   validateOrderEnvMatchesUrl({ orderEnv, kisUrl });
   return {
     pathname: "/uapi/domestic-stock/v1/trading/order-cash",

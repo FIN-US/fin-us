@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 import json
 import shutil
-import ssl
 import tempfile
 import urllib.request
 import zipfile
@@ -40,8 +39,7 @@ def load_existing_aliases():
 
 def download_source(source, target_dir):
     archive_path = target_dir / f"{source['market'].lower()}_code.mst.zip"
-    context = ssl._create_unverified_context()
-    with urllib.request.urlopen(source["url"], context=context) as response:
+    with urllib.request.urlopen(source["url"]) as response:
         with archive_path.open("wb") as archive_file:
             shutil.copyfileobj(response, archive_file)
     with zipfile.ZipFile(archive_path) as archive:

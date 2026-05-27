@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import re
+import secrets
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from typing import Any, Callable
@@ -36,14 +37,7 @@ NATURAL_ORDER_HELP = "자연어 주문을 해석할 수 없습니다. /buy 또�
 ORDER_EXPIRES_AFTER = timedelta(seconds=60)
 ORDER_CONFIRM_CALLBACK = "order:confirm"
 ORDER_CANCEL_CALLBACK = "order:cancel"
-ORDER_CONFIRM_REPLY_MARKUP = {
-    "inline_keyboard": [
-        [
-            {"text": "✅ 확정", "callback_data": ORDER_CONFIRM_CALLBACK},
-            {"text": "❌ 취소", "callback_data": ORDER_CANCEL_CALLBACK},
-        ]
-    ]
-}
+ORDER_STALE_CALLBACK_TEXT = "이전 주문 버튼입니다. 최신 주문 메시지에서 다시 선택하세요."
 TELEGRAM_INTERACTIVE_HELP = "\n".join(
     [
         "사용 가능한 명령:",
@@ -204,16 +198,46 @@ class TelegramCommandHandler:
 
         callback_query_id = str(callback_query.get("id", "")).strip()
         data = str(callback_query.get("data") or "").strip()
-        if data == ORDER_CONFIRM_CALLBACK:
-            await self._answer_callback_query(callback_query_id)
-            await self._handle_confirm(chat_id)
+        if data == ORDER_CONFIRM_CALLBACK or data.startswith(f"{ORDER_CONFIRM_CALLBACK}:"):
+            await self._handle_order_callback(
+                callback_query_id,
+                chat_id,
+                "confirm",
+                data,
+            )
             return
-        if data == ORDER_CANCEL_CALLBACK:
-            await self._answer_callback_query(callback_query_id)
-            await self._handle_cancel(chat_id)
+        if data == ORDER_CANCEL_CALLBACK or data.startswith(f"{ORDER_CANCEL_CALLBACK}:"):
+            await self._handle_order_callback(
+                callback_query_id,
+                chat_id,
+                "cancel",
+                data,
+            )
             return
 
         await self._answer_callback_query(callback_query_id, text="지원하지 않는 버튼입니다.")
+
+    async def _handle_order_callback(
+        self,
+        callback_query_id: str,
+        chat_id: str,
+        action: str,
+        data: str,
+    ) -> None:
+        order = self.pending_orders.get(chat_id)
+        token = self._extract_order_callback_token(data)
+        if order is None or not token or token != order.callback_token:
+            await self._answer_callback_query(
+                callback_query_id,
+                text=ORDER_STALE_CALLBACK_TEXT,
+            )
+            return
+
+        await self._answer_callback_query(callback_query_id)
+        if action == "confirm":
+            await self._handle_confirm(chat_id)
+            return
+        await self._handle_cancel(chat_id)
 
     async def _answer_callback_query(
         self,
@@ -332,11 +356,12 @@ class TelegramCommandHandler:
             price=price,
             created_at=now,
             order_type=order_type,
+            callback_token=secrets.token_urlsafe(8),
         )
         self.pending_orders[chat_id] = order
         await self._send_text_or_raise(
             self._format_order_prompt(order, str(quote_result), str(balance_result)),
-            reply_markup=ORDER_CONFIRM_REPLY_MARKUP,
+            reply_markup=self._order_reply_markup(order),
         )
 
     async def _handle_cancel(self, chat_id: str) -> None:
@@ -476,6 +501,34 @@ class TelegramCommandHandler:
     def _extract_stock_code(self, text: str) -> str | None:
         match = re.search(r"\b(\d{6})\b", text)
         return match.group(1) if match else None
+
+    def _extract_order_callback_token(self, data: str) -> str | None:
+        if data in {ORDER_CONFIRM_CALLBACK, ORDER_CANCEL_CALLBACK}:
+            return None
+        _, separator, token = data.rpartition(":")
+        if not separator:
+            return None
+        return token.strip() or None
+
+    def _order_reply_markup(self, order: PendingOrder) -> dict[str, Any]:
+        return {
+            "inline_keyboard": [
+                [
+                    {
+                        "text": "✅ 확정",
+                        "callback_data": (
+                            f"{ORDER_CONFIRM_CALLBACK}:{order.callback_token}"
+                        ),
+                    },
+                    {
+                        "text": "❌ 취소",
+                        "callback_data": (
+                            f"{ORDER_CANCEL_CALLBACK}:{order.callback_token}"
+                        ),
+                    },
+                ]
+            ]
+        }
 
     def _format_order_prompt(
         self,

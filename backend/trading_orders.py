@@ -24,6 +24,7 @@ class PendingOrder:
     price: int
     created_at: datetime
     order_type: OrderType = "LIMIT"
+    callback_token: str = ""
 
 
 @dataclass(frozen=True)

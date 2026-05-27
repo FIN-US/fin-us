@@ -353,8 +353,18 @@ async def test_buy_command_creates_pending_order_and_prompts_confirmation():
     assert notifier.reply_markups[-1] == {
         "inline_keyboard": [
             [
-                {"text": "✅ 확정", "callback_data": "order:confirm"},
-                {"text": "❌ 취소", "callback_data": "order:cancel"},
+                {
+                    "text": "✅ 확정",
+                    "callback_data": (
+                        f"order:confirm:{handler.pending_orders['123'].callback_token}"
+                    ),
+                },
+                {
+                    "text": "❌ 취소",
+                    "callback_data": (
+                        f"order:cancel:{handler.pending_orders['123'].callback_token}"
+                    ),
+                },
             ]
         ]
     }
@@ -454,8 +464,18 @@ async def test_natural_language_market_buy_creates_pending_order_without_nat():
     assert notifier.reply_markups[-1] == {
         "inline_keyboard": [
             [
-                {"text": "✅ 확정", "callback_data": "order:confirm"},
-                {"text": "❌ 취소", "callback_data": "order:cancel"},
+                {
+                    "text": "✅ 확정",
+                    "callback_data": (
+                        f"order:confirm:{handler.pending_orders['123'].callback_token}"
+                    ),
+                },
+                {
+                    "text": "❌ 취소",
+                    "callback_data": (
+                        f"order:cancel:{handler.pending_orders['123'].callback_token}"
+                    ),
+                },
             ]
         ]
     }
@@ -652,11 +672,12 @@ async def test_cancel_button_removes_pending_order():
     await handler.handle_update(
         {"message": {"chat": {"id": 123}, "text": "/buy 삼성전자 1 75000"}}
     )
+    callback_data = notifier.reply_markups[-1]["inline_keyboard"][0][1]["callback_data"]
     await handler.handle_update(
         {
             "callback_query": {
                 "id": "callback-1",
-                "data": "order:cancel",
+                "data": callback_data,
                 "message": {"chat": {"id": 123}},
             }
         }
@@ -738,11 +759,12 @@ async def test_confirm_button_executes_gateway_and_records_trade():
     await handler.handle_update(
         {"message": {"chat": {"id": 123}, "text": "/buy 삼성전자 1 75000"}}
     )
+    callback_data = notifier.reply_markups[-1]["inline_keyboard"][0][0]["callback_data"]
     await handler.handle_update(
         {
             "callback_query": {
                 "id": "callback-2",
-                "data": "order:confirm",
+                "data": callback_data,
                 "message": {"chat": {"id": 123}},
             }
         }
@@ -753,6 +775,46 @@ async def test_confirm_button_executes_gateway_and_records_trade():
     assert len(recorder.results) == 1
     assert "주문 완료" in notifier.messages[-1]
     assert handler.pending_orders == {}
+
+
+@pytest.mark.asyncio
+async def test_tokenless_old_confirm_button_does_not_execute_current_pending_order():
+    async def mcp_runner(server_params, tool_name, arguments):
+        if tool_name == "resolve_stock_code":
+            return "삼성전자 (005930, KOSPI)"
+        if tool_name == "get_stock_quote":
+            return "현재가: 74,500원"
+        if tool_name == "get_balance":
+            return "주문가능금액: 1,000,000원"
+        raise AssertionError(f"unexpected tool: {tool_name}")
+
+    gateway = FakeOrderGateway()
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        mcp_runner=mcp_runner,
+        order_gateway=gateway,
+        now_factory=lambda: datetime(2026, 5, 20, 10, 0, tzinfo=KST),
+    )
+
+    await handler.handle_update(
+        {"message": {"chat": {"id": 123}, "text": "/buy 삼성전자 1 75000"}}
+    )
+    await handler.handle_update(
+        {
+            "callback_query": {
+                "id": "old-callback",
+                "data": "order:confirm",
+                "message": {"chat": {"id": 123}},
+            }
+        }
+    )
+
+    assert notifier.callback_answers == [
+        ("old-callback", "이전 주문 버튼입니다. 최신 주문 메시지에서 다시 선택하세요.")
+    ]
+    assert gateway.orders == []
+    assert "123" in handler.pending_orders
 
 
 @pytest.mark.asyncio

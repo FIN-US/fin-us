@@ -30,6 +30,40 @@ test("validateOrderEnvMatchesUrl fails closed on env and URL mismatch", () => {
   );
 });
 
+test("createCashOrderRequest rejects real order when real-order guard is disabled", () => {
+  assert.throws(
+    () => createCashOrderRequest({
+      accountNo: "1234567801",
+      kisUrl: "https://openapi.koreainvestment.com:9443",
+      orderEnv: "real",
+      side: "BUY",
+      stockCode: "005930",
+      quantity: 1,
+      price: 0,
+      orderType: "MARKET",
+      realOrderEnabled: false,
+    }),
+    /KIS_REAL_ORDER_ENABLED=true/,
+  );
+});
+
+test("createCashOrderRequest allows real order when real-order guard is enabled", () => {
+  assert.equal(
+    createCashOrderRequest({
+      accountNo: "1234567801",
+      kisUrl: "https://openapi.koreainvestment.com:9443",
+      orderEnv: "real",
+      side: "SELL",
+      stockCode: "005930",
+      quantity: 1,
+      price: 70000,
+      orderType: "LIMIT",
+      realOrderEnabled: true,
+    }).trId,
+    "TTTC0011U",
+  );
+});
+
 test("buildBalanceParams includes required KIS inquire-balance fields", () => {
   assert.deepEqual(buildBalanceParams("1234567801"), {
     CANO: "12345678",
