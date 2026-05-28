@@ -1,12 +1,9 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import {
-  CallToolRequestSchema,
-  ListToolsRequestSchema,
-} from "@modelcontextprotocol/sdk/types.js";
+import { z } from "zod";
 
 // Redirect console.log to console.error to prevent breaking MCP JSON-RPC on stdout
 console.log = console.error;
@@ -46,10 +43,7 @@ const NAVER_CLIENT_SECRET = process.env.NAVER_CLIENT_SECRET;
 const DEFAULT_DISPLAY_COUNT = 3;
 const REQUEST_TIMEOUT_MS = 8000;
 
-const server = new Server(
-  { name: "news-tool", version: "1.0.0" },
-  { capabilities: { tools: {} } },
-);
+const server = new McpServer({ name: "news-tool", version: "1.0.0" });
 
 function isMissingCredential(value) {
   return !value || value.startsWith("your_") || value.includes("_here");
@@ -130,57 +124,34 @@ function deprecatedToolMessage(toolName) {
   );
 }
 
-server.setRequestHandler(ListToolsRequestSchema, async () => ({
-  tools: [
-    {
-      name: "get_market_news",
-      description: "네이버 뉴스 검색 API로 특정 주식 종목의 최신 뉴스 3개를 가져옵니다.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          stock_name: {
-            type: "string",
-            description: "주식 종목명 (예: 삼성전자, SK하이닉스)",
-          },
-        },
-        required: ["stock_name"],
-      },
-    },
-    {
-      name: "get_investor_trading",
-      description: "deprecated: mcp-trading의 get_investor_trading으로 이동되었습니다.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          stock_name: {
-            type: "string",
-            description: "주식 종목명 (예: 삼성전자, SK하이닉스)",
-          },
-        },
-        required: ["stock_name"],
-      },
-    },
-    {
-      name: "get_research_reports",
-      description: "deprecated: 공식 대체 API가 확정되지 않아 비활성화되었습니다.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          stock_name: {
-            type: "string",
-            description: "주식 종목명 (예: 삼성전자, SK하이닉스)",
-          },
-        },
-        required: ["stock_name"],
-      },
-    },
-  ],
-}));
+const stockNameSchema = z.object({
+  stock_name: z.string().describe("주식 종목명 (예: 삼성전자, SK하이닉스)"),
+});
 
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  const { name, arguments: args } = request.params;
-  const stockName = args?.stock_name;
+server.registerTool(
+  "get_market_news",
+  {
+    description: "네이버 뉴스 검색 API로 특정 주식 종목의 최신 뉴스 3개를 가져옵니다.",
+    inputSchema: stockNameSchema,
+  },
+  async ({ stock_name: stockName }) => {
+    if (!stockName) {
+      return {
+        content: [{ type: "text", text: "에러: stock_name 파라미터가 누락되었습니다." }],
+        isError: true,
+      };
+    }
 
+    try {
+      const news = await fetchMarketNews(stockName);
+      return { content: [{ type: "text", text: news }] };
+    } catch (error) {
+      return { content: [{ type: "text", text: `에러 발생: ${error.message}` }], isError: true };
+    }
+  },
+);
+
+async function handleDeprecatedTool(name, stockName) {
   if (!stockName) {
     return {
       content: [{ type: "text", text: "에러: stock_name 파라미터가 누락되었습니다." }],
@@ -188,24 +159,29 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     };
   }
 
-  try {
-    if (name === "get_market_news") {
-      const news = await fetchMarketNews(stockName);
-      return { content: [{ type: "text", text: news }] };
-    }
+  return {
+    content: [{ type: "text", text: deprecatedToolMessage(name) }],
+    isError: true,
+  };
+}
 
-    if (name === "get_investor_trading" || name === "get_research_reports") {
-      return {
-        content: [{ type: "text", text: deprecatedToolMessage(name) }],
-        isError: true,
-      };
-    }
-  } catch (error) {
-    return { content: [{ type: "text", text: `에러 발생: ${error.message}` }], isError: true };
-  }
+server.registerTool(
+  "get_investor_trading",
+  {
+    description: "deprecated: mcp-trading의 get_investor_trading으로 이동되었습니다.",
+    inputSchema: stockNameSchema,
+  },
+  async ({ stock_name: stockName }) => handleDeprecatedTool("get_investor_trading", stockName),
+);
 
-  throw new Error("존재하지 않는 도구입니다.");
-});
+server.registerTool(
+  "get_research_reports",
+  {
+    description: "deprecated: 공식 대체 API가 확정되지 않아 비활성화되었습니다.",
+    inputSchema: stockNameSchema,
+  },
+  async ({ stock_name: stockName }) => handleDeprecatedTool("get_research_reports", stockName),
+);
 
 const transport = new StdioServerTransport();
 await server.connect(transport);

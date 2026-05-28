@@ -10,6 +10,8 @@ from backend.telegram_commands import (
     BUY_COMMAND_HELP,
     QUOTE_COMMAND_HELP,
     TELEGRAM_INTERACTIVE_HELP,
+    TRADE_COMMAND_HELP,
+    LOOKUP_COMMAND_HELP,
     TELEGRAM_MESSAGE_LIMIT,
     TELEGRAM_TRUNCATION_SUFFIX,
     TREND_COMMAND_HELP,
@@ -38,6 +40,7 @@ class FakeNotifier:
         self.send_text_result = send_text_result
         self.bot_username = bot_username
         self.loaded_bot_username = False
+        self.bot_commands = None
         self.messages = []
         self.reply_markups = []
         self.actions = []
@@ -59,6 +62,10 @@ class FakeNotifier:
     async def load_bot_username(self):
         self.loaded_bot_username = True
         return self.bot_username
+
+    async def set_bot_commands(self, commands):
+        self.bot_commands = commands
+        return True
 
 
 class FakeOrderGateway:
@@ -114,7 +121,7 @@ async def test_alerts_status_reports_current_mode():
     await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/alerts status"}})
 
     assert state.mode == "off"
-    assert "off" in notifier.messages[-1]
+    assert notifier.messages[-1].startswith("현재 Telegram 알림 모드: 🔕 off")
 
 
 @pytest.mark.asyncio
@@ -140,6 +147,8 @@ async def test_help_command_replies_with_supported_commands():
 
     assert notifier.messages == [TELEGRAM_INTERACTIVE_HELP]
     assert "/balance - 예수금·총자산·보유 종목 조회" in notifier.messages[-1]
+    assert "/trade - 매수·매도 주문 입력 안내" in notifier.messages[-1]
+    assert "/lookup - 현재가·수급 조회 입력 안내" in notifier.messages[-1]
     assert "/quote <종목명> - 현재가 조회" in notifier.messages[-1]
     assert "/trend <종목명> - 외국인·기관·개인 수급 조회" in notifier.messages[-1]
     assert "/buy <종목명> <수량> [지정가] - 매수 주문 준비" in notifier.messages[-1]
@@ -147,6 +156,46 @@ async def test_help_command_replies_with_supported_commands():
     assert "/confirm - 대기 주문 확정" in notifier.messages[-1]
     assert "/cancel - 대기 주문 취소" in notifier.messages[-1]
     assert "일반 문장은 NAT에게 바로 질문합니다." in notifier.messages[-1]
+    assert notifier.reply_markups[-1] == {
+        "inline_keyboard": [
+            [
+                {"text": "💰 잔고", "callback_data": "balance:refresh"},
+                {"text": "🔔 알림", "callback_data": "alerts:status"},
+            ],
+            [
+                {"text": "🧾 매매", "callback_data": "trade:menu"},
+                {"text": "🔎 조회", "callback_data": "lookup:menu"},
+            ],
+        ]
+    }
+
+
+@pytest.mark.asyncio
+async def test_alerts_button_updates_mode_and_replies():
+    state = FakeState()
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(notifier=notifier, state_factory=lambda: state)
+
+    await handler.handle_update(
+        {
+            "callback_query": {
+                "id": "alert-callback",
+                "data": "alerts:off",
+                "message": {"chat": {"id": 123}},
+            }
+        }
+    )
+
+    assert state.mode == "off"
+    assert notifier.callback_answers == [("alert-callback", None)]
+    assert "🔕 off" in notifier.messages[-1]
+    assert notifier.reply_markups[-1]["inline_keyboard"][0][0]["text"] == "🚨 긴급만"
+    assert notifier.reply_markups[-1]["inline_keyboard"][0][1]["text"] == "📣 전체"
+    assert notifier.reply_markups[-1]["inline_keyboard"][0][2]["text"] == "🔕 끄기"
+    assert notifier.reply_markups[-1]["inline_keyboard"][1][0]["text"] == "🔎 현재 상태"
+    assert notifier.reply_markups[-1]["inline_keyboard"][0][0]["callback_data"] == (
+        "alerts:urgent"
+    )
 
 
 @pytest.mark.asyncio
@@ -157,6 +206,90 @@ async def test_unknown_slash_command_replies_with_help():
     await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/unknown"}})
 
     assert notifier.messages == [TELEGRAM_INTERACTIVE_HELP]
+
+
+@pytest.mark.asyncio
+async def test_trade_command_replies_with_entrypoint_buttons():
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(notifier=notifier)
+
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/trade"}})
+
+    assert notifier.messages == [TRADE_COMMAND_HELP]
+    assert notifier.reply_markups[-1] == {
+        "inline_keyboard": [
+            [
+                {"text": "🛒 매수 입력법", "callback_data": "trade:buy"},
+                {"text": "💸 매도 입력법", "callback_data": "trade:sell"},
+            ]
+        ]
+    }
+
+
+@pytest.mark.asyncio
+async def test_lookup_command_replies_with_entrypoint_buttons():
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(notifier=notifier)
+
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/lookup"}})
+
+    assert notifier.messages == [LOOKUP_COMMAND_HELP]
+    assert notifier.reply_markups[-1] == {
+        "inline_keyboard": [
+            [
+                {"text": "💵 현재가 입력법", "callback_data": "lookup:quote"},
+                {"text": "📊 수급 입력법", "callback_data": "lookup:trend"},
+            ]
+        ]
+    }
+
+
+@pytest.mark.asyncio
+async def test_trade_menu_button_replies_with_buy_and_sell_guidance():
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(notifier=notifier)
+
+    await handler.handle_update(
+        {
+            "callback_query": {
+                "id": "trade-menu",
+                "data": "trade:menu",
+                "message": {"chat": {"id": 123}},
+            }
+        }
+    )
+
+    assert notifier.callback_answers == [("trade-menu", None)]
+    assert notifier.messages == [TRADE_COMMAND_HELP]
+
+
+@pytest.mark.asyncio
+async def test_lookup_quote_button_replies_with_quote_guidance():
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(notifier=notifier)
+
+    await handler.handle_update(
+        {
+            "callback_query": {
+                "id": "lookup-quote",
+                "data": "lookup:quote",
+                "message": {"chat": {"id": 123}},
+            }
+        }
+    )
+
+    assert notifier.callback_answers == [("lookup-quote", None)]
+    assert notifier.messages == [QUOTE_COMMAND_HELP]
+
+
+def test_bot_command_menu_uses_entrypoints_for_parameterized_commands():
+    commands = [command["command"] for command in telegram_commands.TELEGRAM_BOT_COMMANDS]
+
+    assert commands == ["help", "balance", "alerts", "trade", "lookup"]
+    assert "buy" not in commands
+    assert "sell" not in commands
+    assert "quote" not in commands
+    assert "trend" not in commands
 
 
 @pytest.mark.asyncio
@@ -226,6 +359,38 @@ async def test_balance_command_calls_mcp_runner():
     assert calls == [(TRADING_MCP_PARAMS, "get_balance", {})]
     assert notifier.actions == ["typing"]
     assert notifier.messages == ["잔고 응답"]
+    assert notifier.reply_markups[-1] == {
+        "inline_keyboard": [
+            [{"text": "🔄 새로고침", "callback_data": "balance:refresh"}]
+        ]
+    }
+
+
+@pytest.mark.asyncio
+async def test_balance_refresh_button_calls_mcp_runner():
+    calls = []
+
+    async def mcp_runner(server_params, tool_name, arguments):
+        calls.append((server_params, tool_name, arguments))
+        return "잔고 응답"
+
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(notifier=notifier, mcp_runner=mcp_runner)
+
+    await handler.handle_update(
+        {
+            "callback_query": {
+                "id": "balance-callback",
+                "data": "balance:refresh",
+                "message": {"chat": {"id": 123}},
+            }
+        }
+    )
+
+    assert calls == [(TRADING_MCP_PARAMS, "get_balance", {})]
+    assert notifier.callback_answers == [("balance-callback", None)]
+    assert notifier.actions == ["typing"]
+    assert notifier.messages == ["잔고 응답"]
 
 
 @pytest.mark.asyncio
@@ -244,6 +409,42 @@ async def test_quote_command_calls_mcp_runner_with_stock_name():
     assert calls == [(TRADING_MCP_PARAMS, "get_stock_quote", {"stock_name": "삼성전자"})]
     assert notifier.actions == ["typing"]
     assert notifier.messages == ["현재가 응답"]
+    assert notifier.reply_markups[-1]["inline_keyboard"][0][0]["text"] == "📊 수급 보기"
+
+
+@pytest.mark.asyncio
+async def test_quote_result_trend_button_uses_same_stock_name():
+    calls = []
+
+    async def mcp_runner(server_params, tool_name, arguments):
+        calls.append((server_params, tool_name, arguments))
+        if tool_name == "get_stock_quote":
+            return "현재가 응답"
+        if tool_name == "get_investor_trading":
+            return "수급 응답"
+        raise AssertionError(f"unexpected tool: {tool_name}")
+
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(notifier=notifier, mcp_runner=mcp_runner)
+
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/quote 삼성전자"}})
+    callback_data = notifier.reply_markups[-1]["inline_keyboard"][0][0]["callback_data"]
+    await handler.handle_update(
+        {
+            "callback_query": {
+                "id": "trend-callback",
+                "data": callback_data,
+                "message": {"chat": {"id": 123}},
+            }
+        }
+    )
+
+    assert calls == [
+        (TRADING_MCP_PARAMS, "get_stock_quote", {"stock_name": "삼성전자"}),
+        (TRADING_MCP_PARAMS, "get_investor_trading", {"stock_name": "삼성전자"}),
+    ]
+    assert notifier.callback_answers == [("trend-callback", None)]
+    assert notifier.messages[-1] == "수급 응답"
 
 
 @pytest.mark.asyncio
@@ -304,6 +505,69 @@ async def test_trend_command_calls_mcp_runner_with_stock_name():
     ]
     assert notifier.actions == ["typing"]
     assert notifier.messages == ["수급 응답"]
+    assert notifier.reply_markups[-1]["inline_keyboard"][0][0]["text"] == "💵 현재가 보기"
+
+
+@pytest.mark.asyncio
+async def test_trend_result_quote_button_uses_same_stock_name():
+    calls = []
+
+    async def mcp_runner(server_params, tool_name, arguments):
+        calls.append((server_params, tool_name, arguments))
+        if tool_name == "get_stock_quote":
+            return "현재가 응답"
+        if tool_name == "get_investor_trading":
+            return "수급 응답"
+        raise AssertionError(f"unexpected tool: {tool_name}")
+
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(notifier=notifier, mcp_runner=mcp_runner)
+
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/trend 삼성전자"}})
+    callback_data = notifier.reply_markups[-1]["inline_keyboard"][0][0]["callback_data"]
+    await handler.handle_update(
+        {
+            "callback_query": {
+                "id": "quote-callback",
+                "data": callback_data,
+                "message": {"chat": {"id": 123}},
+            }
+        }
+    )
+
+    assert calls == [
+        (TRADING_MCP_PARAMS, "get_investor_trading", {"stock_name": "삼성전자"}),
+        (TRADING_MCP_PARAMS, "get_stock_quote", {"stock_name": "삼성전자"}),
+    ]
+    assert notifier.callback_answers == [("quote-callback", None)]
+    assert notifier.messages[-1] == "현재가 응답"
+
+
+@pytest.mark.asyncio
+async def test_stale_market_button_does_not_call_mcp_runner():
+    calls = []
+
+    async def mcp_runner(server_params, tool_name, arguments):
+        calls.append((server_params, tool_name, arguments))
+        return "응답"
+
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(notifier=notifier, mcp_runner=mcp_runner)
+
+    await handler.handle_update(
+        {
+            "callback_query": {
+                "id": "stale-market-callback",
+                "data": "market:quote:old-token",
+                "message": {"chat": {"id": 123}},
+            }
+        }
+    )
+
+    assert calls == []
+    assert notifier.callback_answers == [
+        ("stale-market-callback", "이전 조회 버튼입니다. 최신 조회 메시지에서 다시 선택하세요.")
+    ]
 
 
 @pytest.mark.asyncio
@@ -1183,6 +1447,34 @@ async def test_poller_loads_bot_username_before_updates(monkeypatch):
     async def fake_get_updates():
         assert notifier.loaded_bot_username is True
         raise RuntimeError("stop after username load")
+
+    async def stop_after_failure(delay):
+        raise pytest.fail.Exception("stop after first failed polling iteration")
+
+    monkeypatch.setattr(poller, "_get_updates", fake_get_updates)
+    monkeypatch.setattr("backend.telegram_commands.asyncio.sleep", stop_after_failure)
+
+    with pytest.raises(pytest.fail.Exception):
+        await poller.run()
+
+    assert poller.offset is None
+
+
+@pytest.mark.asyncio
+async def test_poller_sets_bot_command_menu_before_updates(monkeypatch):
+    notifier = FakeNotifier(bot_username="finus_bot")
+    notifier.enabled = True
+    notifier.bot_token = "token"
+
+    class NoopHandler:
+        async def handle_update(self, update):
+            return None
+
+    poller = TelegramCommandPoller(notifier=notifier, handler=NoopHandler())
+
+    async def fake_get_updates():
+        assert notifier.bot_commands == telegram_commands.TELEGRAM_BOT_COMMANDS
+        raise RuntimeError("stop after bot command setup")
 
     async def stop_after_failure(delay):
         raise pytest.fail.Exception("stop after first failed polling iteration")

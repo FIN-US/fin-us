@@ -3,17 +3,11 @@ import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import {
-  CallToolRequestSchema,
-  ListToolsRequestSchema,
-} from "@modelcontextprotocol/sdk/types.js";
 import axios from "axios";
 import dotenv from "dotenv";
-
-// KIS API 호출용 axios 인스턴스 — 8초 타임아웃으로 무기한 블로킹 방지
-const kisAxios = axios.create({ timeout: 8000 });
+import { z } from "zod";
 import { buildBalanceParams, formatBalanceReport } from "./balance.js";
 import {
   createCashOrderRequest,
@@ -48,10 +42,9 @@ const TOKEN_CACHE_PATH = process.env.KIS_TOKEN_CACHE_PATH || path.join(
 );
 let tokenCache = null;
 
-const server = new Server(
-  { name: "trading-tool", version: "1.0.0" },
-  { capabilities: { tools: {} } },
-);
+const server = new McpServer({ name: "trading-tool", version: "1.0.0" });
+// KIS API 호출용 axios 인스턴스 — 8초 타임아웃으로 무기한 블로킹 방지
+const kisAxios = axios.create({ timeout: 8000 });
 
 function isMissingCredential(value) {
   return !value || value.startsWith("your_") || value.includes("_here");
@@ -275,107 +268,20 @@ async function placeOrder(args) {
   });
 }
 
-server.setRequestHandler(ListToolsRequestSchema, async () => ({
-  tools: [
-    {
-      name: "get_balance",
-      description: "한국투자증권 계좌의 현재 잔고 및 자산 현황을 조회합니다.",
-      inputSchema: {
-        type: "object",
-        properties: {},
-      },
-    },
-    {
-      name: "resolve_stock_code",
-      description: "종목명 또는 6자리 종목코드를 KIS API용 6자리 종목코드로 변환합니다.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          stock_name: {
-            type: "string",
-            description: "주식 종목명 또는 6자리 종목코드",
-          },
-        },
-        required: ["stock_name"],
-      },
-    },
-    {
-      name: "get_stock_quote",
-      description: "한국투자증권 Open API로 국내 주식 현재가 시세를 조회합니다.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          stock_name: {
-            type: "string",
-            description: "주식 종목명 또는 6자리 종목코드",
-          },
-        },
-        required: ["stock_name"],
-      },
-    },
-    {
-      name: "get_investor_trading",
-      description: "한국투자증권 Open API로 외국인/기관/개인 투자자 매매동향을 조회합니다.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          stock_name: {
-            type: "string",
-            description: "주식 종목명 또는 6자리 종목코드",
-          },
-        },
-        required: ["stock_name"],
-      },
-    },
-    {
-      name: "place_order",
-      description: "한국투자증권 Open API로 국내 주식 현금 주문을 실행합니다.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          stock_name: {
-            type: "string",
-            description: "주식 종목명 또는 6자리 종목코드",
-          },
-          stock_code: {
-            type: "string",
-            description: "KIS API용 종목코드",
-          },
-          side: {
-            type: "string",
-            enum: ["BUY", "SELL"],
-            description: "매수 또는 매도",
-          },
-          quantity: {
-            type: "integer",
-            minimum: 1,
-            description: "주문 수량",
-          },
-          price: {
-            type: "integer",
-            minimum: 0,
-            description: "지정가. 시장가 주문은 0 또는 생략",
-          },
-          order_type: {
-            type: "string",
-            enum: ["LIMIT", "MARKET"],
-            description: "지정가 또는 시장가",
-          },
-          order_env: {
-            type: "string",
-            enum: ["demo", "real"],
-            description: "모의투자 또는 실계좌",
-          },
-        },
-        required: ["stock_code", "side", "quantity", "order_env"],
-      },
-    },
-  ],
-}));
+const stockNameSchema = z.object({
+  stock_name: z.string().describe("주식 종목명 또는 6자리 종목코드"),
+});
+const placeOrderSchema = z.object({
+  stock_name: z.string().optional().describe("주식 종목명 또는 6자리 종목코드"),
+  stock_code: z.string().describe("KIS API용 종목코드"),
+  side: z.enum(["BUY", "SELL"]).describe("매수 또는 매도"),
+  quantity: z.number().int().min(1).describe("주문 수량"),
+  price: z.number().int().min(0).optional().describe("지정가. 시장가 주문은 0 또는 생략"),
+  order_type: z.enum(["LIMIT", "MARKET"]).optional().describe("지정가 또는 시장가"),
+  order_env: z.enum(["demo", "real"]).describe("모의투자 또는 실계좌"),
+});
 
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  const { name, arguments: args } = request.params;
-
+async function callTradingTool(name, args = {}) {
   try {
     if (name === "get_balance") {
       return { content: [{ type: "text", text: await getBalance() }] };
@@ -408,7 +314,52 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 
   throw new Error("존재하지 않는 도구입니다.");
-});
+}
+
+server.registerTool(
+  "get_balance",
+  {
+    description: "한국투자증권 계좌의 현재 잔고 및 자산 현황을 조회합니다.",
+    inputSchema: z.object({}),
+  },
+  async () => callTradingTool("get_balance"),
+);
+
+server.registerTool(
+  "resolve_stock_code",
+  {
+    description: "종목명 또는 6자리 종목코드를 KIS API용 6자리 종목코드로 변환합니다.",
+    inputSchema: stockNameSchema,
+  },
+  async (args) => callTradingTool("resolve_stock_code", args),
+);
+
+server.registerTool(
+  "get_stock_quote",
+  {
+    description: "한국투자증권 Open API로 국내 주식 현재가 시세를 조회합니다.",
+    inputSchema: stockNameSchema,
+  },
+  async (args) => callTradingTool("get_stock_quote", args),
+);
+
+server.registerTool(
+  "get_investor_trading",
+  {
+    description: "한국투자증권 Open API로 외국인/기관/개인 투자자 매매동향을 조회합니다.",
+    inputSchema: stockNameSchema,
+  },
+  async (args) => callTradingTool("get_investor_trading", args),
+);
+
+server.registerTool(
+  "place_order",
+  {
+    description: "한국투자증권 Open API로 국내 주식 현금 주문을 실행합니다.",
+    inputSchema: placeOrderSchema,
+  },
+  async (args) => callTradingTool("place_order", args),
+);
 
 const transport = new StdioServerTransport();
 await server.connect(transport);

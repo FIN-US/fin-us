@@ -194,6 +194,20 @@ class TelegramNotifier:
             logger.error("Telegram chat action send failed: %s", exc)
             return False
 
+    async def set_bot_commands(self, commands: list[dict[str, str]]) -> bool:
+        if not self.enabled:
+            return False
+
+        url = f"https://api.telegram.org/bot{self.bot_token}/setMyCommands"
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.post(url, json={"commands": commands})
+                response.raise_for_status()
+            return True
+        except Exception as exc:
+            logger.error("Telegram bot command menu setup failed: %s", exc)
+            return False
+
     async def load_bot_username(self) -> str:
         if not self.enabled:
             return ""
