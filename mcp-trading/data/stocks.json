@@ -24796,30 +24796,6 @@
     "aliases": []
   },
   {
-    "code": "Q570055",
-    "name": "한투 금선물 ETN",
-    "market": "KOSPI",
-    "aliases": []
-  },
-  {
-    "code": "Q570056",
-    "name": "한투 인버스금선물 ETN",
-    "market": "KOSPI",
-    "aliases": []
-  },
-  {
-    "code": "Q570057",
-    "name": "한투 은선물 ETN",
-    "market": "KOSPI",
-    "aliases": []
-  },
-  {
-    "code": "Q570058",
-    "name": "한투 인버스은선물 ETN",
-    "market": "KOSPI",
-    "aliases": []
-  },
-  {
     "code": "Q570059",
     "name": "한투 레버리지금선물 ETN",
     "market": "KOSPI",
