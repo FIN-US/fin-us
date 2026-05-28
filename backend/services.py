@@ -4,7 +4,6 @@ import logging
 from datetime import date
 from typing import Any, Literal, Optional
 from urllib.parse import quote as _url_quote
-from uuid import uuid4
 from fastapi import HTTPException
 from anthropic import AsyncAnthropic
 from openai import AsyncOpenAI
@@ -283,12 +282,7 @@ def _log_nat_response(resp: httpx.Response) -> None:
         )
 
 
-async def _llm_nat_chat(
-    user_msg: str,
-    *,
-    conversation_id: str | None = None,
-    timeout_sec: float = 120.0,
-) -> str:
+async def _llm_nat_chat(user_msg: str, *, conversation_id: str | None = None) -> str:
     url = f"{NAT_BASE_URL}/v1/chat/completions"
     cid = (conversation_id or NAT_CONVERSATION_ID).strip()
     headers = {
@@ -296,7 +290,7 @@ async def _llm_nat_chat(
         "conversation-id": cid,
     }
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(timeout_sec)) as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as client:
             resp = await client.post(
                 url,
                 headers=headers,
@@ -461,7 +455,6 @@ async def llm_chat(
     user_msg: str,
     *,
     conversation_id: str | None = None,
-    timeout_sec: float = 120.0,
 ) -> str:
     if provider_key == "openai":
         return await _llm_openai_chat(user_msg)
@@ -469,37 +462,4 @@ async def llm_chat(
         return await _llm_anthropic_chat(user_msg)
     if provider_key == "ollama":
         return await _llm_ollama_chat(user_msg)
-    return await _llm_nat_chat(user_msg, conversation_id=conversation_id, timeout_sec=timeout_sec)
-
-
-def _today_kst_label() -> str:
-    from datetime import datetime, timedelta, timezone
-
-    kst = timezone(timedelta(hours=9))
-    return datetime.now(kst).strftime("%Y-%m-%d")
-
-
-def _diary_draft_from_nat_text(raw: str, today: str) -> dict[str, str]:
-    """Parse ``title``/``content`` JSON from NAT diary draft response."""
-    default_title = f"매매일지 {today}"
-    for data in _json_objects_from_text(raw):
-        title = str(data.get("title") or "").strip()
-        content = str(data.get("content") or "").strip()
-        if content:
-            return {"title": title or default_title, "content": content}
-
-    text = (raw or "").strip()
-    return {"title": default_title, "content": text}
-
-
-async def generate_trading_diary_via_nat() -> dict[str, Any]:
-    """NAT diary_agent로 당일 매매일지 초안만 작성합니다 (DB 저장 없음)."""
-    today = _today_kst_label()
-    user_msg = (
-        f"오늘(KST, {today}) 매매일지 초안만 작성하세요.\n"
-        f'응답 마지막에 JSON 한 개: {{"title":"매매일지 {today}","content":"..."}}'
-    )
-    conv_id = f"diary:frontend:draft:{today}:{uuid4().hex}"
-    raw = await llm_chat("nat", user_msg, conversation_id=conv_id, timeout_sec=300.0)
-    draft = _diary_draft_from_nat_text(raw, today)
-    return {"report": raw, "draft": draft}
+    return await _llm_nat_chat(user_msg, conversation_id=conversation_id)
