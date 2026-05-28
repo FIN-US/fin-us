@@ -93,7 +93,7 @@ async def perform_stock_analysis(
         '"urgency_reason":"긴급 판단 사유 한 줄 또는 null",'
         '"telegram_alert":true|false}'
     )
-
+    
     key = normalize_llm_provider(provider)
     nat_cid = conversation_id
     if key == "nat" and nat_cid is None:
@@ -133,12 +133,12 @@ async def check_signal_significance(
 ) -> bool:
     """
     외부 signal을 분석하여 투자 관점에서 유의미한 변화가 있는지 판단합니다.
-    로컬 초경량 모델(예: gemma4) 또는 경량 API 모델(예: gpt-5.4-mini)을
+    로컬 초경량 모델(예: gemma4) 또는 경량 API 모델(예: gpt-5.4-mini)을 
     1차 필터로 사용하여 비용과 정확도의 균형을 맞출 수 있습니다.
     """
     if not signal_content:
         return False
-
+    
     if signal_content == last_signal_content:
         return False
 
