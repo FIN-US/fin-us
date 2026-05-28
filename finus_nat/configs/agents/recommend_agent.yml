@@ -16,7 +16,6 @@ functions:
     tool_names:
       - kis-trading-mcp-tool
       - mcp-news-get-market-news
-      - mcp-news-get-investor-trading
       - add_user_memory
       - get_user_memory
     verbose: false
@@ -44,4 +43,4 @@ functions:
   recommend_branch_agent:
     _type: fe_branch
     inner_function_name: recommend_agent
-    tool_description: "Recommendations: KIS MCP context, Fin-Us mcp-news headlines/flows, and user memory when available."
+    tool_description: "Recommendations: KIS MCP context, Fin-Us mcp-news headlines, and user memory when available."

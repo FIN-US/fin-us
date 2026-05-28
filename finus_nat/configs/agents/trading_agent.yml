@@ -21,7 +21,6 @@ functions:
     tool_names:
       - kis-trading-mcp-tool
       - mcp-news-get-market-news
-      - mcp-news-get-investor-trading
       - mcp-dart-get-disclosure-signal
       - add_user_memory
       - get_user_memory
@@ -65,4 +64,4 @@ functions:
   trading_branch_agent:
     _type: fe_branch
     inner_function_name: trading_agent_react
-    tool_description: "Trading: Kis Trading MCP; mcp-news; mcp-dart disclosure (reference only, no auto-trade)."
+    tool_description: "Trading: Kis Trading MCP; mcp-news headlines; mcp-dart disclosure (reference only, no auto-trade)."
