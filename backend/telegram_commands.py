@@ -38,11 +38,26 @@ ORDER_EXPIRES_AFTER = timedelta(seconds=60)
 ORDER_CONFIRM_CALLBACK = "order:confirm"
 ORDER_CANCEL_CALLBACK = "order:cancel"
 ORDER_STALE_CALLBACK_TEXT = "이전 주문 버튼입니다. 최신 주문 메시지에서 다시 선택하세요."
+ALERT_CALLBACK_PREFIX = "alerts:"
+BALANCE_REFRESH_CALLBACK = "balance:refresh"
+TRADE_CALLBACK_PREFIX = "trade:"
+LOOKUP_CALLBACK_PREFIX = "lookup:"
+MARKET_QUOTE_CALLBACK = "market:quote"
+MARKET_TREND_CALLBACK = "market:trend"
+MARKET_STALE_CALLBACK_TEXT = "이전 조회 버튼입니다. 최신 조회 메시지에서 다시 선택하세요."
+MARKET_CALLBACK_LIMIT = 100
+ALERT_MODE_EMOJIS = {
+    "urgent": "🚨",
+    "all": "📣",
+    "off": "🔕",
+}
 TELEGRAM_INTERACTIVE_HELP = "\n".join(
     [
         "사용 가능한 명령:",
         "/alerts urgent|all|off|status - Telegram 알림 모드 변경",
         "/balance - 예수금·총자산·보유 종목 조회",
+        "/trade - 매수·매도 주문 입력 안내",
+        "/lookup - 현재가·수급 조회 입력 안내",
         "/quote <종목명> - 현재가 조회",
         "/trend <종목명> - 외국인·기관·개인 수급 조회",
         "/buy <종목명> <수량> [지정가] - 매수 주문 준비",
@@ -52,8 +67,30 @@ TELEGRAM_INTERACTIVE_HELP = "\n".join(
         "일반 문장은 NAT에게 바로 질문합니다.",
     ]
 )
+TELEGRAM_BOT_COMMANDS = [
+    {"command": "help", "description": "사용 가능한 명령 확인"},
+    {"command": "balance", "description": "예수금·총자산·보유 종목 조회"},
+    {"command": "alerts", "description": "Telegram 알림 모드 변경"},
+    {"command": "trade", "description": "매수·매도 주문 입력 안내"},
+    {"command": "lookup", "description": "현재가·수급 조회 입력 안내"},
+]
 QUOTE_COMMAND_HELP = "사용법: /quote <종목명>"
 TREND_COMMAND_HELP = "사용법: /trend <종목명>"
+TRADE_COMMAND_HELP = "\n".join(
+    [
+        "매매 주문 입력 안내:",
+        f"{BUY_COMMAND_HELP}  예: /buy 삼성전자 1",
+        f"{SELL_COMMAND_HELP}  예: /sell NAVER 1 200000",
+        "주문은 실제 제출 전 반드시 확정이 필요합니다.",
+    ]
+)
+LOOKUP_COMMAND_HELP = "\n".join(
+    [
+        "조회 입력 안내:",
+        f"{QUOTE_COMMAND_HELP}  예: /quote 삼성전자",
+        f"{TREND_COMMAND_HELP}  예: /trend 삼성전자",
+    ]
+)
 TELEGRAM_MESSAGE_LIMIT = 4000
 TELEGRAM_TRUNCATION_SUFFIX = "...(이하 생략)"
 _telegram_command_task: asyncio.Task | None = None
@@ -115,6 +152,7 @@ class TelegramCommandHandler:
         self.trade_recorder = trade_recorder
         self.now_factory = now_factory or (lambda: datetime.now(KST))
         self.pending_orders: dict[str, PendingOrder] = {}
+        self.market_callbacks: dict[str, tuple[str, str]] = {}
 
     async def handle_update(self, update: dict[str, Any]) -> None:
         callback_query = update.get("callback_query") or {}
@@ -136,16 +174,31 @@ class TelegramCommandHandler:
             await self._handle_alerts(argument)
             return
         if self._matches_command(command, bot_username, "/help"):
-            await self._send_text_or_raise(TELEGRAM_INTERACTIVE_HELP)
+            await self._send_text_or_raise(
+                TELEGRAM_INTERACTIVE_HELP,
+                reply_markup=self._help_reply_markup(),
+            )
             return
         if self._matches_command(command, bot_username, "/balance"):
             await self._handle_balance()
             return
+        if self._matches_command(command, bot_username, "/trade"):
+            await self._send_text_or_raise(
+                TRADE_COMMAND_HELP,
+                reply_markup=self._trade_reply_markup(),
+            )
+            return
+        if self._matches_command(command, bot_username, "/lookup"):
+            await self._send_text_or_raise(
+                LOOKUP_COMMAND_HELP,
+                reply_markup=self._lookup_reply_markup(),
+            )
+            return
         if self._matches_command(command, bot_username, "/quote"):
-            await self._handle_quote(argument)
+            await self._handle_quote(argument, str(chat.get("id", "")).strip())
             return
         if self._matches_command(command, bot_username, "/trend"):
-            await self._handle_trend(argument)
+            await self._handle_trend(argument, str(chat.get("id", "")).strip())
             return
         if self._matches_command(command, bot_username, "/buy"):
             await self._handle_order_command("BUY", argument, str(chat.get("id", "")).strip())
@@ -160,7 +213,10 @@ class TelegramCommandHandler:
             await self._handle_cancel(str(chat.get("id", "")).strip())
             return
         if text.startswith("/"):
-            await self._send_text_or_raise(TELEGRAM_INTERACTIVE_HELP)
+            await self._send_text_or_raise(
+                TELEGRAM_INTERACTIVE_HELP,
+                reply_markup=self._help_reply_markup(),
+            )
             return
 
         if self._looks_like_natural_order(text):
@@ -215,6 +271,31 @@ class TelegramCommandHandler:
             )
             return
 
+        if data.startswith(ALERT_CALLBACK_PREFIX):
+            await self._handle_alerts_callback(callback_query_id, data)
+            return
+
+        if data == BALANCE_REFRESH_CALLBACK:
+            await self._answer_callback_query(callback_query_id)
+            await self._handle_balance()
+            return
+
+        if data.startswith(TRADE_CALLBACK_PREFIX):
+            await self._handle_trade_callback(callback_query_id, data)
+            return
+
+        if data.startswith(LOOKUP_CALLBACK_PREFIX):
+            await self._handle_lookup_callback(callback_query_id, data)
+            return
+
+        if data.startswith(f"{MARKET_QUOTE_CALLBACK}:"):
+            await self._handle_market_callback(callback_query_id, chat_id, "quote", data)
+            return
+
+        if data.startswith(f"{MARKET_TREND_CALLBACK}:"):
+            await self._handle_market_callback(callback_query_id, chat_id, "trend", data)
+            return
+
         await self._answer_callback_query(callback_query_id, text="지원하지 않는 버튼입니다.")
 
     async def _handle_order_callback(
@@ -249,6 +330,93 @@ class TelegramCommandHandler:
             return
         await self.notifier.answer_callback_query(callback_query_id, text=text)
 
+    async def _handle_alerts_callback(
+        self,
+        callback_query_id: str,
+        data: str,
+    ) -> None:
+        action = data.removeprefix(ALERT_CALLBACK_PREFIX).strip()
+        if action != "status" and action not in TELEGRAM_ALERT_MODES:
+            await self._answer_callback_query(callback_query_id, text="지원하지 않는 버튼입니다.")
+            return
+
+        await self._answer_callback_query(callback_query_id)
+        await self._handle_alerts(action)
+
+    async def _handle_trade_callback(
+        self,
+        callback_query_id: str,
+        data: str,
+    ) -> None:
+        action = data.removeprefix(TRADE_CALLBACK_PREFIX).strip()
+        if action == "menu":
+            text = TRADE_COMMAND_HELP
+            reply_markup = self._trade_reply_markup()
+        elif action == "buy":
+            text = BUY_COMMAND_HELP
+            reply_markup = None
+        elif action == "sell":
+            text = SELL_COMMAND_HELP
+            reply_markup = None
+        else:
+            await self._answer_callback_query(callback_query_id, text="지원하지 않는 버튼입니다.")
+            return
+
+        await self._answer_callback_query(callback_query_id)
+        await self._send_text_or_raise(text, reply_markup=reply_markup)
+
+    async def _handle_lookup_callback(
+        self,
+        callback_query_id: str,
+        data: str,
+    ) -> None:
+        action = data.removeprefix(LOOKUP_CALLBACK_PREFIX).strip()
+        if action == "menu":
+            text = LOOKUP_COMMAND_HELP
+            reply_markup = self._lookup_reply_markup()
+        elif action == "quote":
+            text = QUOTE_COMMAND_HELP
+            reply_markup = None
+        elif action == "trend":
+            text = TREND_COMMAND_HELP
+            reply_markup = None
+        else:
+            await self._answer_callback_query(callback_query_id, text="지원하지 않는 버튼입니다.")
+            return
+
+        await self._answer_callback_query(callback_query_id)
+        await self._send_text_or_raise(text, reply_markup=reply_markup)
+
+    async def _handle_market_callback(
+        self,
+        callback_query_id: str,
+        chat_id: str,
+        action: str,
+        data: str,
+    ) -> None:
+        token = self._extract_callback_token(data)
+        context = self.market_callbacks.pop(token, None) if token else None
+        if context is None:
+            await self._answer_callback_query(
+                callback_query_id,
+                text=MARKET_STALE_CALLBACK_TEXT,
+            )
+            return
+
+        callback_chat_id, stock = context
+        if callback_chat_id != chat_id:
+            await self._answer_callback_query(
+                callback_query_id,
+                text=MARKET_STALE_CALLBACK_TEXT,
+            )
+            return
+
+        await self._answer_callback_query(callback_query_id)
+        if action == "quote":
+            await self._handle_quote(stock, chat_id)
+            return
+        await self._handle_trend(stock, chat_id)
+
     def _matches_command(self, command: str, bot_username: str, expected: str) -> bool:
         if command != expected:
             return False
@@ -263,16 +431,23 @@ class TelegramCommandHandler:
         async with self._state() as state:
             if action == "status":
                 mode = await state.get_telegram_alert_mode()
-                await self._send_text_or_raise(f"현재 Telegram 알림 모드: {mode}")
+                await self._send_text_or_raise(
+                    f"현재 Telegram 알림 모드: {self._format_alert_mode(mode)}",
+                    reply_markup=self._alerts_reply_markup(),
+                )
                 return
 
             if action not in TELEGRAM_ALERT_MODES:
-                await self._send_text_or_raise(ALERT_COMMAND_HELP)
+                await self._send_text_or_raise(
+                    ALERT_COMMAND_HELP,
+                    reply_markup=self._alerts_reply_markup(),
+                )
                 return
 
             await state.set_telegram_alert_mode(action)
             await self._send_text_or_raise(
-                f"Telegram 알림 모드가 {action}(으)로 변경되었습니다."
+                f"Telegram 알림 모드가 {self._format_alert_mode(action)}(으)로 변경되었습니다.",
+                reply_markup=self._alerts_reply_markup(),
             )
 
     async def _handle_balance(self) -> None:
@@ -282,9 +457,12 @@ class TelegramCommandHandler:
         except Exception as exc:
             await self._send_text_or_raise(f"조회 실패: {_short_error(exc)}")
             return
-        await self._send_text_or_raise(_telegram_text(str(result)))
+        await self._send_text_or_raise(
+            _telegram_text(str(result)),
+            reply_markup=self._balance_reply_markup(),
+        )
 
-    async def _handle_quote(self, argument: str) -> None:
+    async def _handle_quote(self, argument: str, chat_id: str) -> None:
         if not argument:
             await self._send_text_or_raise(QUOTE_COMMAND_HELP)
             return
@@ -300,7 +478,10 @@ class TelegramCommandHandler:
         except Exception as exc:
             await self._send_text_or_raise(f"조회 실패: {_short_error(exc)}")
             return
-        await self._send_text_or_raise(_telegram_text(str(result)))
+        await self._send_text_or_raise(
+            _telegram_text(str(result)),
+            reply_markup=self._market_reply_markup("trend", chat_id, stock),
+        )
 
     async def _handle_order_command(self, side: str, argument: str, chat_id: str) -> None:
         usage = BUY_COMMAND_HELP if side == "BUY" else SELL_COMMAND_HELP
@@ -505,10 +686,112 @@ class TelegramCommandHandler:
     def _extract_order_callback_token(self, data: str) -> str | None:
         if data in {ORDER_CONFIRM_CALLBACK, ORDER_CANCEL_CALLBACK}:
             return None
+        return self._extract_callback_token(data)
+
+    def _extract_callback_token(self, data: str) -> str | None:
         _, separator, token = data.rpartition(":")
         if not separator:
             return None
         return token.strip() or None
+
+    def _help_reply_markup(self) -> dict[str, Any]:
+        return {
+            "inline_keyboard": [
+                [
+                    {"text": "💰 잔고", "callback_data": BALANCE_REFRESH_CALLBACK},
+                    {"text": "🔔 알림", "callback_data": f"{ALERT_CALLBACK_PREFIX}status"},
+                ],
+                [
+                    {"text": "🧾 매매", "callback_data": f"{TRADE_CALLBACK_PREFIX}menu"},
+                    {"text": "🔎 조회", "callback_data": f"{LOOKUP_CALLBACK_PREFIX}menu"},
+                ],
+            ]
+        }
+
+    def _alerts_reply_markup(self) -> dict[str, Any]:
+        return {
+            "inline_keyboard": [
+                [
+                    {"text": "🚨 긴급만", "callback_data": f"{ALERT_CALLBACK_PREFIX}urgent"},
+                    {"text": "📣 전체", "callback_data": f"{ALERT_CALLBACK_PREFIX}all"},
+                    {"text": "🔕 끄기", "callback_data": f"{ALERT_CALLBACK_PREFIX}off"},
+                ],
+                [
+                    {"text": "🔎 현재 상태", "callback_data": f"{ALERT_CALLBACK_PREFIX}status"}
+                ],
+            ]
+        }
+
+    def _format_alert_mode(self, mode: str) -> str:
+        emoji = ALERT_MODE_EMOJIS.get(mode)
+        if emoji is None:
+            return mode
+        return f"{emoji} {mode}"
+
+    def _balance_reply_markup(self) -> dict[str, Any]:
+        return {
+            "inline_keyboard": [
+                [{"text": "🔄 새로고침", "callback_data": BALANCE_REFRESH_CALLBACK}]
+            ]
+        }
+
+    def _trade_reply_markup(self) -> dict[str, Any]:
+        return {
+            "inline_keyboard": [
+                [
+                    {"text": "🛒 매수 입력법", "callback_data": f"{TRADE_CALLBACK_PREFIX}buy"},
+                    {"text": "💸 매도 입력법", "callback_data": f"{TRADE_CALLBACK_PREFIX}sell"},
+                ]
+            ]
+        }
+
+    def _lookup_reply_markup(self) -> dict[str, Any]:
+        return {
+            "inline_keyboard": [
+                [
+                    {
+                        "text": "💵 현재가 입력법",
+                        "callback_data": f"{LOOKUP_CALLBACK_PREFIX}quote",
+                    },
+                    {
+                        "text": "📊 수급 입력법",
+                        "callback_data": f"{LOOKUP_CALLBACK_PREFIX}trend",
+                    },
+                ]
+            ]
+        }
+
+    def _market_reply_markup(
+        self,
+        action: str,
+        chat_id: str,
+        stock: str,
+    ) -> dict[str, Any]:
+        token = secrets.token_urlsafe(8)
+        if len(self.market_callbacks) >= MARKET_CALLBACK_LIMIT:
+            self.market_callbacks.pop(next(iter(self.market_callbacks)), None)
+        self.market_callbacks[token] = (chat_id, stock)
+        if action == "quote":
+            return {
+                "inline_keyboard": [
+                    [
+                        {
+                            "text": "💵 현재가 보기",
+                            "callback_data": f"{MARKET_QUOTE_CALLBACK}:{token}",
+                        }
+                    ]
+                ]
+            }
+        return {
+            "inline_keyboard": [
+                [
+                    {
+                        "text": "📊 수급 보기",
+                        "callback_data": f"{MARKET_TREND_CALLBACK}:{token}",
+                    }
+                ]
+            ]
+        }
 
     def _order_reply_markup(self, order: PendingOrder) -> dict[str, Any]:
         return {
@@ -583,7 +866,7 @@ class TelegramCommandHandler:
                 return stripped
         return None
 
-    async def _handle_trend(self, argument: str) -> None:
+    async def _handle_trend(self, argument: str, chat_id: str) -> None:
         if not argument:
             await self._send_text_or_raise(TREND_COMMAND_HELP)
             return
@@ -599,7 +882,10 @@ class TelegramCommandHandler:
         except Exception as exc:
             await self._send_text_or_raise(f"조회 실패: {_short_error(exc)}")
             return
-        await self._send_text_or_raise(_telegram_text(str(result)))
+        await self._send_text_or_raise(
+            _telegram_text(str(result)),
+            reply_markup=self._market_reply_markup("quote", chat_id, stock),
+        )
 
     async def _handle_chat_fallback(self, text: str, chat_id: str) -> None:
         await self.notifier.send_chat_action("typing")
@@ -644,9 +930,7 @@ class TelegramCommandPoller:
     async def run(self) -> None:
         if not self.notifier.enabled:
             return
-        load_bot_username = getattr(self.notifier, "load_bot_username", None)
-        if callable(load_bot_username):
-            await load_bot_username()
+        await self._setup_bot_profile()
 
         while True:
             try:
@@ -661,6 +945,21 @@ class TelegramCommandPoller:
             except Exception as exc:
                 logger.error("Telegram command polling failed: %s", exc)
                 await asyncio.sleep(5)
+
+    async def _setup_bot_profile(self) -> None:
+        load_bot_username = getattr(self.notifier, "load_bot_username", None)
+        if callable(load_bot_username):
+            try:
+                await load_bot_username()
+            except Exception as exc:
+                logger.error("Telegram bot username setup failed: %s", exc)
+
+        set_bot_commands = getattr(self.notifier, "set_bot_commands", None)
+        if callable(set_bot_commands):
+            try:
+                await set_bot_commands(TELEGRAM_BOT_COMMANDS)
+            except Exception as exc:
+                logger.error("Telegram bot command menu setup failed: %s", exc)
 
     async def _get_updates(self) -> list[dict[str, Any]]:
         url = f"https://api.telegram.org/bot{self.notifier.bot_token}/getUpdates"
