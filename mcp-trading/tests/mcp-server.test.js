@@ -34,6 +34,7 @@ test("registers trading tools with preserved required schemas", async () => {
       "resolve_stock_code",
       "get_stock_quote",
       "get_investor_trading",
+      "place_order",
       "get_today_daily_orders",
       "get_balance_rlz_pl",
     ]);
@@ -41,8 +42,12 @@ test("registers trading tools with preserved required schemas", async () => {
     assert.deepEqual(toolByName(tools, "resolve_stock_code").inputSchema.required, ["stock_name"]);
     assert.deepEqual(toolByName(tools, "get_stock_quote").inputSchema.required, ["stock_name"]);
     assert.deepEqual(toolByName(tools, "get_investor_trading").inputSchema.required, ["stock_name"]);
-    assert.deepEqual(toolByName(tools, "get_today_daily_orders").inputSchema.required ?? [], []);
-    assert.deepEqual(toolByName(tools, "get_balance_rlz_pl").inputSchema.required ?? [], []);
+    assert.deepEqual(toolByName(tools, "place_order").inputSchema.required, [
+      "stock_code",
+      "side",
+      "quantity",
+      "order_env",
+    ]);
   });
 });
 
