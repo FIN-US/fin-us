@@ -67,7 +67,7 @@ Action Input (Kis Trading MCP 전용 — ``kis-trading-mcp-tool`` / ``finus_acco
 _FINUS_REACT_ACTION_INPUT_FINUS = """
 Action Input (아래 Fin-Us 래퍼 도구 — ``tool_name``·``api_type``·``domestic_stock`` 금지):
 - ``mcp-trading-today-orders``: {{"trade_date":"","stock_name":"","ccld_dvsn":"00","sll_buy_dvsn":"00"}}
-- ``mcp-trading-stock-holdings``: {{"stock_name":""}}
+- ``mcp-trading-get-balance``: {{}}
 - ``mcp-trading-balance-rlz-pl``: {{"stock_name":""}}
 - ``finus-save-diary``: {{"title":"매매일지 YYYY-MM-DD","content":"본문"}}
 - ``finus-list-diaries``: {{}}
@@ -91,7 +91,7 @@ def _react_system_prompt_for_tools(tools) -> str:
         token in names
         for token in (
             "mcp-trading-today",
-            "mcp-trading-stock",
+            "mcp-trading-get-balance",
             "mcp-trading-balance",
             "finus-save-diary",
             "finus-list-diaries",

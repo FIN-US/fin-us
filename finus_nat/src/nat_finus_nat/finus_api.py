@@ -294,8 +294,8 @@ class FinusMcpTradingBalanceRlzPlConfig(FinusMcpTradingConfig, name="finus_mcp_t
     """mcp-trading ``get_balance_rlz_pl`` — 잔고·실현손익 조회 (실전 계좌)."""
 
 
-class FinusMcpTradingStockHoldingsConfig(FinusMcpTradingConfig, name="finus_mcp_trading_stock_holdings"):
-    """mcp-trading ``get_stock_holdings`` — 보유 종목 상세 조회 (v1_국내주식-006)."""
+class FinusMcpTradingGetBalanceConfig(FinusMcpTradingConfig, name="finus_mcp_trading_get_balance"):
+    """mcp-trading ``get_balance`` — 계좌 잔고·보유종목 요약 (inquire-balance, 연속조회)."""
 
 
 class FinusKisDailyTradesConfig(FunctionBaseConfig, name="finus_kis_daily_trades"):
@@ -380,6 +380,10 @@ class FinusSaveDiaryInput(FinusReactToolInput):
 
 
 class FinusListDiariesInput(FinusReactToolInput):
+    placeholder: str = Field(default="", description="호환용. 비워도 됩니다.")
+
+
+class FinusMcpTradingGetBalanceInput(FinusReactToolInput):
     placeholder: str = Field(default="", description="호환용. 비워도 됩니다.")
 
 
@@ -628,6 +632,29 @@ async def finus_mcp_trading_today_orders(config: FinusMcpTradingTodayOrdersConfi
     )
 
 
+@register_function(config_type=FinusMcpTradingGetBalanceConfig)
+async def finus_mcp_trading_get_balance(config: FinusMcpTradingGetBalanceConfig, _builder: Builder):
+    doc = (
+        "Fin-Us mcp-trading stdio MCP: 계좌 잔고·보유종목 요약 조회 "
+        "(get_balance, inquire-balance v1_국내주식-006, 연속조회 포함). 파라미터 없음."
+    )
+
+    async def get_balance(inp: FinusMcpTradingGetBalanceInput) -> str:  # noqa: ARG001
+        return await _mcp_trading_call(
+            vendor_root=config.vendor_root,
+            timeout_sec=config.timeout_sec,
+            tool_name="get_balance",
+            arguments={},
+        )
+
+    get_balance.__doc__ = doc
+    yield FunctionInfo.from_fn(
+        get_balance,
+        description=doc,
+        input_schema=FinusMcpTradingGetBalanceInput,
+    )
+
+
 @register_function(config_type=FinusMcpTradingBalanceRlzPlConfig)
 async def finus_mcp_trading_balance_rlz_pl(config: FinusMcpTradingBalanceRlzPlConfig, _builder: Builder):
     doc = (
@@ -650,33 +677,6 @@ async def finus_mcp_trading_balance_rlz_pl(config: FinusMcpTradingBalanceRlzPlCo
     get_balance_rlz_pl.__doc__ = doc
     yield FunctionInfo.from_fn(
         get_balance_rlz_pl,
-        description=doc,
-        input_schema=FinusMcpTradingStockNameInput,
-    )
-
-
-@register_function(config_type=FinusMcpTradingStockHoldingsConfig)
-async def finus_mcp_trading_stock_holdings(config: FinusMcpTradingStockHoldingsConfig, _builder: Builder):
-    doc = (
-        "Fin-Us mcp-trading stdio MCP: 주식잔고조회 보유 종목 상세 "
-        "(get_stock_holdings, inquire-balance v1_국내주식-006, 연속조회 포함). "
-        "stock_name 생략 시 전체 보유 종목."
-    )
-
-    async def get_stock_holdings(inp: FinusMcpTradingStockNameInput) -> str:
-        arguments: McpCallArguments = {}
-        if inp.stock_name.strip():
-            arguments["stock_name"] = inp.stock_name.strip()
-        return await _mcp_trading_call(
-            vendor_root=config.vendor_root,
-            timeout_sec=config.timeout_sec,
-            tool_name="get_stock_holdings",
-            arguments=arguments,
-        )
-
-    get_stock_holdings.__doc__ = doc
-    yield FunctionInfo.from_fn(
-        get_stock_holdings,
         description=doc,
         input_schema=FinusMcpTradingStockNameInput,
     )
