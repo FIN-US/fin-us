@@ -74,18 +74,6 @@ export interface DiaryItem {
   created_at: string;
 }
 
-export interface DiaryDraft {
-  title: string;
-  content: string;
-}
-
-export interface DiaryGenerateResult {
-  // Backend (services.generate_trading_diary_via_nat) 가 현재 ``report`` / ``draft`` 만 반환합니다.
-  // 기존에 있던 ``source`` / ``diary_id`` 는 채워진 적이 없어 dead branch 였으므로 제거했습니다.
-  report: string;
-  draft: DiaryDraft;
-}
-
 export interface AccountBalance {
   report: string;
 }

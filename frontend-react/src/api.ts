@@ -4,7 +4,6 @@ import type {
   AgentReportItem,
   AnalysisReport,
   ApiResponse,
-  DiaryGenerateResult,
   DiaryItem,
   HealthStatus,
   PortfolioItem,
@@ -47,5 +46,4 @@ export const finUsApi = {
   diaries: () => getData<DiaryItem[]>('/api/v1/db/diary'),
   createDiary: (title: string, content: string) =>
     postData<DiaryItem>('/api/v1/db/diary', { title, content }),
-  generateDiary: () => postData<DiaryGenerateResult>('/api/v1/diary/generate', {}),
 };

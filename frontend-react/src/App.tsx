@@ -30,13 +30,10 @@ export default function App() {
     handleFetchData,
     loadResources,
     submitDiary,
-    diaryAiLoading,
     diaryListLoading,
     diarySaveLoading,
     showAllDiaries,
-    diaryAgentReport,
     loadPastDiaries,
-    generateDiaryWithAi,
     sendChatMessage,
   } = useFinUsDashboard();
 
@@ -80,14 +77,11 @@ export default function App() {
           <RecordsPanel
             resources={resources}
             loading={resourceLoading}
-            diaryAiLoading={diaryAiLoading}
             diaryListLoading={diaryListLoading}
             diarySaveLoading={diarySaveLoading}
             showAllDiaries={showAllDiaries}
-            diaryAgentReport={diaryAgentReport}
             onSubmitDiary={submitDiary}
             onLoadPastDiaries={loadPastDiaries}
-            onGenerateDiaryWithAi={generateDiaryWithAi}
           />
           <ChatPanel status={chatStatus} messages={chatMessages} onSend={sendChatMessage} />
         </div>

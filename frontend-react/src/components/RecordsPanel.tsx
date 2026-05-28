@@ -1,19 +1,16 @@
 import React, { useState } from 'react';
-import { BookOpen, ClipboardList, FileText, History, Loader2, Sparkles, Archive } from 'lucide-react';
+import { Archive, BookOpen, ClipboardList, FileText, History, Loader2 } from 'lucide-react';
 import type { DashboardResources, DiaryItem } from '../types';
 import { formatNumber } from '../utils/formatters';
 
 interface RecordsPanelProps {
   resources: DashboardResources;
   loading: boolean;
-  diaryAiLoading: boolean;
   diaryListLoading: boolean;
   diarySaveLoading: boolean;
   showAllDiaries: boolean;
-  diaryAgentReport: string;
   onSubmitDiary: (title: string, content: string) => Promise<void>;
   onLoadPastDiaries: () => Promise<void>;
-  onGenerateDiaryWithAi: () => Promise<{ title: string; content: string } | null>;
 }
 
 function formatDiaryDate(value?: string) {
@@ -32,20 +29,17 @@ function formatDiaryDate(value?: string) {
 const RecordsPanel: React.FC<RecordsPanelProps> = ({
   resources,
   loading,
-  diaryAiLoading,
   diaryListLoading,
   diarySaveLoading,
   showAllDiaries,
-  diaryAgentReport,
   onSubmitDiary,
   onLoadPastDiaries,
-  onGenerateDiaryWithAi,
 }) => {
   const [title, setTitle] = useState('');
   const [content, setContent] = useState('');
   const [selectedDiaryId, setSelectedDiaryId] = useState<number | undefined>();
 
-  const diaryBusy = diaryAiLoading || diaryListLoading || diarySaveLoading;
+  const diaryBusy = diaryListLoading || diarySaveLoading;
   const busy = loading || diaryBusy;
   const visibleDiaries = showAllDiaries ? resources.diaries : resources.diaries.slice(0, 6);
 
@@ -55,16 +49,6 @@ const RecordsPanel: React.FC<RecordsPanelProps> = ({
     setTitle('');
     setContent('');
     setSelectedDiaryId(undefined);
-  };
-
-  const handleGenerateAi = async () => {
-    const draft = await onGenerateDiaryWithAi();
-    if (draft) {
-      setTitle(draft.title);
-      setContent(draft.content);
-      // AI 초안은 아직 DB 에 저장되지 않은 새 글이므로 과거 일지 카드 선택을 해제한다.
-      setSelectedDiaryId(undefined);
-    }
   };
 
   const handleLoadPast = async () => {
@@ -150,37 +134,16 @@ const RecordsPanel: React.FC<RecordsPanelProps> = ({
             <div className="p-2 bg-amber-50 rounded-lg"><BookOpen className="w-5 h-5 text-amber-600" /></div>
             <h3 className="text-slate-900 font-black">Diary</h3>
           </div>
-          <div className="flex flex-wrap gap-2">
-            <button
-              type="button"
-              onClick={handleGenerateAi}
-              disabled={busy}
-              className="inline-flex items-center gap-2 rounded-lg bg-violet-600 px-4 py-2.5 text-sm font-black text-white disabled:bg-slate-300"
-            >
-              {diaryAiLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
-              AI로 작성하기
-            </button>
-            <button
-              type="button"
-              onClick={handleLoadPast}
-              disabled={busy}
-              className="inline-flex items-center gap-2 rounded-lg border border-amber-300 bg-amber-50 px-4 py-2.5 text-sm font-black text-amber-900 disabled:opacity-50"
-            >
-              {diaryListLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Archive className="w-4 h-4" />}
-              과거 매매일지 가져오기
-            </button>
-          </div>
+          <button
+            type="button"
+            onClick={handleLoadPast}
+            disabled={busy}
+            className="inline-flex items-center gap-2 rounded-lg border border-amber-300 bg-amber-50 px-4 py-2.5 text-sm font-black text-amber-900 disabled:opacity-50"
+          >
+            {diaryListLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Archive className="w-4 h-4" />}
+            과거 매매일지 가져오기
+          </button>
         </div>
-
-        {diaryAgentReport && (
-          <div className="mb-4 rounded-lg border border-violet-100 bg-violet-50/80 p-4">
-            <p className="text-xs font-black uppercase tracking-wide text-violet-700">AI 초안 (미저장)</p>
-            <p className="mt-1 text-xs text-violet-600">내용을 확인·수정한 뒤 아래 「저장」 버튼을 눌러 backend에 저장하세요.</p>
-            <p className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap text-sm leading-relaxed text-slate-700">
-              {diaryAgentReport}
-            </p>
-          </div>
-        )}
 
         <form onSubmit={submit} className="grid grid-cols-1 lg:grid-cols-[240px_1fr_auto] gap-3 mb-5">
           <input

@@ -30,11 +30,9 @@ export function useFinUsDashboard() {
   const [provider, setProvider] = useState('openai');
   const [loading, setLoading] = useState(false);
   const [resourceLoading, setResourceLoading] = useState(false);
-  const [diaryAiLoading, setDiaryAiLoading] = useState(false);
   const [diaryListLoading, setDiaryListLoading] = useState(false);
   const [diarySaveLoading, setDiarySaveLoading] = useState(false);
   const [showAllDiaries, setShowAllDiaries] = useState(false);
-  const [diaryAgentReport, setDiaryAgentReport] = useState('');
   const [report, setReport] = useState<AnalysisReport | null>(null);
   const [rawNews, setRawNews] = useState<string[]>([]);
   const [rawTrend, setRawTrend] = useState<string | null>(null);
@@ -156,29 +154,6 @@ export function useFinUsDashboard() {
     }
   }, []);
 
-  const generateDiaryWithAi = useCallback(async (): Promise<{
-    title: string;
-    content: string;
-  } | null> => {
-    setDiaryAiLoading(true);
-    setError('');
-    setDiaryAgentReport('');
-    try {
-      const result = await finUsApi.generateDiary();
-      setDiaryAgentReport(result.report || '');
-      const draft = result.draft;
-      if (draft?.title && draft?.content) {
-        return { title: draft.title, content: draft.content };
-      }
-      return null;
-    } catch (err: unknown) {
-      setError(apiErrorMessage(err));
-      return null;
-    } finally {
-      setDiaryAiLoading(false);
-    }
-  }, []);
-
   const sendChatMessage = useCallback((text: string) => {
     const message = text.trim();
     if (!message) return;
@@ -233,11 +208,9 @@ export function useFinUsDashboard() {
     setProvider,
     loading,
     resourceLoading,
-    diaryAiLoading,
     diaryListLoading,
     diarySaveLoading,
     showAllDiaries,
-    diaryAgentReport,
     report,
     rawNews,
     rawTrend,
@@ -250,7 +223,6 @@ export function useFinUsDashboard() {
     loadResources,
     submitDiary,
     loadPastDiaries,
-    generateDiaryWithAi,
     sendChatMessage,
   };
 }
