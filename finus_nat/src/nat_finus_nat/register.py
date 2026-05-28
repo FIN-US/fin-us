@@ -24,7 +24,6 @@ _STRICT_TOOL_SUBSTR = (
     "kis-api-daily-trades",
     "mcp-news",
     "finus_market_news",
-    "finus_investor_trading",
     "mcp-dart",
     "finus_disclosure",
 )

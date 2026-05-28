@@ -44,7 +44,7 @@ functions:
         description: "보유·관심 포트폴리오 상태 점검, 리스크/하락/알림/건전성 모니터링."
       - name: news_agent
         function_name: news_branch_agent
-        description: "종목·시황 뉴스 헤드라인·요약, 투자자 수급(mcp-news: get_market_news, get_investor_trading)."
+        description: "종목·시황 뉴스 헤드라인·요약(mcp-news: get_market_news). 투자자 수급은 Kis Trading MCP 경로로 조회."
       - name: recommend_agent
         function_name: recommend_branch_agent
         description: "조건에 맞는 종목 후보 탐색, 대안 종목, 관심종목 아이디어 추천."

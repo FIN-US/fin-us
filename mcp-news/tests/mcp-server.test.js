@@ -19,23 +19,19 @@ async function withClient(callback) {
   }
 }
 
-test("registers news tools with required stock_name schema", async () => {
+test("registers active news tools with required stock_name schema", async () => {
   await withClient(async (client) => {
     const { tools } = await client.listTools();
     const toolNames = tools.map((tool) => tool.name);
 
-    assert.deepEqual(toolNames, [
-      "get_market_news",
-      "get_investor_trading",
-      "get_research_reports",
-    ]);
+    assert.deepEqual(toolNames, ["get_market_news"]);
     for (const tool of tools) {
       assert.deepEqual(tool.inputSchema.required, ["stock_name"]);
     }
   });
 });
 
-test("deprecated tools keep returning MCP error results", async () => {
+test("deprecated tools are not callable from mcp-news", async () => {
   await withClient(async (client) => {
     const result = await client.callTool({
       name: "get_research_reports",
@@ -43,6 +39,6 @@ test("deprecated tools keep returning MCP error results", async () => {
     });
 
     assert.equal(result.isError, true);
-    assert.match(result.content[0].text, /deprecated: get_research_reports/);
+    assert.match(result.content[0].text, /Tool get_research_reports not found/);
   });
 });

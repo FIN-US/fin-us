@@ -110,20 +110,6 @@ async function fetchMarketNews(stockName) {
   }
 }
 
-function deprecatedToolMessage(toolName) {
-  if (toolName === "get_investor_trading") {
-    return (
-      "deprecated: get_investor_trading은 mcp-news에서 제거되었습니다. " +
-      "공식 시세/수급 데이터는 mcp-trading의 get_investor_trading 도구를 사용하세요."
-    );
-  }
-
-  return (
-    "deprecated: get_research_reports는 공식 대체 API가 확정되지 않아 비활성화되었습니다. " +
-    "네이버증권 리서치 HTML 크롤링은 더 이상 지원하지 않습니다."
-  );
-}
-
 const stockNameSchema = z.object({
   stock_name: z.string().describe("주식 종목명 (예: 삼성전자, SK하이닉스)"),
 });
@@ -149,38 +135,6 @@ server.registerTool(
       return { content: [{ type: "text", text: `에러 발생: ${error.message}` }], isError: true };
     }
   },
-);
-
-async function handleDeprecatedTool(name, stockName) {
-  if (!stockName) {
-    return {
-      content: [{ type: "text", text: "에러: stock_name 파라미터가 누락되었습니다." }],
-      isError: true,
-    };
-  }
-
-  return {
-    content: [{ type: "text", text: deprecatedToolMessage(name) }],
-    isError: true,
-  };
-}
-
-server.registerTool(
-  "get_investor_trading",
-  {
-    description: "deprecated: mcp-trading의 get_investor_trading으로 이동되었습니다.",
-    inputSchema: stockNameSchema,
-  },
-  async ({ stock_name: stockName }) => handleDeprecatedTool("get_investor_trading", stockName),
-);
-
-server.registerTool(
-  "get_research_reports",
-  {
-    description: "deprecated: 공식 대체 API가 확정되지 않아 비활성화되었습니다.",
-    inputSchema: stockNameSchema,
-  },
-  async ({ stock_name: stockName }) => handleDeprecatedTool("get_research_reports", stockName),
 );
 
 const transport = new StdioServerTransport();
