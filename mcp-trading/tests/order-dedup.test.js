@@ -1,0 +1,79 @@
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import test from "node:test";
+import {
+  DuplicateOrderError,
+  OrderDedupStore,
+  createOrderDedupKey,
+} from "../order-dedup.js";
+
+function tempLedgerPath() {
+  return path.join(fs.mkdtempSync(path.join(os.tmpdir(), "finus-order-dedup-test-")), "ledger.json");
+}
+
+test("createOrderDedupKey normalizes equivalent order arguments", () => {
+  const first = createOrderDedupKey({
+    accountNo: "1234567801",
+    orderEnv: "DEMO",
+    stockCode: "005930",
+    side: "buy",
+    quantity: 1,
+    price: 0,
+    orderType: "market",
+  });
+  const second = createOrderDedupKey({
+    accountNo: " 1234567801 ",
+    orderEnv: "demo",
+    stockCode: "005930",
+    side: "BUY",
+    quantity: "1",
+    price: "0",
+    orderType: "MARKET",
+  });
+
+  assert.equal(first, second);
+});
+
+test("OrderDedupStore blocks duplicate reservations before TTL expires", () => {
+  const store = new OrderDedupStore({
+    filePath: tempLedgerPath(),
+    ttlMs: 60_000,
+    now: () => 1_000,
+  });
+
+  store.reserve("same-order", { stockCode: "005930" });
+
+  assert.throws(
+    () => store.reserve("same-order", { stockCode: "005930" }),
+    DuplicateOrderError,
+  );
+});
+
+test("OrderDedupStore allows reservation after TTL expires", () => {
+  let now = 1_000;
+  const store = new OrderDedupStore({
+    filePath: tempLedgerPath(),
+    ttlMs: 60_000,
+    now: () => now,
+  });
+
+  store.reserve("same-order", { stockCode: "005930" });
+  now = 61_001;
+
+  assert.doesNotThrow(() => store.reserve("same-order", { stockCode: "005930" }));
+});
+
+test("OrderDedupStore releases failed reservations", () => {
+  const store = new OrderDedupStore({
+    filePath: tempLedgerPath(),
+    ttlMs: 60_000,
+    now: () => 1_000,
+  });
+
+  store.reserve("same-order", { stockCode: "005930" });
+  store.release("same-order");
+
+  assert.doesNotThrow(() => store.reserve("same-order", { stockCode: "005930" }));
+});
