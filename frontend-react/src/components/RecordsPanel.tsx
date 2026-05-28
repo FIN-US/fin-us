@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Archive, BookOpen, ClipboardList, FileText, History, Loader2 } from 'lucide-react';
+import { Archive, BookOpen, ClipboardList, FileText, History, Loader2, Sparkles } from 'lucide-react';
 import type { DashboardResources, DiaryItem } from '../types';
 import { formatNumber } from '../utils/formatters';
 
@@ -8,9 +8,11 @@ interface RecordsPanelProps {
   loading: boolean;
   diaryListLoading: boolean;
   diarySaveLoading: boolean;
+  diaryGenerateLoading: boolean;
   showAllDiaries: boolean;
   onSubmitDiary: (title: string, content: string) => Promise<void>;
   onLoadPastDiaries: () => Promise<void>;
+  onGenerateDiaryViaNat: () => Promise<{ title: string; content: string } | null>;
 }
 
 function formatDiaryDate(value?: string) {
@@ -31,15 +33,17 @@ const RecordsPanel: React.FC<RecordsPanelProps> = ({
   loading,
   diaryListLoading,
   diarySaveLoading,
+  diaryGenerateLoading,
   showAllDiaries,
   onSubmitDiary,
   onLoadPastDiaries,
+  onGenerateDiaryViaNat,
 }) => {
   const [title, setTitle] = useState('');
   const [content, setContent] = useState('');
   const [selectedDiaryId, setSelectedDiaryId] = useState<number | undefined>();
 
-  const diaryBusy = diaryListLoading || diarySaveLoading;
+  const diaryBusy = diaryListLoading || diarySaveLoading || diaryGenerateLoading;
   const busy = loading || diaryBusy;
   const visibleDiaries = showAllDiaries ? resources.diaries : resources.diaries.slice(0, 6);
 
@@ -53,6 +57,14 @@ const RecordsPanel: React.FC<RecordsPanelProps> = ({
 
   const handleLoadPast = async () => {
     await onLoadPastDiaries();
+  };
+
+  const handleGenerateViaNat = async () => {
+    const draft = await onGenerateDiaryViaNat();
+    if (!draft) return;
+    setTitle(draft.title);
+    setContent(draft.content);
+    setSelectedDiaryId(undefined);
   };
 
   const selectDiary = (item: DiaryItem) => {
@@ -134,16 +146,32 @@ const RecordsPanel: React.FC<RecordsPanelProps> = ({
             <div className="p-2 bg-amber-50 rounded-lg"><BookOpen className="w-5 h-5 text-amber-600" /></div>
             <h3 className="text-slate-900 font-black">Diary</h3>
           </div>
-          <button
-            type="button"
-            onClick={handleLoadPast}
-            disabled={busy}
-            className="inline-flex items-center gap-2 rounded-lg border border-amber-300 bg-amber-50 px-4 py-2.5 text-sm font-black text-amber-900 disabled:opacity-50"
-          >
-            {diaryListLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Archive className="w-4 h-4" />}
-            과거 매매일지 가져오기
-          </button>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={handleGenerateViaNat}
+              disabled={busy}
+              className="inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2.5 text-sm font-black text-white disabled:bg-slate-300"
+            >
+              {diaryGenerateLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
+              {diaryGenerateLoading ? 'NAT 작성·저장 중…' : 'AI 매매일지 작성·저장 (NAT)'}
+            </button>
+            <button
+              type="button"
+              onClick={handleLoadPast}
+              disabled={busy}
+              className="inline-flex items-center gap-2 rounded-lg border border-amber-300 bg-amber-50 px-4 py-2.5 text-sm font-black text-amber-900 disabled:opacity-50"
+            >
+              {diaryListLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Archive className="w-4 h-4" />}
+              과거 매매일지 가져오기
+            </button>
+          </div>
         </div>
+
+        <p className="mb-4 text-xs text-slate-500">
+          「AI 매매일지 작성·저장」은 finus-nat의 diary_agent가 KIS MCP로 조회한 뒤 finus-save-diary로 DB에 저장합니다.
+          finus-nat(기본 localhost:8001)이 떠 있어야 합니다.
+        </p>
 
         <form onSubmit={submit} className="grid grid-cols-1 lg:grid-cols-[240px_1fr_auto] gap-3 mb-5">
           <input

@@ -32,8 +32,10 @@ export default function App() {
     submitDiary,
     diaryListLoading,
     diarySaveLoading,
+    diaryGenerateLoading,
     showAllDiaries,
     loadPastDiaries,
+    generateDiaryViaNat,
     sendChatMessage,
   } = useFinUsDashboard();
 
@@ -79,9 +81,11 @@ export default function App() {
             loading={resourceLoading}
             diaryListLoading={diaryListLoading}
             diarySaveLoading={diarySaveLoading}
+            diaryGenerateLoading={diaryGenerateLoading}
             showAllDiaries={showAllDiaries}
             onSubmitDiary={submitDiary}
             onLoadPastDiaries={loadPastDiaries}
+            onGenerateDiaryViaNat={generateDiaryViaNat}
           />
           <ChatPanel status={chatStatus} messages={chatMessages} onSend={sendChatMessage} />
         </div>

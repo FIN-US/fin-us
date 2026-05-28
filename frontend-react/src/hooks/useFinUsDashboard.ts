@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { apiErrorMessage, finUsApi } from '../api';
+import { runDiaryAgentAndSave } from '../natApi';
 import type { AnalysisReport, ChatMessage, DashboardResources, DiaryItem } from '../types';
 
 const initialResources: DashboardResources = {
@@ -32,6 +33,7 @@ export function useFinUsDashboard() {
   const [resourceLoading, setResourceLoading] = useState(false);
   const [diaryListLoading, setDiaryListLoading] = useState(false);
   const [diarySaveLoading, setDiarySaveLoading] = useState(false);
+  const [diaryGenerateLoading, setDiaryGenerateLoading] = useState(false);
   const [showAllDiaries, setShowAllDiaries] = useState(false);
   const [report, setReport] = useState<AnalysisReport | null>(null);
   const [rawNews, setRawNews] = useState<string[]>([]);
@@ -154,6 +156,23 @@ export function useFinUsDashboard() {
     }
   }, []);
 
+  const generateDiaryViaNat = useCallback(async () => {
+    setDiaryGenerateLoading(true);
+    setError('');
+    try {
+      const { text, title } = await runDiaryAgentAndSave();
+      const diaries = await finUsApi.diaries();
+      setResources((current) => ({ ...current, diaries }));
+      setShowAllDiaries(true);
+      return { title, content: text };
+    } catch (err: unknown) {
+      setError(apiErrorMessage(err));
+      return null;
+    } finally {
+      setDiaryGenerateLoading(false);
+    }
+  }, []);
+
   const sendChatMessage = useCallback((text: string) => {
     const message = text.trim();
     if (!message) return;
@@ -210,6 +229,7 @@ export function useFinUsDashboard() {
     resourceLoading,
     diaryListLoading,
     diarySaveLoading,
+    diaryGenerateLoading,
     showAllDiaries,
     report,
     rawNews,
@@ -223,6 +243,7 @@ export function useFinUsDashboard() {
     loadResources,
     submitDiary,
     loadPastDiaries,
+    generateDiaryViaNat,
     sendChatMessage,
   };
 }
