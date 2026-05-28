@@ -74,7 +74,7 @@ const MainDashboard: React.FC<MainDashboardProps> = ({ trendData, report }) => {
               <Tooltip
                 cursor={{ fill: '#f8fafc' }}
                 contentStyle={{ borderRadius: '24px', border: 'none', boxShadow: '0 25px 50px -12px rgb(0 0 0 / 0.15)', padding: '20px' }}
-                formatter={(value: number) => [formatNumber(value), '']}
+                formatter={(value) => [formatNumber(Number(value)), '']}
               />
               <ReferenceLine y={0} stroke="#cbd5e1" strokeWidth={2} />
               <Bar dataKey="foreigner" radius={[6, 6, 0, 0]}>

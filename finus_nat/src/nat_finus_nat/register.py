@@ -26,7 +26,6 @@ _STRICT_TOOL_SUBSTR = (
     "finus_mcp_trading",
     "mcp-news",
     "finus_market_news",
-    "finus_investor_trading",
     "mcp-dart",
     "finus_disclosure",
 )

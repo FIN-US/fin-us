@@ -138,6 +138,85 @@ def test_telegram_error_log_redacts_bot_token(caplog):
 
 
 @pytest.mark.asyncio
+async def test_send_text_posts_reply_markup(monkeypatch):
+    captured = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+    class FakeAsyncClient:
+        def __init__(self, *, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return None
+
+        async def post(self, url, *, json):
+            captured["url"] = url
+            captured["json"] = json
+            return FakeResponse()
+
+    reply_markup = {
+        "inline_keyboard": [
+            [{"text": "확정", "callback_data": "order:confirm"}],
+        ]
+    }
+    monkeypatch.setattr("backend.telegram_notifier.httpx.AsyncClient", FakeAsyncClient)
+    notifier = TelegramNotifier("token", "123")
+
+    result = await notifier.send_text("주문 확인", reply_markup=reply_markup)
+
+    assert result is True
+    assert captured["url"] == "https://api.telegram.org/bottoken/sendMessage"
+    assert captured["json"] == {
+        "chat_id": "123",
+        "text": "주문 확인",
+        "disable_web_page_preview": True,
+        "reply_markup": reply_markup,
+    }
+
+
+@pytest.mark.asyncio
+async def test_answer_callback_query_posts_payload(monkeypatch):
+    captured = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+    class FakeAsyncClient:
+        def __init__(self, *, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return None
+
+        async def post(self, url, *, json):
+            captured["url"] = url
+            captured["json"] = json
+            return FakeResponse()
+
+    monkeypatch.setattr("backend.telegram_notifier.httpx.AsyncClient", FakeAsyncClient)
+    notifier = TelegramNotifier("token", "123")
+
+    result = await notifier.answer_callback_query("callback-1", text="처리했습니다.")
+
+    assert result is True
+    assert captured["url"] == "https://api.telegram.org/bottoken/answerCallbackQuery"
+    assert captured["json"] == {
+        "callback_query_id": "callback-1",
+        "text": "처리했습니다.",
+    }
+
+
+@pytest.mark.asyncio
 async def test_send_chat_action_posts_typing_payload(monkeypatch):
     captured = {}
 
@@ -168,6 +247,43 @@ async def test_send_chat_action_posts_typing_payload(monkeypatch):
     assert result is True
     assert captured["url"] == "https://api.telegram.org/bottoken/sendChatAction"
     assert captured["json"] == {"chat_id": "123", "action": "typing"}
+
+
+@pytest.mark.asyncio
+async def test_set_bot_commands_posts_command_menu_payload(monkeypatch):
+    captured = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+    class FakeAsyncClient:
+        def __init__(self, *, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return None
+
+        async def post(self, url, *, json):
+            captured["url"] = url
+            captured["json"] = json
+            return FakeResponse()
+
+    commands = [
+        {"command": "balance", "description": "잔고 조회"},
+        {"command": "alerts", "description": "알림 모드 변경"},
+    ]
+    monkeypatch.setattr("backend.telegram_notifier.httpx.AsyncClient", FakeAsyncClient)
+    notifier = TelegramNotifier("token", "123")
+
+    result = await notifier.set_bot_commands(commands)
+
+    assert result is True
+    assert captured["url"] == "https://api.telegram.org/bottoken/setMyCommands"
+    assert captured["json"] == {"commands": commands}
 
 
 @pytest.mark.asyncio

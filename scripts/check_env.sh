@@ -42,11 +42,11 @@ else
   echo "  ✓ backend present"
 fi
 
-_env_backend="${FIN_BACKEND}/.env"
+_env_backend="${FIN_US_INTEGRATE_ROOT}/.env"
 if [[ -f "${_env_backend}" ]]; then
-  echo "  ✓ backend .env present (${_env_backend})"
+  echo "  ✓ root .env present (${_env_backend})"
 else
-  echo "  ! backend .env missing — copy backend/.env.example to backend/.env" >&2
+  echo "  ! root .env missing — copy .env.example to .env" >&2
   warn=1
 fi
 
@@ -89,6 +89,6 @@ if [[ "${ok}" -ne 0 ]]; then
   exit 1
 fi
 if [[ "${warn}" -ne 0 ]]; then
-  echo "Warnings only — set OPENAI_API_KEY (and optional keys) in backend/.env before using analyze/NAT."
+  echo "Warnings only — set OPENAI_API_KEY (and optional keys) in .env before using analyze/NAT."
 fi
 echo "OK."

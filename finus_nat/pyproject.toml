@@ -37,3 +37,9 @@ nat_finus_nat = "nat_finus_nat.register"
 [project.scripts]
 finus-chat = "nat_finus_nat.chat_cli:main"
 
+[dependency-groups]
+dev = [
+  "pytest>=9.0,<10",
+  "pytest-asyncio>=1.3,<2",
+]
+

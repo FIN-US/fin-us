@@ -278,9 +278,6 @@ class FinusMarketNewsConfig(FunctionBaseConfig, name="finus_market_news"):
     timeout_sec: float = Field(default=120.0, ge=5.0, le=600.0)
 
 
-class FinusInvestorTradingConfig(FinusMarketNewsConfig, name="finus_investor_trading"):
-    """finus_market_news와 동일 필드"""
-
 class FinusDisclosureSignalConfig(FinusMarketNewsConfig, name="finus_disclosure_signal"):
     """mcp-dart stdio MCP — OpenDART 지분공시 signal."""
 
@@ -576,17 +573,6 @@ async def finus_market_news(config: FinusMarketNewsConfig, _builder: Builder):
         vendor_root=config.vendor_root,
         timeout_sec=config.timeout_sec,
         mcp_tool="get_market_news",
-        fn_doc=doc,
-    )
-
-
-@register_function(config_type=FinusInvestorTradingConfig)
-async def finus_investor_trading(config: FinusInvestorTradingConfig, _builder: Builder):
-    doc = "Fin-Us mcp-news stdio MCP: 투자자별 순매수·수급(약 5거래일), 종목명·코드 기준."
-    yield _mcp_news_stock_function_info(
-        vendor_root=config.vendor_root,
-        timeout_sec=config.timeout_sec,
-        mcp_tool="get_investor_trading",
         fn_doc=doc,
     )
 
