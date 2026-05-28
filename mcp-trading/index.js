@@ -43,6 +43,8 @@ const TOKEN_CACHE_PATH = process.env.KIS_TOKEN_CACHE_PATH || path.join(
 let tokenCache = null;
 
 const server = new McpServer({ name: "trading-tool", version: "1.0.0" });
+// KIS API 호출용 axios 인스턴스 — 8초 타임아웃으로 무기한 블로킹 방지
+const kisAxios = axios.create({ timeout: 8000 });
 
 function isMissingCredential(value) {
   return !value || value.startsWith("your_") || value.includes("_here");
@@ -100,7 +102,7 @@ async function getAccessToken() {
   if (cachedToken) return cachedToken;
 
   try {
-    const response = await axios.post(`${KIS_URL}/oauth2/tokenP`, {
+    const response = await kisAxios.post(`${KIS_URL}/oauth2/tokenP`, {
       grant_type: "client_credentials",
       appkey: KIS_API_KEY,
       appsecret: KIS_API_SECRET,
@@ -120,7 +122,7 @@ async function getAccessToken() {
 
 async function kisGet(pathname, trId, params) {
   const token = await getAccessToken();
-  const response = await axios.get(`${KIS_URL}${pathname}`, {
+  const response = await kisAxios.get(`${KIS_URL}${pathname}`, {
     headers: {
       "Content-Type": "application/json",
       authorization: `Bearer ${token}`,
@@ -141,7 +143,7 @@ async function kisGet(pathname, trId, params) {
 
 async function kisPost(pathname, trId, body) {
   const token = await getAccessToken();
-  const response = await axios.post(`${KIS_URL}${pathname}`, body, {
+  const response = await kisAxios.post(`${KIS_URL}${pathname}`, body, {
     headers: {
       "Content-Type": "application/json",
       authorization: `Bearer ${token}`,
