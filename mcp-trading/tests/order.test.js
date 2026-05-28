@@ -232,6 +232,19 @@ test("buildCashOrderBody creates market KIS order body", () => {
   );
 });
 
+test("buildCashOrderBody rejects alphanumeric stock codes as unsupported order targets", () => {
+  assert.throws(
+    () => buildCashOrderBody({
+      accountNo: "1234567801",
+      stockCode: "0001A0",
+      quantity: 1,
+      price: 10000,
+      orderType: "LIMIT",
+    }),
+    /이 종목은 현재 주문을 지원하지 않습니다/,
+  );
+});
+
 test("formatOrderResult includes order number when present", () => {
   assert.equal(
     formatOrderResult({
