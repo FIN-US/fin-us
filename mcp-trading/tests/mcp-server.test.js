@@ -46,6 +46,7 @@ test("registers trading tools with preserved required schemas", async () => {
       "quantity",
       "order_env",
     ]);
+    assert.match(toolByName(tools, "place_order").description, /자동 재시도하지 마세요/);
   });
 });
 

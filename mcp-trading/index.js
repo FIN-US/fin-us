@@ -410,7 +410,7 @@ server.registerTool(
 server.registerTool(
   "place_order",
   {
-    description: "한국투자증권 Open API로 국내 주식 현금 주문을 실행합니다.",
+    description: "한국투자증권 Open API로 국내 주식 현금 주문을 실행합니다. 동일 주문은 중복 방지 TTL 동안 차단되므로 자동 재시도하지 마세요.",
     inputSchema: placeOrderSchema,
   },
   async (args) => callTradingTool("place_order", args),
