@@ -88,7 +88,8 @@ uv sync --project backend
 uv run --project backend uvicorn backend.main:app --host 0.0.0.0 --port 8000
 
 # 3. Frontend 실행
-cd frontend-react && npm install && npm run dev
+cd frontend-react && npm ci && npm run dev
+```
 
 ## 📝 에이전트별 보유 스킬 (MCP Tools)
 
