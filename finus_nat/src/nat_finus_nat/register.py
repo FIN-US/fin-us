@@ -82,6 +82,9 @@ Action Input:
 
 
 def _react_system_prompt_for_tools(tools) -> str:
+    # 등록된 도구 이름을 공백으로 잇고 lowercase 한 뒤 substring 매칭으로 분기한다.
+    # 이름 충돌 위험을 줄이기 위해 ``_STRICT_TOOL_SUBSTR`` 와 동일한 “접두어 + 하이픈” 토큰만 사용한다
+    # (예: ``mcp-trading-`` 접두어로 KIS wrapped 도구를 식별, 일반 ``trading`` 이라는 단어는 매칭하지 않음).
     names = " ".join(getattr(t, "name", "") for t in (tools or [])).lower()
     has_kis = "kis-trading-mcp-tool" in names or "finus_account_balance" in names
     has_finus_wrapped = any(

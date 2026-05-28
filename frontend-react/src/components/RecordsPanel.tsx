@@ -13,7 +13,7 @@ interface RecordsPanelProps {
   diaryAgentReport: string;
   onSubmitDiary: (title: string, content: string) => Promise<void>;
   onLoadPastDiaries: () => Promise<void>;
-  onGenerateDiaryWithAi: () => Promise<{ title: string; content: string; diaryId?: number } | null>;
+  onGenerateDiaryWithAi: () => Promise<{ title: string; content: string } | null>;
 }
 
 function formatDiaryDate(value?: string) {
@@ -62,7 +62,8 @@ const RecordsPanel: React.FC<RecordsPanelProps> = ({
     if (draft) {
       setTitle(draft.title);
       setContent(draft.content);
-      setSelectedDiaryId(draft.diaryId);
+      // AI 초안은 아직 DB 에 저장되지 않은 새 글이므로 과거 일지 카드 선택을 해제한다.
+      setSelectedDiaryId(undefined);
     }
   };
 

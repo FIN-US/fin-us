@@ -159,7 +159,6 @@ export function useFinUsDashboard() {
   const generateDiaryWithAi = useCallback(async (): Promise<{
     title: string;
     content: string;
-    diaryId?: number;
   } | null> => {
     setDiaryAiLoading(true);
     setError('');
@@ -169,11 +168,7 @@ export function useFinUsDashboard() {
       setDiaryAgentReport(result.report || '');
       const draft = result.draft;
       if (draft?.title && draft?.content) {
-        return {
-          title: draft.title,
-          content: draft.content,
-          diaryId: result.source === 'existing' ? result.diary_id ?? undefined : undefined,
-        };
+        return { title: draft.title, content: draft.content };
       }
       return null;
     } catch (err: unknown) {

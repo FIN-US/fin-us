@@ -259,13 +259,11 @@ function resolveStock(stockName) {
   return matches[0];
 }
 
-async function getAccessToken() {
-  requireKisCredentials();
+// 동일 노드 프로세스 안에서 토큰 발급이 동시에 여러 번 일어나 EGW00133 을 자초하지 않도록
+// in-flight Promise 를 공유한다. 다른 프로세스 간 race 는 readTokenCache(..., allowStale) 로 처리한다.
+let tokenIssueInFlight = null;
 
-  const now = Date.now();
-  const cachedToken = readTokenCache(now);
-  if (cachedToken) return cachedToken;
-
+async function issueAccessToken(now) {
   try {
     const response = await axios.post(`${KIS_URL}/oauth2/tokenP`, {
       grant_type: "client_credentials",
@@ -300,6 +298,23 @@ async function getAccessToken() {
   }
 }
 
+async function getAccessToken() {
+  requireKisCredentials();
+
+  const now = Date.now();
+  const cachedToken = readTokenCache(now);
+  if (cachedToken) return cachedToken;
+
+  if (tokenIssueInFlight) {
+    return tokenIssueInFlight;
+  }
+
+  tokenIssueInFlight = issueAccessToken(now).finally(() => {
+    tokenIssueInFlight = null;
+  });
+  return tokenIssueInFlight;
+}
+
 async function kisApiGet(pathname, trId, params, { trCont = "" } = {}) {
   const token = await getAccessToken();
   const response = await axios.get(`${KIS_URL}${pathname}`, {
@@ -327,6 +342,16 @@ async function kisApiGet(pathname, trId, params, { trCont = "" } = {}) {
 async function kisGet(pathname, trId, params) {
   const { body } = await kisApiGet(pathname, trId, params);
   return body;
+}
+
+// KIS Open API 응답 헤더 `tr_cont` 의 의미:
+//   F / M = 다음 페이지 존재 (요청 시 `tr_cont`="N" 으로 이어 호출)
+//   D / E = 마지막 페이지
+//   ""(공백) = 단일 페이지
+// 일부 TR 은 가이드와 미묘하게 다르게 D/E 외 값을 “끝” 으로 흘리는 경우가 있으니,
+// 명시적으로 “계속” 값(F/M)일 때만 다음 페이지를 받아오도록 한다.
+function isKisContinueTrCont(value) {
+  return value === "F" || value === "M";
 }
 
 function todayKstYmd() {
@@ -410,7 +435,7 @@ async function fetchAllDailyOrderCcld({
     ctxNk = body.ctx_area_nk100 || "";
     pages += 1;
 
-    if (respTrCont !== "M" && respTrCont !== "F") {
+    if (!isKisContinueTrCont(respTrCont)) {
       break;
     }
     trCont = "N";
@@ -541,7 +566,7 @@ async function fetchAllInquireBalance() {
     ctxNk = body.ctx_area_nk100 || "";
     pages += 1;
 
-    if (respTrCont !== "M" && respTrCont !== "F") {
+    if (!isKisContinueTrCont(respTrCont)) {
       break;
     }
     trCont = "N";
@@ -653,7 +678,7 @@ async function fetchAllBalanceRlzPl() {
     ctxNk = body.ctx_area_nk100 || "";
     pages += 1;
 
-    if (respTrCont !== "M" && respTrCont !== "F") {
+    if (!isKisContinueTrCont(respTrCont)) {
       break;
     }
     trCont = "N";
@@ -790,15 +815,19 @@ async function getBalance() {
   const { rows: holdings, summary = {} } = await fetchAllInquireBalance();
 
   const stockList = holdings
-    .map((h) => `- ${h.prdt_name} (${h.pdno}): ${h.hldg_qty}주 (평가금액: ${h.evlu_amt}원)`)
+    .map(
+      (h) =>
+        `- ${h.prdt_name || "-"} (${h.pdno || "-"}): ${formatQuantity(h.hldg_qty)}주 ` +
+        `(평가금액: ${formatWon(h.evlu_amt)})`,
+    )
     .join("\n");
 
   return `
 [계좌 잔고 현황]
-- 총 평가금액: ${summary.tot_evlu_amt}원
-- 순자산금액: ${summary.nass_amt ?? summary.pchs_amt_smtl_amt}원
-- 총 손익: ${summary.evlu_pfls_smtl_amt}원
-- 예수금: ${summary.dnca_tot_amt}원
+- 총 평가금액: ${formatWon(summary.tot_evlu_amt)}
+- 순자산금액: ${formatWon(summary.nass_amt ?? summary.pchs_amt_smtl_amt)}
+- 총 손익: ${formatWon(summary.evlu_pfls_smtl_amt)}
+- 예수금: ${formatWon(summary.dnca_tot_amt)}
 
 [보유 종목 리스트]
 ${stockList || "보유 종목이 없습니다."}
