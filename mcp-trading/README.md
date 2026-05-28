@@ -18,7 +18,6 @@ Fin-Us **Trading Provider** MCP 서버입니다. 한국투자증권(KIS) Open AP
 | 도구 | 설명 | KIS TR / API |
 |------|------|----------------|
 | `get_balance` | 계좌 잔고·보유종목 요약 | `inquire-balance` (`TTTC8434R` / 모의 `VTTC8434R`, v1_국내주식-006) |
-| `get_stock_holdings` | **보유 종목 상세** (수량·평가손익·주문가능, 연속조회) | `inquire-balance` (`TTTC8434R` / 모의 `VTTC8434R`, v1_국내주식-006) |
 | `get_stock_quote` | 국내 주식 현재가 시세 | `inquire-price` (`FHKST01010100`) |
 | `get_investor_trading` | 개인/외국인/기관 순매수 (최근 약 5일) | `inquire-investor` (`FHKST01010900`) |
 | `get_today_daily_orders` | **당일 주문·체결 전체** (연속조회 paginate) | `inquire-daily-ccld` (`TTTC0081R` / 모의 `VTTC0081R`, v1_국내주식-005) |
@@ -36,7 +35,7 @@ Fin-Us **Trading Provider** MCP 서버입니다. 한국투자증권(KIS) Open AP
 | `KIS_URL` | 예 | KIS REST base URL (예: 모의 `https://openapivts.koreainvestment.com:29443`) |
 | `KIS_API_KEY` | 예 | App Key |
 | `KIS_API_SECRET` | 예 | App Secret |
-| `KIS_ACCOUNT_NO` | `get_balance`, `get_stock_holdings` 등 | 10자리 (계좌 8자리 + 상품코드 2자리) |
+| `KIS_ACCOUNT_NO` | `get_balance` 등 | 10자리 (계좌 8자리 + 상품코드 2자리) |
 | `KIS_TOKEN_CACHE_PATH` | 아니오 | OAuth 토큰 파일 캐시 경로 (기본: OS temp) |
 | `KIS_TR_ID_DAILY_CCLD` | 아니오 | 일별주문체결 TR override (기본: 실전 `TTTC0081R`, 모의 `VTTC0081R`) |
 | `KIS_TR_ID_BALANCE_RLZ_PL` | 아니오 | 잔고실현손익 TR override (기본: `TTTC8494R`) |
@@ -53,14 +52,6 @@ Fin-Us **Trading Provider** MCP 서버입니다. 한국투자증권(KIS) Open AP
 | `sll_buy_dvsn` | `00` | `00` 전체 / `01` 매도 / `02` 매수 |
 
 실전 계좌는 API 1회 최대 100건, 모의는 15건까지 반환하므로 서버가 `tr_cont`·`CTX_AREA_*` 연속조회로 **당일 전체**를 모읍니다.
-
-### `get_stock_holdings` 파라미터
-
-| 파라미터 | 기본값 | 설명 |
-|----------|--------|------|
-| `stock_name` | (전체) | 특정 종목만 필터 (종목명 또는 6자리 코드) |
-
-실전 계좌는 API 1회 최대 50건까지 반환하므로 서버가 연속조회로 **전체 보유 종목**을 모읍니다.
 
 ## 로컬 실행
 

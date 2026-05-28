@@ -382,15 +382,16 @@ function formatOrderTime(value) {
   return `${text.slice(0, 2)}:${text.slice(2, 4)}:${text.slice(4, 6)}`;
 }
 
+// get_today_daily_orders tool 구현
 async function fetchAllDailyOrderCcld({
-  tradeDate,
-  stockCode = "",
-  ccldDvsn = "00",
-  sllBuyDvsn = "00",
+  tradeDate, // YYYYMMDD
+  stockCode = "", // 6자리 종목코드
+  ccldDvsn = "00", // 00: 전체, 01: 체결, 02: 미체결
+  sllBuyDvsn = "00", // 00: 전체, 01: 매도, 02: 매수
 }) {
   requireKisCredentials({ accountRequired: true });
 
-  const date = normalizeYmd(tradeDate, todayKstYmd());
+  const date = normalizeYmd(tradeDate, todayKstYmd()); // 조회일(YYYYMMDD). 생략 시 당일(KST).
   const baseParams = {
     CANO: KIS_ACCOUNT_NO.substring(0, 8),
     ACNT_PRDT_CD: KIS_ACCOUNT_NO.substring(8, 10),
@@ -443,6 +444,7 @@ async function fetchAllDailyOrderCcld({
 
   return { date, rows, summary, pages, trId: KIS_DAILY_CCLD_TR_ID };
 }
+
 
 function formatDailyOrderCcldReport({ date, rows, summary, pages, trId, stockLabel }) {
   if (rows.length === 0) {
@@ -521,21 +523,21 @@ function assertRealAccountForBalanceRlzPl() {
 
 function inquireBalanceBaseParams() {
   return {
-    CANO: KIS_ACCOUNT_NO.substring(0, 8),
-    ACNT_PRDT_CD: KIS_ACCOUNT_NO.substring(8, 10),
-    AFHR_FLPR_YN: "N",
-    OFL_YN: "",
-    INQR_DVSN: "02",
-    UNPR_DVSN: "01",
-    FUND_STTL_ICLD_YN: "N",
-    FNCG_AMT_AUTO_RDPT_YN: "N",
-    PRCS_DVSN: "01",
+    CANO: KIS_ACCOUNT_NO.substring(0, 8), // 계좌번호 8자리
+    ACNT_PRDT_CD: KIS_ACCOUNT_NO.substring(8, 10), // 상품코드 2자리
+    AFHR_FLPR_YN: "N", // 평가금액 자동 계산 여부
+    OFL_YN: "", // 매도가능 수량 자동 계산 여부
+    INQR_DVSN: "02", // 02: 전체, 01: 체결, 02: 미체결
+    UNPR_DVSN: "01", // 01: 현재가, 02: 시가, 03: 고가, 04: 저가
+    FUND_STTL_ICLD_YN: "N", // 펀드 매도 체결 여부
+    FNCG_AMT_AUTO_RDPT_YN: "N", // 외화 매도 체결 여부
+    PRCS_DVSN: "01", // 01: 체결, 02: 미체결
   };
 }
 
 async function fetchAllInquireBalance() {
   requireKisCredentials({ accountRequired: true });
-
+  // 
   const baseParams = inquireBalanceBaseParams();
   const rows = [];
   let summary = null;
@@ -573,63 +575,6 @@ async function fetchAllInquireBalance() {
   }
 
   return { rows, summary, pages, trId: KIS_BALANCE_TR_ID };
-}
-
-function formatStockHoldingsReport({ rows, summary, pages, trId, stockLabel }) {
-  if (rows.length === 0) {
-    return `
-[보유 종목 조회]${stockLabel ? ` / ${stockLabel}` : ""}
-- 조회 TR: ${trId} (v1_국내주식-006, inquire-balance)
-- 보유 종목이 없습니다.
-    `.trim();
-  }
-
-  const lines = rows.map((row, index) => {
-    const dayTrade =
-      `금일 매수 ${formatQuantity(row.thdt_buyqty)}주 / 매도 ${formatQuantity(row.thdt_sll_qty)}주`;
-    return [
-      `${index + 1}. ${row.prdt_name || "-"} (${row.pdno || "-"}) · ${row.trad_dvsn_name || "-"}`,
-      `   보유 ${formatQuantity(row.hldg_qty)}주 | 주문가능 ${formatQuantity(row.ord_psbl_qty)}주`,
-      `   현재가 ${formatWon(row.prpr)} | 평가 ${formatWon(row.evlu_amt)} | 매입가 ${formatWon(row.pchs_avg_pric)} (매입금 ${formatWon(row.pchs_amt)})`,
-      `   평가손익 ${formatWon(row.evlu_pfls_amt)} (${formatPercent(row.evlu_pfls_rt)}) | 전일대비 ${row.bfdy_cprs_icdc ?? "-"} (${formatPercent(row.fltt_rt)})`,
-      `   ${dayTrade}`,
-    ].join("\n");
-  });
-
-  const summaryBlock = summary
-    ? `
-[계좌 요약]
-- 예수금: ${formatWon(summary.dnca_tot_amt)} | D+1 ${formatWon(summary.nxdy_excc_amt)} | D+2 ${formatWon(summary.prvs_rcdl_excc_amt)}
-- 유가평가: ${formatWon(summary.scts_evlu_amt)} | 총평가: ${formatWon(summary.tot_evlu_amt)} | 순자산: ${formatWon(summary.nass_amt)}
-- 매입합계: ${formatWon(summary.pchs_amt_smtl_amt)} | 평가손익합계: ${formatWon(summary.evlu_pfls_smtl_amt)}
-- 금일 매수/매도: ${formatWon(summary.thdt_buy_amt)} / ${formatWon(summary.thdt_sll_amt)}
-    `.trim()
-    : "";
-
-  return `
-[보유 종목 조회]${stockLabel ? ` / ${stockLabel}` : ""}
-- 조회 TR: ${trId} (v1_국내주식-006, inquire-balance)
-- 종목 수: ${rows.length} (${pages}회 API 호출, 연속조회 포함)
-
-${summaryBlock}
-
-[보유 종목]
-${lines.join("\n\n")}
-  `.trim();
-}
-
-async function getStockHoldings({ stock_name: stockName } = {}) {
-  const result = await fetchAllInquireBalance();
-  let { rows } = result;
-  let stockLabel = "";
-
-  if (stockName) {
-    const stock = resolveStock(stockName);
-    stockLabel = stock.name;
-    rows = rows.filter((row) => row.pdno === stock.code || row.prdt_name === stock.name);
-  }
-
-  return formatStockHoldingsReport({ ...result, rows, stockLabel });
 }
 
 async function fetchAllBalanceRlzPl() {
@@ -889,7 +834,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: "get_today_daily_orders",
       description:
-        "당일(KST) 국내주식 주문·체결 내역을 전부 조회합니다. KIS 주식일별주문체결조회(inquire-daily-ccld, v1_국내주식-005)를 연속조회로 paginate합니다.",
+        "당일(KST) 국내주식 주문·체결 내역을 전부 조회합니다. KIS 주식일별주문체결조회(inquire-daily-ccld)를 연속조회로 paginate합니다.",
       inputSchema: {
         type: "object",
         properties: {
@@ -913,23 +858,9 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       },
     },
     {
-      name: "get_stock_holdings",
-      description:
-        "주식잔고조회: 계좌 보유 종목·수량·평가손익·주문가능수량을 조회합니다 (inquire-balance, v1_국내주식-006). 연속조회로 전체 보유 종목을 paginate합니다.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          stock_name: {
-            type: "string",
-            description: "특정 종목만 볼 때 종목명 또는 6자리 코드. 생략 시 전체 보유 종목.",
-          },
-        },
-      },
-    },
-    {
       name: "get_balance_rlz_pl",
       description:
-        "주식잔고조회_실현손익: 체결기준 잔고, 종목별 평가손익, 계좌 실현손익·실평가손익을 조회합니다 (inquire-balance-rlz-pl, v1_국내주식-041). 모의투자 미지원.",
+        "주식잔고조회_실현손익: 체결기준 잔고, 종목별 평가손익, 계좌 실현손익·실평가손익을 조회합니다 (inquire-balance-rlz-pl). 모의투자 미지원.",
       inputSchema: {
         type: "object",
         properties: {
@@ -964,10 +895,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
     if (name === "get_investor_trading") {
       return { content: [{ type: "text", text: await getInvestorTrading(args?.stock_name) }] };
-    }
-
-    if (name === "get_stock_holdings") {
-      return { content: [{ type: "text", text: await getStockHoldings(args ?? {}) }] };
     }
 
     if (name === "get_today_daily_orders") {
