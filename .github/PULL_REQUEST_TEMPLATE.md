@@ -1,18 +1,14 @@
-## 📝 개요
+## Summary
 
+<!-- 이 PR이 해결하는 이슈·목적을 2~3문장으로 -->
 
-## 🚀 변경 사항
-- 
-- 
+## Test plan
 
-## 🔗 관련 이슈
-- Related to #
+- [ ] `uv run --project backend pytest backend/tests/`
+- [ ] `uv run --project finus_nat pytest finus_nat/tests/`
+- [ ] `cd mcp-trading && npm test`
+- [ ] `cd frontend-react && npx tsc --noEmit`
 
-## ✅ 체크리스트
-- [ ] 코딩 컨벤션을 준수했나요?
-- [ ] 테스트 코드를 작성하거나 기존 테스트를 통과했나요?
-- [ ] 불필요한 주석이나 디버깅 코드를 제거했나요?
-- [ ] 변경 사항에 대한 문서(README 등)를 업데이트했나요?
+## Merge note
 
-## 📸 스크린샷 (선택 사항)
-
+머지 시 **Squash and merge** 를 권장합니다. 중간 머지·revert 커밋이 섞이면 `main` 히스토리가 읽기 어려워집니다.

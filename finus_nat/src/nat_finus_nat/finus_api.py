@@ -4,6 +4,7 @@ import os
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any, Literal, TypeAlias
 from zoneinfo import ZoneInfo
 
@@ -343,6 +344,8 @@ class FinusReactToolInput(BaseModel):
     @classmethod
     def _coerce_whole_string_payload(cls, data: Any) -> Any:
         if isinstance(data, str):
+            if not data.strip():
+                return {}
             parsed = _parse_leading_json_object(data)
             if parsed is None:
                 raise ValueError(
@@ -396,6 +399,15 @@ def _parse_leading_json_object(text: str) -> dict[str, Any] | None:
         return None
     obj, _end = json.JSONDecoder().raw_decode(t[i:])
     return obj if isinstance(obj, dict) else None
+
+
+def _finus_react_input_converter(model_cls: type[BaseModel]) -> Callable[[str], BaseModel]:
+    """ReAct ``Action Input`` 문자열을 NAT type_converter가 Pydantic 모델로 변환하도록 등록."""
+
+    def _convert(value: str) -> BaseModel:
+        return model_cls.model_validate(value)
+
+    return _convert
 
 
 class KisTradingMcpCallInput(BaseModel):
@@ -629,6 +641,7 @@ async def finus_mcp_trading_today_orders(config: FinusMcpTradingTodayOrdersConfi
         get_today_daily_orders,
         description=doc,
         input_schema=FinusMcpTradingTodayOrdersInput,
+        converters=[_finus_react_input_converter(FinusMcpTradingTodayOrdersInput)],
     )
 
 
@@ -652,6 +665,7 @@ async def finus_mcp_trading_get_balance(config: FinusMcpTradingGetBalanceConfig,
         get_balance,
         description=doc,
         input_schema=FinusMcpTradingGetBalanceInput,
+        converters=[_finus_react_input_converter(FinusMcpTradingGetBalanceInput)],
     )
 
 
@@ -679,6 +693,7 @@ async def finus_mcp_trading_balance_rlz_pl(config: FinusMcpTradingBalanceRlzPlCo
         get_balance_rlz_pl,
         description=doc,
         input_schema=FinusMcpTradingStockNameInput,
+        converters=[_finus_react_input_converter(FinusMcpTradingStockNameInput)],
     )
 
 
@@ -842,6 +857,7 @@ async def finus_save_diary(config: FinusSaveDiaryConfig, _builder: Builder):
         save_trading_diary,
         description=save_trading_diary.__doc__,
         input_schema=FinusSaveDiaryInput,
+        converters=[_finus_react_input_converter(FinusSaveDiaryInput)],
     )
 
 
@@ -879,6 +895,7 @@ async def finus_list_diaries(config: FinusListDiariesConfig, _builder: Builder):
         list_trading_diaries,
         description=list_trading_diaries.__doc__,
         input_schema=FinusListDiariesInput,
+        converters=[_finus_react_input_converter(FinusListDiariesInput)],
     )
 
 

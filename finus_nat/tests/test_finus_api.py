@@ -48,6 +48,27 @@ def test_finus_backend_base_url(monkeypatch):
     assert finus_api._finus_backend_base_url("http://custom:9000") == "http://custom:9000"
 
 
+def test_react_tool_input_accepts_empty_action_input_string():
+    inp = finus_api.FinusMcpTradingTodayOrdersInput.model_validate("")
+    assert inp.trade_date == ""
+    assert inp.ccld_dvsn == "00"
+
+
+def test_react_tool_input_accepts_json_action_input_string():
+    inp = finus_api.FinusMcpTradingTodayOrdersInput.model_validate(
+        '{"trade_date":"20260529","stock_name":"삼성전자"}'
+    )
+    assert inp.trade_date == "20260529"
+    assert inp.stock_name == "삼성전자"
+
+
+def test_finus_react_input_converter_maps_str_to_model():
+    convert = finus_api._finus_react_input_converter(finus_api.FinusMcpTradingTodayOrdersInput)
+    inp = convert('{"ccld_dvsn":"01"}')
+    assert isinstance(inp, finus_api.FinusMcpTradingTodayOrdersInput)
+    assert inp.ccld_dvsn == "01"
+
+
 def test_save_trading_diary_posts_to_backend(monkeypatch):
     captured = {}
 
