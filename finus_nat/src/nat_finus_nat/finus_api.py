@@ -379,6 +379,8 @@ class FinusMcpTradingStockNameInput(FinusReactToolInput):
 
 
 class FinusSaveDiaryInput(FinusReactToolInput):
+    """ReAct Action Input은 유효한 JSON 객체 한 덩어리로 넣으세요 (본문에 미이스케이프 `\"` 금지)."""
+
     title: str = Field(default="", description="일지 제목.")
     content: str = Field(default="", description="일지 본문.")
 

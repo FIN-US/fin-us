@@ -10,7 +10,7 @@ interface RecordsPanelProps {
   diarySaveLoading: boolean;
   diaryGenerateLoading: boolean;
   showAllDiaries: boolean;
-  onSubmitDiary: (title: string, content: string) => Promise<boolean>;
+  onSubmitDiary: (title: string, content: string, existingId?: number) => Promise<boolean>;
   onLoadPastDiaries: () => Promise<void>;
   onGenerateDiaryViaNat: () => Promise<{ title: string; content: string } | null>;
 }
@@ -49,11 +49,12 @@ const RecordsPanel: React.FC<RecordsPanelProps> = ({
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
-    const saved = await onSubmitDiary(title, content);
+    const saved = await onSubmitDiary(title, content, selectedDiaryId);
     if (!saved) return;
-    setTitle('');
-    setContent('');
-    setSelectedDiaryId(undefined);
+    if (selectedDiaryId === undefined) {
+      setTitle('');
+      setContent('');
+    }
   };
 
   const handleLoadPast = async () => {
@@ -193,13 +194,13 @@ const RecordsPanel: React.FC<RecordsPanelProps> = ({
             disabled={busy}
             className="rounded-lg bg-amber-500 px-5 py-3 text-sm font-black text-white disabled:bg-slate-300 lg:self-start"
           >
-            {diarySaveLoading ? '저장 중…' : '저장'}
+            {diarySaveLoading ? '저장 중…' : selectedDiaryId !== undefined ? '수정 저장' : '저장'}
           </button>
         </form>
 
         <p className="mb-3 text-xs text-slate-500">
           {showAllDiaries
-            ? `저장된 일지 ${resources.diaries.length}건 · 카드를 클릭하면 내용을 불러옵니다. 수정 후 「저장」하면 새 일지가 추가됩니다.`
+            ? `저장된 일지 ${resources.diaries.length}건 · 카드를 클릭해 수정한 뒤 「수정 저장」하면 같은 일지가 갱신됩니다.`
             : `최근 ${visibleDiaries.length}건 미리보기 · 전체 목록은 「과거 매매일지 가져오기」를 누르세요.`}
         </p>
 

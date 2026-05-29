@@ -122,12 +122,15 @@ export function useFinUsDashboard() {
   );
 
   const submitDiary = useCallback(
-    async (title: string, content: string): Promise<boolean> => {
+    async (title: string, content: string, existingId?: number): Promise<boolean> => {
       if (!title.trim() || !content.trim()) return false;
       setDiarySaveLoading(true);
       setError('');
       try {
-        const diary = await finUsApi.createDiary(title.trim(), content.trim());
+        const diary =
+          existingId !== undefined
+            ? await finUsApi.updateDiary(existingId, title.trim(), content.trim())
+            : await finUsApi.createDiary(title.trim(), content.trim());
         setResources((current) => {
           const rest = current.diaries.filter((item) => item.id !== diary.id);
           return { ...current, diaries: [diary, ...rest] };

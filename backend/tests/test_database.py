@@ -55,6 +55,35 @@ def test_create_and_get_diary(client: TestClient):
     assert diaries[0]["title"] == "Test Title"
 
 
+def test_update_diary(client: TestClient):
+    create = client.post(
+        "/api/v1/db/diary",
+        json={"title": "Original", "content": "Body"},
+    )
+    diary_id = create.json()["data"]["id"]
+
+    response = client.put(
+        f"/api/v1/db/diary/{diary_id}",
+        json={"title": "Updated", "content": "New body"},
+    )
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["title"] == "Updated"
+    assert data["content"] == "New body"
+
+    listed = client.get("/api/v1/db/diary").json()["data"]
+    assert len(listed) == 1
+    assert listed[0]["title"] == "Updated"
+
+
+def test_update_diary_not_found(client: TestClient):
+    response = client.put(
+        "/api/v1/db/diary/99999",
+        json={"title": "Missing", "content": "None"},
+    )
+    assert response.status_code == 404
+
+
 def test_get_trades_empty(client: TestClient):
     response = client.get("/api/v1/db/trades")
     assert response.status_code == 200

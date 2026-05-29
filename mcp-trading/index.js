@@ -8,7 +8,14 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import axios from "axios";
 import dotenv from "dotenv";
 import { z } from "zod";
+import { formatBalanceRlzPlReport } from "./balance-rlz-pl-report.js";
 import { buildBalanceParams, formatBalanceReport } from "./balance.js";
+import {
+  formatPercent,
+  formatQuantity,
+  formatWon,
+  isPaperTradingKisUrl,
+} from "./formatters.js";
 import {
   createCashOrderRequest,
   formatOrderResult,
@@ -195,11 +202,6 @@ function formatOrderTime(value) {
   return `${text.slice(0, 2)}:${text.slice(2, 4)}:${text.slice(4, 6)}`;
 }
 
-function formatPercent(value) {
-  if (value === undefined || value === null || value === "") return "-";
-  return `${value}%`;
-}
-
 async function kisPost(pathname, trId, body) {
   const token = await getAccessToken();
   const response = await kisAxios.post(`${KIS_URL}${pathname}`, body, {
@@ -218,16 +220,6 @@ async function kisPost(pathname, trId, body) {
     throw new Error(`KIS API 오류: ${data.msg1 || data.msg_cd || "알 수 없는 오류"}`);
   }
   return data;
-}
-
-function formatWon(value) {
-  if (value === undefined || value === null || value === "") return "-";
-  return `${Number(value).toLocaleString("ko-KR")}원`;
-}
-
-function formatQuantity(value) {
-  if (value === undefined || value === null || value === "") return "-";
-  return Number(value).toLocaleString("ko-KR");
 }
 
 async function getStockQuote(stockName) {
@@ -519,61 +511,8 @@ async function fetchAllBalanceRlzPl() {
   return { rows, summary, pages, trId: BALANCE_RLZ_PL_TR_ID };
 }
 
-function formatBalanceRlzPlSummaryBlock(summary) {
-  if (!summary) {
-    return "";
-  }
-  return `
-[계좌 집계]
-- 예수금: ${formatWon(summary.dnca_tot_amt)}
-- 총평가금액: ${formatWon(summary.tot_evlu_amt)} | 순자산: ${formatWon(summary.nass_amt)}
-- 매입합계: ${formatWon(summary.pchs_amt_smtl_amt)} | 평가손익합계: ${formatWon(summary.evlu_pfls_smtl_amt)}
-- 실현손익: ${formatWon(summary.rlzt_pfls)} (${formatPercent(summary.rlzt_erng_rt)})
-- 실평가손익: ${formatWon(summary.real_evlu_pfls)} (${formatPercent(summary.real_evlu_pfls_erng_rt)})
-- 금일 매수/매도: ${formatWon(summary.thdt_buy_amt)} / ${formatWon(summary.thdt_sll_amt)}
-  `.trim();
-}
-
-function formatBalanceRlzPlReport({ rows, summary, pages, trId, stockLabel }) {
-  const summaryBlock = formatBalanceRlzPlSummaryBlock(summary);
-
-  if (rows.length === 0) {
-    const holdingsNote = stockLabel
-      ? `- ${stockLabel} 보유 종목이 없습니다.`
-      : "- 보유 종목이 없습니다.";
-    return `
-[주식잔고조회_실현손익]${stockLabel ? ` / ${stockLabel}` : ""}
-- 조회 TR: ${trId} (v1_국내주식-041, inquire-balance-rlz-pl)
-${holdingsNote}
-${summaryBlock ? `\n${summaryBlock}` : ""}
-    `.trim();
-  }
-
-  const lines = rows.map((row, index) => {
-    const dayTrade =
-      `금일 매수 ${formatQuantity(row.thdt_buyqty)}주 / 매도 ${formatQuantity(row.thdt_sll_qty)}주`;
-    return [
-      `${index + 1}. ${row.prdt_name || "-"} (${row.pdno || "-"}) · ${row.trad_dvsn_name || "-"}`,
-      `   보유 ${formatQuantity(row.hldg_qty)}주 | 현재가 ${formatWon(row.prpr)} | 평가 ${formatWon(row.evlu_amt)}`,
-      `   평가손익 ${formatWon(row.evlu_pfls_amt)} (${formatPercent(row.evlu_pfls_rt)}) | 매입가 ${formatWon(row.pchs_avg_pric)}`,
-      `   ${dayTrade} | 전일대비 ${row.bfdy_cprs_icdc ?? "-"} (${formatPercent(row.fltt_rt)})`,
-    ].join("\n");
-  });
-
-  return `
-[주식잔고조회_실현손익]${stockLabel ? ` / ${stockLabel}` : ""}
-- 조회 TR: ${trId} (v1_국내주식-041, inquire-balance-rlz-pl)
-- 종목 수: ${rows.length} (${pages}회 API 호출, 연속조회 포함)
-
-${summaryBlock}
-
-[보유 종목]
-${lines.join("\n\n")}
-  `.trim();
-}
-
 async function getBalanceRlzPl({ stock_name: stockName } = {}) {
-  if (KIS_URL?.includes("openapivts")) {
+  if (isPaperTradingKisUrl(KIS_URL)) {
     const balanceText = await getBalance();
     const note =
       "\n\n[안내] 모의투자(openapivts) 계좌는 실현손익 TR(v1_국내주식-041)을 지원하지 않아 잔고 요약으로 대체했습니다.";
