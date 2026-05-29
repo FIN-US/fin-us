@@ -10,7 +10,7 @@ interface RecordsPanelProps {
   diarySaveLoading: boolean;
   diaryGenerateLoading: boolean;
   showAllDiaries: boolean;
-  onSubmitDiary: (title: string, content: string) => Promise<void>;
+  onSubmitDiary: (title: string, content: string) => Promise<boolean>;
   onLoadPastDiaries: () => Promise<void>;
   onGenerateDiaryViaNat: () => Promise<{ title: string; content: string } | null>;
 }
@@ -49,7 +49,8 @@ const RecordsPanel: React.FC<RecordsPanelProps> = ({
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
-    await onSubmitDiary(title, content);
+    const saved = await onSubmitDiary(title, content);
+    if (!saved) return;
     setTitle('');
     setContent('');
     setSelectedDiaryId(undefined);
@@ -154,7 +155,7 @@ const RecordsPanel: React.FC<RecordsPanelProps> = ({
               className="inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2.5 text-sm font-black text-white disabled:bg-slate-300"
             >
               {diaryGenerateLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
-              {diaryGenerateLoading ? 'NAT 작성·저장 중…' : 'AI 매매일지 작성·저장 (NAT)'}
+              {diaryGenerateLoading ? 'NAT 작성·저장 중…' : 'AI 매매일지 작성·저장'}
             </button>
             <button
               type="button"
@@ -169,8 +170,8 @@ const RecordsPanel: React.FC<RecordsPanelProps> = ({
         </div>
 
         <p className="mb-4 text-xs text-slate-500">
-          「AI 매매일지 작성·저장」은 finus-nat의 diary_agent가 KIS MCP로 조회한 뒤 finus-save-diary로 DB에 저장합니다.
-          finus-nat(기본 localhost:8001)이 떠 있어야 합니다.
+          「AI 매매일지 작성·저장」은 finus-nat diary_agent가 mcp-trading으로 초안을 만든 뒤, 이 화면에서 backend DB에 저장합니다.
+          finus-nat(기본 localhost:8001)과 backend(8000)가 떠 있어야 합니다.
         </p>
 
         <form onSubmit={submit} className="grid grid-cols-1 lg:grid-cols-[240px_1fr_auto] gap-3 mb-5">
@@ -198,7 +199,7 @@ const RecordsPanel: React.FC<RecordsPanelProps> = ({
 
         <p className="mb-3 text-xs text-slate-500">
           {showAllDiaries
-            ? `저장된 일지 ${resources.diaries.length}건 · 카드를 클릭하면 편집란에 불러옵니다.`
+            ? `저장된 일지 ${resources.diaries.length}건 · 카드를 클릭하면 내용을 불러옵니다. 수정 후 「저장」하면 새 일지가 추가됩니다.`
             : `최근 ${visibleDiaries.length}건 미리보기 · 전체 목록은 「과거 매매일지 가져오기」를 누르세요.`}
         </p>
 

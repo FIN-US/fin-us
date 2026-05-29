@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { apiErrorMessage, finUsApi } from '../api';
-import { runDiaryAgentAndSave } from '../natApi';
+import { runDiaryAgentDraft } from '../natApi';
 import type { AnalysisReport, ChatMessage, DashboardResources, DiaryItem } from '../types';
 
 const initialResources: DashboardResources = {
@@ -122,8 +122,8 @@ export function useFinUsDashboard() {
   );
 
   const submitDiary = useCallback(
-    async (title: string, content: string) => {
-      if (!title.trim() || !content.trim()) return;
+    async (title: string, content: string): Promise<boolean> => {
+      if (!title.trim() || !content.trim()) return false;
       setDiarySaveLoading(true);
       setError('');
       try {
@@ -133,8 +133,10 @@ export function useFinUsDashboard() {
           return { ...current, diaries: [diary, ...rest] };
         });
         setShowAllDiaries(true);
+        return true;
       } catch (err: unknown) {
         setError(apiErrorMessage(err));
+        return false;
       } finally {
         setDiarySaveLoading(false);
       }
@@ -160,11 +162,18 @@ export function useFinUsDashboard() {
     setDiaryGenerateLoading(true);
     setError('');
     try {
-      const { text, title } = await runDiaryAgentAndSave();
-      const diaries = await finUsApi.diaries();
-      setResources((current) => ({ ...current, diaries }));
+      const { text, title: suggestedTitle } = await runDiaryAgentDraft();
+      const content = text.trim();
+      if (!content) {
+        throw new Error('NAT diary_agent가 빈 초안을 반환했습니다.');
+      }
+      const diary = await finUsApi.createDiary(suggestedTitle.trim(), content);
+      setResources((current) => {
+        const rest = current.diaries.filter((item) => item.id !== diary.id);
+        return { ...current, diaries: [diary, ...rest] };
+      });
       setShowAllDiaries(true);
-      return { title, content: text };
+      return { title: diary.title, content: diary.content };
     } catch (err: unknown) {
       setError(apiErrorMessage(err));
       return null;

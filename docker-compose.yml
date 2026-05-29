@@ -58,6 +58,11 @@ services:
       - "8001:8000"
     volumes:
       - .:/workspace
+      # 이미지 빌드 시 설치한 node_modules·venv가 bind mount에 가려지지 않도록 보존
+      - /workspace/finus_nat/.venv
+      - /workspace/mcp-news/node_modules
+      - /workspace/mcp-trading/node_modules
+      - /workspace/mcp-dart/node_modules
     env_file:
       - ./.env
     environment:

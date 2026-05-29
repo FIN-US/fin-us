@@ -23,7 +23,8 @@ function extractAssistantText(data: unknown): string {
   return JSON.stringify(data, null, 2);
 }
 
-export async function runDiaryAgentAndSave(): Promise<{ text: string; title: string; conversationId: string }> {
+/** NAT diary_agent로 초안만 생성합니다. DB 저장은 호출 측에서 backend API로 수행하세요. */
+export async function runDiaryAgentDraft(): Promise<{ text: string; title: string; conversationId: string }> {
   const conversationId = crypto.randomUUID();
   const title = todayKstTitle();
 

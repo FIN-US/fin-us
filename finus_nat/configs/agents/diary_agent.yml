@@ -50,7 +50,8 @@ functions:
     additional_instructions: |
       === 도구 사용 순서 ===
       1.`mcp-trading-today-orders`를 사용하여 당일주문내역을 가져옵니다. 해당 조건의 주문·체결이 없다면 2번으로 바로 넘어가세요
-        당일 주문 내역이 있다면 'mcp-trading-balance-rlz-pl'를 사용하여 실현손익과 평가손익을 가져옵니다.
+        당일 주문 내역이 있다면 `mcp-trading-balance-rlz-pl`로 실현·평가 손익을 조회합니다.
+        모의투자(KIS_URL에 openapivts)이거나 해당 도구가 실전 전용 오류를 반환하면 `mcp-trading-get-balance`로 대체하세요.
         tool 호출 결과로 매매일지 초안을 작성합니다. 초안은 종목명, 거래금액, 변동율, 매매 구분, 실현손익 순서로 작성하고 사용자 의견을 적을 공간을 남깁니다.
 
       2. 당일 거래내역이 없다면 `mcp-trading-get-balance`로 계좌·보유종목 요약을 조회합니다.

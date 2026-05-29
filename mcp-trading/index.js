@@ -519,12 +519,33 @@ async function fetchAllBalanceRlzPl() {
   return { rows, summary, pages, trId: BALANCE_RLZ_PL_TR_ID };
 }
 
+function formatBalanceRlzPlSummaryBlock(summary) {
+  if (!summary) {
+    return "";
+  }
+  return `
+[계좌 집계]
+- 예수금: ${formatWon(summary.dnca_tot_amt)}
+- 총평가금액: ${formatWon(summary.tot_evlu_amt)} | 순자산: ${formatWon(summary.nass_amt)}
+- 매입합계: ${formatWon(summary.pchs_amt_smtl_amt)} | 평가손익합계: ${formatWon(summary.evlu_pfls_smtl_amt)}
+- 실현손익: ${formatWon(summary.rlzt_pfls)} (${formatPercent(summary.rlzt_erng_rt)})
+- 실평가손익: ${formatWon(summary.real_evlu_pfls)} (${formatPercent(summary.real_evlu_pfls_erng_rt)})
+- 금일 매수/매도: ${formatWon(summary.thdt_buy_amt)} / ${formatWon(summary.thdt_sll_amt)}
+  `.trim();
+}
+
 function formatBalanceRlzPlReport({ rows, summary, pages, trId, stockLabel }) {
+  const summaryBlock = formatBalanceRlzPlSummaryBlock(summary);
+
   if (rows.length === 0) {
+    const holdingsNote = stockLabel
+      ? `- ${stockLabel} 보유 종목이 없습니다.`
+      : "- 보유 종목이 없습니다.";
     return `
 [주식잔고조회_실현손익]${stockLabel ? ` / ${stockLabel}` : ""}
 - 조회 TR: ${trId} (v1_국내주식-041, inquire-balance-rlz-pl)
-- 보유 종목이 없습니다.
+${holdingsNote}
+${summaryBlock ? `\n${summaryBlock}` : ""}
     `.trim();
   }
 
@@ -539,18 +560,6 @@ function formatBalanceRlzPlReport({ rows, summary, pages, trId, stockLabel }) {
     ].join("\n");
   });
 
-  const summaryBlock = summary
-    ? `
-[계좌 집계]
-- 예수금: ${formatWon(summary.dnca_tot_amt)}
-- 총평가금액: ${formatWon(summary.tot_evlu_amt)} | 순자산: ${formatWon(summary.nass_amt)}
-- 매입합계: ${formatWon(summary.pchs_amt_smtl_amt)} | 평가손익합계: ${formatWon(summary.evlu_pfls_smtl_amt)}
-- 실현손익: ${formatWon(summary.rlzt_pfls)} (${formatPercent(summary.rlzt_erng_rt)})
-- 실평가손익: ${formatWon(summary.real_evlu_pfls)} (${formatPercent(summary.real_evlu_pfls_erng_rt)})
-- 금일 매수/매도: ${formatWon(summary.thdt_buy_amt)} / ${formatWon(summary.thdt_sll_amt)}
-    `.trim()
-    : "";
-
   return `
 [주식잔고조회_실현손익]${stockLabel ? ` / ${stockLabel}` : ""}
 - 조회 TR: ${trId} (v1_국내주식-041, inquire-balance-rlz-pl)
@@ -564,6 +573,13 @@ ${lines.join("\n\n")}
 }
 
 async function getBalanceRlzPl({ stock_name: stockName } = {}) {
+  if (KIS_URL?.includes("openapivts")) {
+    const balanceText = await getBalance();
+    const note =
+      "\n\n[안내] 모의투자(openapivts) 계좌는 실현손익 TR(v1_국내주식-041)을 지원하지 않아 잔고 요약으로 대체했습니다.";
+    return `${balanceText}${note}`;
+  }
+
   const result = await fetchAllBalanceRlzPl();
   let { rows } = result;
   let stockLabel = "";
