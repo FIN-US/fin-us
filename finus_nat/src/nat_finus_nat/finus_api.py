@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import re
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
@@ -381,6 +382,23 @@ class FinusSaveDiaryInput(FinusReactToolInput):
     title: str = Field(default="", description="일지 제목.")
     content: str = Field(default="", description="일지 본문.")
 
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_whole_string_payload(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            return data
+        if isinstance(data, str):
+            if not data.strip():
+                return {}
+            parsed = _parse_save_diary_action_input(data)
+            if parsed is None:
+                raise ValueError(
+                    "finus-save-diary Action Input: JSON 객체 또는 "
+                    '{"title":"...","content":"..."} 형식이 필요합니다.'
+                )
+            return parsed
+        return data
+
 
 class FinusListDiariesInput(FinusReactToolInput):
     placeholder: str = Field(default="", description="호환용. 비워도 됩니다.")
@@ -397,8 +415,61 @@ def _parse_leading_json_object(text: str) -> dict[str, Any] | None:
     i = t.find("{")
     if i < 0:
         return None
-    obj, _end = json.JSONDecoder().raw_decode(t[i:])
+    try:
+        obj, _end = json.JSONDecoder().raw_decode(t[i:])
+    except json.JSONDecodeError:
+        return None
     return obj if isinstance(obj, dict) else None
+
+
+def _unescape_json_string_fragment(value: str) -> str:
+    return (
+        value.replace("\\n", "\n")
+        .replace("\\r", "\r")
+        .replace("\\t", "\t")
+        .replace('\\"', '"')
+        .replace("\\\\", "\\")
+    )
+
+
+def _parse_save_diary_action_input(text: str) -> dict[str, str] | None:
+    """ReAct Action Input — 일지 본문에 따옴표·줄바꿈이 있어도 title/content 추출."""
+    t = (text or "").strip()
+    if not t:
+        return {"title": "", "content": ""}
+
+    parsed = _parse_leading_json_object(t)
+    if parsed is not None and ("title" in parsed or "content" in parsed):
+        return {
+            "title": "" if parsed.get("title") is None else str(parsed["title"]),
+            "content": "" if parsed.get("content") is None else str(parsed["content"]),
+        }
+
+    title_m = re.search(r'"title"\s*:\s*"((?:\\.|[^"\\])*)"', t)
+    title = _unescape_json_string_fragment(title_m.group(1)) if title_m else ""
+
+    content_m = re.search(r'"content"\s*:\s*"', t)
+    if not content_m:
+        return None
+
+    start = content_m.end()
+    end = len(t)
+    for suffix in ('"}', '"\n}', '" \n}'):
+        idx = t.rfind(suffix)
+        if idx > start:
+            end = idx
+            break
+    else:
+        last_quote = t.rfind('"', start)
+        if last_quote > start:
+            end = last_quote
+
+    content = _unescape_json_string_fragment(t[start:end])
+    return {"title": title, "content": content}
+
+
+def _finus_save_diary_input_converter(value: str) -> BaseModel:
+    return FinusSaveDiaryInput.model_validate(value)
 
 
 def _finus_react_input_converter(model_cls: type[BaseModel]) -> Callable[[str], BaseModel]:
@@ -857,7 +928,7 @@ async def finus_save_diary(config: FinusSaveDiaryConfig, _builder: Builder):
         save_trading_diary,
         description=save_trading_diary.__doc__,
         input_schema=FinusSaveDiaryInput,
-        converters=[_finus_react_input_converter(FinusSaveDiaryInput)],
+        converters=[_finus_save_diary_input_converter],
     )
 
 

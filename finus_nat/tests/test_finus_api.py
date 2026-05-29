@@ -69,6 +69,25 @@ def test_finus_react_input_converter_maps_str_to_model():
     assert inp.ccld_dvsn == "01"
 
 
+def test_save_diary_input_parses_broken_json_with_quotes_in_content():
+    raw = (
+        '{"title":"매매일지 2026-05-29","content":"[초안]\\n- 사용자 의견: " "}'
+    )
+    inp = finus_api.FinusSaveDiaryInput.model_validate(raw)
+    assert inp.title == "매매일지 2026-05-29"
+    assert "사용자 의견" in inp.content
+    assert inp.content.startswith("[초안]")
+
+
+def test_save_diary_input_converter_accepts_multiline_content():
+    convert = finus_api._finus_save_diary_input_converter
+    inp = convert(
+        '{"title":"T","content":"line1\\nline2"}',
+    )
+    assert inp.title == "T"
+    assert inp.content == "line1\nline2"
+
+
 def test_save_trading_diary_posts_to_backend(monkeypatch):
     captured = {}
 
