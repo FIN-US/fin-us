@@ -176,7 +176,7 @@ export function useFinUsDashboard() {
         return { ...current, diaries: [diary, ...rest] };
       });
       setShowAllDiaries(true);
-      return { title: diary.title, content: diary.content };
+      return { id: diary.id as number | undefined, title: diary.title, content: diary.content };
     } catch (err: unknown) {
       setError(apiErrorMessage(err));
       return null;

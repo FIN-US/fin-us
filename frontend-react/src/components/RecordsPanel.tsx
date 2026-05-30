@@ -12,7 +12,7 @@ interface RecordsPanelProps {
   showAllDiaries: boolean;
   onSubmitDiary: (title: string, content: string, existingId?: number) => Promise<boolean>;
   onLoadPastDiaries: () => Promise<void>;
-  onGenerateDiaryViaNat: () => Promise<{ title: string; content: string } | null>;
+  onGenerateDiaryViaNat: () => Promise<{ id: number | undefined; title: string; content: string } | null>;
 }
 
 function formatDiaryDate(value?: string) {
@@ -66,7 +66,7 @@ const RecordsPanel: React.FC<RecordsPanelProps> = ({
     if (!draft) return;
     setTitle(draft.title);
     setContent(draft.content);
-    setSelectedDiaryId(undefined);
+    setSelectedDiaryId(draft.id);
   };
 
   const selectDiary = (item: DiaryItem) => {
