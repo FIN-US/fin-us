@@ -109,22 +109,16 @@ def _react_system_prompt_for_tools(tools) -> str:
     return _FINUS_REACT_PROMPT_HEAD + body + _FINUS_REACT_PROMPT_TAIL
 
 
-# 레거시 참조용 (패치 전 기본값).
-_FINUS_REACT_SYSTEM_PROMPT = _react_system_prompt_for_tools([])
-
-
 # 주어진 tools 목록에 strict 대상 도구(_STRICT_TOOL_SUBSTR)가 포함되어 있는지 판별한다.
 def _strict_data_tools(tools) -> bool:
     names = " ".join(getattr(t, "name", "") for t in (tools or [])).lower()
     return any(s in names for s in _STRICT_TOOL_SUBSTR)
 
 
-# NAT ReAct 모듈의 SYSTEM_PROMPT를 위의 _FINUS_REACT_SYSTEM_PROMPT로 변경합니다
+# NAT ReAct 모듈에 도구별 프롬프트 선택 함수를 등록합니다.
 def _patch_react_system_prompt(ra_mod) -> None:
-    # 이미 패치된 모듈이면 중복 적용하지 않는다.
     if getattr(ra_mod, "_finus_system_prompt_patched", False):
         return
-    ra_mod.SYSTEM_PROMPT = _FINUS_REACT_SYSTEM_PROMPT
     ra_mod._finus_react_prompt_for_tools = _react_system_prompt_for_tools  # type: ignore[attr-defined]
     ra_mod._finus_system_prompt_patched = True
 
