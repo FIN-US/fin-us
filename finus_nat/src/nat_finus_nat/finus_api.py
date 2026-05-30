@@ -2,11 +2,9 @@ import asyncio
 import json
 import os
 from contextlib import asynccontextmanager
-from datetime import datetime
 from pathlib import Path
 from collections.abc import Callable
 from typing import Any, Literal, TypeAlias
-from zoneinfo import ZoneInfo
 
 import httpx
 from mcp import ClientSession
@@ -301,12 +299,6 @@ class FinusMcpTradingBalanceRlzPlConfig(FinusMcpTradingConfig, name="finus_mcp_t
 
 class FinusMcpTradingGetBalanceConfig(FinusMcpTradingConfig, name="finus_mcp_trading_get_balance"):
     """mcp-trading ``get_balance`` — 계좌 잔고·보유종목 요약 (inquire-balance, 연속조회)."""
-
-
-class FinusKisDailyTradesConfig(FunctionBaseConfig, name="finus_kis_daily_trades"):
-    """KIS HTTP Open API로 당일(KST) 국내주식 주문/체결 내역 조회 (MCP 미사용)."""
-
-    timeout_sec: float = Field(default=120.0, ge=5.0, le=600.0)
 
 
 class FinusSaveDiaryConfig(FunctionBaseConfig, name="finus_save_diary"):
@@ -702,121 +694,6 @@ async def finus_mcp_trading_balance_rlz_pl(config: FinusMcpTradingBalanceRlzPlCo
         input_schema=FinusMcpTradingStockNameInput,
         converters=[_finus_react_input_converter(FinusMcpTradingStockNameInput)],
     )
-
-
-# ---------- KIS HTTP (no MCP) ----------
-
-
-# KIS Open API에서 access_token을 발급받습니다(클라이언트 자격증명 그랜트).
-async def _kis_issue_access_token(*, base_url: str, app_key: str, app_secret: str, timeout: float) -> str:
-    token_url = f"{base_url.rstrip('/')}/oauth2/tokenP"
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        resp = await client.post(
-            token_url,
-            json={"grant_type": "client_credentials", "appkey": app_key, "appsecret": app_secret},
-        )
-        resp.raise_for_status()
-        body = resp.json()
-        token = body.get("access_token")
-        if not token:
-            raise RuntimeError(str(body.get("msg1") or body))
-        return str(token)
-
-
-# 일별 주문체결 조회용 TR_ID를 환경변수와 모의투자 플래그에 따라 결정합니다.
-def _kis_tr_id_daily_ccld() -> str:
-    override = (os.getenv("FINUS_KIS_TR_ID_DAILY_CCLD") or "").strip()
-    if override:
-        return override
-    paper = (os.getenv("FINUS_KIS_PAPER") or "").lower() in ("1", "true", "yes", "y")
-    return "VTTC8001R" if paper else "TTTC8001R"
-
-
-# 당일(KST) 국내주식 주문/체결 내역을 KIS Open API로 조회하는 NAT 함수로 등록합니다.
-@register_function(config_type=FinusKisDailyTradesConfig)
-async def finus_kis_daily_trades(config: FinusKisDailyTradesConfig, _builder: Builder):
-
-    # 환경변수 + 토큰 발급 + 일별주문체결 GET을 수행하고 결과 JSON을 반환합니다.
-    async def get_today_domestic_trade_history(placeholder: str = "") -> str:
-        """한국투자 Open API(HTTP)로 당일(KST 기준) 국내주식 일별주문체결 내역을 조회합니다.
-
-        ``placeholder``는 NAT 도구 스키마 호환용이며 조회에 사용하지 않습니다.
-        MCP가 아니라 ``KIS_URL``·``KIS_API_KEY``·``KIS_API_SECRET``·``KIS_ACCOUNT_NO`` 환경 변수를 사용합니다.
-        모의투자는 ``FINUS_KIS_PAPER=true`` 또는 ``FINUS_KIS_TR_ID_DAILY_CCLD`` 로 TR_ID를 직접 지정하세요.
-
-        Returns:
-            JSON 문자열. 성공 시 ``output1``(체결·주문 내역 배열), ``output2``(집계) 및 조회일 ``as_of_kst_date``.
-        """
-        kis_url = (os.getenv("KIS_URL") or "").strip().rstrip("/")
-        api_key = (os.getenv("KIS_API_KEY") or "").strip()
-        api_secret = (os.getenv("KIS_API_SECRET") or "").strip()
-        account_no = (os.getenv("KIS_ACCOUNT_NO") or "").strip()
-
-        if not all([kis_url, api_key, api_secret, account_no]):
-            return _err_json(
-                "kis_env_missing",
-                hint="Set KIS_URL, KIS_API_KEY, KIS_API_SECRET, KIS_ACCOUNT_NO (10 digits: 8+2).",
-            )
-        if len(account_no) != 10 or not account_no.isdigit():
-            return _err_json("kis_invalid_account", detail="KIS_ACCOUNT_NO must be 10 digits.")
-
-        today_kst = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y%m%d")
-        tr_id = _kis_tr_id_daily_ccld()
-        token_timeout = min(60.0, float(config.timeout_sec))
-
-        token = await _kis_issue_access_token(
-            base_url=kis_url, app_key=api_key, app_secret=api_secret, timeout=token_timeout)
-
-        path = "/uapi/domestic-stock/v1/trading/inquire-daily-ccld"
-        params: dict[str, str] = {
-            "CANO": account_no[0:8],
-            "ACNT_PRDT_CD": account_no[8:10],
-            "INQR_STRT_DT": today_kst,
-            "INQR_END_DT": today_kst,
-            "SLL_BUY_DVSN_CD": "00",
-            "INQR_DVSN": "01",
-            "PDNO": "",
-            "CCLD_DVSN": "00",
-            "ORD_GNO_BRNO": "",
-            "ODNO": "",
-            "INQR_DVSN_3": "00",
-            "INQR_DVSN_1": "",
-            "CTX_AREA_FK100": "",
-            "CTX_AREA_NK100": "",
-        }
-        headers = {
-            "Content-Type": "application/json",
-            "authorization": f"Bearer {token}",
-            "appkey": api_key,
-            "appsecret": api_secret,
-            "tr_id": tr_id,
-            "custtype": "P",
-        }
-
-        async with httpx.AsyncClient(timeout=config.timeout_sec) as client:
-            resp = await client.get(f"{kis_url}{path}", headers=headers, params=params)
-            resp.raise_for_status()
-            data = resp.json()
-
-        if data.get("rt_cd") != "0":
-            return _err_json(
-                "kis_api_error",
-                rt_cd=data.get("rt_cd"),
-                msg_cd=data.get("msg_cd"),
-                msg1=data.get("msg1"),
-            )
-
-        return json.dumps(
-            {
-                "as_of_kst_date": today_kst,
-                "tr_id": tr_id,
-                "output1": data.get("output1"),
-                "output2": data.get("output2"),
-            },
-            ensure_ascii=False,
-        )
-
-    yield FunctionInfo.from_fn(get_today_domestic_trade_history, description=get_today_domestic_trade_history.__doc__)
 
 
 @register_function(config_type=FinusSaveDiaryConfig)

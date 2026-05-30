@@ -21,7 +21,6 @@ from nat_finus_nat import finus_api
 _STRICT_TOOL_SUBSTR = (
     "kis-trading-mcp-tool",
     "finus_account_balance",
-    "kis-api-daily-trades",
     "mcp-trading",
     "finus_mcp_trading",
     "mcp-news",

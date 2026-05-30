@@ -448,17 +448,8 @@ async function getTodayDailyOrders({
   return formatDailyOrderCcldReport({ ...result, stockLabel });
 }
 
-function assertRealAccountForBalanceRlzPl() {
-  if (KIS_URL?.includes("openapivts")) {
-    throw new Error(
-      "주식잔고조회_실현손익(v1_국내주식-041)은 KIS 모의투자 API를 지원하지 않습니다. 실전 KIS_URL을 사용하세요.",
-    );
-  }
-}
-
 async function fetchAllBalanceRlzPl() {
   requireKisCredentials({ accountRequired: true });
-  assertRealAccountForBalanceRlzPl();
 
   const baseParams = {
     CANO: KIS_ACCOUNT_NO.substring(0, 8),
