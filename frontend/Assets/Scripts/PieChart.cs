@@ -51,16 +51,16 @@ public class PieChart : MonoBehaviour
             float height = Mathf.Clamp(Mathf.Abs(h.return_rate) * heightScale, 0f, maxHeight);
             float yOffset = h.return_rate >= 0 ? 0f : -height;
 
-            GameObject slice = CreateSlice(h.name, startAngle, angle, height, yOffset, h.return_rate);
+            GameObject slice = CreateSlice(h, startAngle, angle, height, yOffset);
             CreateLabel(slice.transform, h.name, startAngle + angle * 0.5f, yOffset + height, weight, i);
             slices.Add(slice);
             startAngle += angle;
         }
     }
 
-    GameObject CreateSlice(string name, float startAngle, float angle, float height, float yOffset, float returnRate)
+    GameObject CreateSlice(Holding holding, float startAngle, float angle, float height, float yOffset)
     {
-        GameObject obj = new GameObject(name);
+        GameObject obj = new GameObject(holding.name);
         obj.transform.SetParent(transform, false);
 
         int steps = Mathf.Max(3, Mathf.RoundToInt(angle));
@@ -87,6 +87,12 @@ public class PieChart : MonoBehaviour
 
         obj.AddComponent<MeshFilter>().mesh = mesh;
 
+        MeshCollider meshCollider = obj.AddComponent<MeshCollider>();
+        meshCollider.sharedMesh = mesh;
+
+        PieSliceClickHandler clickHandler = obj.AddComponent<PieSliceClickHandler>();
+        clickHandler.Initialize(holding);
+
         MeshRenderer meshRenderer = obj.AddComponent<MeshRenderer>();
         if (sliceMaterial == null)
         {
@@ -97,7 +103,7 @@ public class PieChart : MonoBehaviour
         meshRenderer.sharedMaterial = sliceMaterial;
         propertyBlock ??= new MaterialPropertyBlock();
         propertyBlock.Clear();
-        Color sliceColor = GetColor(returnRate);
+        Color sliceColor = GetColor(holding.return_rate);
         propertyBlock.SetColor(BaseColorId, sliceColor);
         propertyBlock.SetColor(ColorId, sliceColor);
         meshRenderer.SetPropertyBlock(propertyBlock);
