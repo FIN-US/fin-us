@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { apiErrorMessage, finUsApi } from '../api';
-import { runDiaryAgentDraft } from '../natApi';
-import type { AnalysisReport, ChatMessage, DashboardResources, DiaryItem } from '../types';
+import type { AnalysisReport, ChatMessage, DashboardResources } from '../types';
 
 const initialResources: DashboardResources = {
   health: null,
@@ -31,10 +30,6 @@ export function useFinUsDashboard() {
   const [provider, setProvider] = useState('openai');
   const [loading, setLoading] = useState(false);
   const [resourceLoading, setResourceLoading] = useState(false);
-  const [diaryListLoading, setDiaryListLoading] = useState(false);
-  const [diarySaveLoading, setDiarySaveLoading] = useState(false);
-  const [diaryGenerateLoading, setDiaryGenerateLoading] = useState(false);
-  const [showAllDiaries, setShowAllDiaries] = useState(false);
   const [report, setReport] = useState<AnalysisReport | null>(null);
   const [rawNews, setRawNews] = useState<string[]>([]);
   const [rawTrend, setRawTrend] = useState<string | null>(null);
@@ -122,65 +117,21 @@ export function useFinUsDashboard() {
   );
 
   const submitDiary = useCallback(
-    async (title: string, content: string): Promise<boolean> => {
-      if (!title.trim() || !content.trim()) return false;
-      setDiarySaveLoading(true);
+    async (title: string, content: string) => {
+      if (!title.trim() || !content.trim()) return;
+      setResourceLoading(true);
       setError('');
       try {
         const diary = await finUsApi.createDiary(title.trim(), content.trim());
-        setResources((current) => {
-          const rest = current.diaries.filter((item) => item.id !== diary.id);
-          return { ...current, diaries: [diary, ...rest] };
-        });
-        setShowAllDiaries(true);
-        return true;
+        setResources((current) => ({ ...current, diaries: [diary, ...current.diaries] }));
       } catch (err: unknown) {
         setError(apiErrorMessage(err));
-        return false;
       } finally {
-        setDiarySaveLoading(false);
+        setResourceLoading(false);
       }
     },
     [],
   );
-
-  const loadPastDiaries = useCallback(async () => {
-    setDiaryListLoading(true);
-    setError('');
-    try {
-      const diaries = await finUsApi.diaries();
-      setResources((current) => ({ ...current, diaries }));
-      setShowAllDiaries(true);
-    } catch (err: unknown) {
-      setError(apiErrorMessage(err));
-    } finally {
-      setDiaryListLoading(false);
-    }
-  }, []);
-
-  const generateDiaryViaNat = useCallback(async () => {
-    setDiaryGenerateLoading(true);
-    setError('');
-    try {
-      const { text, title: suggestedTitle } = await runDiaryAgentDraft();
-      const content = text.trim();
-      if (!content) {
-        throw new Error('NAT diary_agent가 빈 초안을 반환했습니다.');
-      }
-      const diary = await finUsApi.createDiary(suggestedTitle.trim(), content);
-      setResources((current) => {
-        const rest = current.diaries.filter((item) => item.id !== diary.id);
-        return { ...current, diaries: [diary, ...rest] };
-      });
-      setShowAllDiaries(true);
-      return { title: diary.title, content: diary.content };
-    } catch (err: unknown) {
-      setError(apiErrorMessage(err));
-      return null;
-    } finally {
-      setDiaryGenerateLoading(false);
-    }
-  }, []);
 
   const sendChatMessage = useCallback((text: string) => {
     const message = text.trim();
@@ -236,10 +187,6 @@ export function useFinUsDashboard() {
     setProvider,
     loading,
     resourceLoading,
-    diaryListLoading,
-    diarySaveLoading,
-    diaryGenerateLoading,
-    showAllDiaries,
     report,
     rawNews,
     rawTrend,
@@ -251,8 +198,6 @@ export function useFinUsDashboard() {
     handleFetchData,
     loadResources,
     submitDiary,
-    loadPastDiaries,
-    generateDiaryViaNat,
     sendChatMessage,
   };
 }
