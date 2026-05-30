@@ -36,6 +36,22 @@ test("createOrderDedupKey normalizes equivalent order arguments", () => {
   assert.equal(first, second);
 });
 
+test("createOrderDedupKey ignores original price for market orders", () => {
+  const baseOrder = {
+    accountNo: "1234567801",
+    orderEnv: "demo",
+    stockCode: "005930",
+    side: "BUY",
+    quantity: 1,
+    orderType: "MARKET",
+  };
+
+  assert.equal(
+    createOrderDedupKey({ ...baseOrder, price: 0 }),
+    createOrderDedupKey({ ...baseOrder, price: 50_000 }),
+  );
+});
+
 test("OrderDedupStore blocks duplicate reservations before TTL expires", () => {
   const store = new OrderDedupStore({
     filePath: tempLedgerPath(),

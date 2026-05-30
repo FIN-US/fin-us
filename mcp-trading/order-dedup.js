@@ -23,14 +23,15 @@ export function createOrderDedupKey({
   price,
   orderType,
 }) {
+  const normalizedOrderType = String(orderType ?? "LIMIT").trim().toUpperCase();
   const payload = {
     accountNo: String(accountNo ?? "").trim(),
     orderEnv: String(orderEnv ?? "demo").trim().toLowerCase(),
     stockCode: String(stockCode ?? "").trim(),
     side: String(side ?? "").trim().toUpperCase(),
     quantity: String(quantity ?? "").trim(),
-    price: String(price ?? 0).trim(),
-    orderType: String(orderType ?? "LIMIT").trim().toUpperCase(),
+    price: normalizedOrderType === "MARKET" ? "0" : String(price ?? 0).trim(),
+    orderType: normalizedOrderType,
   };
 
   return crypto.createHash("sha256").update(JSON.stringify(payload)).digest("hex");
