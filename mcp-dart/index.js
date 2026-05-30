@@ -4,12 +4,9 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import AdmZip from "adm-zip";
 import { XMLParser } from "fast-xml-parser";
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import {
-  CallToolRequestSchema,
-  ListToolsRequestSchema,
-} from "@modelcontextprotocol/sdk/types.js";
+import { z } from "zod";
 
 console.log = console.error;
 
@@ -52,10 +49,7 @@ function loadRootEnv() {
 
 loadRootEnv();
 
-const server = new Server(
-  { name: "mcp-dart", version: "1.0.0" },
-  { capabilities: { tools: {} } },
-);
+const server = new McpServer({ name: "mcp-dart", version: "1.0.0" });
 
 function isMissingCredential(value) {
   const normalized = String(value ?? "").trim();
@@ -380,50 +374,31 @@ async function getDisclosureSignal(stockName) {
   return formatDisclosureSignal(corp, window, disclosures, majorStocks, eleStocks);
 }
 
-server.setRequestHandler(ListToolsRequestSchema, async () => ({
-  tools: [
-    {
-      name: "get_disclosure_signal",
-      description: "OpenDART 공식 API로 5% 룰 및 임원/주요주주 지분공시 signal을 조회합니다.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          stock_name: {
-            type: "string",
-            description: "주식 종목명 또는 6자리 종목코드",
-          },
-        },
-        required: ["stock_name"],
-      },
-    },
-  ],
-}));
+server.registerTool(
+  "get_disclosure_signal",
+  {
+    description: "OpenDART 공식 API로 5% 룰 및 임원/주요주주 지분공시 signal을 조회합니다.",
+    inputSchema: z.object({
+      stock_name: z.string().describe("주식 종목명 또는 6자리 종목코드"),
+    }),
+  },
+  async (args) => {
+    const stockName = args?.stock_name;
+    if (!stockName) {
+      return {
+        content: [{ type: "text", text: "에러: stock_name 파라미터가 누락되었습니다." }],
+        isError: true,
+      };
+    }
 
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  const { name, arguments: args } = request.params;
-
-  if (name !== "get_disclosure_signal") {
-    return {
-      content: [{ type: "text", text: "에러: 존재하지 않는 도구입니다." }],
-      isError: true,
-    };
-  }
-
-  const stockName = args?.stock_name;
-  if (!stockName) {
-    return {
-      content: [{ type: "text", text: "에러: stock_name 파라미터가 누락되었습니다." }],
-      isError: true,
-    };
-  }
-
-  try {
-    const signal = await getDisclosureSignal(stockName);
-    return { content: [{ type: "text", text: signal }] };
-  } catch (error) {
-    return { content: [{ type: "text", text: `에러 발생: ${error.message}` }], isError: true };
-  }
-});
+    try {
+      const signal = await getDisclosureSignal(stockName);
+      return { content: [{ type: "text", text: signal }] };
+    } catch (error) {
+      return { content: [{ type: "text", text: `에러 발생: ${error.message}` }], isError: true };
+    }
+  },
+);
 
 const transport = new StdioServerTransport();
 await server.connect(transport);

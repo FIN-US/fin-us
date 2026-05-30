@@ -1,0 +1,98 @@
+name: CI
+
+# PR과 main 푸시에서 검증을 자동 실행한다.
+# main 직접 푸시는 브랜치 보호로 막혀 있으므로 push 트리거는 사실상 머지 시점에만 발화한다.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# 동일 브랜치에서 새 푸시가 일어나면 이전 실행을 취소해 자원을 절약한다.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend-test:
+    name: Backend pytest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: uv 설치 (자체 캐시 활성화)
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Python 3.13 설치
+        run: uv python install 3.13
+
+      - name: backend 의존성 동기화
+        run: uv sync --project backend
+
+      - name: backend 테스트 실행
+        run: uv run --project backend pytest backend/tests/
+
+  nat-test:
+    name: finus_nat pytest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: uv 설치 (자체 캐시 활성화)
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Python 3.13 설치
+        run: uv python install 3.13
+
+      - name: finus_nat 의존성 동기화
+        run: uv sync --project finus_nat
+
+      - name: finus_nat 테스트 실행
+        run: uv run --project finus_nat pytest finus_nat/tests/
+
+  frontend-typecheck:
+    name: Frontend tsc --noEmit
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend-react
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Node 24 설치 (npm 캐시 활성화)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+          cache-dependency-path: frontend-react/package-lock.json
+
+      - name: npm 의존성 설치
+        run: npm ci
+
+      - name: 타입 체크
+        run: npx tsc --noEmit
+
+  docker-lint:
+    name: Dockerfile hadolint
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        dockerfile:
+          - backend/Dockerfile
+          - finus_nat/Dockerfile
+          - frontend-react/Dockerfile
+          - mcp-news/Dockerfile
+          - mcp-trading/Dockerfile
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: hadolint 실행 - ${{ matrix.dockerfile }}
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: ${{ matrix.dockerfile }}
+          # Dockerfile 부채(#52)가 정리됐으므로 warning까지 차단해 신규 부채 유입을 막는다.
+          failure-threshold: warning
