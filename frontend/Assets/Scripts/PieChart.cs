@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using UnityEngine;
+using UnityEngine.Rendering;
 
 public class PieChart : MonoBehaviour
 {
@@ -18,14 +19,30 @@ public class PieChart : MonoBehaviour
     [SerializeField] private float labelYOffset = 0.35f;
     [SerializeField] private float labelYStep = 0.14f;
     [SerializeField] private float labelCharacterSize = 0.22f;
+    [SerializeField] private Material highlightMaterial;
+    [SerializeField] private Color highlightColor = new Color(1f, 0.86f, 0.12f, 1f);
+    [SerializeField] private float highlightScale = 1.035f;
+    [SerializeField] private float highlightEdgeWidth = 0.035f;
+    [SerializeField] private float highlightEdgeOffset = 0.03f;
 
     private static readonly int BaseColorId = Shader.PropertyToID("_BaseColor");
     private static readonly int ColorId = Shader.PropertyToID("_Color");
     private MaterialPropertyBlock propertyBlock;
+    private Material runtimeHighlightMaterial;
+    private Material runtimeOverlayLineMaterial;
 
     void Awake()
     {
         propertyBlock = new MaterialPropertyBlock();
+    }
+
+    void OnDestroy()
+    {
+        if (runtimeHighlightMaterial != null)
+            Destroy(runtimeHighlightMaterial);
+
+        if (runtimeOverlayLineMaterial != null)
+            Destroy(runtimeOverlayLineMaterial);
     }
 
     public void Generate(PortfolioData portfolioData)
@@ -90,8 +107,10 @@ public class PieChart : MonoBehaviour
         MeshCollider meshCollider = obj.AddComponent<MeshCollider>();
         meshCollider.sharedMesh = mesh;
 
+        GameObject hoverHighlight = CreateHoverHighlight(obj.transform, mesh, startAngle, angle, yBottom, yTop);
+
         PieSliceClickHandler clickHandler = obj.AddComponent<PieSliceClickHandler>();
-        clickHandler.Initialize(holding);
+        clickHandler.Initialize(holding, hoverHighlight);
 
         MeshRenderer meshRenderer = obj.AddComponent<MeshRenderer>();
         if (sliceMaterial == null)
@@ -109,6 +128,158 @@ public class PieChart : MonoBehaviour
         meshRenderer.SetPropertyBlock(propertyBlock);
 
         return obj;
+    }
+
+    GameObject CreateHoverHighlight(Transform parent, Mesh sourceMesh, float startAngle, float angle, float yBottom, float yTop)
+    {
+        GameObject highlightRoot = new GameObject("HoverHighlight");
+        highlightRoot.transform.SetParent(parent, false);
+
+        GameObject highlightObject = new GameObject("HoverOutline");
+        highlightObject.transform.SetParent(highlightRoot.transform, false);
+        float outlineScale = Mathf.Max(1.001f, highlightScale);
+        Vector3 boundsCenter = sourceMesh.bounds.center;
+        highlightObject.transform.localPosition = boundsCenter * (1f - outlineScale);
+        highlightObject.transform.localScale = Vector3.one * outlineScale;
+
+        MeshFilter meshFilter = highlightObject.AddComponent<MeshFilter>();
+        meshFilter.sharedMesh = sourceMesh;
+
+        MeshRenderer meshRenderer = highlightObject.AddComponent<MeshRenderer>();
+        meshRenderer.shadowCastingMode = ShadowCastingMode.Off;
+        meshRenderer.receiveShadows = false;
+
+        Material material = GetHighlightMaterial();
+        if (material != null)
+            meshRenderer.sharedMaterial = material;
+
+        CreateBoundaryOverlay(highlightRoot.transform, startAngle, angle, yBottom, yTop);
+
+        highlightRoot.SetActive(false);
+        return highlightRoot;
+    }
+
+    void CreateBoundaryOverlay(Transform parent, float startAngle, float angle, float yBottom, float yTop)
+    {
+        float topY = yTop + highlightEdgeOffset;
+        float bottomY = yBottom - highlightEdgeOffset;
+
+        Vector3 topCenter = new Vector3(0f, topY, 0f);
+        Vector3 bottomCenter = new Vector3(0f, bottomY, 0f);
+        Vector3 startTop = GetRimPoint(startAngle, 0f, 1, 0, topY, radius + highlightEdgeOffset);
+        Vector3 endTop = GetRimPoint(startAngle + angle, 0f, 1, 0, topY, radius + highlightEdgeOffset);
+        Vector3 startBottom = GetRimPoint(startAngle, 0f, 1, 0, bottomY, radius + highlightEdgeOffset);
+        Vector3 endBottom = GetRimPoint(startAngle + angle, 0f, 1, 0, bottomY, radius + highlightEdgeOffset);
+
+        CreateOverlayLine(parent, "StartTopBoundary", new[] { topCenter, startTop });
+        CreateOverlayLine(parent, "EndTopBoundary", new[] { topCenter, endTop });
+        CreateOverlayLine(parent, "StartOuterVerticalBoundary", new[] { startBottom, startTop });
+        CreateOverlayLine(parent, "EndOuterVerticalBoundary", new[] { endBottom, endTop });
+        CreateOverlayLine(parent, "CenterVerticalBoundary", new[] { bottomCenter, topCenter });
+    }
+
+    void CreateOverlayLine(Transform parent, string name, Vector3[] positions)
+    {
+        GameObject lineObject = new GameObject(name);
+        lineObject.transform.SetParent(parent, false);
+
+        LineRenderer lineRenderer = lineObject.AddComponent<LineRenderer>();
+        lineRenderer.useWorldSpace = false;
+        lineRenderer.positionCount = positions.Length;
+        lineRenderer.widthMultiplier = highlightEdgeWidth;
+        lineRenderer.numCornerVertices = 3;
+        lineRenderer.numCapVertices = 3;
+        lineRenderer.startColor = highlightColor;
+        lineRenderer.endColor = highlightColor;
+        lineRenderer.shadowCastingMode = ShadowCastingMode.Off;
+        lineRenderer.receiveShadows = false;
+        Material material = GetOverlayLineMaterial();
+        if (material != null)
+            lineRenderer.sharedMaterial = material;
+
+        lineRenderer.SetPositions(positions);
+    }
+
+    Material GetHighlightMaterial()
+    {
+        if (runtimeHighlightMaterial == null)
+        {
+            Shader shader = Shader.Find("Universal Render Pipeline/Unlit");
+
+            if (shader == null)
+                shader = Shader.Find("Sprites/Default");
+
+            if (shader == null)
+                shader = Shader.Find("Universal Render Pipeline/Lit");
+
+            if (shader != null)
+            {
+                runtimeHighlightMaterial = new Material(shader);
+
+                if (runtimeHighlightMaterial.HasProperty(BaseColorId))
+                    runtimeHighlightMaterial.SetColor(BaseColorId, highlightColor);
+
+                if (runtimeHighlightMaterial.HasProperty(ColorId))
+                    runtimeHighlightMaterial.SetColor(ColorId, highlightColor);
+
+                if (runtimeHighlightMaterial.HasProperty("_EmissionColor"))
+                    runtimeHighlightMaterial.SetColor("_EmissionColor", highlightColor);
+
+                if (runtimeHighlightMaterial.HasProperty("_SpecularHighlights"))
+                    runtimeHighlightMaterial.SetFloat("_SpecularHighlights", 0f);
+
+                if (runtimeHighlightMaterial.HasProperty("_EnvironmentReflections"))
+                    runtimeHighlightMaterial.SetFloat("_EnvironmentReflections", 0f);
+
+                if (runtimeHighlightMaterial.HasProperty("_Cull"))
+                    runtimeHighlightMaterial.SetFloat("_Cull", (float)CullMode.Front);
+
+                if (runtimeHighlightMaterial.HasProperty("_ZWrite"))
+                    runtimeHighlightMaterial.SetFloat("_ZWrite", 0f);
+
+                runtimeHighlightMaterial.renderQueue = 3000;
+            }
+        }
+
+        return runtimeHighlightMaterial;
+    }
+
+    Material GetOverlayLineMaterial()
+    {
+        if (runtimeOverlayLineMaterial == null)
+        {
+            Shader shader = Shader.Find("Hidden/Internal-Colored");
+
+            if (shader == null)
+                shader = Shader.Find("Universal Render Pipeline/Unlit");
+
+            if (shader == null)
+                shader = Shader.Find("Sprites/Default");
+
+            if (shader != null)
+            {
+                runtimeOverlayLineMaterial = new Material(shader);
+
+                if (runtimeOverlayLineMaterial.HasProperty(BaseColorId))
+                    runtimeOverlayLineMaterial.SetColor(BaseColorId, highlightColor);
+
+                if (runtimeOverlayLineMaterial.HasProperty(ColorId))
+                    runtimeOverlayLineMaterial.SetColor(ColorId, highlightColor);
+
+                if (runtimeOverlayLineMaterial.HasProperty("_Cull"))
+                    runtimeOverlayLineMaterial.SetFloat("_Cull", (float)CullMode.Off);
+
+                if (runtimeOverlayLineMaterial.HasProperty("_ZWrite"))
+                    runtimeOverlayLineMaterial.SetFloat("_ZWrite", 0f);
+
+                if (runtimeOverlayLineMaterial.HasProperty("_ZTest"))
+                    runtimeOverlayLineMaterial.SetFloat("_ZTest", (float)CompareFunction.Always);
+
+                runtimeOverlayLineMaterial.renderQueue = 5000;
+            }
+        }
+
+        return runtimeOverlayLineMaterial;
     }
 
     void CreateLabel(Transform sliceTransform, string text, float angle, float yTop, float weight, int index)
@@ -258,8 +429,13 @@ public class PieChart : MonoBehaviour
 
     Vector3 GetRimPoint(float startAngle, float angle, int steps, int index, float y)
     {
+        return GetRimPoint(startAngle, angle, steps, index, y, radius);
+    }
+
+    Vector3 GetRimPoint(float startAngle, float angle, int steps, int index, float y, float targetRadius)
+    {
         float a = Mathf.Deg2Rad * (startAngle + angle / steps * index);
-        return new Vector3(Mathf.Cos(a) * radius, y, Mathf.Sin(a) * radius);
+        return new Vector3(Mathf.Cos(a) * targetRadius, y, Mathf.Sin(a) * targetRadius);
     }
 
     Color GetColor(float returnRate)

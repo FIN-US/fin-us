@@ -21,6 +21,7 @@ public class PanelController : MonoBehaviour
     private bool isPointerDown;
     private Vector2 pointerDownPosition;
     private UIDocument document;
+    private PieSliceClickHandler hoveredSlice;
 
     void OnEnable()
     {
@@ -134,6 +135,8 @@ public class PanelController : MonoBehaviour
 
     void Update()
     {
+        UpdateHover();
+
         if (TryGetPointerDown(out Vector2 downPosition))
         {
             isPointerDown = true;
@@ -199,6 +202,44 @@ public class PanelController : MonoBehaviour
         UpdatePanel(handler.Holding);
     }
 
+    void UpdateHover()
+    {
+        if (!TryGetPointerPosition(out Vector2 pointerPosition))
+        {
+            SetHoveredSlice(null);
+            return;
+        }
+
+        SetHoveredSlice(GetSliceAt(pointerPosition));
+    }
+
+    PieSliceClickHandler GetSliceAt(Vector2 screenPosition)
+    {
+        Camera cameraToUse = clickCamera != null ? clickCamera : Camera.main;
+        if (cameraToUse == null)
+            return null;
+
+        Ray ray = cameraToUse.ScreenPointToRay(screenPosition);
+        if (!Physics.Raycast(ray, out RaycastHit hit))
+            return null;
+
+        return hit.collider.GetComponentInParent<PieSliceClickHandler>();
+    }
+
+    void SetHoveredSlice(PieSliceClickHandler nextHoveredSlice)
+    {
+        if (hoveredSlice == nextHoveredSlice)
+            return;
+
+        if (hoveredSlice != null)
+            hoveredSlice.SetHovered(false);
+
+        hoveredSlice = nextHoveredSlice;
+
+        if (hoveredSlice != null)
+            hoveredSlice.SetHovered(true);
+    }
+
     bool TryGetPointerDown(out Vector2 position)
     {
 #if ENABLE_INPUT_SYSTEM
@@ -253,6 +294,31 @@ public class PanelController : MonoBehaviour
 
         position = Vector2.zero;
         return false;
+    }
+
+    bool TryGetPointerPosition(out Vector2 position)
+    {
+#if ENABLE_INPUT_SYSTEM
+        if (Mouse.current != null)
+        {
+            position = Mouse.current.position.ReadValue();
+            return true;
+        }
+
+        if (Touchscreen.current != null && Touchscreen.current.primaryTouch.press.isPressed)
+        {
+            position = Touchscreen.current.primaryTouch.position.ReadValue();
+            return true;
+        }
+#endif
+
+#if ENABLE_LEGACY_INPUT_MANAGER
+        position = Input.mousePosition;
+        return true;
+#else
+        position = Vector2.zero;
+        return false;
+#endif
     }
 
 }

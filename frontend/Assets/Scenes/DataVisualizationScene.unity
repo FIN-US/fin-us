@@ -571,6 +571,11 @@ MonoBehaviour:
   labelYOffset: 0.35
   labelYStep: 0.14
   labelCharacterSize: 0.1
+  highlightMaterial: {fileID: 2100000, guid: f258d93eed2f4c1ca7b2a8f13298d234, type: 2}
+  highlightColor: {r: 1, g: 0.86, b: 0.12, a: 1}
+  highlightScale: 1.035
+  highlightEdgeWidth: 0.035
+  highlightEdgeOffset: 0.03
 --- !u!114 &1885009134
 MonoBehaviour:
   m_ObjectHideFlags: 0
