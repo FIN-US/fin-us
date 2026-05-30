@@ -28,8 +28,3 @@ class CommonResponse(BaseModel):
 class DiaryCreate(BaseModel):
     title: str = Field(..., description="일지 제목")
     content: str = Field(..., description="일지 내용")
-
-
-class DiaryUpdate(BaseModel):
-    title: str = Field(..., description="일지 제목")
-    content: str = Field(..., description="일지 내용")

@@ -1,7 +1,7 @@
 import os
 import logging
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Query, Depends, WebSocket, WebSocketDisconnect, Body, HTTPException
+from fastapi import FastAPI, Query, Depends, WebSocket, WebSocketDisconnect, Body
 from fastapi.middleware.cors import CORSMiddleware
 from sqlmodel import Session, select
 
@@ -9,7 +9,7 @@ from .config import NAT_BASE_URL, NEWS_MCP_PARAMS, TRADING_MCP_PARAMS, DART_MCP_
 from .ws_manager import manager
 from .scheduler import start_scheduler, stop_scheduler
 from .telegram_commands import start_telegram_commands, stop_telegram_commands
-from .schemas import CommonResponse, DiaryCreate, DiaryUpdate
+from .schemas import CommonResponse, DiaryCreate
 from .services import (
     run_mcp_tool,
     normalize_llm_provider,
@@ -136,24 +136,6 @@ async def create_db_diary(
 ):
     """새로운 투자 일지를 작성합니다."""
     diary = Diary.model_validate(diary_in)
-    session.add(diary)
-    session.commit()
-    session.refresh(diary)
-    return {"status": "success", "data": diary}
-
-
-@app.put("/api/v1/db/diary/{diary_id}", response_model=CommonResponse, tags=["Database"])
-async def update_db_diary(
-    diary_id: int,
-    diary_in: DiaryUpdate,
-    session: Session = Depends(get_session),
-):
-    """기존 투자 일지를 수정합니다."""
-    diary = session.get(Diary, diary_id)
-    if diary is None:
-        raise HTTPException(status_code=404, detail="Diary not found")
-    diary.title = diary_in.title
-    diary.content = diary_in.content
     session.add(diary)
     session.commit()
     session.refresh(diary)

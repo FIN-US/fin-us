@@ -29,11 +29,6 @@ async function postData<T>(url: string, body: unknown) {
   return response.data.data;
 }
 
-async function putData<T>(url: string, body: unknown) {
-  const response = await axios.put<ApiResponse<T>>(url, body);
-  return response.data.data;
-}
-
 export const finUsApi = {
   health: async () => {
     const response = await axios.get<HealthStatus>('/health');
@@ -51,6 +46,4 @@ export const finUsApi = {
   diaries: () => getData<DiaryItem[]>('/api/v1/db/diary'),
   createDiary: (title: string, content: string) =>
     postData<DiaryItem>('/api/v1/db/diary', { title, content }),
-  updateDiary: (id: number, title: string, content: string) =>
-    putData<DiaryItem>(`/api/v1/db/diary/${id}`, { title, content }),
 };
