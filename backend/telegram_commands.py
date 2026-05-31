@@ -472,8 +472,32 @@ class TelegramCommandHandler:
             if not watchlist:
                 text = "관심 종목이 없습니다.\n/watch add <종목명> 으로 추가하세요."
             else:
-                items = "\n".join(f"• {s}" for s in watchlist)
-                text = f"관심 종목 목록:\n{items}"
+                lines = []
+                for stock in watchlist:
+                    try:
+                        raw = await self.mcp_runner(
+                            TRADING_MCP_PARAMS, "get_stock_quote", {"stock_name": stock}
+                        )
+                        summary = self._parse_quote_summary(str(raw))
+                        if summary:
+                            price, rate = summary
+                            try:
+                                rate_float = float(rate.rstrip("%"))
+                            except ValueError:
+                                rate_float = None
+                            if rate_float is not None and rate_float < 0:
+                                line = f"🔵 {stock}  {price}  ▼ {rate}"
+                            elif rate_float is not None and rate_float == 0.0:
+                                line = f"⬜ {stock}  {price}  {rate}"
+                            else:
+                                sign = "" if rate.startswith("+") else "+"
+                                line = f"🔴 {stock}  {price}  ▲ {sign}{rate}"
+                        else:
+                            line = f"• {stock}  (조회 실패)"
+                    except Exception:
+                        line = f"• {stock}  (조회 실패)"
+                    lines.append(line)
+                text = "관심 종목 목록:\n" + "\n".join(lines)
             await self._send_text_or_raise(text, reply_markup=self._watch_reply_markup())
             return
 
@@ -925,6 +949,17 @@ class TelegramCommandHandler:
             if stripped and any(needle in stripped for needle in needles):
                 return stripped
         return None
+
+    def _parse_quote_summary(self, raw: str) -> tuple[str, str] | None:
+        price_line = self._first_line_containing(raw, ("현재가:",))
+        rate_line = self._first_line_containing(raw, ("전일 대비:",))
+        if not price_line or not rate_line:
+            return None
+        price_match = re.search(r"현재가:\s*(.+)", price_line)
+        rate_match = re.search(r"\(([^)]+%)\)", rate_line)
+        if not price_match or not rate_match:
+            return None
+        return price_match.group(1).strip(), rate_match.group(1).strip()
 
     async def _handle_trend(self, argument: str, chat_id: str) -> None:
         if not argument:
