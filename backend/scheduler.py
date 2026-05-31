@@ -10,6 +10,7 @@ from .database import engine
 from .config import NEWS_MCP_PARAMS, TRADING_MCP_PARAMS, DART_MCP_PARAMS
 from .redis_state import RedisSchedulerState, signal_hash, redis_state
 from .services import perform_stock_analysis, run_mcp_tool, check_signal_significance
+from .watchlist_repo import SqliteWatchlistRepo
 from .telegram_notifier import telegram_notifier
 from .telegram_notifier import should_send_telegram_alert
 
@@ -68,7 +69,7 @@ def extract_stocks_from_balance(balance_text: str) -> list[str]:
                     stocks.append(name)
     return stocks
 
-async def monitor_market_task():
+async def monitor_market_task(watchlist_repo: SqliteWatchlistRepo | None = None):
     """
     주기적으로 시장 상황을 모니터링합니다.
     """
@@ -82,7 +83,7 @@ async def monitor_market_task():
 
             fallback_to_memory = False
             try:
-                await _monitor_market_task(state)
+                await _monitor_market_task(state, watchlist_repo)
             finally:
                 try:
                     await state.release_lock(state.keys.scheduler_lock("market_monitoring"), scheduler_token)
@@ -97,16 +98,21 @@ async def monitor_market_task():
             "Redis 스케줄러 상태를 사용할 수 없어 인메모리 fallback으로 시장 모니터링을 실행합니다: %s",
             e,
         )
-        await _monitor_market_task(None)
+        await _monitor_market_task(None, watchlist_repo)
 
 
-async def _monitor_market_task(state: RedisSchedulerState | None):
+async def _monitor_market_task(
+    state: RedisSchedulerState | None,
+    watchlist_repo: SqliteWatchlistRepo | None = None,
+):
     try:
         # 1. 실시간 잔고 조회 및 모니터링 대상 확정
         balance_text = await run_mcp_tool(TRADING_MCP_PARAMS, "get_balance", {})
         owned_stocks = extract_stocks_from_balance(balance_text)
 
-        watchlist = await state.get_watchlist() if state is not None else []
+        if watchlist_repo is None:
+            watchlist_repo = SqliteWatchlistRepo(lambda: Session(engine))
+        watchlist = await watchlist_repo.get_watchlist()
 
         # 보유 종목 + 관심 종목 합산 (순서 유지, 중복 제거)
         seen: set[str] = set()

@@ -6,6 +6,14 @@ from unittest.mock import MagicMock
 from ..main import app
 from ..redis_state import RedisSchedulerState
 
+
+class FakeWatchlistRepo:
+    def __init__(self, stocks: list[str] | None = None):
+        self._stocks = list(stocks or [])
+
+    async def get_watchlist(self) -> list[str]:
+        return list(self._stocks)
+
 @pytest.fixture
 def client():
     with TestClient(app) as c:
@@ -572,7 +580,6 @@ async def test_monitor_market_task_includes_watchlist_stocks(monkeypatch):
     from ..scheduler import SignalSource, monitor_market_task
 
     state = RedisSchedulerState(FakeRedis())
-    await state.add_to_watchlist("NAVER")
 
     @asynccontextmanager
     async def fake_redis_state():
@@ -598,7 +605,7 @@ async def test_monitor_market_task_includes_watchlist_stocks(monkeypatch):
     monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
     monkeypatch.setattr("backend.scheduler.manager.broadcast", MagicMock(return_value=asyncio.Future()))
 
-    await monitor_market_task()
+    await monitor_market_task(watchlist_repo=FakeWatchlistRepo(["NAVER"]))
 
     assert "삼성전자" in monitored_stocks
     assert "NAVER" in monitored_stocks
@@ -610,7 +617,6 @@ async def test_monitor_market_task_deduplicates_watchlist_and_owned_stocks(monke
     from ..scheduler import SignalSource, monitor_market_task
 
     state = RedisSchedulerState(FakeRedis())
-    await state.add_to_watchlist("삼성전자")
 
     @asynccontextmanager
     async def fake_redis_state():
@@ -636,7 +642,7 @@ async def test_monitor_market_task_deduplicates_watchlist_and_owned_stocks(monke
     monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
     monkeypatch.setattr("backend.scheduler.manager.broadcast", MagicMock(return_value=asyncio.Future()))
 
-    await monitor_market_task()
+    await monitor_market_task(watchlist_repo=FakeWatchlistRepo(["삼성전자"]))
 
     assert monitored_stocks.count("삼성전자") == 1
 
@@ -672,7 +678,7 @@ async def test_monitor_market_task_uses_default_stocks_only_when_both_empty(monk
     monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
     monkeypatch.setattr("backend.scheduler.manager.broadcast", MagicMock(return_value=asyncio.Future()))
 
-    await monitor_market_task()
+    await monitor_market_task(watchlist_repo=FakeWatchlistRepo())
 
     assert monitored_stocks == DEFAULT_MONITOR_STOCKS
 
@@ -683,7 +689,6 @@ async def test_monitor_market_task_watchlist_alone_skips_default_fallback(monkey
     from ..scheduler import DEFAULT_MONITOR_STOCKS, SignalSource, monitor_market_task
 
     state = RedisSchedulerState(FakeRedis())
-    await state.add_to_watchlist("카카오")
 
     @asynccontextmanager
     async def fake_redis_state():
@@ -709,7 +714,7 @@ async def test_monitor_market_task_watchlist_alone_skips_default_fallback(monkey
     monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
     monkeypatch.setattr("backend.scheduler.manager.broadcast", MagicMock(return_value=asyncio.Future()))
 
-    await monitor_market_task()
+    await monitor_market_task(watchlist_repo=FakeWatchlistRepo(["카카오"]))
 
     assert monitored_stocks == ["카카오"]
     for default_stock in DEFAULT_MONITOR_STOCKS:
