@@ -18,6 +18,7 @@ from .config import (
 from .database import engine
 from .redis_state import RedisSchedulerState, redis_state
 from .services import llm_chat, run_mcp_tool
+from .watchlist_repo import SqliteWatchlistRepo
 from .telegram_notifier import TELEGRAM_ALERT_MODES, TelegramNotifier, telegram_notifier
 from .trading_orders import (
     KST,
@@ -142,12 +143,17 @@ def _create_trade_recorder() -> TradeRecorder:
     return TradeRecorder(lambda: Session(engine))
 
 
+def _default_watchlist_repo() -> SqliteWatchlistRepo:
+    return SqliteWatchlistRepo(lambda: Session(engine))
+
+
 class TelegramCommandHandler:
     def __init__(
         self,
         *,
         notifier: TelegramNotifier,
         state_factory: Callable[[], Any] = redis_state,
+        watchlist_repo: Any | None = None,
         mcp_runner: Callable[[Any, str, dict[str, Any]], Any] = run_mcp_tool,
         llm_runner: Callable[..., Any] = llm_chat,
         order_gateway: Any | None = None,
@@ -156,6 +162,7 @@ class TelegramCommandHandler:
     ):
         self.notifier = notifier
         self.state_factory = state_factory
+        self.watchlist_repo = watchlist_repo if watchlist_repo is not None else _default_watchlist_repo()
         self.mcp_runner = mcp_runner
         self.llm_runner = llm_runner
         self.order_gateway = order_gateway
@@ -474,8 +481,7 @@ class TelegramCommandHandler:
         stock = parts[1].strip() if len(parts) > 1 else ""
 
         if subcommand == "list":
-            async with self._state() as state:
-                watchlist = await state.get_watchlist()
+            watchlist = await self.watchlist_repo.get_watchlist()
             if not watchlist:
                 text = "관심 종목이 없습니다.\n/watch add <종목명> 으로 추가하세요."
             else:
@@ -512,8 +518,7 @@ class TelegramCommandHandler:
             if not stock:
                 await self._send_text_or_raise(WATCH_COMMAND_HELP)
                 return
-            async with self._state() as state:
-                await state.add_to_watchlist(stock)
+            await self.watchlist_repo.add_to_watchlist(stock)
             await self._send_text_or_raise(
                 f"관심 종목에 {stock}을(를) 추가했습니다.",
                 reply_markup=self._watch_reply_markup(),
@@ -524,8 +529,7 @@ class TelegramCommandHandler:
             if not stock:
                 await self._send_text_or_raise(WATCH_COMMAND_HELP)
                 return
-            async with self._state() as state:
-                await state.remove_from_watchlist(stock)
+            await self.watchlist_repo.remove_from_watchlist(stock)
             await self._send_text_or_raise(
                 f"관심 종목에서 {stock}을(를) 삭제했습니다.",
                 reply_markup=self._watch_reply_markup(),
