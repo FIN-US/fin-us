@@ -73,9 +73,16 @@ TELEGRAM_INTERACTIVE_HELP = "\n".join(
 TELEGRAM_BOT_COMMANDS = [
     {"command": "help", "description": "사용 가능한 명령 확인"},
     {"command": "balance", "description": "예수금·총자산·보유 종목 조회"},
+    {"command": "watch", "description": "관심 종목 추가·삭제·조회 (add/remove/list)"},
+    {"command": "quote", "description": "종목 현재가 조회"},
+    {"command": "trend", "description": "종목 외국인·기관·개인 수급 조회"},
     {"command": "alerts", "description": "Telegram 알림 모드 변경"},
     {"command": "trade", "description": "매수·매도 주문 입력 안내"},
     {"command": "lookup", "description": "현재가·수급 조회 입력 안내"},
+    {"command": "buy", "description": "매수 주문 준비 (예: /buy 삼성전자 1)"},
+    {"command": "sell", "description": "매도 주문 준비 (예: /sell 삼성전자 1)"},
+    {"command": "confirm", "description": "대기 주문 확정"},
+    {"command": "cancel", "description": "대기 주문 취소"},
 ]
 QUOTE_COMMAND_HELP = "사용법: /quote <종목명>"
 TREND_COMMAND_HELP = "사용법: /trend <종목명>"

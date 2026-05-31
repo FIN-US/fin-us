@@ -293,14 +293,13 @@ async def test_lookup_quote_button_replies_with_quote_guidance():
     assert notifier.messages == [QUOTE_COMMAND_HELP]
 
 
-def test_bot_command_menu_uses_entrypoints_for_parameterized_commands():
+def test_bot_command_menu_includes_all_user_commands():
     commands = [command["command"] for command in telegram_commands.TELEGRAM_BOT_COMMANDS]
 
-    assert commands == ["help", "balance", "alerts", "trade", "lookup"]
-    assert "buy" not in commands
-    assert "sell" not in commands
-    assert "quote" not in commands
-    assert "trend" not in commands
+    assert commands == [
+        "help", "balance", "watch", "quote", "trend",
+        "alerts", "trade", "lookup", "buy", "sell", "confirm", "cancel",
+    ]
 
 
 @pytest.mark.asyncio
