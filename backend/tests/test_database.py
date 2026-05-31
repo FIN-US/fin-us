@@ -4,7 +4,7 @@ from sqlmodel import Session, SQLModel, create_engine
 from sqlmodel.pool import StaticPool
 
 from ..main import app, get_session
-from ..models import Diary, AgentReport
+from ..models import Diary, AgentReport, Portfolio
 
 # 테스트용 인메모리 SQLite 엔진 설정
 @pytest.fixture(name="session")
@@ -33,6 +33,119 @@ def test_get_portfolio_empty(client: TestClient):
     assert response.status_code == 200
     assert response.json()["status"] == "success"
     assert response.json()["data"] == []
+
+
+def test_get_visualization_portfolio_empty(client: TestClient):
+    response = client.get("/api/v1/portfolio")
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "success",
+        "data": {
+            "total_asset": 0,
+            "total_return_rate": 0.0,
+            "holdings": [],
+        },
+        "message": None,
+    }
+
+
+def test_get_visualization_portfolio_maps_holdings(
+    client: TestClient,
+    session: Session,
+):
+    session.add(
+        Portfolio(
+            stock_code="005930",
+            stock_name="삼성전자",
+            quantity=10,
+            avg_price=70000,
+            current_price=77000,
+        )
+    )
+    session.add(
+        Portfolio(
+            stock_code="000660",
+            stock_name="SK하이닉스",
+            quantity=5,
+            avg_price=200000,
+            current_price=190000,
+        )
+    )
+    session.commit()
+
+    response = client.get("/api/v1/portfolio")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "success"
+    assert response.json()["data"] == {
+        "total_asset": 1720000.0,
+        "total_return_rate": 1.1765,
+        "holdings": [
+            {
+                "name": "삼성전자",
+                "current_price": 77000.0,
+                "avg_price": 70000.0,
+                "return_rate": 10.0,
+                "quantity": 10,
+            },
+            {
+                "name": "SK하이닉스",
+                "current_price": 190000.0,
+                "avg_price": 200000.0,
+                "return_rate": -5.0,
+                "quantity": 5,
+            },
+        ],
+    }
+
+
+def test_get_visualization_portfolio_handles_missing_prices(
+    client: TestClient,
+    session: Session,
+):
+    session.add(
+        Portfolio(
+            stock_code="035720",
+            stock_name="카카오",
+            quantity=3,
+            avg_price=42000,
+            current_price=None,
+        )
+    )
+    session.add(
+        Portfolio(
+            stock_code="000000",
+            stock_name="평단가없음",
+            quantity=2,
+            avg_price=0,
+            current_price=1000,
+        )
+    )
+    session.commit()
+
+    response = client.get("/api/v1/portfolio")
+
+    assert response.status_code == 200
+    assert response.json()["data"] == {
+        "total_asset": 128000.0,
+        "total_return_rate": 0.0,
+        "holdings": [
+            {
+                "name": "카카오",
+                "current_price": 42000.0,
+                "avg_price": 42000.0,
+                "return_rate": 0.0,
+                "quantity": 3,
+            },
+            {
+                "name": "평단가없음",
+                "current_price": 1000.0,
+                "avg_price": 0.0,
+                "return_rate": 0.0,
+                "quantity": 2,
+            },
+        ],
+    }
 
 
 def test_create_and_get_diary(client: TestClient):
