@@ -12,6 +12,7 @@ from backend.redis_state import (
 class FakeRedis:
     def __init__(self):
         self.store = {}
+        self.sets: dict[str, set] = {}
 
     async def get(self, key):
         return self.store.get(key)
@@ -31,6 +32,23 @@ class FakeRedis:
             del self.store[key]
             return 1
         return 0
+
+    async def sadd(self, key, *values):
+        if key not in self.sets:
+            self.sets[key] = set()
+        added = sum(1 for v in values if v not in self.sets[key])
+        self.sets[key].update(values)
+        return added
+
+    async def srem(self, key, *values):
+        if key not in self.sets:
+            return 0
+        removed = sum(1 for v in values if v in self.sets[key])
+        self.sets[key].difference_update(values)
+        return removed
+
+    async def smembers(self, key):
+        return self.sets.get(key, set())
 
 
 def test_news_hash_normalizes_order_and_whitespace():
@@ -141,3 +159,51 @@ async def test_telegram_alert_mode_ignores_invalid_values():
     await state.set_telegram_alert_mode("invalid")
 
     assert await state.get_telegram_alert_mode() == "all"
+
+
+@pytest.mark.asyncio
+async def test_watchlist_is_empty_by_default():
+    state = RedisSchedulerState(FakeRedis())
+
+    assert await state.get_watchlist() == []
+
+
+@pytest.mark.asyncio
+async def test_watchlist_add_and_list():
+    state = RedisSchedulerState(FakeRedis())
+
+    await state.add_to_watchlist("삼성전자")
+    await state.add_to_watchlist("NAVER")
+
+    result = await state.get_watchlist()
+    assert result == ["NAVER", "삼성전자"]
+
+
+@pytest.mark.asyncio
+async def test_watchlist_add_duplicate_is_idempotent():
+    state = RedisSchedulerState(FakeRedis())
+
+    await state.add_to_watchlist("삼성전자")
+    await state.add_to_watchlist("삼성전자")
+
+    assert await state.get_watchlist() == ["삼성전자"]
+
+
+@pytest.mark.asyncio
+async def test_watchlist_remove():
+    state = RedisSchedulerState(FakeRedis())
+
+    await state.add_to_watchlist("삼성전자")
+    await state.add_to_watchlist("NAVER")
+    await state.remove_from_watchlist("삼성전자")
+
+    assert await state.get_watchlist() == ["NAVER"]
+
+
+@pytest.mark.asyncio
+async def test_watchlist_remove_nonexistent_is_safe():
+    state = RedisSchedulerState(FakeRedis())
+
+    await state.remove_from_watchlist("없는종목")
+
+    assert await state.get_watchlist() == []

@@ -60,6 +60,9 @@ class RedisKeys:
     def telegram_alert_mode(self) -> str:
         return f"{self.prefix}:telegram:alert_mode"
 
+    def watchlist(self) -> str:
+        return f"{self.prefix}:user:watchlist"
+
 
 class RedisSchedulerState:
     def __init__(
@@ -172,6 +175,16 @@ class RedisSchedulerState:
             return False
         await self.redis.set(self.keys.telegram_alert_mode(), mode)
         return True
+
+    async def get_watchlist(self) -> list[str]:
+        members = await self.redis.smembers(self.keys.watchlist())
+        return sorted(self._decode(m) for m in members if m)
+
+    async def add_to_watchlist(self, stock: str) -> None:
+        await self.redis.sadd(self.keys.watchlist(), stock)
+
+    async def remove_from_watchlist(self, stock: str) -> None:
+        await self.redis.srem(self.keys.watchlist(), stock)
 
 
 def create_redis_client() -> Any:
