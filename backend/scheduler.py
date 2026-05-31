@@ -2,6 +2,7 @@ import os
 import logging
 from dataclasses import dataclass
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from typing import Any
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from sqlmodel import Session
@@ -22,7 +23,8 @@ from .telegram_notifier import should_send_telegram_alert
 logger = logging.getLogger(__name__)
 
 # 비동기 스케줄러 인스턴스 생성
-scheduler = AsyncIOScheduler()
+KST = ZoneInfo("Asia/Seoul")
+scheduler = AsyncIOScheduler(timezone=KST)
 
 # 뉴스 필터링에 사용할 모델 제공자 (ollama 또는 openai)
 FILTER_PROVIDER = os.environ.get("NEWS_FILTER_PROVIDER", "ollama")
@@ -313,7 +315,7 @@ def start_scheduler():
             "cron",
             day_of_week="mon-fri",
             hour=8,
-            minute=30,
+            minute=35,
             id="morning_briefing",
         )
         
