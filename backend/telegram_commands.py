@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 ALERT_COMMAND_HELP = "사용법: /alerts urgent | all | off | status"
 BUY_COMMAND_HELP = "사용법: /buy <종목명> <수량> [지정가]"
 SELL_COMMAND_HELP = "사용법: /sell <종목명> <수량> [지정가]"
+WATCH_COMMAND_HELP = "사용법: /watch add <종목명> | remove <종목명> | list"
 NATURAL_ORDER_HELP = "자연어 주문을 해석할 수 없습니다. /buy 또는 /sell 형식으로 입력하세요."
 ORDER_EXPIRES_AFTER = timedelta(seconds=60)
 ORDER_CONFIRM_CALLBACK = "order:confirm"
@@ -42,6 +43,7 @@ ALERT_CALLBACK_PREFIX = "alerts:"
 BALANCE_REFRESH_CALLBACK = "balance:refresh"
 TRADE_CALLBACK_PREFIX = "trade:"
 LOOKUP_CALLBACK_PREFIX = "lookup:"
+WATCH_LIST_CALLBACK = "watch:list"
 MARKET_QUOTE_CALLBACK = "market:quote"
 MARKET_TREND_CALLBACK = "market:trend"
 MARKET_STALE_CALLBACK_TEXT = "이전 조회 버튼입니다. 최신 조회 메시지에서 다시 선택하세요."
@@ -56,6 +58,7 @@ TELEGRAM_INTERACTIVE_HELP = "\n".join(
         "사용 가능한 명령:",
         "/alerts urgent|all|off|status - Telegram 알림 모드 변경",
         "/balance - 예수금·총자산·보유 종목 조회",
+        "/watch add <종목명>|remove <종목명>|list - 관심 종목 관리",
         "/trade - 매수·매도 주문 입력 안내",
         "/lookup - 현재가·수급 조회 입력 안내",
         "/quote <종목명> - 현재가 조회",
@@ -182,6 +185,9 @@ class TelegramCommandHandler:
         if self._matches_command(command, bot_username, "/balance"):
             await self._handle_balance()
             return
+        if self._matches_command(command, bot_username, "/watch"):
+            await self._handle_watch(argument)
+            return
         if self._matches_command(command, bot_username, "/trade"):
             await self._send_text_or_raise(
                 TRADE_COMMAND_HELP,
@@ -278,6 +284,11 @@ class TelegramCommandHandler:
         if data == BALANCE_REFRESH_CALLBACK:
             await self._answer_callback_query(callback_query_id)
             await self._handle_balance()
+            return
+
+        if data == WATCH_LIST_CALLBACK:
+            await self._answer_callback_query(callback_query_id)
+            await self._handle_watch("list")
             return
 
         if data.startswith(TRADE_CALLBACK_PREFIX):
@@ -449,6 +460,48 @@ class TelegramCommandHandler:
                 f"Telegram 알림 모드가 {self._format_alert_mode(action)}(으)로 변경되었습니다.",
                 reply_markup=self._alerts_reply_markup(),
             )
+
+    async def _handle_watch(self, argument: str) -> None:
+        parts = argument.split(None, 1)
+        subcommand = parts[0].lower() if parts else "list"
+        stock = parts[1].strip() if len(parts) > 1 else ""
+
+        if subcommand == "list":
+            async with self._state() as state:
+                watchlist = await state.get_watchlist()
+            if not watchlist:
+                text = "관심 종목이 없습니다.\n/watch add <종목명> 으로 추가하세요."
+            else:
+                items = "\n".join(f"• {s}" for s in watchlist)
+                text = f"관심 종목 목록:\n{items}"
+            await self._send_text_or_raise(text, reply_markup=self._watch_reply_markup())
+            return
+
+        if subcommand == "add":
+            if not stock:
+                await self._send_text_or_raise(WATCH_COMMAND_HELP)
+                return
+            async with self._state() as state:
+                await state.add_to_watchlist(stock)
+            await self._send_text_or_raise(
+                f"관심 종목에 {stock}을(를) 추가했습니다.",
+                reply_markup=self._watch_reply_markup(),
+            )
+            return
+
+        if subcommand == "remove":
+            if not stock:
+                await self._send_text_or_raise(WATCH_COMMAND_HELP)
+                return
+            async with self._state() as state:
+                await state.remove_from_watchlist(stock)
+            await self._send_text_or_raise(
+                f"관심 종목에서 {stock}을(를) 삭제했습니다.",
+                reply_markup=self._watch_reply_markup(),
+            )
+            return
+
+        await self._send_text_or_raise(WATCH_COMMAND_HELP)
 
     async def _handle_balance(self) -> None:
         await self.notifier.send_chat_action("typing")
@@ -732,6 +785,13 @@ class TelegramCommandHandler:
         return {
             "inline_keyboard": [
                 [{"text": "🔄 새로고침", "callback_data": BALANCE_REFRESH_CALLBACK}]
+            ]
+        }
+
+    def _watch_reply_markup(self) -> dict[str, Any]:
+        return {
+            "inline_keyboard": [
+                [{"text": "📋 목록 새로고침", "callback_data": WATCH_LIST_CALLBACK}]
             ]
         }
 

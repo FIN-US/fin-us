@@ -26,12 +26,23 @@ KST = ZoneInfo("Asia/Seoul")
 class FakeState:
     def __init__(self):
         self.mode = "urgent"
+        self._watchlist: list[str] = []
 
     async def get_telegram_alert_mode(self):
         return self.mode
 
     async def set_telegram_alert_mode(self, mode):
         self.mode = mode
+
+    async def get_watchlist(self):
+        return sorted(self._watchlist)
+
+    async def add_to_watchlist(self, stock: str):
+        if stock not in self._watchlist:
+            self._watchlist.append(stock)
+
+    async def remove_from_watchlist(self, stock: str):
+        self._watchlist = [s for s in self._watchlist if s != stock]
 
 
 class FakeNotifier:
@@ -1521,3 +1532,127 @@ async def test_poller_keeps_offset_when_nat_response_send_fails(monkeypatch):
 
     assert calls == [("nat", "질문", "telegram:123")]
     assert poller.offset is None
+
+
+# ---------------------------------------------------------------------------
+# /watch command
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_watch_list_empty_shows_empty_message():
+    state = FakeState()
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(notifier=notifier, state_factory=lambda: state)
+
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/watch list"}})
+
+    assert "관심 종목이 없습니다" in notifier.messages[-1]
+
+
+@pytest.mark.asyncio
+async def test_watch_list_shows_stocks_with_refresh_button():
+    state = FakeState()
+    state._watchlist = ["삼성전자", "NAVER"]
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(notifier=notifier, state_factory=lambda: state)
+
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/watch list"}})
+
+    assert "NAVER" in notifier.messages[-1]
+    assert "삼성전자" in notifier.messages[-1]
+    markup = notifier.reply_markups[-1]
+    assert markup is not None
+    buttons_flat = [btn for row in markup["inline_keyboard"] for btn in row]
+    callback_datas = [btn["callback_data"] for btn in buttons_flat]
+    assert "watch:list" in callback_datas
+
+
+@pytest.mark.asyncio
+async def test_watch_add_adds_stock_and_confirms():
+    state = FakeState()
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(notifier=notifier, state_factory=lambda: state)
+
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/watch add 삼성전자"}})
+
+    assert "삼성전자" in state._watchlist
+    assert "삼성전자" in notifier.messages[-1]
+    assert "추가" in notifier.messages[-1]
+
+
+@pytest.mark.asyncio
+async def test_watch_remove_removes_stock_and_confirms():
+    state = FakeState()
+    state._watchlist = ["삼성전자"]
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(notifier=notifier, state_factory=lambda: state)
+
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/watch remove 삼성전자"}})
+
+    assert "삼성전자" not in state._watchlist
+    assert "삼성전자" in notifier.messages[-1]
+    assert "삭제" in notifier.messages[-1]
+
+
+@pytest.mark.asyncio
+async def test_watch_add_without_stock_name_shows_help():
+    state = FakeState()
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(notifier=notifier, state_factory=lambda: state)
+
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/watch add"}})
+
+    assert "사용법" in notifier.messages[-1]
+
+
+@pytest.mark.asyncio
+async def test_watch_remove_without_stock_name_shows_help():
+    state = FakeState()
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(notifier=notifier, state_factory=lambda: state)
+
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/watch remove"}})
+
+    assert "사용법" in notifier.messages[-1]
+
+
+@pytest.mark.asyncio
+async def test_watch_unknown_subcommand_shows_help():
+    state = FakeState()
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(notifier=notifier, state_factory=lambda: state)
+
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/watch foo"}})
+
+    assert "사용법" in notifier.messages[-1]
+
+
+@pytest.mark.asyncio
+async def test_watch_list_callback_refreshes_watchlist():
+    state = FakeState()
+    state._watchlist = ["SK하이닉스"]
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(notifier=notifier, state_factory=lambda: state)
+
+    await handler.handle_update(
+        {
+            "callback_query": {
+                "id": "cb-watch",
+                "data": "watch:list",
+                "message": {"chat": {"id": 123}},
+            }
+        }
+    )
+
+    assert notifier.callback_answers == [("cb-watch", None)]
+    assert "SK하이닉스" in notifier.messages[-1]
+
+
+@pytest.mark.asyncio
+async def test_help_command_includes_watch_description():
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(notifier=notifier)
+
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/help"}})
+
+    assert "/watch" in notifier.messages[-1]
