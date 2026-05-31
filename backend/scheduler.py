@@ -1,10 +1,12 @@
 import os
 import logging
+import re
 from dataclasses import dataclass
-from datetime import datetime
-from typing import Any
+from datetime import date, datetime
+from typing import Any, Callable
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from sqlmodel import Session
+from .catalyst_repo import CatalystEventInput, SqliteCatalystEventRepo
 from .ws_manager import manager
 from .database import engine
 from .config import NEWS_MCP_PARAMS, TRADING_MCP_PARAMS, DART_MCP_PARAMS
@@ -56,6 +58,21 @@ SIGNAL_SOURCES = [
     ),
 ]
 
+CATALYST_EVENT_LABELS = {
+    "earnings": "실적",
+    "dividend": "배당",
+    "disclosure": "공시",
+    "agm": "주주총회",
+}
+
+
+def _default_watchlist_repo() -> SqliteWatchlistRepo:
+    return SqliteWatchlistRepo(lambda: Session(engine))
+
+
+def _default_catalyst_repo() -> SqliteCatalystEventRepo:
+    return SqliteCatalystEventRepo(lambda: Session(engine))
+
 def extract_stocks_from_balance(balance_text: str) -> list[str]:
     """mcp-trading의 get_balance 결과에서 종목명 리스트를 추출합니다."""
     stocks = []
@@ -68,6 +85,180 @@ def extract_stocks_from_balance(balance_text: str) -> list[str]:
                 if name:
                     stocks.append(name)
     return stocks
+
+
+def _infer_catalyst_event_type(description: str) -> str:
+    text = description.lower()
+    if any(keyword in description for keyword in ("실적", "분기보고서", "반기보고서", "사업보고서")):
+        return "earnings"
+    if "배당" in description:
+        return "dividend"
+    if any(keyword in description for keyword in ("주주총회", "주총")):
+        return "agm"
+    if any(keyword in text for keyword in ("major stock", "executive")):
+        return "disclosure"
+    return "disclosure"
+
+
+def _parse_catalyst_date(raw: str) -> date | None:
+    compact_match = re.search(r"\b(20\d{2})(\d{2})(\d{2})\b", raw)
+    if compact_match is not None:
+        year, month, day = compact_match.groups()
+        try:
+            return date(int(year), int(month), int(day))
+        except ValueError:
+            return None
+
+    dashed_match = re.search(r"\b(20\d{2})[-.](\d{1,2})[-.](\d{1,2})\b", raw)
+    if dashed_match is None:
+        return None
+    year, month, day = dashed_match.groups()
+    try:
+        return date(int(year), int(month), int(day))
+    except ValueError:
+        return None
+
+
+def _parse_disclosure_signal_events(stock_name: str, raw_signal: str) -> list[CatalystEventInput]:
+    events: list[CatalystEventInput] = []
+    for line in str(raw_signal).splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("-"):
+            continue
+
+        event_date = _parse_catalyst_date(stripped)
+        if event_date is None:
+            continue
+
+        parts = [part.strip(" -") for part in stripped.split("|")]
+        description = next(
+            (part for part in parts if part and _parse_catalyst_date(part) is None),
+            stripped.lstrip("-").strip(),
+        )
+        events.append(
+            CatalystEventInput(
+                stock_name=stock_name,
+                event_type=_infer_catalyst_event_type(description),
+                event_date=event_date,
+                description=description,
+                source="dart",
+            )
+        )
+    return events
+
+
+def _format_catalyst_alert(event: Any) -> str:
+    d_day = "D-Day" if event.days_until_event == 0 else f"D-{event.days_until_event}"
+    label = CATALYST_EVENT_LABELS.get(event.event_type, event.event_type or "기타")
+    return "\n".join(
+        [
+            f"📅 촉매 이벤트 알림 ({d_day})",
+            f"- 종목: {event.stock_name}",
+            f"- 날짜: {event.event_date.isoformat()}",
+            f"- 유형: {label}",
+            f"- 내용: {event.description}",
+        ]
+    )
+
+
+async def _collect_catalyst_events(
+    watchlist: list[str],
+    catalyst_repo: SqliteCatalystEventRepo,
+) -> None:
+    for stock in watchlist:
+        try:
+            signal = await run_mcp_tool(
+                DART_MCP_PARAMS,
+                "get_disclosure_signal",
+                {"stock_name": stock},
+            )
+            events = _parse_disclosure_signal_events(stock, str(signal))
+            if events:
+                await catalyst_repo.upsert_events(events)
+        except Exception as e:
+            logger.error("[%s] 촉매 이벤트 수집 중 오류: %s", stock, e)
+
+
+async def _send_due_catalyst_alerts(
+    watchlist: list[str],
+    catalyst_repo: SqliteCatalystEventRepo,
+    *,
+    notifier: Any,
+    today: date,
+) -> None:
+    try:
+        due_events = await catalyst_repo.list_due_for_notification(watchlist, today=today)
+    except Exception as e:
+        logger.error("촉매 이벤트 알림 대상 조회 중 오류: %s", e)
+        return
+
+    for event in due_events:
+        try:
+            sent = await notifier.send_text(_format_catalyst_alert(event))
+            if sent is True:
+                await catalyst_repo.mark_notification_sent(
+                    event.id,
+                    days_until_event=event.days_until_event,
+                )
+        except Exception as e:
+            logger.error("[%s] 촉매 이벤트 Telegram 알림 중 오류: %s", event.stock_name, e)
+
+
+async def catalyst_calendar_task(
+    *,
+    watchlist_repo: SqliteWatchlistRepo | None = None,
+    catalyst_repo: SqliteCatalystEventRepo | None = None,
+    notifier: Any = telegram_notifier,
+    today_factory: Callable[[], date] | None = None,
+    use_redis_lock: bool = True,
+) -> None:
+    if use_redis_lock:
+        try:
+            async with redis_state() as state:
+                scheduler_token = await state.acquire_scheduler_lock("catalyst_calendar")
+                if scheduler_token is None:
+                    logger.info("다른 worker가 촉매 이벤트 캘린더를 실행 중입니다. 이번 실행을 건너뜁니다.")
+                    return
+                try:
+                    await catalyst_calendar_task(
+                        watchlist_repo=watchlist_repo,
+                        catalyst_repo=catalyst_repo,
+                        notifier=notifier,
+                        today_factory=today_factory,
+                        use_redis_lock=False,
+                    )
+                finally:
+                    await state.release_lock(
+                        state.keys.scheduler_lock("catalyst_calendar"),
+                        scheduler_token,
+                    )
+        except Exception as e:
+            logger.error("Redis 기반 촉매 이벤트 캘린더 실행 중 오류: %s", e)
+        return
+
+    if watchlist_repo is None:
+        watchlist_repo = _default_watchlist_repo()
+    if catalyst_repo is None:
+        catalyst_repo = _default_catalyst_repo()
+    today = today_factory() if today_factory is not None else datetime.now(scheduler.timezone).date()
+
+    try:
+        watchlist = await watchlist_repo.get_watchlist()
+    except Exception as e:
+        logger.error("촉매 이벤트 관심 종목 조회 중 오류: %s", e)
+        return
+
+    if not watchlist:
+        logger.info("관심 종목이 없어 촉매 이벤트 캘린더를 건너뜁니다.")
+        return
+
+    await _collect_catalyst_events(watchlist, catalyst_repo)
+    await _send_due_catalyst_alerts(
+        watchlist,
+        catalyst_repo,
+        notifier=notifier,
+        today=today,
+    )
 
 async def monitor_market_task(watchlist_repo: SqliteWatchlistRepo | None = None):
     """
@@ -284,6 +475,14 @@ def start_scheduler():
             minutes=10,
             id="market_monitoring",
             next_run_time=datetime.now(scheduler.timezone),
+        )
+
+        scheduler.add_job(
+            catalyst_calendar_task,
+            "cron",
+            hour=8,
+            minute=30,
+            id="catalyst_calendar",
         )
         
         scheduler.start()
