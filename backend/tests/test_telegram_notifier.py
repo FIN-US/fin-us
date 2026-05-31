@@ -75,6 +75,27 @@ def test_format_analysis_alert_marks_only_actual_urgent_alerts():
     assert "긴급" not in message
 
 
+def test_format_morning_briefing_uses_expected_sections():
+    notifier = TelegramNotifier("token", "123")
+
+    message = notifier.format_morning_briefing({
+        "market_summary": "미국 증시 상승, 달러 약세",
+        "watchlist": ["삼성전자: 반도체 수급 개선"],
+        "trading_ideas": ["삼성전자 눌림목 매수 시나리오"],
+        "catalysts": ["오늘 CPI 발표"],
+    })
+
+    assert "📰 오늘의 시장 요약" in message
+    assert "미국 증시 상승, 달러 약세" in message
+    assert "📊 관심종목 동향" in message
+    assert "- 삼성전자: 반도체 수급 개선" in message
+    assert "🎯 오늘의 트레이딩 아이디어" in message
+    assert "- 삼성전자 눌림목 매수 시나리오" in message
+    assert "⚡ 주요 촉매 이벤트" in message
+    assert "- 오늘 CPI 발표" in message
+    assert len(message) <= 4000
+
+
 @pytest.mark.asyncio
 async def test_send_analysis_alert_skips_when_gate_is_false(monkeypatch):
     notifier = TelegramNotifier("token", "123")

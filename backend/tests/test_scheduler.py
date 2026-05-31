@@ -77,6 +77,64 @@ def test_start_scheduler_runs_market_monitoring_immediately(monkeypatch):
     assert market_job["next_run_time"] is not None
 
 
+def test_start_scheduler_registers_weekday_morning_briefing(monkeypatch):
+    from .. import scheduler as scheduler_module
+
+    added_jobs = []
+
+    class FakeScheduler:
+        running = False
+        timezone = None
+
+        def add_job(self, *args, **kwargs):
+            added_jobs.append((args, kwargs))
+
+        def start(self):
+            self.running = True
+
+    fake_scheduler = FakeScheduler()
+    monkeypatch.setattr(scheduler_module, "scheduler", fake_scheduler)
+
+    scheduler_module.start_scheduler()
+
+    briefing_job = next(kwargs for _args, kwargs in added_jobs if kwargs["id"] == "morning_briefing")
+    assert briefing_job["day_of_week"] == "mon-fri"
+    assert briefing_job["hour"] == 8
+    assert briefing_job["minute"] == 30
+
+
+@pytest.mark.asyncio
+async def test_morning_briefing_task_sends_telegram_message(monkeypatch):
+    from ..scheduler import morning_briefing_task
+
+    calls = []
+    briefing = {
+        "market_summary": "미국 증시 상승",
+        "watchlist": ["삼성전자: 반도체 뉴스"],
+        "trading_ideas": ["삼성전자 눌림목 관찰"],
+        "catalysts": ["FOMC 의사록"],
+    }
+
+    async def fake_generate_morning_briefing(watchlist):
+        calls.append(watchlist)
+        return briefing
+
+    mock_format = MagicMock(return_value="모닝 브리핑 메시지")
+    mock_send = MagicMock(return_value=asyncio.Future())
+    mock_send.return_value.set_result(True)
+
+    monkeypatch.setattr("backend.scheduler.SqliteWatchlistRepo", lambda session_factory: FakeWatchlistRepo(["삼성전자"]))
+    monkeypatch.setattr("backend.scheduler.generate_morning_briefing", fake_generate_morning_briefing)
+    monkeypatch.setattr("backend.scheduler.telegram_notifier.format_morning_briefing", mock_format)
+    monkeypatch.setattr("backend.scheduler.telegram_notifier.send_text", mock_send)
+
+    await morning_briefing_task()
+
+    assert calls == [["삼성전자"]]
+    mock_format.assert_called_once_with(briefing)
+    mock_send.assert_called_once_with("모닝 브리핑 메시지")
+
+
 @pytest.mark.asyncio
 async def test_ping_task_execution(monkeypatch):
     """
@@ -140,14 +198,14 @@ async def test_monitor_market_task_filtering(monkeypatch):
     monkeypatch.setattr("backend.scheduler.redis_state", unavailable_redis_state)
     
     # 1. 첫 번째 실행: 뉴스가 처음이므로 분석 수행
-    await monitor_market_task()
+    await monitor_market_task(watchlist_repo=FakeWatchlistRepo())
     assert mock_perform_analysis.call_count == 3 # 삼성전자, SK하이닉스, 현대차
     assert mock_broadcast.call_count == 3
     
     # 2. 두 번째 실행: 뉴스가 동일하므로 분석 스킵
     mock_perform_analysis.reset_mock()
     mock_broadcast.reset_mock()
-    await monitor_market_task()
+    await monitor_market_task(watchlist_repo=FakeWatchlistRepo())
     assert mock_perform_analysis.call_count == 0
     assert mock_broadcast.call_count == 0
     
@@ -160,7 +218,7 @@ async def test_monitor_market_task_filtering(monkeypatch):
         return f"Latest news for {args.get('stock_name')}"
         
     monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool_changed)
-    await monitor_market_task()
+    await monitor_market_task(watchlist_repo=FakeWatchlistRepo())
     assert mock_perform_analysis.call_count == 1
     assert mock_broadcast.call_count == 1
     assert mock_perform_analysis.call_args[0][0] == "삼성전자"
@@ -416,7 +474,7 @@ async def test_monitor_market_task_uses_default_stocks_when_balance_empty(monkey
     monkeypatch.setattr("backend.scheduler.perform_stock_analysis", mock_perform_analysis)
     monkeypatch.setattr("backend.scheduler.manager.broadcast", mock_broadcast)
 
-    await monitor_market_task()
+    await monitor_market_task(watchlist_repo=FakeWatchlistRepo())
 
     assert len(DEFAULT_MONITOR_STOCKS) == 4
     assert monitored_stocks == DEFAULT_MONITOR_STOCKS
@@ -458,8 +516,8 @@ async def test_monitor_market_task_uses_redis_hash_to_skip_duplicate_news(monkey
     monkeypatch.setattr("backend.scheduler.perform_stock_analysis", mock_perform_analysis)
     monkeypatch.setattr("backend.scheduler.manager.broadcast", mock_broadcast)
 
-    await monitor_market_task()
-    await monitor_market_task()
+    await monitor_market_task(watchlist_repo=FakeWatchlistRepo())
+    await monitor_market_task(watchlist_repo=FakeWatchlistRepo())
 
     assert mock_perform_analysis.call_count == 1
     assert mock_broadcast.call_count == 1
@@ -500,7 +558,7 @@ async def test_monitor_market_task_processes_multiple_signal_sources_independent
     monkeypatch.setattr("backend.scheduler.perform_stock_analysis", mock_perform_analysis)
     monkeypatch.setattr("backend.scheduler.manager.broadcast", mock_broadcast)
 
-    await monitor_market_task()
+    await monitor_market_task(watchlist_repo=FakeWatchlistRepo())
 
     assert mock_perform_analysis.call_count == 2
     assert [call.kwargs["trigger_source"] for call in mock_perform_analysis.call_args_list] == ["news", "sns"]
@@ -532,7 +590,7 @@ async def test_monitor_market_task_skips_when_scheduler_lock_is_held(monkeypatch
     )
     monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
 
-    await monitor_market_task()
+    await monitor_market_task(watchlist_repo=FakeWatchlistRepo())
 
     mock_run_mcp_tool.assert_not_called()
 
@@ -573,7 +631,10 @@ async def test_concurrent_monitor_market_task_runs_once_with_scheduler_lock(monk
     monkeypatch.setattr("backend.scheduler.perform_stock_analysis", mock_perform_analysis)
     monkeypatch.setattr("backend.scheduler.manager.broadcast", mock_broadcast)
 
-    await asyncio.gather(monitor_market_task(), monitor_market_task())
+    await asyncio.gather(
+        monitor_market_task(watchlist_repo=FakeWatchlistRepo()),
+        monitor_market_task(watchlist_repo=FakeWatchlistRepo()),
+    )
 
     assert mock_perform_analysis.call_count == 1
     assert mock_broadcast.call_count == 1

@@ -16,6 +16,7 @@ from .config import (
     ANTHROPIC_API_KEY, ANTHROPIC_CHAT_MODEL,
     OLLAMA_API_KEY, OLLAMA_MODEL, OLLAMA_BASE_URL,
     NAT_BASE_URL, NAT_CHAT_MODEL, NAT_CONVERSATION_ID,
+    NEWS_MCP_PARAMS, TRADING_MCP_PARAMS,
 )
 from .schemas import TradingSignal, AnalysisReport
 from .models import AgentReport
@@ -122,6 +123,83 @@ async def perform_stock_analysis(
         # DB 저장 실패해도 데이터는 반환함
 
     return data
+
+
+async def generate_morning_briefing(watchlist: list[str] | None = None) -> dict[str, Any]:
+    stocks = list(dict.fromkeys(watchlist or []))
+    market_summary_source = await _collect_morning_context(
+        NEWS_MCP_PARAMS,
+        "get_market_news",
+        {"stock_name": "미국 증시"},
+    )
+    balance_text = await _collect_morning_context(TRADING_MCP_PARAMS, "get_balance", {})
+
+    stock_blocks = []
+    for stock in stocks:
+        news = await _collect_morning_context(
+            NEWS_MCP_PARAMS,
+            "get_market_news",
+            {"stock_name": stock},
+        )
+        trading = await _collect_morning_context(
+            TRADING_MCP_PARAMS,
+            "get_investor_trading",
+            {"stock_name": stock},
+        )
+        stock_blocks.append(f"[{stock}]\n뉴스: {news}\n수급: {trading}")
+
+    watchlist_context = "\n\n".join(stock_blocks) if stock_blocks else "관심종목 없음"
+    prompt = (
+        "Strategy Planner 관점으로 오늘 장 시작 전 Telegram 모닝 브리핑을 작성하라.\n"
+        "반드시 다음 JSON 객체 한 개만 출력하라:\n"
+        '{"market_summary":"전일 미국/선물 시장 동향과 주요 이슈",'
+        '"watchlist":["종목별 뉴스 및 수급 요약"],'
+        '"trading_ideas":["오늘의 간략 시나리오"],'
+        '"catalysts":["당일/금주 주요 촉매 이벤트"]}\n\n'
+        f"시장 뉴스:\n{market_summary_source}\n\n"
+        f"잔고:\n{balance_text}\n\n"
+        f"관심종목 컨텍스트:\n{watchlist_context}"
+    )
+    raw = await llm_chat("nat", prompt, conversation_id="morning-briefing")
+    return _morning_briefing_from_text(str(raw))
+
+
+async def _collect_morning_context(
+    mcp_params: StdioServerParameters,
+    tool_name: str,
+    arguments: dict[str, Any],
+) -> str:
+    try:
+        return await run_mcp_tool(mcp_params, tool_name, arguments)
+    except Exception as exc:
+        logger.error("Morning briefing source failed for %s: %s", tool_name, exc)
+        return f"{tool_name} 조회 실패: {exc}"
+
+
+def _morning_briefing_from_text(raw: str) -> dict[str, Any]:
+    text = (raw or "").strip()
+    for data in _json_objects_from_text(text):
+        return {
+            "market_summary": str(data.get("market_summary") or ""),
+            "watchlist": _string_list(data.get("watchlist")),
+            "trading_ideas": _string_list(data.get("trading_ideas")),
+            "catalysts": _string_list(data.get("catalysts")),
+        }
+    return {
+        "market_summary": text or "모닝 브리핑 생성 결과가 비어 있습니다.",
+        "watchlist": [],
+        "trading_ideas": [],
+        "catalysts": [],
+    }
+
+
+def _string_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item) for item in value if str(item).strip()]
+    if value:
+        return [str(value)]
+    return []
+
 
 async def check_signal_significance(
     stock: str,

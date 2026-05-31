@@ -113,6 +113,30 @@ class TelegramNotifier:
             lines.append(f"Summary: {summary}")
         return "\n".join(lines)[:4000]
 
+    def format_morning_briefing(self, briefing: dict[str, Any]) -> str:
+        lines = [
+            "📰 오늘의 시장 요약",
+            str(briefing.get("market_summary") or "요약 없음"),
+            "",
+            "📊 관심종목 동향",
+            *self._format_bullets(briefing.get("watchlist")),
+            "",
+            "🎯 오늘의 트레이딩 아이디어",
+            *self._format_bullets(briefing.get("trading_ideas")),
+            "",
+            "⚡ 주요 촉매 이벤트",
+            *self._format_bullets(briefing.get("catalysts")),
+        ]
+        return "\n".join(lines)[:4000]
+
+    @staticmethod
+    def _format_bullets(items: Any) -> list[str]:
+        if not items:
+            return ["- 없음"]
+        if isinstance(items, str):
+            return [f"- {items}"]
+        return [f"- {item}" for item in items if str(item).strip()] or ["- 없음"]
+
     async def send_analysis_alert(
         self,
         stock: str,
