@@ -1747,6 +1747,28 @@ async def test_watch_list_shows_failure_message_when_quote_fails():
 
 
 @pytest.mark.asyncio
+async def test_watch_list_shows_failure_message_when_rate_is_unparseable():
+    notifier = FakeNotifier()
+
+    async def mcp_runner(server_params, tool_name, arguments):
+        return "[LG화학] 현재가 시세\n- 현재가: 312,000원\n- 전일 대비: - (-%)"
+
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        watchlist_repo=FakeWatchlistRepo(["LG화학"]),
+        mcp_runner=mcp_runner,
+    )
+
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/watch list"}})
+
+    msg = notifier.messages[-1]
+    assert "LG화학" in msg
+    assert "조회 실패" in msg
+    assert "🔴" not in msg
+    assert "▲" not in msg
+
+
+@pytest.mark.asyncio
 async def test_watch_list_calls_quote_for_each_stock_sequentially():
     notifier = FakeNotifier()
     calls: list[str] = []

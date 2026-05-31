@@ -14,6 +14,11 @@ class FakeWatchlistRepo:
     async def get_watchlist(self) -> list[str]:
         return list(self._stocks)
 
+
+class FailingWatchlistRepo:
+    async def get_watchlist(self) -> list[str]:
+        raise RuntimeError("watchlist db unavailable")
+
 @pytest.fixture
 def client():
     with TestClient(app) as c:
@@ -609,6 +614,42 @@ async def test_monitor_market_task_includes_watchlist_stocks(monkeypatch):
 
     assert "삼성전자" in monitored_stocks
     assert "NAVER" in monitored_stocks
+
+
+@pytest.mark.asyncio
+async def test_monitor_market_task_continues_owned_stock_when_watchlist_fails(monkeypatch):
+    """관심 종목 조회 실패가 보유 종목 모니터링까지 막지 않습니다."""
+    from ..scheduler import SignalSource, monitor_market_task
+
+    state = RedisSchedulerState(FakeRedis())
+
+    @asynccontextmanager
+    async def fake_redis_state():
+        yield state
+
+    monitored_stocks = []
+
+    async def mock_run_mcp_tool(params, name, args):
+        if name == "get_balance":
+            return "[보유 종목 리스트]\n- 삼성전자 (005930): 10주"
+        monitored_stocks.append(args["stock_name"])
+        return "news"
+
+    async def mock_check_significance(stock, current, last, *, source, provider):
+        return False
+
+    monkeypatch.setattr("backend.scheduler.redis_state", fake_redis_state)
+    monkeypatch.setattr(
+        "backend.scheduler.SIGNAL_SOURCES",
+        [SignalSource(name="news", mcp_params=object(), tool_name="get_market_news")],
+    )
+    monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
+    monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
+    monkeypatch.setattr("backend.scheduler.manager.broadcast", MagicMock(return_value=asyncio.Future()))
+
+    await monitor_market_task(watchlist_repo=FailingWatchlistRepo())
+
+    assert monitored_stocks == ["삼성전자"]
 
 
 @pytest.mark.asyncio

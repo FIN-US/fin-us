@@ -112,7 +112,11 @@ async def _monitor_market_task(
 
         if watchlist_repo is None:
             watchlist_repo = SqliteWatchlistRepo(lambda: Session(engine))
-        watchlist = await watchlist_repo.get_watchlist()
+        try:
+            watchlist = await watchlist_repo.get_watchlist()
+        except Exception as e:
+            logger.error("관심 종목 조회 중 오류: %s", e)
+            watchlist = []
 
         # 보유 종목 + 관심 종목 합산 (순서 유지, 중복 제거)
         seen: set[str] = set()

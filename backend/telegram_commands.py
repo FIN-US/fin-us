@@ -497,10 +497,12 @@ class TelegramCommandHandler:
                             try:
                                 rate_float = float(rate.rstrip("%"))
                             except ValueError:
-                                rate_float = None
-                            if rate_float is not None and rate_float < 0:
+                                line = f"• {stock}  (조회 실패)"
+                                lines.append(line)
+                                continue
+                            if rate_float < 0:
                                 line = f"🔵 {stock}  {price}  ▼ {rate}"
-                            elif rate_float is not None and rate_float == 0.0:
+                            elif rate_float == 0.0:
                                 line = f"⬜ {stock}  {price}  {rate}"
                             else:
                                 sign = "" if rate.startswith("+") else "+"
