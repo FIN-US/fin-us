@@ -49,3 +49,8 @@ class Diary(SQLModel, table=True):
     title: str = Field(description="일지 제목")
     content: str = Field(description="일지 내용")
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="작성 일시")
+
+
+class WatchlistItem(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    stock_name: str = Field(unique=True, index=True)
