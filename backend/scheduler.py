@@ -104,10 +104,20 @@ async def _monitor_market_task(state: RedisSchedulerState | None):
     try:
         # 1. 실시간 잔고 조회 및 모니터링 대상 확정
         balance_text = await run_mcp_tool(TRADING_MCP_PARAMS, "get_balance", {})
-        stocks_to_monitor = extract_stocks_from_balance(balance_text)
+        owned_stocks = extract_stocks_from_balance(balance_text)
+
+        watchlist = await state.get_watchlist() if state is not None else []
+
+        # 보유 종목 + 관심 종목 합산 (순서 유지, 중복 제거)
+        seen: set[str] = set()
+        stocks_to_monitor: list[str] = []
+        for stock in owned_stocks + watchlist:
+            if stock not in seen:
+                seen.add(stock)
+                stocks_to_monitor.append(stock)
 
         if not stocks_to_monitor:
-            logger.info("보유 종목이 없습니다. 기본 종목 10개를 감시합니다.")
+            logger.info("보유 종목 및 관심 종목이 없습니다. 기본 종목을 감시합니다.")
             stocks_to_monitor = DEFAULT_MONITOR_STOCKS
 
         with Session(engine) as session:
