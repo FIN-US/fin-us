@@ -15,6 +15,7 @@ from .config import (
     KIS_REAL_ORDER_ENABLED,
     TRADING_MCP_PARAMS,
 )
+from .catalyst_repo import SqliteCatalystEventRepo
 from .database import engine
 from .redis_state import RedisSchedulerState, redis_state
 from .services import llm_chat, run_mcp_tool
@@ -35,6 +36,7 @@ ALERT_COMMAND_HELP = "사용법: /alerts urgent | all | off | status"
 BUY_COMMAND_HELP = "사용법: /buy <종목명> <수량> [지정가]"
 SELL_COMMAND_HELP = "사용법: /sell <종목명> <수량> [지정가]"
 WATCH_COMMAND_HELP = "사용법: /watch add <종목명> | remove <종목명> | list"
+CATALYST_COMMAND_HELP = "사용법: /catalysts <종목명>"
 NATURAL_ORDER_HELP = "자연어 주문을 해석할 수 없습니다. /buy 또는 /sell 형식으로 입력하세요."
 ORDER_EXPIRES_AFTER = timedelta(seconds=60)
 ORDER_CONFIRM_CALLBACK = "order:confirm"
@@ -60,6 +62,7 @@ TELEGRAM_INTERACTIVE_HELP = "\n".join(
         "/alerts urgent|all|off|status - Telegram 알림 모드 변경",
         "/balance - 예수금·총자산·보유 종목 조회",
         "/watch add <종목명>|remove <종목명>|list - 관심 종목 관리",
+        "/catalysts <종목명> - 예정 촉매 이벤트 조회",
         "/trade - 매수·매도 주문 입력 안내",
         "/lookup - 현재가·수급 조회 입력 안내",
         "/quote <종목명> - 현재가 조회",
@@ -75,6 +78,7 @@ TELEGRAM_BOT_COMMANDS = [
     {"command": "help", "description": "사용 가능한 명령 확인"},
     {"command": "balance", "description": "예수금·총자산·보유 종목 조회"},
     {"command": "watch", "description": "관심 종목 추가·삭제·조회 (add/remove/list)"},
+    {"command": "catalysts", "description": "예정 촉매 이벤트 조회"},
     {"command": "quote", "description": "종목 현재가 조회"},
     {"command": "trend", "description": "종목 외국인·기관·개인 수급 조회"},
     {"command": "alerts", "description": "Telegram 알림 모드 변경"},
@@ -147,6 +151,10 @@ def _default_watchlist_repo() -> SqliteWatchlistRepo:
     return SqliteWatchlistRepo(lambda: Session(engine))
 
 
+def _default_catalyst_repo() -> SqliteCatalystEventRepo:
+    return SqliteCatalystEventRepo(lambda: Session(engine))
+
+
 class TelegramCommandHandler:
     def __init__(
         self,
@@ -154,6 +162,7 @@ class TelegramCommandHandler:
         notifier: TelegramNotifier,
         state_factory: Callable[[], Any] = redis_state,
         watchlist_repo: Any | None = None,
+        catalyst_repo: Any | None = None,
         mcp_runner: Callable[[Any, str, dict[str, Any]], Any] = run_mcp_tool,
         llm_runner: Callable[..., Any] = llm_chat,
         order_gateway: Any | None = None,
@@ -163,6 +172,7 @@ class TelegramCommandHandler:
         self.notifier = notifier
         self.state_factory = state_factory
         self.watchlist_repo = watchlist_repo if watchlist_repo is not None else _default_watchlist_repo()
+        self.catalyst_repo = catalyst_repo if catalyst_repo is not None else _default_catalyst_repo()
         self.mcp_runner = mcp_runner
         self.llm_runner = llm_runner
         self.order_gateway = order_gateway
@@ -201,6 +211,9 @@ class TelegramCommandHandler:
             return
         if self._matches_command(command, bot_username, "/watch"):
             await self._handle_watch(argument)
+            return
+        if self._matches_command(command, bot_username, "/catalysts"):
+            await self._handle_catalysts(argument)
             return
         if self._matches_command(command, bot_username, "/trade"):
             await self._send_text_or_raise(
@@ -540,6 +553,29 @@ class TelegramCommandHandler:
 
         await self._send_text_or_raise(WATCH_COMMAND_HELP)
 
+    async def _handle_catalysts(self, argument: str) -> None:
+        stock = argument.strip()
+        if not stock:
+            await self._send_text_or_raise(CATALYST_COMMAND_HELP)
+            return
+
+        today = self.now_factory().astimezone(KST).date()
+        events = await self.catalyst_repo.list_upcoming(stock, today=today, limit=20)
+        if not events:
+            await self._send_text_or_raise(
+                f"{stock} 예정 이벤트가 없습니다.\n"
+                "이벤트는 관심 종목 대상 스케줄러가 수집한 뒤 표시됩니다."
+            )
+            return
+
+        lines = [f"📅 {stock} 예정 이벤트"]
+        for event in events:
+            label = self._format_catalyst_type(getattr(event, "event_type", ""))
+            lines.append(
+                f"• {event.event_date.isoformat()}  {getattr(event, 'description', '')} ({label})"
+            )
+        await self._send_text_or_raise(_telegram_text("\n".join(lines)))
+
     async def _handle_balance(self) -> None:
         await self.notifier.send_chat_action("typing")
         try:
@@ -817,6 +853,14 @@ class TelegramCommandHandler:
         if emoji is None:
             return mode
         return f"{emoji} {mode}"
+
+    def _format_catalyst_type(self, event_type: str) -> str:
+        return {
+            "earnings": "실적",
+            "dividend": "배당",
+            "disclosure": "공시",
+            "agm": "주주총회",
+        }.get(event_type, event_type or "기타")
 
     def _balance_reply_markup(self) -> dict[str, Any]:
         return {

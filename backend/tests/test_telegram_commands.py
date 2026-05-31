@@ -1,4 +1,5 @@
-from datetime import datetime
+from datetime import date, datetime
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -8,6 +9,7 @@ import backend.telegram_commands as telegram_commands
 from backend.config import TRADING_MCP_PARAMS
 from backend.telegram_commands import (
     BUY_COMMAND_HELP,
+    CATALYST_COMMAND_HELP,
     QUOTE_COMMAND_HELP,
     TELEGRAM_INTERACTIVE_HELP,
     TRADE_COMMAND_HELP,
@@ -47,6 +49,16 @@ class FakeWatchlistRepo:
 
     async def remove_from_watchlist(self, stock: str):
         self._watchlist = [s for s in self._watchlist if s != stock]
+
+
+class FakeCatalystRepo:
+    def __init__(self, events: dict[str, list[SimpleNamespace]] | None = None):
+        self.events = events or {}
+        self.calls = []
+
+    async def list_upcoming(self, stock_name: str, *, today: date, limit: int = 20):
+        self.calls.append((stock_name, today, limit))
+        return list(self.events.get(stock_name, []))
 
 
 class FakeNotifier:
@@ -301,7 +313,7 @@ def test_bot_command_menu_includes_all_user_commands():
     commands = [command["command"] for command in telegram_commands.TELEGRAM_BOT_COMMANDS]
 
     assert commands == [
-        "help", "balance", "watch", "quote", "trend",
+        "help", "balance", "watch", "catalysts", "quote", "trend",
         "alerts", "trade", "lookup", "buy", "sell", "confirm", "cancel",
     ]
 
@@ -1796,3 +1808,81 @@ async def test_help_command_includes_watch_description():
     await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/help"}})
 
     assert "/watch" in notifier.messages[-1]
+
+
+# ---------------------------------------------------------------------------
+# /catalysts command
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_catalysts_without_stock_name_shows_help():
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        catalyst_repo=FakeCatalystRepo(),
+    )
+
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/catalysts"}})
+
+    assert notifier.messages == [CATALYST_COMMAND_HELP]
+
+
+@pytest.mark.asyncio
+async def test_catalysts_lists_upcoming_events_for_stock():
+    notifier = FakeNotifier()
+    repo = FakeCatalystRepo(
+        {
+            "삼성전자": [
+                SimpleNamespace(
+                    event_type="earnings",
+                    event_date=date(2026, 1, 28),
+                    description="분기 실적 발표",
+                ),
+                SimpleNamespace(
+                    event_type="dividend",
+                    event_date=date(2026, 1, 30),
+                    description="배당락일",
+                ),
+            ]
+        }
+    )
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        catalyst_repo=repo,
+        now_factory=lambda: datetime(2026, 1, 27, 9, 0, tzinfo=KST),
+    )
+
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/catalysts 삼성전자"}})
+
+    assert repo.calls == [("삼성전자", date(2026, 1, 27), 20)]
+    message = notifier.messages[-1]
+    assert message.startswith("📅 삼성전자 예정 이벤트")
+    assert "2026-01-28" in message
+    assert "분기 실적 발표" in message
+    assert "2026-01-30" in message
+    assert "배당락일" in message
+
+
+@pytest.mark.asyncio
+async def test_catalysts_reports_empty_events_for_stock():
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        catalyst_repo=FakeCatalystRepo(),
+        now_factory=lambda: datetime(2026, 1, 27, 9, 0, tzinfo=KST),
+    )
+
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/catalysts NAVER"}})
+
+    assert "NAVER 예정 이벤트가 없습니다" in notifier.messages[-1]
+
+
+@pytest.mark.asyncio
+async def test_help_and_bot_menu_include_catalysts_command(monkeypatch):
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(notifier=notifier)
+
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/help"}})
+
+    assert "/catalysts <종목명> - 예정 촉매 이벤트 조회" in notifier.messages[-1]
+    assert "catalysts" in [command["command"] for command in telegram_commands.TELEGRAM_BOT_COMMANDS]
