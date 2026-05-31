@@ -103,6 +103,7 @@ cd frontend-react && npm ci && npm run dev
 |                      | `execute_trade`        | 매수/매도 주문 실행 (KIS API)                |
 
 Backend는 `GET /api/v1/disclosures?stock=삼성전자`로 DART 지분공시 signal을 제공하며, 스케줄러는 뉴스 signal과 함께 공시 signal도 주기적으로 수집합니다.
+관심 종목의 DART signal은 촉매 이벤트 캘린더에도 저장되며, 매일 오전 D-1/D-0 이벤트를 Telegram으로 사전 알림합니다.
 
 ## 📅 로드맵
 
@@ -165,6 +166,7 @@ docker compose exec backend uv run --project /app/backend python /app/backend/sc
 | `/watch list` | 관심 종목 목록 조회 | 📋 목록 새로고침 |
 | `/watch add <종목명>` | 관심 종목 추가 (스케줄러 자동 모니터링 대상에 포함) | 📋 목록 새로고침 |
 | `/watch remove <종목명>` | 관심 종목 삭제 | 📋 목록 새로고침 |
+| `/catalysts <종목명>` | 관심 종목의 예정 촉매 이벤트 조회 (실적·배당·공시·주주총회) | - |
 | `/quote <종목명>` | 현재가 조회 | 📊 수급 보기 |
 | `/trend <종목명>` | 외국인·기관·개인 수급 조회 | 💵 현재가 보기 |
 
