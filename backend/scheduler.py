@@ -315,7 +315,7 @@ def start_scheduler():
             "cron",
             day_of_week="mon-fri",
             hour=8,
-            minute=35,
+            minute=30,
             id="morning_briefing",
         )
         

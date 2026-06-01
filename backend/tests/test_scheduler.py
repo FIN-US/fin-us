@@ -100,7 +100,7 @@ def test_start_scheduler_registers_weekday_morning_briefing(monkeypatch):
     briefing_job = next(kwargs for _args, kwargs in added_jobs if kwargs["id"] == "morning_briefing")
     assert briefing_job["day_of_week"] == "mon-fri"
     assert briefing_job["hour"] == 8
-    assert briefing_job["minute"] == 35
+    assert briefing_job["minute"] == 30
 
 
 @pytest.mark.asyncio
