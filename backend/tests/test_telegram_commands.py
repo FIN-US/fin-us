@@ -985,6 +985,8 @@ async def test_confirm_executes_gateway_and_records_trade():
             return "현재가: 74,500원"
         if tool_name == "get_balance":
             return "주문가능금액: 1,000,000원"
+        if tool_name == "get_today_daily_orders":
+            return "[당일 주문·체결 내역]\n주문번호 123456 | 매수 | 체결"
         raise AssertionError(f"unexpected tool: {tool_name}")
 
     gateway = FakeOrderGateway()
@@ -1013,6 +1015,93 @@ async def test_confirm_executes_gateway_and_records_trade():
 
 
 @pytest.mark.asyncio
+async def test_confirm_sends_today_order_status_after_successful_order():
+    calls = []
+
+    async def mcp_runner(server_params, tool_name, arguments):
+        calls.append((server_params, tool_name, arguments))
+        if tool_name == "resolve_stock_code":
+            return "삼성전자 (005930, KOSPI)"
+        if tool_name == "get_stock_quote":
+            return "현재가: 74,500원"
+        if tool_name == "get_balance":
+            return "주문가능금액: 1,000,000원"
+        if tool_name == "get_today_daily_orders":
+            return (
+                "[당일 주문·체결 내역] 20260520 / 005930\n"
+                "1. 삼성전자 (005930)\n"
+                "   주문번호 123456 | 매수 | 체결\n"
+                "   체결 1주 / 잔량 0주"
+            )
+        raise AssertionError(f"unexpected tool: {tool_name}")
+
+    gateway = FakeOrderGateway()
+    recorder = FakeTradeRecorder()
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        mcp_runner=mcp_runner,
+        order_gateway=gateway,
+        trade_recorder=recorder,
+        now_factory=lambda: datetime(2026, 5, 20, 10, 0, tzinfo=KST),
+    )
+
+    await handler.handle_update(
+        {"message": {"chat": {"id": 123}, "text": "/buy 삼성전자 1 75000"}}
+    )
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/confirm"}})
+
+    assert calls[-1] == (
+        TRADING_MCP_PARAMS,
+        "get_today_daily_orders",
+        {"stock_name": "005930", "ccld_dvsn": "00", "sll_buy_dvsn": "02"},
+    )
+    assert "주문 완료: 주문 접수" in notifier.messages[-1]
+    assert "현재 주문·체결 조회:" in notifier.messages[-1]
+    assert "주문번호 123456" in notifier.messages[-1]
+    assert "체결 1주 / 잔량 0주" in notifier.messages[-1]
+    assert len(gateway.orders) == 1
+    assert len(recorder.results) == 1
+    assert handler.pending_orders == {}
+
+
+@pytest.mark.asyncio
+async def test_confirm_keeps_order_success_when_today_order_status_lookup_fails():
+    async def mcp_runner(server_params, tool_name, arguments):
+        if tool_name == "resolve_stock_code":
+            return "삼성전자 (005930, KOSPI)"
+        if tool_name == "get_stock_quote":
+            return "현재가: 74,500원"
+        if tool_name == "get_balance":
+            return "주문가능금액: 1,000,000원"
+        if tool_name == "get_today_daily_orders":
+            raise RuntimeError("daily orders down")
+        raise AssertionError(f"unexpected tool: {tool_name}")
+
+    gateway = FakeOrderGateway()
+    recorder = FakeTradeRecorder()
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        mcp_runner=mcp_runner,
+        order_gateway=gateway,
+        trade_recorder=recorder,
+        now_factory=lambda: datetime(2026, 5, 20, 10, 0, tzinfo=KST),
+    )
+
+    await handler.handle_update(
+        {"message": {"chat": {"id": 123}, "text": "/buy 삼성전자 1 75000"}}
+    )
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/confirm"}})
+
+    assert "주문 완료: 주문 접수" in notifier.messages[-1]
+    assert "주문·체결 조회 실패: daily orders down" in notifier.messages[-1]
+    assert len(gateway.orders) == 1
+    assert len(recorder.results) == 1
+    assert handler.pending_orders == {}
+
+
+@pytest.mark.asyncio
 async def test_confirm_button_executes_gateway_and_records_trade():
     async def mcp_runner(server_params, tool_name, arguments):
         if tool_name == "resolve_stock_code":
@@ -1021,6 +1110,8 @@ async def test_confirm_button_executes_gateway_and_records_trade():
             return "현재가: 74,500원"
         if tool_name == "get_balance":
             return "주문가능금액: 1,000,000원"
+        if tool_name == "get_today_daily_orders":
+            return "[당일 주문·체결 내역]\n주문번호 123456 | 매수 | 체결"
         raise AssertionError(f"unexpected tool: {tool_name}")
 
     gateway = FakeOrderGateway()
@@ -1104,6 +1195,8 @@ async def test_confirm_gateway_success_recorder_failure_clears_pending_order():
             return "현재가: 74,500원"
         if tool_name == "get_balance":
             return "주문가능금액: 1,000,000원"
+        if tool_name == "get_today_daily_orders":
+            return "[당일 주문·체결 내역]\n주문번호 123456 | 매수 | 체결"
         raise AssertionError(f"unexpected tool: {tool_name}")
 
     gateway = FakeOrderGateway()
@@ -1125,7 +1218,13 @@ async def test_confirm_gateway_success_recorder_failure_clears_pending_order():
 
     assert len(gateway.orders) == 1
     assert len(recorder.results) == 1
-    assert notifier.messages[-2] == "주문 완료: 주문 접수\n거래 이력 기록 실패: db commit failed"
+    assert notifier.messages[-2] == (
+        "주문 완료: 주문 접수\n"
+        "현재 주문·체결 조회:\n"
+        "[당일 주문·체결 내역]\n"
+        "주문번호 123456 | 매수 | 체결\n"
+        "거래 이력 기록 실패: db commit failed"
+    )
     assert notifier.messages[-1] == "확정할 대기 주문이 없습니다."
     assert handler.pending_orders == {}
 

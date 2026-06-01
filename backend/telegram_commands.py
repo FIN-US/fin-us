@@ -671,6 +671,23 @@ class TelegramCommandHandler:
             return
 
         self.pending_orders.pop(chat_id, None)
+        order_status_message = ""
+        try:
+            order_status = await self.mcp_runner(
+                TRADING_MCP_PARAMS,
+                "get_today_daily_orders",
+                {
+                    "stock_name": order.stock_code,
+                    "ccld_dvsn": "00",
+                    "sll_buy_dvsn": "02" if order.side == "BUY" else "01",
+                },
+            )
+            if str(order_status).strip():
+                order_status_message = f"\n현재 주문·체결 조회:\n{order_status}"
+        except Exception as exc:
+            logger.warning("Today order status lookup failed: %s", exc)
+            order_status_message = f"\n주문·체결 조회 실패: {_short_error(exc)}"
+
         record_warning = ""
         if self.trade_recorder is not None:
             try:
@@ -678,7 +695,9 @@ class TelegramCommandHandler:
             except Exception as exc:
                 logger.warning("Trade history recording failed: %s", exc)
                 record_warning = f"\n거래 이력 기록 실패: {_short_error(exc)}"
-        await self._send_text_or_raise(f"주문 완료: {result.message}{record_warning}")
+        await self._send_text_or_raise(
+            f"주문 완료: {result.message}{order_status_message}{record_warning}"
+        )
 
     def _parse_order_argument(self, argument: str) -> tuple[str, int, int, OrderType] | None:
         parts = argument.split()
