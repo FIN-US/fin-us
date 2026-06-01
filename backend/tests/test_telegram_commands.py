@@ -1066,6 +1066,45 @@ async def test_confirm_sends_today_order_status_after_successful_order():
 
 
 @pytest.mark.asyncio
+async def test_sell_confirm_queries_today_order_status_with_sell_filter():
+    calls = []
+
+    async def mcp_runner(server_params, tool_name, arguments):
+        calls.append((server_params, tool_name, arguments))
+        if tool_name == "resolve_stock_code":
+            return "삼성전자 (005930, KOSPI)"
+        if tool_name == "get_stock_quote":
+            return "현재가: 74,500원"
+        if tool_name == "get_balance":
+            return "주문가능금액: 1,000,000원"
+        if tool_name == "get_today_daily_orders":
+            return "[당일 주문·체결 내역]\n주문번호 987654 | 매도 | 체결"
+        raise AssertionError(f"unexpected tool: {tool_name}")
+
+    gateway = FakeOrderGateway()
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        mcp_runner=mcp_runner,
+        order_gateway=gateway,
+        now_factory=lambda: datetime(2026, 5, 20, 10, 0, tzinfo=KST),
+    )
+
+    await handler.handle_update(
+        {"message": {"chat": {"id": 123}, "text": "/sell 삼성전자 1 75000"}}
+    )
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/confirm"}})
+
+    assert gateway.orders[0].side == "SELL"
+    assert calls[-1] == (
+        TRADING_MCP_PARAMS,
+        "get_today_daily_orders",
+        {"stock_name": "005930", "ccld_dvsn": "00", "sll_buy_dvsn": "01"},
+    )
+    assert "주문번호 987654" in notifier.messages[-1]
+
+
+@pytest.mark.asyncio
 async def test_confirm_keeps_order_success_when_today_order_status_lookup_fails():
     async def mcp_runner(server_params, tool_name, arguments):
         if tool_name == "resolve_stock_code":
