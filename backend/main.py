@@ -51,9 +51,9 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOW_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_credentials=False,
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type"],
 )
 
 
@@ -99,6 +99,58 @@ async def get_trading_trend(stock: str = Query(..., examples=["삼성전자"])):
 async def get_account_balance():
     balance_text = await run_mcp_tool(TRADING_MCP_PARAMS, "get_balance", {})
     return {"status": "success", "data": {"report": balance_text}}
+
+
+def _portfolio_current_price(portfolio: Portfolio) -> float:
+    return float(portfolio.current_price if portfolio.current_price is not None else portfolio.avg_price)
+
+
+def _portfolio_return_rate(current_price: float, avg_price: float) -> float:
+    if avg_price <= 0:
+        return 0.0
+    return round(((current_price - avg_price) / avg_price) * 100, 4)
+
+
+@app.get("/api/v1/portfolio", response_model=CommonResponse, tags=["Portfolio"])
+async def get_visualization_portfolio(session: Session = Depends(get_session)):
+    """Unity WebGL 시각화 화면에서 사용하는 포트폴리오 요약을 조회합니다."""
+    portfolios = session.exec(select(Portfolio)).all()
+    holdings = []
+    total_asset = 0.0
+    total_cost = 0.0
+    total_market_for_return = 0.0
+
+    for portfolio in portfolios:
+        current_price = _portfolio_current_price(portfolio)
+        avg_price = float(portfolio.avg_price)
+        quantity = portfolio.quantity
+        market_value = current_price * quantity
+        total_asset += market_value
+
+        if avg_price > 0:
+            total_cost += avg_price * quantity
+            total_market_for_return += market_value
+
+        holdings.append({
+            "name": portfolio.stock_name,
+            "current_price": current_price,
+            "avg_price": avg_price,
+            "return_rate": _portfolio_return_rate(current_price, avg_price),
+            "quantity": quantity,
+        })
+
+    total_return_rate = 0.0
+    if total_cost > 0:
+        total_return_rate = round(((total_market_for_return - total_cost) / total_cost) * 100, 4)
+
+    return {
+        "status": "success",
+        "data": {
+            "total_asset": total_asset,
+            "total_return_rate": total_return_rate,
+            "holdings": holdings,
+        },
+    }
 
 
 @app.get("/api/v1/db/portfolio", response_model=CommonResponse, tags=["Database"])

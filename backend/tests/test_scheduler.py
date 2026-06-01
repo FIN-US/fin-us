@@ -6,6 +6,19 @@ from unittest.mock import MagicMock
 from ..main import app
 from ..redis_state import RedisSchedulerState
 
+
+class FakeWatchlistRepo:
+    def __init__(self, stocks: list[str] | None = None):
+        self._stocks = list(stocks or [])
+
+    async def get_watchlist(self) -> list[str]:
+        return list(self._stocks)
+
+
+class FailingWatchlistRepo:
+    async def get_watchlist(self) -> list[str]:
+        raise RuntimeError("watchlist db unavailable")
+
 @pytest.fixture
 def client():
     with TestClient(app) as c:
@@ -156,6 +169,7 @@ async def test_monitor_market_task_filtering(monkeypatch):
 class FakeRedis:
     def __init__(self):
         self.store = {}
+        self.sets: dict[str, set] = {}
 
     async def get(self, key):
         return self.store.get(key)
@@ -176,6 +190,23 @@ class FakeRedis:
             del self.store[key]
             return 1
         return 0
+
+    async def sadd(self, key, *values):
+        if key not in self.sets:
+            self.sets[key] = set()
+        added = sum(1 for v in values if v not in self.sets[key])
+        self.sets[key].update(values)
+        return added
+
+    async def srem(self, key, *values):
+        if key not in self.sets:
+            return 0
+        removed = sum(1 for v in values if v in self.sets[key])
+        self.sets[key].difference_update(values)
+        return removed
+
+    async def smembers(self, key):
+        return self.sets.get(key, set())
 
 
 @pytest.mark.asyncio
@@ -546,3 +577,186 @@ async def test_concurrent_monitor_market_task_runs_once_with_scheduler_lock(monk
 
     assert mock_perform_analysis.call_count == 1
     assert mock_broadcast.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_monitor_market_task_includes_watchlist_stocks(monkeypatch):
+    """관심 종목이 있으면 보유 종목과 합쳐서 모니터링합니다."""
+    from ..scheduler import SignalSource, monitor_market_task
+
+    state = RedisSchedulerState(FakeRedis())
+
+    @asynccontextmanager
+    async def fake_redis_state():
+        yield state
+
+    monitored_stocks = []
+
+    async def mock_run_mcp_tool(params, name, args):
+        if name == "get_balance":
+            return "[보유 종목 리스트]\n- 삼성전자 (005930): 10주"
+        monitored_stocks.append(args["stock_name"])
+        return f"news for {args['stock_name']}"
+
+    async def mock_check_significance(stock, current, last, *, source, provider):
+        return False
+
+    monkeypatch.setattr("backend.scheduler.redis_state", fake_redis_state)
+    monkeypatch.setattr(
+        "backend.scheduler.SIGNAL_SOURCES",
+        [SignalSource(name="news", mcp_params=object(), tool_name="get_market_news")],
+    )
+    monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
+    monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
+    monkeypatch.setattr("backend.scheduler.manager.broadcast", MagicMock(return_value=asyncio.Future()))
+
+    await monitor_market_task(watchlist_repo=FakeWatchlistRepo(["NAVER"]))
+
+    assert "삼성전자" in monitored_stocks
+    assert "NAVER" in monitored_stocks
+
+
+@pytest.mark.asyncio
+async def test_monitor_market_task_continues_owned_stock_when_watchlist_fails(monkeypatch):
+    """관심 종목 조회 실패가 보유 종목 모니터링까지 막지 않습니다."""
+    from ..scheduler import SignalSource, monitor_market_task
+
+    state = RedisSchedulerState(FakeRedis())
+
+    @asynccontextmanager
+    async def fake_redis_state():
+        yield state
+
+    monitored_stocks = []
+
+    async def mock_run_mcp_tool(params, name, args):
+        if name == "get_balance":
+            return "[보유 종목 리스트]\n- 삼성전자 (005930): 10주"
+        monitored_stocks.append(args["stock_name"])
+        return "news"
+
+    async def mock_check_significance(stock, current, last, *, source, provider):
+        return False
+
+    monkeypatch.setattr("backend.scheduler.redis_state", fake_redis_state)
+    monkeypatch.setattr(
+        "backend.scheduler.SIGNAL_SOURCES",
+        [SignalSource(name="news", mcp_params=object(), tool_name="get_market_news")],
+    )
+    monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
+    monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
+    monkeypatch.setattr("backend.scheduler.manager.broadcast", MagicMock(return_value=asyncio.Future()))
+
+    await monitor_market_task(watchlist_repo=FailingWatchlistRepo())
+
+    assert monitored_stocks == ["삼성전자"]
+
+
+@pytest.mark.asyncio
+async def test_monitor_market_task_deduplicates_watchlist_and_owned_stocks(monkeypatch):
+    """보유 종목과 관심 종목이 겹쳐도 중복 모니터링하지 않습니다."""
+    from ..scheduler import SignalSource, monitor_market_task
+
+    state = RedisSchedulerState(FakeRedis())
+
+    @asynccontextmanager
+    async def fake_redis_state():
+        yield state
+
+    monitored_stocks = []
+
+    async def mock_run_mcp_tool(params, name, args):
+        if name == "get_balance":
+            return "[보유 종목 리스트]\n- 삼성전자 (005930): 10주"
+        monitored_stocks.append(args["stock_name"])
+        return "news"
+
+    async def mock_check_significance(stock, current, last, *, source, provider):
+        return False
+
+    monkeypatch.setattr("backend.scheduler.redis_state", fake_redis_state)
+    monkeypatch.setattr(
+        "backend.scheduler.SIGNAL_SOURCES",
+        [SignalSource(name="news", mcp_params=object(), tool_name="get_market_news")],
+    )
+    monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
+    monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
+    monkeypatch.setattr("backend.scheduler.manager.broadcast", MagicMock(return_value=asyncio.Future()))
+
+    await monitor_market_task(watchlist_repo=FakeWatchlistRepo(["삼성전자"]))
+
+    assert monitored_stocks.count("삼성전자") == 1
+
+
+@pytest.mark.asyncio
+async def test_monitor_market_task_uses_default_stocks_only_when_both_empty(monkeypatch):
+    """보유 종목도 관심 종목도 없을 때만 기본 종목으로 fallback합니다."""
+    from ..scheduler import DEFAULT_MONITOR_STOCKS, SignalSource, monitor_market_task
+
+    state = RedisSchedulerState(FakeRedis())
+
+    @asynccontextmanager
+    async def fake_redis_state():
+        yield state
+
+    monitored_stocks = []
+
+    async def mock_run_mcp_tool(params, name, args):
+        if name == "get_balance":
+            return "[보유 종목 리스트]\n보유 종목이 없습니다."
+        monitored_stocks.append(args["stock_name"])
+        return "news"
+
+    async def mock_check_significance(stock, current, last, *, source, provider):
+        return False
+
+    monkeypatch.setattr("backend.scheduler.redis_state", fake_redis_state)
+    monkeypatch.setattr(
+        "backend.scheduler.SIGNAL_SOURCES",
+        [SignalSource(name="news", mcp_params=object(), tool_name="get_market_news")],
+    )
+    monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
+    monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
+    monkeypatch.setattr("backend.scheduler.manager.broadcast", MagicMock(return_value=asyncio.Future()))
+
+    await monitor_market_task(watchlist_repo=FakeWatchlistRepo())
+
+    assert monitored_stocks == DEFAULT_MONITOR_STOCKS
+
+
+@pytest.mark.asyncio
+async def test_monitor_market_task_watchlist_alone_skips_default_fallback(monkeypatch):
+    """보유 종목은 없어도 관심 종목이 있으면 기본 종목을 사용하지 않습니다."""
+    from ..scheduler import DEFAULT_MONITOR_STOCKS, SignalSource, monitor_market_task
+
+    state = RedisSchedulerState(FakeRedis())
+
+    @asynccontextmanager
+    async def fake_redis_state():
+        yield state
+
+    monitored_stocks = []
+
+    async def mock_run_mcp_tool(params, name, args):
+        if name == "get_balance":
+            return "[보유 종목 리스트]\n보유 종목이 없습니다."
+        monitored_stocks.append(args["stock_name"])
+        return "news"
+
+    async def mock_check_significance(stock, current, last, *, source, provider):
+        return False
+
+    monkeypatch.setattr("backend.scheduler.redis_state", fake_redis_state)
+    monkeypatch.setattr(
+        "backend.scheduler.SIGNAL_SOURCES",
+        [SignalSource(name="news", mcp_params=object(), tool_name="get_market_news")],
+    )
+    monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
+    monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
+    monkeypatch.setattr("backend.scheduler.manager.broadcast", MagicMock(return_value=asyncio.Future()))
+
+    await monitor_market_task(watchlist_repo=FakeWatchlistRepo(["카카오"]))
+
+    assert monitored_stocks == ["카카오"]
+    for default_stock in DEFAULT_MONITOR_STOCKS:
+        assert default_stock not in monitored_stocks

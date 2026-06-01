@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import json
+import os
 import shutil
 import tempfile
 import urllib.request
@@ -67,6 +68,37 @@ def parse_master_rows(file_path, *, market, tail_width, aliases_by_code):
     return stocks
 
 
+def deduplicate_stocks(stocks):
+    deduped_by_market_name = {}
+    for stock in stocks:
+        key = (stock["market"], stock["name"])
+        deduped_by_market_name[key] = stock
+    return list(deduped_by_market_name.values())
+
+
+def write_stocks(stocks, stocks_path=STOCKS_PATH):
+    if not stocks:
+        raise ValueError("종목 마스터 갱신 결과가 비어 있습니다.")
+
+    next_text = json.dumps(stocks, ensure_ascii=False, indent=2) + "\n"
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=stocks_path.parent,
+            delete=False,
+        ) as temp_file:
+            temp_path = Path(temp_file.name)
+            temp_file.write(next_text)
+            temp_file.flush()
+            os.fsync(temp_file.fileno())
+        os.replace(temp_path, stocks_path)
+    finally:
+        if temp_path is not None and temp_path.exists():
+            temp_path.unlink()
+
+
 def main():
     aliases_by_code = load_existing_aliases()
     with tempfile.TemporaryDirectory() as temp_name:
@@ -83,9 +115,9 @@ def main():
                 )
             )
 
+    stocks = deduplicate_stocks(stocks)
     stocks.sort(key=lambda stock: (stock["market"], stock["code"]))
-    next_text = json.dumps(stocks, ensure_ascii=False, indent=2) + "\n"
-    STOCKS_PATH.write_text(next_text, encoding="utf-8")
+    write_stocks(stocks)
     print(f"updated {STOCKS_PATH} with {len(stocks)} stocks")
 
 

@@ -34,6 +34,21 @@ class FakeState:
         self.mode = mode
 
 
+class FakeWatchlistRepo:
+    def __init__(self, stocks: list[str] | None = None):
+        self._watchlist: list[str] = list(stocks or [])
+
+    async def get_watchlist(self):
+        return sorted(self._watchlist)
+
+    async def add_to_watchlist(self, stock: str):
+        if stock not in self._watchlist:
+            self._watchlist.append(stock)
+
+    async def remove_from_watchlist(self, stock: str):
+        self._watchlist = [s for s in self._watchlist if s != stock]
+
+
 class FakeNotifier:
     def __init__(self, chat_id="123", send_text_result=True, bot_username=""):
         self.chat_id = chat_id
@@ -282,14 +297,13 @@ async def test_lookup_quote_button_replies_with_quote_guidance():
     assert notifier.messages == [QUOTE_COMMAND_HELP]
 
 
-def test_bot_command_menu_uses_entrypoints_for_parameterized_commands():
+def test_bot_command_menu_includes_all_user_commands():
     commands = [command["command"] for command in telegram_commands.TELEGRAM_BOT_COMMANDS]
 
-    assert commands == ["help", "balance", "alerts", "trade", "lookup"]
-    assert "buy" not in commands
-    assert "sell" not in commands
-    assert "quote" not in commands
-    assert "trend" not in commands
+    assert commands == [
+        "help", "balance", "watch", "quote", "trend",
+        "alerts", "trade", "lookup", "buy", "sell", "confirm", "cancel",
+    ]
 
 
 @pytest.mark.asyncio
@@ -1521,3 +1535,264 @@ async def test_poller_keeps_offset_when_nat_response_send_fails(monkeypatch):
 
     assert calls == [("nat", "질문", "telegram:123")]
     assert poller.offset is None
+
+
+# ---------------------------------------------------------------------------
+# /watch command
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_watch_list_empty_shows_empty_message():
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(notifier=notifier, watchlist_repo=FakeWatchlistRepo())
+
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/watch list"}})
+
+    assert "관심 종목이 없습니다" in notifier.messages[-1]
+
+
+@pytest.mark.asyncio
+async def test_watch_list_shows_stocks_with_refresh_button():
+    notifier = FakeNotifier()
+
+    async def mcp_runner(server_params, tool_name, arguments):
+        return f"[{arguments.get('stock_name')}] 현재가 시세\n- 현재가: 75,400원\n- 전일 대비: +930 (1.23%)"
+
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        watchlist_repo=FakeWatchlistRepo(["삼성전자", "NAVER"]),
+        mcp_runner=mcp_runner,
+    )
+
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/watch list"}})
+
+    assert "NAVER" in notifier.messages[-1]
+    assert "삼성전자" in notifier.messages[-1]
+    markup = notifier.reply_markups[-1]
+    assert markup is not None
+    buttons_flat = [btn for row in markup["inline_keyboard"] for btn in row]
+    callback_datas = [btn["callback_data"] for btn in buttons_flat]
+    assert "watch:list" in callback_datas
+
+
+@pytest.mark.asyncio
+async def test_watch_add_adds_stock_and_confirms():
+    repo = FakeWatchlistRepo()
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(notifier=notifier, watchlist_repo=repo)
+
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/watch add 삼성전자"}})
+
+    assert "삼성전자" in repo._watchlist
+    assert "삼성전자" in notifier.messages[-1]
+    assert "추가" in notifier.messages[-1]
+
+
+@pytest.mark.asyncio
+async def test_watch_remove_removes_stock_and_confirms():
+    repo = FakeWatchlistRepo(["삼성전자"])
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(notifier=notifier, watchlist_repo=repo)
+
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/watch remove 삼성전자"}})
+
+    assert "삼성전자" not in repo._watchlist
+    assert "삼성전자" in notifier.messages[-1]
+    assert "삭제" in notifier.messages[-1]
+
+
+@pytest.mark.asyncio
+async def test_watch_add_without_stock_name_shows_help():
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(notifier=notifier, watchlist_repo=FakeWatchlistRepo())
+
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/watch add"}})
+
+    assert "사용법" in notifier.messages[-1]
+
+
+@pytest.mark.asyncio
+async def test_watch_remove_without_stock_name_shows_help():
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(notifier=notifier, watchlist_repo=FakeWatchlistRepo())
+
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/watch remove"}})
+
+    assert "사용법" in notifier.messages[-1]
+
+
+@pytest.mark.asyncio
+async def test_watch_unknown_subcommand_shows_help():
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(notifier=notifier, watchlist_repo=FakeWatchlistRepo())
+
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/watch foo"}})
+
+    assert "사용법" in notifier.messages[-1]
+
+
+@pytest.mark.asyncio
+async def test_watch_list_callback_refreshes_watchlist():
+    notifier = FakeNotifier()
+
+    async def mcp_runner(server_params, tool_name, arguments):
+        return "[SK하이닉스] 현재가 시세\n- 현재가: 180,000원\n- 전일 대비: -990 (-0.55%)"
+
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        watchlist_repo=FakeWatchlistRepo(["SK하이닉스"]),
+        mcp_runner=mcp_runner,
+    )
+
+    await handler.handle_update(
+        {
+            "callback_query": {
+                "id": "cb-watch",
+                "data": "watch:list",
+                "message": {"chat": {"id": 123}},
+            }
+        }
+    )
+
+    assert notifier.callback_answers == [("cb-watch", None)]
+    assert "SK하이닉스" in notifier.messages[-1]
+
+
+@pytest.mark.asyncio
+async def test_watch_list_shows_rising_stock_with_red_emoji():
+    notifier = FakeNotifier()
+
+    async def mcp_runner(server_params, tool_name, arguments):
+        return "[삼성전자] 현재가 시세\n- 현재가: 75,400원\n- 전일 대비: +930 (1.23%)"
+
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        watchlist_repo=FakeWatchlistRepo(["삼성전자"]),
+        mcp_runner=mcp_runner,
+    )
+
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/watch list"}})
+
+    msg = notifier.messages[-1]
+    assert "🔴" in msg
+    assert "▲" in msg
+    assert "+1.23%" in msg
+    assert "75,400원" in msg
+    assert "삼성전자" in msg
+
+
+@pytest.mark.asyncio
+async def test_watch_list_shows_falling_stock_with_blue_emoji():
+    notifier = FakeNotifier()
+
+    async def mcp_runner(server_params, tool_name, arguments):
+        return "[SK하이닉스] 현재가 시세\n- 현재가: 180,000원\n- 전일 대비: -990 (-0.55%)"
+
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        watchlist_repo=FakeWatchlistRepo(["SK하이닉스"]),
+        mcp_runner=mcp_runner,
+    )
+
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/watch list"}})
+
+    msg = notifier.messages[-1]
+    assert "🔵" in msg
+    assert "▼" in msg
+    assert "-0.55%" in msg
+    assert "180,000원" in msg
+    assert "SK하이닉스" in msg
+
+
+@pytest.mark.asyncio
+async def test_watch_list_shows_flat_stock_with_white_emoji():
+    notifier = FakeNotifier()
+
+    async def mcp_runner(server_params, tool_name, arguments):
+        return "[카카오] 현재가 시세\n- 현재가: 45,000원\n- 전일 대비: 0 (0.00%)"
+
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        watchlist_repo=FakeWatchlistRepo(["카카오"]),
+        mcp_runner=mcp_runner,
+    )
+
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/watch list"}})
+
+    msg = notifier.messages[-1]
+    assert "⬜" in msg
+    assert "0.00%" in msg
+    assert "45,000원" in msg
+    assert "카카오" in msg
+
+
+@pytest.mark.asyncio
+async def test_watch_list_shows_failure_message_when_quote_fails():
+    notifier = FakeNotifier()
+
+    async def mcp_runner(server_params, tool_name, arguments):
+        raise RuntimeError("connection error")
+
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        watchlist_repo=FakeWatchlistRepo(["현대차"]),
+        mcp_runner=mcp_runner,
+    )
+
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/watch list"}})
+
+    msg = notifier.messages[-1]
+    assert "현대차" in msg
+    assert "조회 실패" in msg
+
+
+@pytest.mark.asyncio
+async def test_watch_list_shows_failure_message_when_rate_is_unparseable():
+    notifier = FakeNotifier()
+
+    async def mcp_runner(server_params, tool_name, arguments):
+        return "[LG화학] 현재가 시세\n- 현재가: 312,000원\n- 전일 대비: - (-%)"
+
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        watchlist_repo=FakeWatchlistRepo(["LG화학"]),
+        mcp_runner=mcp_runner,
+    )
+
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/watch list"}})
+
+    msg = notifier.messages[-1]
+    assert "LG화학" in msg
+    assert "조회 실패" in msg
+    assert "🔴" not in msg
+    assert "▲" not in msg
+
+
+@pytest.mark.asyncio
+async def test_watch_list_calls_quote_for_each_stock_sequentially():
+    notifier = FakeNotifier()
+    calls: list[str] = []
+
+    async def mcp_runner(server_params, tool_name, arguments):
+        calls.append(arguments.get("stock_name"))
+        return f"[{arguments.get('stock_name')}] 현재가 시세\n- 현재가: 75,400원\n- 전일 대비: +930 (1.23%)"
+
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        watchlist_repo=FakeWatchlistRepo(["삼성전자", "NAVER"]),
+        mcp_runner=mcp_runner,
+    )
+
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/watch list"}})
+
+    assert calls == ["NAVER", "삼성전자"]  # FakeState.get_watchlist returns sorted
+
+
+@pytest.mark.asyncio
+async def test_help_command_includes_watch_description():
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(notifier=notifier)
+
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/help"}})
+
+    assert "/watch" in notifier.messages[-1]

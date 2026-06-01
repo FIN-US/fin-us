@@ -18,6 +18,7 @@ from .config import (
 from .database import engine
 from .redis_state import RedisSchedulerState, redis_state
 from .services import llm_chat, run_mcp_tool
+from .watchlist_repo import SqliteWatchlistRepo
 from .telegram_notifier import TELEGRAM_ALERT_MODES, TelegramNotifier, telegram_notifier
 from .trading_orders import (
     KST,
@@ -33,6 +34,7 @@ logger = logging.getLogger(__name__)
 ALERT_COMMAND_HELP = "사용법: /alerts urgent | all | off | status"
 BUY_COMMAND_HELP = "사용법: /buy <종목명> <수량> [지정가]"
 SELL_COMMAND_HELP = "사용법: /sell <종목명> <수량> [지정가]"
+WATCH_COMMAND_HELP = "사용법: /watch add <종목명> | remove <종목명> | list"
 NATURAL_ORDER_HELP = "자연어 주문을 해석할 수 없습니다. /buy 또는 /sell 형식으로 입력하세요."
 ORDER_EXPIRES_AFTER = timedelta(seconds=60)
 ORDER_CONFIRM_CALLBACK = "order:confirm"
@@ -42,6 +44,7 @@ ALERT_CALLBACK_PREFIX = "alerts:"
 BALANCE_REFRESH_CALLBACK = "balance:refresh"
 TRADE_CALLBACK_PREFIX = "trade:"
 LOOKUP_CALLBACK_PREFIX = "lookup:"
+WATCH_LIST_CALLBACK = "watch:list"
 MARKET_QUOTE_CALLBACK = "market:quote"
 MARKET_TREND_CALLBACK = "market:trend"
 MARKET_STALE_CALLBACK_TEXT = "이전 조회 버튼입니다. 최신 조회 메시지에서 다시 선택하세요."
@@ -56,6 +59,7 @@ TELEGRAM_INTERACTIVE_HELP = "\n".join(
         "사용 가능한 명령:",
         "/alerts urgent|all|off|status - Telegram 알림 모드 변경",
         "/balance - 예수금·총자산·보유 종목 조회",
+        "/watch add <종목명>|remove <종목명>|list - 관심 종목 관리",
         "/trade - 매수·매도 주문 입력 안내",
         "/lookup - 현재가·수급 조회 입력 안내",
         "/quote <종목명> - 현재가 조회",
@@ -70,9 +74,16 @@ TELEGRAM_INTERACTIVE_HELP = "\n".join(
 TELEGRAM_BOT_COMMANDS = [
     {"command": "help", "description": "사용 가능한 명령 확인"},
     {"command": "balance", "description": "예수금·총자산·보유 종목 조회"},
+    {"command": "watch", "description": "관심 종목 추가·삭제·조회 (add/remove/list)"},
+    {"command": "quote", "description": "종목 현재가 조회"},
+    {"command": "trend", "description": "종목 외국인·기관·개인 수급 조회"},
     {"command": "alerts", "description": "Telegram 알림 모드 변경"},
     {"command": "trade", "description": "매수·매도 주문 입력 안내"},
     {"command": "lookup", "description": "현재가·수급 조회 입력 안내"},
+    {"command": "buy", "description": "매수 주문 준비 (예: /buy 삼성전자 1)"},
+    {"command": "sell", "description": "매도 주문 준비 (예: /sell 삼성전자 1)"},
+    {"command": "confirm", "description": "대기 주문 확정"},
+    {"command": "cancel", "description": "대기 주문 취소"},
 ]
 QUOTE_COMMAND_HELP = "사용법: /quote <종목명>"
 TREND_COMMAND_HELP = "사용법: /trend <종목명>"
@@ -132,12 +143,17 @@ def _create_trade_recorder() -> TradeRecorder:
     return TradeRecorder(lambda: Session(engine))
 
 
+def _default_watchlist_repo() -> SqliteWatchlistRepo:
+    return SqliteWatchlistRepo(lambda: Session(engine))
+
+
 class TelegramCommandHandler:
     def __init__(
         self,
         *,
         notifier: TelegramNotifier,
         state_factory: Callable[[], Any] = redis_state,
+        watchlist_repo: Any | None = None,
         mcp_runner: Callable[[Any, str, dict[str, Any]], Any] = run_mcp_tool,
         llm_runner: Callable[..., Any] = llm_chat,
         order_gateway: Any | None = None,
@@ -146,6 +162,7 @@ class TelegramCommandHandler:
     ):
         self.notifier = notifier
         self.state_factory = state_factory
+        self.watchlist_repo = watchlist_repo if watchlist_repo is not None else _default_watchlist_repo()
         self.mcp_runner = mcp_runner
         self.llm_runner = llm_runner
         self.order_gateway = order_gateway
@@ -181,6 +198,9 @@ class TelegramCommandHandler:
             return
         if self._matches_command(command, bot_username, "/balance"):
             await self._handle_balance()
+            return
+        if self._matches_command(command, bot_username, "/watch"):
+            await self._handle_watch(argument)
             return
         if self._matches_command(command, bot_username, "/trade"):
             await self._send_text_or_raise(
@@ -278,6 +298,11 @@ class TelegramCommandHandler:
         if data == BALANCE_REFRESH_CALLBACK:
             await self._answer_callback_query(callback_query_id)
             await self._handle_balance()
+            return
+
+        if data == WATCH_LIST_CALLBACK:
+            await self._answer_callback_query(callback_query_id)
+            await self._handle_watch("list")
             return
 
         if data.startswith(TRADE_CALLBACK_PREFIX):
@@ -449,6 +474,71 @@ class TelegramCommandHandler:
                 f"Telegram 알림 모드가 {self._format_alert_mode(action)}(으)로 변경되었습니다.",
                 reply_markup=self._alerts_reply_markup(),
             )
+
+    async def _handle_watch(self, argument: str) -> None:
+        parts = argument.split(None, 1)
+        subcommand = parts[0].lower() if parts else "list"
+        stock = parts[1].strip() if len(parts) > 1 else ""
+
+        if subcommand == "list":
+            watchlist = await self.watchlist_repo.get_watchlist()
+            if not watchlist:
+                text = "관심 종목이 없습니다.\n/watch add <종목명> 으로 추가하세요."
+            else:
+                lines = []
+                for stock in watchlist:
+                    try:
+                        raw = await self.mcp_runner(
+                            TRADING_MCP_PARAMS, "get_stock_quote", {"stock_name": stock}
+                        )
+                        summary = self._parse_quote_summary(str(raw))
+                        if summary:
+                            price, rate = summary
+                            try:
+                                rate_float = float(rate.rstrip("%"))
+                            except ValueError:
+                                line = f"• {stock}  (조회 실패)"
+                                lines.append(line)
+                                continue
+                            if rate_float < 0:
+                                line = f"🔵 {stock}  {price}  ▼ {rate}"
+                            elif rate_float == 0.0:
+                                line = f"⬜ {stock}  {price}  {rate}"
+                            else:
+                                sign = "" if rate.startswith("+") else "+"
+                                line = f"🔴 {stock}  {price}  ▲ {sign}{rate}"
+                        else:
+                            line = f"• {stock}  (조회 실패)"
+                    except Exception:
+                        line = f"• {stock}  (조회 실패)"
+                    lines.append(line)
+                text = "관심 종목 목록:\n" + "\n".join(lines)
+            await self._send_text_or_raise(text, reply_markup=self._watch_reply_markup())
+            return
+
+        if subcommand == "add":
+            if not stock:
+                await self._send_text_or_raise(WATCH_COMMAND_HELP)
+                return
+            await self.watchlist_repo.add_to_watchlist(stock)
+            await self._send_text_or_raise(
+                f"관심 종목에 {stock}을(를) 추가했습니다.",
+                reply_markup=self._watch_reply_markup(),
+            )
+            return
+
+        if subcommand == "remove":
+            if not stock:
+                await self._send_text_or_raise(WATCH_COMMAND_HELP)
+                return
+            await self.watchlist_repo.remove_from_watchlist(stock)
+            await self._send_text_or_raise(
+                f"관심 종목에서 {stock}을(를) 삭제했습니다.",
+                reply_markup=self._watch_reply_markup(),
+            )
+            return
+
+        await self._send_text_or_raise(WATCH_COMMAND_HELP)
 
     async def _handle_balance(self) -> None:
         await self.notifier.send_chat_action("typing")
@@ -735,6 +825,13 @@ class TelegramCommandHandler:
             ]
         }
 
+    def _watch_reply_markup(self) -> dict[str, Any]:
+        return {
+            "inline_keyboard": [
+                [{"text": "📋 목록 새로고침", "callback_data": WATCH_LIST_CALLBACK}]
+            ]
+        }
+
     def _trade_reply_markup(self) -> dict[str, Any]:
         return {
             "inline_keyboard": [
@@ -865,6 +962,17 @@ class TelegramCommandHandler:
             if stripped and any(needle in stripped for needle in needles):
                 return stripped
         return None
+
+    def _parse_quote_summary(self, raw: str) -> tuple[str, str] | None:
+        price_line = self._first_line_containing(raw, ("현재가:",))
+        rate_line = self._first_line_containing(raw, ("전일 대비:",))
+        if not price_line or not rate_line:
+            return None
+        price_match = re.search(r"현재가:\s*(.+)", price_line)
+        rate_match = re.search(r"\(([^)]+%)\)", rate_line)
+        if not price_match or not rate_match:
+            return None
+        return price_match.group(1).strip(), rate_match.group(1).strip()
 
     async def _handle_trend(self, argument: str, chat_id: str) -> None:
         if not argument:

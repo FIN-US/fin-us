@@ -141,3 +141,5 @@ async def test_telegram_alert_mode_ignores_invalid_values():
     await state.set_telegram_alert_mode("invalid")
 
     assert await state.get_telegram_alert_mode() == "all"
+
+

@@ -17,6 +17,10 @@ import {
   isPaperTradingKisUrl,
 } from "./formatters.js";
 import {
+  OrderDedupStore,
+  createOrderDedupKey,
+} from "./order-dedup.js";
+import {
   createCashOrderRequest,
   formatOrderResult,
 } from "./order.js";
@@ -66,6 +70,7 @@ let tokenCache = null;
 const server = new McpServer({ name: "trading-tool", version: "1.0.0" });
 // KIS API 호출용 axios 인스턴스 — 8초 타임아웃으로 무기한 블로킹 방지
 const kisAxios = axios.create({ timeout: 8000 });
+const orderDedupStore = new OrderDedupStore();
 
 function isMissingCredential(value) {
   return !value || value.startsWith("your_") || value.includes("_here");
@@ -202,22 +207,48 @@ function formatOrderTime(value) {
   return `${text.slice(0, 2)}:${text.slice(2, 4)}:${text.slice(4, 6)}`;
 }
 
-async function kisPost(pathname, trId, body) {
-  const token = await getAccessToken();
-  const response = await kisAxios.post(`${KIS_URL}${pathname}`, body, {
+async function createKisHashKey(body) {
+  const response = await kisAxios.post(`${KIS_URL}/uapi/hashkey`, body, {
     headers: {
       "Content-Type": "application/json",
-      authorization: `Bearer ${token}`,
       appkey: KIS_API_KEY,
       appsecret: KIS_API_SECRET,
-      tr_id: trId,
-      custtype: "P",
     },
   });
+  const hashKey = response.data?.HASH;
+  if (!hashKey) {
+    throw new Error("KIS hashkey 발급 실패");
+  }
+  return hashKey;
+}
+
+async function kisPost(pathname, trId, body, { useHashKey = false } = {}) {
+  const token = await getAccessToken();
+  const headers = {
+    "Content-Type": "application/json",
+    authorization: `Bearer ${token}`,
+    appkey: KIS_API_KEY,
+    appsecret: KIS_API_SECRET,
+    tr_id: trId,
+    custtype: "P",
+  };
+  if (useHashKey) {
+    headers.hashkey = await createKisHashKey(body);
+  }
+
+  let response;
+  try {
+    response = await kisAxios.post(`${KIS_URL}${pathname}`, body, { headers });
+  } catch (error) {
+    error.kisOrderSubmittedMaybe = true;
+    throw error;
+  }
 
   const data = response.data;
   if (data.rt_cd !== "0") {
-    throw new Error(`KIS API 오류: ${data.msg1 || data.msg_cd || "알 수 없는 오류"}`);
+    const error = new Error(`KIS API 오류: ${data.msg1 || data.msg_cd || "알 수 없는 오류"}`);
+    error.kisOrderRejected = true;
+    throw error;
   }
   return data;
 }
@@ -306,8 +337,32 @@ async function placeOrder(args) {
     orderType,
     realOrderEnabled: KIS_REAL_ORDER_ENABLED === "true",
   });
+  const dedupKey = createOrderDedupKey({
+    accountNo: KIS_ACCOUNT_NO,
+    orderEnv,
+    stockCode,
+    side,
+    quantity,
+    price,
+    orderType,
+  });
 
-  const data = await kisPost(request.pathname, request.trId, request.body);
+  orderDedupStore.reserve(dedupKey, {
+    pathname: request.pathname,
+    trId: request.trId,
+    body: request.body,
+  });
+
+  let data;
+  try {
+    data = await kisPost(request.pathname, request.trId, request.body, { useHashKey: true });
+    orderDedupStore.markSucceeded(dedupKey, data);
+  } catch (error) {
+    if (!error.kisOrderSubmittedMaybe || error.kisOrderRejected) {
+      orderDedupStore.release(dedupKey);
+    }
+    throw error;
+  }
   return formatOrderResult({
     stockName,
     stockCode,
@@ -627,7 +682,7 @@ server.registerTool(
 server.registerTool(
   "place_order",
   {
-    description: "한국투자증권 Open API로 국내 주식 현금 주문을 실행합니다.",
+    description: "한국투자증권 Open API로 국내 주식 현금 주문을 실행합니다. 동일 주문은 중복 방지 TTL 동안 차단되므로 자동 재시도하지 마세요.",
     inputSchema: placeOrderSchema,
   },
   async (args) => callTradingTool("place_order", args),

@@ -173,7 +173,6 @@ class RedisSchedulerState:
         await self.redis.set(self.keys.telegram_alert_mode(), mode)
         return True
 
-
 def create_redis_client() -> Any:
     from redis.asyncio import Redis
 

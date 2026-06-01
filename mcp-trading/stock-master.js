@@ -12,11 +12,24 @@ export function loadStocks(stocksPath = DEFAULT_STOCKS_PATH) {
   return JSON.parse(text);
 }
 
+let cachedStocks;
+
+export function clearStocksCache() {
+  cachedStocks = undefined;
+}
+
+export function getDefaultStocks() {
+  if (cachedStocks === undefined) {
+    cachedStocks = loadStocks();
+  }
+  return cachedStocks;
+}
+
 export function normalizeStockInput(value) {
   return String(value ?? "").trim();
 }
 
-export function resolveStock(stockName, stocks = loadStocks()) {
+export function resolveStock(stockName, stocks) {
   const input = normalizeStockInput(stockName);
   if (!input) {
     throw new Error("stock_name 파라미터가 누락되었습니다.");
@@ -27,7 +40,8 @@ export function resolveStock(stockName, stocks = loadStocks()) {
     return { code, name: code, market: "UNKNOWN", aliases: [] };
   }
 
-  const matches = stocks.filter((stock) => {
+  const stockList = stocks ?? getDefaultStocks();
+  const matches = stockList.filter((stock) => {
     const aliases = Array.isArray(stock.aliases) ? stock.aliases : [];
     return stock.name === input || aliases.includes(input);
   });
