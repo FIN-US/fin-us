@@ -1789,6 +1789,38 @@ async def test_watch_list_calls_quote_for_each_stock_sequentially():
 
 
 @pytest.mark.asyncio
+async def test_watch_list_waits_between_quote_calls(monkeypatch):
+    notifier = FakeNotifier()
+    events: list[tuple[str, str | float]] = []
+    expected_delay_seconds = 1.1
+
+    async def mcp_runner(server_params, tool_name, arguments):
+        events.append(("quote", arguments.get("stock_name")))
+        return f"[{arguments.get('stock_name')}] 현재가 시세\n- 현재가: 75,400원\n- 전일 대비: +930 (1.23%)"
+
+    async def fake_sleep(seconds):
+        events.append(("sleep", seconds))
+
+    monkeypatch.setattr("backend.telegram_commands.asyncio.sleep", fake_sleep)
+
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        watchlist_repo=FakeWatchlistRepo(["CCC", "AAA", "BBB"]),
+        mcp_runner=mcp_runner,
+    )
+
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/watch list"}})
+
+    assert events == [
+        ("quote", "AAA"),
+        ("sleep", expected_delay_seconds),
+        ("quote", "BBB"),
+        ("sleep", expected_delay_seconds),
+        ("quote", "CCC"),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_help_command_includes_watch_description():
     notifier = FakeNotifier()
     handler = TelegramCommandHandler(notifier=notifier)

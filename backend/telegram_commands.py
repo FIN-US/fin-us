@@ -45,6 +45,7 @@ BALANCE_REFRESH_CALLBACK = "balance:refresh"
 TRADE_CALLBACK_PREFIX = "trade:"
 LOOKUP_CALLBACK_PREFIX = "lookup:"
 WATCH_LIST_CALLBACK = "watch:list"
+WATCH_LIST_QUOTE_DELAY_SECONDS = 1.1
 MARKET_QUOTE_CALLBACK = "market:quote"
 MARKET_TREND_CALLBACK = "market:trend"
 MARKET_STALE_CALLBACK_TEXT = "이전 조회 버튼입니다. 최신 조회 메시지에서 다시 선택하세요."
@@ -486,7 +487,9 @@ class TelegramCommandHandler:
                 text = "관심 종목이 없습니다.\n/watch add <종목명> 으로 추가하세요."
             else:
                 lines = []
-                for stock in watchlist:
+                for index, stock in enumerate(watchlist):
+                    if index > 0:
+                        await asyncio.sleep(WATCH_LIST_QUOTE_DELAY_SECONDS)
                     try:
                         raw = await self.mcp_runner(
                             TRADING_MCP_PARAMS, "get_stock_quote", {"stock_name": stock}
