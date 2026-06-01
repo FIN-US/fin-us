@@ -1,0 +1,15 @@
+<ui:UXML xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:ui="UnityEngine.UIElements" xmlns:uie="UnityEditor.UIElements" noNamespaceSchemaLocation="../../UIElementsSchema/UIElements.xsd" editor-extension-mode="False">
+    <ui:VisualElement name="portfolio-overlay" style="flex-grow: 1; padding-top: 24px; padding-right: 24px; padding-bottom: 24px; padding-left: 24px; -unity-font-definition: url(&quot;project://database/Assets/UI/Pretendard-Medium.otf?fileID=12800000&amp;guid=1d1678f6cfd13634ab402b7caa51bc91&amp;type=3#Pretendard-Medium&quot;);">
+        <ui:VisualElement name="top-bar" style="position: absolute; left: 24px; top: 24px; flex-direction: column; align-items: center; padding-top: 10px; padding-right: 14px; padding-bottom: 10px; padding-left: 14px; background-color: rgba(238, 238, 238, 0.78); border-top-left-radius: 6px; border-top-right-radius: 6px; border-bottom-right-radius: 6px; border-bottom-left-radius: 6px;">
+            <ui:Label text="총자산: -" name="total-asset" style="font-size: 30px; color: rgb(20, 20, 20); margin-right: 18px;"/>
+            <ui:Label text="총수익률: -" name="total-return-rate" style="font-size: 30px; color: rgb(20, 20, 20);"/>
+        </ui:VisualElement>
+        <ui:VisualElement name="panel" style="position: absolute; right: 24px; top: 24px; width: 260px; padding-top: 14px; padding-right: 16px; padding-bottom: 14px; padding-left: 16px; background-color: rgba(238, 238, 238, 0.78); border-top-left-radius: 6px; border-top-right-radius: 6px; border-bottom-right-radius: 6px; border-bottom-left-radius: 6px;">
+            <ui:Label text="종목 선택" name="stock-name" style="font-size: 40px; color: rgb(10, 10, 10); margin-bottom: 10px;"/>
+            <ui:Label text="현재가: -" name="current-price" style="font-size: 30px; color: rgb(20, 20, 20); margin-bottom: 6px;"/>
+            <ui:Label text="평단가: -" name="avg-price" style="font-size: 30px; color: rgb(20, 20, 20); margin-bottom: 6px;"/>
+            <ui:Label text="보유 수량: -" name="quantity" style="font-size: 30px; color: rgb(20, 20, 20); margin-bottom: 6px;"/>
+            <ui:Label text="수익률: -" name="return-rate" style="font-size: 30px; color: rgb(20, 20, 20);"/>
+        </ui:VisualElement>
+    </ui:VisualElement>
+</ui:UXML>

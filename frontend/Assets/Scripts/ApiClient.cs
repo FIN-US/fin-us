@@ -153,4 +153,26 @@ public class ApiClient
         var errorDetail = string.IsNullOrWhiteSpace(request.error) ? request.result.ToString() : request.error;
         return $"{fallbackPrefix}: {errorDetail} (url={request.url}, status={request.responseCode})";
     }
+
+    public IEnumerator FetchPortfolio(Action<PortfolioData> onSuccess, Action<string> onError)
+    {
+        var url = $"{apiBaseUrl}/api/v1/portfolio";
+        using var req = UnityWebRequest.Get(url);
+        yield return req.SendWebRequest();
+
+        if (req.result != UnityWebRequest.Result.Success)
+        {
+            onError?.Invoke(ExtractErrorMessage(req, "포트폴리오 조회 실패"));
+            yield break;
+        }
+
+        var parsed = JsonUtility.FromJson<PortfolioApiResponse>(req.downloadHandler.text);
+        if (parsed == null || parsed.status != "success" || parsed.data == null)
+        {
+            onError?.Invoke("포트폴리오 데이터를 파싱하지 못했습니다.");
+            yield break;
+        }
+
+        onSuccess?.Invoke(parsed.data);
+    }
 }
