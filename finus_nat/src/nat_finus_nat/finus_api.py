@@ -2,10 +2,9 @@ import asyncio
 import json
 import os
 from contextlib import asynccontextmanager
-from datetime import datetime
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any, Literal, TypeAlias
-from zoneinfo import ZoneInfo
 
 import httpx
 from mcp import ClientSession
@@ -42,11 +41,12 @@ _MCP_ENV_ALLOWED_KEYS = frozenset({
     "KIS_API_SECRET",
     "KIS_ACCOUNT_NO",
     "KIS_URL",
+    "KIS_TOKEN_CACHE_PATH",
     "NAVER_CLIENT_ID",
     "NAVER_CLIENT_SECRET",
     "DART_API_KEY",
 })
-_MCP_ENV_ALLOWED_PREFIXES = ("FIN_US_",)
+_MCP_ENV_ALLOWED_PREFIXES = ("FIN_US_", "FINUS_")
 
 McpCallArguments: TypeAlias = dict[str, Any]
 
@@ -254,23 +254,138 @@ async def _mcp_dart_stock(
     )
 
 
+async def _mcp_trading_call(
+    *,
+    vendor_root: str | None,
+    timeout_sec: float,
+    tool_name: str,
+    arguments: McpCallArguments,
+) -> str:
+    return await _mcp_call_tool(
+        vendor_root=_resolve_vendor_root(vendor_root),
+        subdir="mcp-trading",
+        tool_name=tool_name,
+        arguments=arguments,
+        timeout_sec=timeout_sec,
+    )
+
+
 # =========== registered NAT components ==========
 
-class FinusMarketNewsConfig(FunctionBaseConfig, name="finus_market_news"):
-    vendor_root: str | None = Field(default=None, description="Override parent dir containing mcp-news (stdio MCP).")
+class _FinusMcpStdioConfig(FunctionBaseConfig):
+    vendor_root: str | None = Field(default=None, description="Override parent dir containing MCP subdirectory (stdio).")
     timeout_sec: float = Field(default=120.0, ge=5.0, le=600.0)
+
+
+class FinusMarketNewsConfig(_FinusMcpStdioConfig, name="finus_market_news"):
+    pass
 
 
 class FinusDisclosureSignalConfig(FinusMarketNewsConfig, name="finus_disclosure_signal"):
     """mcp-dart stdio MCP — OpenDART 지분공시 signal."""
 
-class FinusKisDailyTradesConfig(FunctionBaseConfig, name="finus_kis_daily_trades"):
-    """KIS HTTP Open API로 당일(KST) 국내주식 주문/체결 내역 조회 (MCP 미사용)."""
 
-    timeout_sec: float = Field(default=120.0, ge=5.0, le=600.0)
+class FinusMcpTradingConfig(_FinusMcpStdioConfig, name="finus_mcp_trading_base"):
+    """fin-us/mcp-trading stdio MCP 공통 설정 (vendor_root, timeout_sec)."""
+
+
+class FinusMcpTradingTodayOrdersConfig(FinusMcpTradingConfig, name="finus_mcp_trading_today_orders"):
+    """mcp-trading ``get_today_daily_orders`` — 당일 주문·체결 전체 조회."""
+
+
+class FinusMcpTradingBalanceRlzPlConfig(FinusMcpTradingConfig, name="finus_mcp_trading_balance_rlz_pl"):
+    """mcp-trading ``get_balance_rlz_pl`` — 잔고·실현손익 조회 (실전 계좌)."""
+
+
+class FinusMcpTradingGetBalanceConfig(FinusMcpTradingConfig, name="finus_mcp_trading_get_balance"):
+    """mcp-trading ``get_balance`` — 계좌 잔고·보유종목 요약 (inquire-balance, 연속조회)."""
+
+
+class FinusSaveDiaryConfig(FunctionBaseConfig, name="finus_save_diary"):
+    """Fin-Us backend ``POST /api/v1/db/diary`` — 매매일지 저장."""
+
+    backend_url: str = Field(
+        default="",
+        description="Backend base URL without path. Falls back to FINUS_BACKEND_URL, then http://127.0.0.1:8000.",
+    )
+    timeout_sec: float = Field(default=60.0, ge=5.0, le=300.0)
+
+
+class FinusListDiariesConfig(FunctionBaseConfig, name="finus_list_diaries"):
+    """Fin-Us backend ``GET /api/v1/db/diary`` — 저장된 매매일지 목록 조회."""
+
+    backend_url: str = Field(
+        default="",
+        description="Backend base URL without path. Falls back to FINUS_BACKEND_URL, then http://127.0.0.1:8000.",
+    )
+    timeout_sec: float = Field(default=60.0, ge=5.0, le=300.0)
+
+
+def _finus_backend_base_url(config_url: str) -> str:
+    return (config_url or os.getenv("FINUS_BACKEND_URL") or "http://127.0.0.1:8000").strip().rstrip("/")
 
 
 # ========== Kis Trading remote MCP ==========
+class FinusReactToolInput(BaseModel):
+    """ReAct Action Input — 문자열 JSON·Kis ``params`` 래핑을 허용합니다."""
+
+    tool_input: str | dict[str, Any] | None = Field(default=None, description="레거시 JSON 한 줄.")
+    tool_name: str | None = Field(default=None, description="Kis Trading MCP용(무시 가능).")
+    api_type: str | None = Field(default=None, description="Kis Trading MCP용(무시 가능).")
+    params: dict[str, Any] | None = Field(default=None, description="Kis 형식이면 여기 필드를 사용.")
+
+    model_config = ConfigDict(extra="allow")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_whole_string_payload(cls, data: Any) -> Any:
+        if isinstance(data, str):
+            if not data.strip():
+                return {}
+            parsed = _parse_leading_json_object(data)
+            if parsed is None:
+                raise ValueError(
+                    "Action Input에는 JSON 객체 한 덩어리만 넣으세요. "
+                    "Kis ``tool_name``/``api_type`` 대신 도구 스키마 필드만 사용하세요."
+                )
+            data = parsed
+        if isinstance(data, dict):
+            nested = data.get("params")
+            if isinstance(nested, dict):
+                merged = dict(nested)
+                for key, value in data.items():
+                    if key in ("tool_name", "api_type", "params", "tool_input"):
+                        continue
+                    if value is not None and key not in merged:
+                        merged[key] = value
+                return merged
+        return data
+
+
+class FinusMcpTradingTodayOrdersInput(FinusReactToolInput):
+    trade_date: str = Field(default="", description="YYYYMMDD. 생략 시 당일(KST).")
+    stock_name: str = Field(default="", description="특정 종목만 조회할 때.")
+    ccld_dvsn: str = Field(default="00", description="00 전체 / 01 체결 / 02 미체결.")
+    sll_buy_dvsn: str = Field(default="00", description="00 전체 / 01 매도 / 02 매수.")
+
+
+class FinusMcpTradingStockNameInput(FinusReactToolInput):
+    stock_name: str = Field(default="", description="특정 종목만 조회할 때. 생략 시 전체.")
+
+
+class FinusSaveDiaryInput(FinusReactToolInput):
+    title: str = Field(default="", description="일지 제목.")
+    content: str = Field(default="", description="일지 본문.")
+
+
+class FinusListDiariesInput(FinusReactToolInput):
+    pass
+
+
+class FinusMcpTradingGetBalanceInput(FinusReactToolInput):
+    pass
+
+
 def _parse_leading_json_object(text: str) -> dict[str, Any] | None:
     t = (text or "").strip()
     if not t:
@@ -278,8 +393,20 @@ def _parse_leading_json_object(text: str) -> dict[str, Any] | None:
     i = t.find("{")
     if i < 0:
         return None
-    obj, _end = json.JSONDecoder().raw_decode(t[i:])
+    try:
+        obj, _end = json.JSONDecoder().raw_decode(t[i:])
+    except json.JSONDecodeError:
+        return None
     return obj if isinstance(obj, dict) else None
+
+
+def _finus_react_input_converter(model_cls: type[BaseModel]) -> Callable[[str], BaseModel]:
+    """ReAct ``Action Input`` 문자열을 NAT type_converter가 Pydantic 모델로 변환하도록 등록."""
+
+    def _convert(value: str) -> BaseModel:
+        return model_cls.model_validate(value)
+
+    return _convert
 
 
 class KisTradingMcpCallInput(BaseModel):
@@ -418,7 +545,7 @@ def _prepare_kis_trading_mcp_call(
     return tool_name, {"api_type": str(api_type).strip(), "params": params}
 
 
-# ---------- registered functions ----------
+# KIS Trading MCP 도구 가이드
 _KIS_TRADING_TOOL_GUIDE = """
 ### Fin-Us KIS 호출 규칙
 - ReAct 형식: `Action Input:` 한 줄에는 JSON만 두세요. JSON 뒤에 같은 줄·바로 다음 줄에 설명을 붙이면 도구 입력이 깨질 수 있습니다. 설명은 Observation 이후 또는 `Final Answer:` 에 쓰세요.
@@ -483,119 +610,177 @@ async def finus_disclosure_signal(config: FinusDisclosureSignalConfig, _builder:
     yield FunctionInfo.from_fn(get_disclosure_signal, description=doc)
 
 
-# ---------- KIS HTTP (no MCP) ----------
+@register_function(config_type=FinusMcpTradingTodayOrdersConfig)
+async def finus_mcp_trading_today_orders(config: FinusMcpTradingTodayOrdersConfig, _builder: Builder):
+    doc = (
+        "Fin-Us mcp-trading stdio MCP: 당일(KST) 국내주식 주문·체결 내역 전체 조회 "
+        "(get_today_daily_orders, inquire-daily-ccld v1_국내주식-005, 연속조회 포함). "
+        "trade_date(YYYYMMDD), stock_name, ccld_dvsn(00/01/02), sll_buy_dvsn(00/01/02) 선택."
+    )
 
-
-# KIS Open API에서 access_token을 발급받습니다(클라이언트 자격증명 그랜트).
-async def _kis_issue_access_token(*, base_url: str, app_key: str, app_secret: str, timeout: float) -> str:
-    token_url = f"{base_url.rstrip('/')}/oauth2/tokenP"
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        resp = await client.post(
-            token_url,
-            json={"grant_type": "client_credentials", "appkey": app_key, "appsecret": app_secret},
+    async def get_today_daily_orders(inp: FinusMcpTradingTodayOrdersInput) -> str:
+        arguments: McpCallArguments = {}
+        if inp.trade_date.strip():
+            arguments["trade_date"] = inp.trade_date.strip()
+        if inp.stock_name.strip():
+            arguments["stock_name"] = inp.stock_name.strip()
+        if inp.ccld_dvsn.strip():
+            arguments["ccld_dvsn"] = inp.ccld_dvsn.strip()
+        if inp.sll_buy_dvsn.strip():
+            arguments["sll_buy_dvsn"] = inp.sll_buy_dvsn.strip()
+        return await _mcp_trading_call(
+            vendor_root=config.vendor_root,
+            timeout_sec=config.timeout_sec,
+            tool_name="get_today_daily_orders",
+            arguments=arguments,
         )
-        resp.raise_for_status()
-        body = resp.json()
-        token = body.get("access_token")
-        if not token:
-            raise RuntimeError(str(body.get("msg1") or body))
-        return str(token)
+
+    get_today_daily_orders.__doc__ = doc
+    yield FunctionInfo.from_fn(
+        get_today_daily_orders,
+        description=doc,
+        input_schema=FinusMcpTradingTodayOrdersInput,
+        converters=[_finus_react_input_converter(FinusMcpTradingTodayOrdersInput)],
+    )
 
 
-# 일별 주문체결 조회용 TR_ID를 환경변수와 모의투자 플래그에 따라 결정합니다.
-def _kis_tr_id_daily_ccld() -> str:
-    override = (os.getenv("FINUS_KIS_TR_ID_DAILY_CCLD") or "").strip()
-    if override:
-        return override
-    paper = (os.getenv("FINUS_KIS_PAPER") or "").lower() in ("1", "true", "yes", "y")
-    return "VTTC8001R" if paper else "TTTC8001R"
+@register_function(config_type=FinusMcpTradingGetBalanceConfig)
+async def finus_mcp_trading_get_balance(config: FinusMcpTradingGetBalanceConfig, _builder: Builder):
+    doc = (
+        "Fin-Us mcp-trading stdio MCP: 계좌 잔고·보유종목 요약 조회 "
+        "(get_balance, inquire-balance v1_국내주식-006, 연속조회 포함). 파라미터 없음."
+    )
+
+    async def get_balance(inp: FinusMcpTradingGetBalanceInput) -> str:  # noqa: ARG001
+        return await _mcp_trading_call(
+            vendor_root=config.vendor_root,
+            timeout_sec=config.timeout_sec,
+            tool_name="get_balance",
+            arguments={},
+        )
+
+    get_balance.__doc__ = doc
+    yield FunctionInfo.from_fn(
+        get_balance,
+        description=doc,
+        input_schema=FinusMcpTradingGetBalanceInput,
+        converters=[_finus_react_input_converter(FinusMcpTradingGetBalanceInput)],
+    )
 
 
-# 당일(KST) 국내주식 주문/체결 내역을 KIS Open API로 조회하는 NAT 함수로 등록합니다.
-@register_function(config_type=FinusKisDailyTradesConfig)
-async def finus_kis_daily_trades(config: FinusKisDailyTradesConfig, _builder: Builder):
+@register_function(config_type=FinusMcpTradingBalanceRlzPlConfig)
+async def finus_mcp_trading_balance_rlz_pl(config: FinusMcpTradingBalanceRlzPlConfig, _builder: Builder):
+    doc = (
+        "Fin-Us mcp-trading stdio MCP: 주식잔고조회_실현손익 "
+        "(get_balance_rlz_pl, inquire-balance-rlz-pl v1_국내주식-041). "
+        "stock_name 생략 시 전체 보유 종목. 모의투자 URL 미지원."
+    )
 
-    # 환경변수 + 토큰 발급 + 일별주문체결 GET을 수행하고 결과 JSON을 반환합니다.
-    async def get_today_domestic_trade_history(placeholder: str = "") -> str:
-        """한국투자 Open API(HTTP)로 당일(KST 기준) 국내주식 일별주문체결 내역을 조회합니다.
+    async def get_balance_rlz_pl(inp: FinusMcpTradingStockNameInput) -> str:
+        arguments: McpCallArguments = {}
+        if inp.stock_name.strip():
+            arguments["stock_name"] = inp.stock_name.strip()
+        return await _mcp_trading_call(
+            vendor_root=config.vendor_root,
+            timeout_sec=config.timeout_sec,
+            tool_name="get_balance_rlz_pl",
+            arguments=arguments,
+        )
 
-        ``placeholder``는 NAT 도구 스키마 호환용이며 조회에 사용하지 않습니다.
-        MCP가 아니라 ``KIS_URL``·``KIS_API_KEY``·``KIS_API_SECRET``·``KIS_ACCOUNT_NO`` 환경 변수를 사용합니다.
-        모의투자는 ``FINUS_KIS_PAPER=true`` 또는 ``FINUS_KIS_TR_ID_DAILY_CCLD`` 로 TR_ID를 직접 지정하세요.
+    get_balance_rlz_pl.__doc__ = doc
+    yield FunctionInfo.from_fn(
+        get_balance_rlz_pl,
+        description=doc,
+        input_schema=FinusMcpTradingStockNameInput,
+        converters=[_finus_react_input_converter(FinusMcpTradingStockNameInput)],
+    )
+
+
+@register_function(config_type=FinusSaveDiaryConfig)
+async def finus_save_diary(config: FinusSaveDiaryConfig, _builder: Builder):
+    base_url = _finus_backend_base_url(config.backend_url)
+
+    async def save_trading_diary(inp: FinusSaveDiaryInput) -> str:
+        """Fin-Us backend db에 매매일지를 저장합니다.
+
+        Args:
+            title: 일지 제목 (예: ``매매일지 2026-05-24``).
+            content: 일지 본문(종목·매매 구분·금액·변동률·회고 등).
 
         Returns:
-            JSON 문자열. 성공 시 ``output1``(체결·주문 내역 배열), ``output2``(집계) 및 조회일 ``as_of_kst_date``.
+            저장된 일지 메타데이터 JSON 문자열. 실패 시 ``error`` 필드를 가진 JSON.
         """
-        kis_url = (os.getenv("KIS_URL") or "").strip().rstrip("/")
-        api_key = (os.getenv("KIS_API_KEY") or "").strip()
-        api_secret = (os.getenv("KIS_API_SECRET") or "").strip()
-        account_no = (os.getenv("KIS_ACCOUNT_NO") or "").strip()
+        title = (inp.title or "").strip()
+        content = (inp.content or "").strip()
+        if not title:
+            return _err_json("diary_title_required", hint="Provide a non-empty title.")
+        if not content:
+            return _err_json("diary_content_required", hint="Provide non-empty diary content.")
 
-        if not all([kis_url, api_key, api_secret, account_no]):
+        url = f"{base_url}/api/v1/db/diary"
+        try:
+            async with httpx.AsyncClient(timeout=config.timeout_sec) as client:
+                resp = await client.post(url, json={"title": title, "content": content})
+                resp.raise_for_status()
+                body = resp.json()
+        except httpx.HTTPStatusError as exc:
             return _err_json(
-                "kis_env_missing",
-                hint="Set KIS_URL, KIS_API_KEY, KIS_API_SECRET, KIS_ACCOUNT_NO (10 digits: 8+2).",
+                "diary_api_http_error",
+                status_code=exc.response.status_code,
+                detail=exc.response.text[:500],
+                url=url,
             )
-        if len(account_no) != 10 or not account_no.isdigit():
-            return _err_json("kis_invalid_account", detail="KIS_ACCOUNT_NO must be 10 digits.")
+        except Exception as exc:  # noqa: BLE001
+            return _err_json("diary_api_request_failed", detail=str(exc), url=url)
 
-        today_kst = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y%m%d")
-        tr_id = _kis_tr_id_daily_ccld()
-        token_timeout = min(60.0, float(config.timeout_sec))
+        if body.get("status") != "success":
+            return _err_json("diary_api_error", response=body)
+        return json.dumps(body.get("data"), ensure_ascii=False)
 
-        token = await _kis_issue_access_token(
-            base_url=kis_url, app_key=api_key, app_secret=api_secret, timeout=token_timeout)
+    yield FunctionInfo.from_fn(
+        save_trading_diary,
+        description=save_trading_diary.__doc__,
+        input_schema=FinusSaveDiaryInput,
+        converters=[_finus_react_input_converter(FinusSaveDiaryInput)],
+    )
 
-        path = "/uapi/domestic-stock/v1/trading/inquire-daily-ccld"
-        params: dict[str, str] = {
-            "CANO": account_no[0:8],
-            "ACNT_PRDT_CD": account_no[8:10],
-            "INQR_STRT_DT": today_kst,
-            "INQR_END_DT": today_kst,
-            "SLL_BUY_DVSN_CD": "00",
-            "INQR_DVSN": "01",
-            "PDNO": "",
-            "CCLD_DVSN": "00",
-            "ORD_GNO_BRNO": "",
-            "ODNO": "",
-            "INQR_DVSN_3": "00",
-            "INQR_DVSN_1": "",
-            "CTX_AREA_FK100": "",
-            "CTX_AREA_NK100": "",
-        }
-        headers = {
-            "Content-Type": "application/json",
-            "authorization": f"Bearer {token}",
-            "appkey": api_key,
-            "appsecret": api_secret,
-            "tr_id": tr_id,
-            "custtype": "P",
-        }
 
-        async with httpx.AsyncClient(timeout=config.timeout_sec) as client:
-            resp = await client.get(f"{kis_url}{path}", headers=headers, params=params)
-            resp.raise_for_status()
-            data = resp.json()
+@register_function(config_type=FinusListDiariesConfig)
+async def finus_list_diaries(config: FinusListDiariesConfig, _builder: Builder):
+    base_url = _finus_backend_base_url(config.backend_url)
 
-        if data.get("rt_cd") != "0":
+    async def list_trading_diaries(inp: FinusListDiariesInput) -> str:  # noqa: ARG001
+        """Fin-Us backend에 저장된 매매일지 목록을 조회합니다.
+
+        Returns:
+            일지 배열 JSON 문자열. 실패 시 ``error`` 필드를 가진 JSON.
+        """
+        url = f"{base_url}/api/v1/db/diary"
+        try:
+            async with httpx.AsyncClient(timeout=config.timeout_sec) as client:
+                resp = await client.get(url)
+                resp.raise_for_status()
+                body = resp.json()
+        except httpx.HTTPStatusError as exc:
             return _err_json(
-                "kis_api_error",
-                rt_cd=data.get("rt_cd"),
-                msg_cd=data.get("msg_cd"),
-                msg1=data.get("msg1"),
+                "diary_api_http_error",
+                status_code=exc.response.status_code,
+                detail=exc.response.text[:500],
+                url=url,
             )
+        except Exception as exc:  # noqa: BLE001
+            return _err_json("diary_api_request_failed", detail=str(exc), url=url)
 
-        return json.dumps(
-            {
-                "as_of_kst_date": today_kst,
-                "tr_id": tr_id,
-                "output1": data.get("output1"),
-                "output2": data.get("output2"),
-            },
-            ensure_ascii=False,
-        )
+        if body.get("status") != "success":
+            return _err_json("diary_api_error", response=body)
+        return json.dumps(body.get("data"), ensure_ascii=False)
 
-    yield FunctionInfo.from_fn(get_today_domestic_trade_history, description=get_today_domestic_trade_history.__doc__)
+    yield FunctionInfo.from_fn(
+        list_trading_diaries,
+        description=list_trading_diaries.__doc__,
+        input_schema=FinusListDiariesInput,
+        converters=[_finus_react_input_converter(FinusListDiariesInput)],
+    )
 
 
 def _mcp_tool_input_schema_json(tool: Any) -> str | None:

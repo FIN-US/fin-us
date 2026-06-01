@@ -40,6 +40,86 @@ def test_vendor_root_detection_keeps_nested_news_trading_layout(monkeypatch, tmp
     assert finus_paths.fin_us_vendor_root() == finus_home
 
 
+def test_finus_backend_base_url(monkeypatch):
+    monkeypatch.delenv("FINUS_BACKEND_URL", raising=False)
+    assert finus_api._finus_backend_base_url("") == "http://127.0.0.1:8000"
+    monkeypatch.setenv("FINUS_BACKEND_URL", "http://backend:8000/")
+    assert finus_api._finus_backend_base_url("") == "http://backend:8000"
+    assert finus_api._finus_backend_base_url("http://custom:9000") == "http://custom:9000"
+
+
+def test_react_tool_input_accepts_empty_action_input_string():
+    inp = finus_api.FinusMcpTradingTodayOrdersInput.model_validate("")
+    assert inp.trade_date == ""
+    assert inp.ccld_dvsn == "00"
+
+
+def test_react_tool_input_accepts_json_action_input_string():
+    inp = finus_api.FinusMcpTradingTodayOrdersInput.model_validate(
+        '{"trade_date":"20260529","stock_name":"삼성전자"}'
+    )
+    assert inp.trade_date == "20260529"
+    assert inp.stock_name == "삼성전자"
+
+
+def test_finus_react_input_converter_maps_str_to_model():
+    convert = finus_api._finus_react_input_converter(finus_api.FinusMcpTradingTodayOrdersInput)
+    inp = convert('{"ccld_dvsn":"01"}')
+    assert isinstance(inp, finus_api.FinusMcpTradingTodayOrdersInput)
+    assert inp.ccld_dvsn == "01"
+
+
+def test_save_diary_input_converter_accepts_multiline_content():
+    convert = finus_api._finus_react_input_converter(finus_api.FinusSaveDiaryInput)
+    inp = convert('{"title":"T","content":"line1\\nline2"}')
+    assert inp.title == "T"
+    assert inp.content == "line1\nline2"
+
+
+def test_save_trading_diary_posts_to_backend(monkeypatch):
+    captured = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"status": "success", "data": {"id": 1, "title": "T", "content": "C"}}
+
+    class FakeClient:
+        def __init__(self, timeout):
+            captured["timeout"] = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, json):
+            captured["url"] = url
+            captured["json"] = json
+            return FakeResponse()
+
+    monkeypatch.setattr(finus_api.httpx, "AsyncClient", FakeClient)
+
+    config = finus_api.FinusSaveDiaryConfig(backend_url="http://test-backend:8000")
+
+    # ``@register_function`` 은 빌더를 ``asynccontextmanager`` 로 감싸고,
+    # 노출되는 호출 핸들은 ``FunctionInfo.single_fn`` 이며 입력은 pydantic 스키마 인스턴스다.
+    async def run_tool():
+        async with finus_api.finus_save_diary(config, None) as info:
+            return await info.single_fn(
+                finus_api.FinusSaveDiaryInput(title="매매일지 2026-05-24", content="본문")
+            )
+
+    result = asyncio.run(run_tool())
+
+    assert captured["url"] == "http://test-backend:8000/api/v1/db/diary"
+    assert captured["json"] == {"title": "매매일지 2026-05-24", "content": "본문"}
+    assert '"id": 1' in result
+
+
 def test_mcp_call_tool_passes_environment_to_child_process(monkeypatch, tmp_path):
     server_dir = tmp_path / "mcp-news"
     server_dir.mkdir()

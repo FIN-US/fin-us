@@ -21,6 +21,8 @@ COPY finus_nat /workspace/finus_nat
 COPY mcp-news /workspace/mcp-news
 COPY mcp-trading /workspace/mcp-trading
 COPY mcp-dart /workspace/mcp-dart
+COPY scripts/finus-nat-entrypoint.sh /usr/local/bin/finus-nat-entrypoint.sh
+RUN chmod +x /usr/local/bin/finus-nat-entrypoint.sh
 
 WORKDIR /workspace/mcp-news
 RUN npm ci --omit=dev
@@ -59,4 +61,5 @@ PY
 
 EXPOSE 8000
 
+ENTRYPOINT ["/usr/local/bin/finus-nat-entrypoint.sh"]
 CMD ["sh", "-lc", "uv run --project . nat start fastapi --config_file \"${FINUS_NAT_CONFIG_FILE:-configs/router_nomemory.yml}\" --host 0.0.0.0 --port 8000"]

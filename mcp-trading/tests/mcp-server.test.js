@@ -35,6 +35,8 @@ test("registers trading tools with preserved required schemas", async () => {
       "get_stock_quote",
       "get_investor_trading",
       "place_order",
+      "get_today_daily_orders",
+      "get_balance_rlz_pl",
     ]);
     assert.deepEqual(toolByName(tools, "get_balance").inputSchema.required ?? [], []);
     assert.deepEqual(toolByName(tools, "resolve_stock_code").inputSchema.required, ["stock_name"]);
