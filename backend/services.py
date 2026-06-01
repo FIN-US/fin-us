@@ -160,7 +160,7 @@ async def generate_morning_briefing(watchlist: list[str] | None = None) -> dict[
         f"잔고:\n{balance_text}\n\n"
         f"관심종목 컨텍스트:\n{watchlist_context}"
     )
-    raw = await llm_chat("nat", prompt, conversation_id="morning-briefing")
+    raw = await llm_chat("nat", prompt, conversation_id=f"morning-briefing:{date.today().isoformat()}")
     return _morning_briefing_from_text(str(raw))
 
 

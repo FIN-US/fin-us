@@ -183,7 +183,7 @@ async def test_generate_morning_briefing_collects_market_watchlist_and_strategy(
         ("get_investor_trading", {"stock_name": "NAVER"}),
     ]
     assert prompts[0][0] == "nat"
-    assert prompts[0][2] == "morning-briefing"
+    assert prompts[0][2] == f"morning-briefing:{date.today().isoformat()}"
     assert "Strategy Planner" in prompts[0][1]
     assert "NAVER 뉴스" in prompts[0][1]
 
