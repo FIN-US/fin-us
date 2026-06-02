@@ -1,6 +1,8 @@
 import pytest
 import asyncio
 from contextlib import asynccontextmanager
+from datetime import date
+from types import SimpleNamespace
 from fastapi.testclient import TestClient
 from unittest.mock import MagicMock
 from ..main import app
@@ -18,6 +20,34 @@ class FakeWatchlistRepo:
 class FailingWatchlistRepo:
     async def get_watchlist(self) -> list[str]:
         raise RuntimeError("watchlist db unavailable")
+
+
+class FakeCatalystRepo:
+    def __init__(self, due_events=None):
+        self.upserted = []
+        self.due_events = list(due_events or [])
+        self.marked = []
+
+    async def upsert_events(self, events):
+        self.upserted.extend(events)
+        return list(events)
+
+    async def list_due_for_notification(self, stock_names, *, today):
+        self.due_call = (stock_names, today)
+        return list(self.due_events)
+
+    async def mark_notification_sent(self, event_id, *, days_until_event):
+        self.marked.append((event_id, days_until_event))
+
+
+class FakeCatalystNotifier:
+    def __init__(self, result=True):
+        self.result = result
+        self.messages = []
+
+    async def send_text(self, text, *, reply_markup=None):
+        self.messages.append(text)
+        return self.result
 
 @pytest.fixture
 def client():
@@ -821,3 +851,148 @@ async def test_monitor_market_task_watchlist_alone_skips_default_fallback(monkey
     assert monitored_stocks == ["카카오"]
     for default_stock in DEFAULT_MONITOR_STOCKS:
         assert default_stock not in monitored_stocks
+
+
+@pytest.mark.asyncio
+async def test_catalyst_calendar_task_collects_disclosure_events_for_watchlist(monkeypatch):
+    """관심 종목의 DART signal을 촉매 이벤트로 저장합니다."""
+    from ..scheduler import catalyst_calendar_task
+
+    repo = FakeCatalystRepo()
+    notifier = FakeCatalystNotifier()
+    calls = []
+
+    async def mock_run_mcp_tool(params, name, args):
+        calls.append((name, args))
+        return "\n".join(
+            [
+                "[최신 공시]",
+                "- 2026-01-28 | 분기보고서 접수 | 접수번호 202601280001",
+                "- 2026-01-29 | 현금ㆍ현물배당 결정 | 접수번호 202601290001",
+                "- 2026-01-30 | 정기주주총회결과 | 접수번호 202601300001",
+            ]
+        )
+
+    monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
+
+    await catalyst_calendar_task(
+        watchlist_repo=FakeWatchlistRepo(["삼성전자"]),
+        catalyst_repo=repo,
+        notifier=notifier,
+        today_factory=lambda: date(2026, 1, 28),
+        use_redis_lock=False,
+    )
+
+    assert calls == [("get_disclosure_signal", {"stock_name": "삼성전자"})]
+    assert [(event.event_type, event.event_date, event.description) for event in repo.upserted] == [
+        ("earnings", date(2026, 1, 28), "분기보고서 접수"),
+        ("dividend", date(2026, 1, 29), "현금ㆍ현물배당 결정"),
+        ("agm", date(2026, 1, 30), "정기주주총회결과"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_catalyst_calendar_task_sends_and_marks_d1_d0_alerts(monkeypatch):
+    """D-1/D-0 촉매 이벤트 알림을 보내고 성공한 알림만 발송 처리합니다."""
+    from ..scheduler import catalyst_calendar_task
+
+    repo = FakeCatalystRepo(
+        [
+            SimpleNamespace(
+                id=1,
+                stock_name="삼성전자",
+                event_type="earnings",
+                event_date=date(2026, 1, 28),
+                description="분기 실적 발표",
+                days_until_event=0,
+            ),
+            SimpleNamespace(
+                id=2,
+                stock_name="NAVER",
+                event_type="agm",
+                event_date=date(2026, 1, 29),
+                description="정기 주주총회",
+                days_until_event=1,
+            ),
+        ]
+    )
+    notifier = FakeCatalystNotifier()
+
+    async def mock_run_mcp_tool(params, name, args):
+        return "[최신 공시]\n- 최근 공시가 없습니다."
+
+    monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
+
+    await catalyst_calendar_task(
+        watchlist_repo=FakeWatchlistRepo(["삼성전자", "NAVER"]),
+        catalyst_repo=repo,
+        notifier=notifier,
+        today_factory=lambda: date(2026, 1, 28),
+        use_redis_lock=False,
+    )
+
+    assert repo.due_call == (["삼성전자", "NAVER"], date(2026, 1, 28))
+    assert len(notifier.messages) == 2
+    assert "D-Day" in notifier.messages[0]
+    assert "삼성전자" in notifier.messages[0]
+    assert "D-1" in notifier.messages[1]
+    assert "NAVER" in notifier.messages[1]
+    assert repo.marked == [(1, 0), (2, 1)]
+
+
+@pytest.mark.asyncio
+async def test_catalyst_calendar_task_does_not_mark_failed_telegram_alert(monkeypatch):
+    """Telegram 전송 실패 시 같은 촉매 이벤트를 재시도할 수 있게 남깁니다."""
+    from ..scheduler import catalyst_calendar_task
+
+    repo = FakeCatalystRepo(
+        [
+            SimpleNamespace(
+                id=3,
+                stock_name="삼성전자",
+                event_type="earnings",
+                event_date=date(2026, 1, 29),
+                description="분기 실적 발표",
+                days_until_event=1,
+            )
+        ]
+    )
+
+    async def mock_run_mcp_tool(params, name, args):
+        return "[최신 공시]\n- 최근 공시가 없습니다."
+
+    monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
+
+    await catalyst_calendar_task(
+        watchlist_repo=FakeWatchlistRepo(["삼성전자"]),
+        catalyst_repo=repo,
+        notifier=FakeCatalystNotifier(result=False),
+        today_factory=lambda: date(2026, 1, 28),
+        use_redis_lock=False,
+    )
+
+    assert repo.marked == []
+
+
+def test_start_scheduler_registers_catalyst_calendar_job(monkeypatch):
+    from .. import scheduler as scheduler_module
+
+    added_jobs = []
+
+    class FakeScheduler:
+        running = False
+        timezone = None
+
+        def add_job(self, *args, **kwargs):
+            added_jobs.append((args, kwargs))
+
+        def start(self):
+            self.running = True
+
+    fake_scheduler = FakeScheduler()
+    monkeypatch.setattr(scheduler_module, "scheduler", fake_scheduler)
+
+    scheduler_module.start_scheduler()
+
+    job_ids = [kwargs["id"] for _args, kwargs in added_jobs]
+    assert "catalyst_calendar" in job_ids
