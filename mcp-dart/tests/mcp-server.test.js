@@ -23,8 +23,19 @@ test("registers disclosure signal tool with required stock_name schema", async (
   await withClient(async (client) => {
     const { tools } = await client.listTools();
 
-    assert.equal(tools.length, 1);
-    assert.equal(tools[0].name, "get_disclosure_signal");
-    assert.deepEqual(tools[0].inputSchema.required, ["stock_name"]);
+    const disclosureTool = tools.find((tool) => tool.name === "get_disclosure_signal");
+    assert.ok(disclosureTool);
+    assert.deepEqual(disclosureTool.inputSchema.required, ["stock_name"]);
+  });
+});
+
+test("registers earnings report tool with stock_name and optional period schema", async () => {
+  await withClient(async (client) => {
+    const { tools } = await client.listTools();
+
+    const earningsTool = tools.find((tool) => tool.name === "get_earnings_report");
+    assert.ok(earningsTool);
+    assert.deepEqual(earningsTool.inputSchema.required, ["stock_name"]);
+    assert.ok(earningsTool.inputSchema.properties.period);
   });
 });

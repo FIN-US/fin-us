@@ -222,3 +222,31 @@ def test_mcp_dart_stock_routes_to_disclosure_signal_tool(monkeypatch, tmp_path):
         "arguments": {"stock_name": "삼성전자"},
         "timeout_sec": 7,
     }
+
+
+def test_mcp_dart_earnings_stock_routes_to_earnings_report_tool(monkeypatch, tmp_path):
+    captured = {}
+
+    async def fake_mcp_call_tool(**kwargs):
+        captured.update(kwargs)
+        return "ok"
+
+    monkeypatch.setattr(finus_api, "_mcp_call_tool", fake_mcp_call_tool)
+
+    result = asyncio.run(
+        finus_api._mcp_dart_earnings_stock(
+            vendor_root=str(tmp_path),
+            timeout_sec=7,
+            stock_name="삼성전자",
+            period="2025Q1",
+        )
+    )
+
+    assert result == "ok"
+    assert captured == {
+        "vendor_root": Path(str(tmp_path)).expanduser().resolve(),
+        "subdir": "mcp-dart",
+        "tool_name": "get_earnings_report",
+        "arguments": {"stock_name": "삼성전자", "period": "2025Q1"},
+        "timeout_sec": 7,
+    }

@@ -5,14 +5,17 @@ import secrets
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from typing import Any, Callable
+from urllib.parse import quote as _url_quote
 
 import httpx
 from fastapi import HTTPException
 from sqlmodel import Session
 
 from .config import (
+    DART_MCP_PARAMS,
     KIS_ORDER_ENV,
     KIS_REAL_ORDER_ENABLED,
+    NEWS_MCP_PARAMS,
     TRADING_MCP_PARAMS,
 )
 from .database import engine
@@ -35,6 +38,7 @@ ALERT_COMMAND_HELP = "사용법: /alerts urgent | all | off | status"
 BUY_COMMAND_HELP = "사용법: /buy <종목명> <수량> [지정가]"
 SELL_COMMAND_HELP = "사용법: /sell <종목명> <수량> [지정가]"
 WATCH_COMMAND_HELP = "사용법: /watch add <종목명> | remove <종목명> | list"
+EARNINGS_COMMAND_HELP = "사용법: /earnings <종목명> [기간]  예: /earnings 삼성전자 2025Q1"
 NATURAL_ORDER_HELP = "자연어 주문을 해석할 수 없습니다. /buy 또는 /sell 형식으로 입력하세요."
 ORDER_EXPIRES_AFTER = timedelta(seconds=60)
 ORDER_CONFIRM_CALLBACK = "order:confirm"
@@ -65,6 +69,7 @@ TELEGRAM_INTERACTIVE_HELP = "\n".join(
         "/lookup - 현재가·수급 조회 입력 안내",
         "/quote <종목명> - 현재가 조회",
         "/trend <종목명> - 외국인·기관·개인 수급 조회",
+        "/earnings <종목명> [기간] - DART 실적·뉴스 분석",
         "/buy <종목명> <수량> [지정가] - 매수 주문 준비",
         "/sell <종목명> <수량> [지정가] - 매도 주문 준비",
         "/confirm - 대기 주문 확정",
@@ -78,6 +83,7 @@ TELEGRAM_BOT_COMMANDS = [
     {"command": "watch", "description": "관심 종목 추가·삭제·조회 (add/remove/list)"},
     {"command": "quote", "description": "종목 현재가 조회"},
     {"command": "trend", "description": "종목 외국인·기관·개인 수급 조회"},
+    {"command": "earnings", "description": "DART 실적·뉴스 분석"},
     {"command": "alerts", "description": "Telegram 알림 모드 변경"},
     {"command": "trade", "description": "매수·매도 주문 입력 안내"},
     {"command": "lookup", "description": "현재가·수급 조회 입력 안내"},
@@ -220,6 +226,9 @@ class TelegramCommandHandler:
             return
         if self._matches_command(command, bot_username, "/trend"):
             await self._handle_trend(argument, str(chat.get("id", "")).strip())
+            return
+        if self._matches_command(command, bot_username, "/earnings"):
+            await self._handle_earnings(argument, str(chat.get("id", "")).strip())
             return
         if self._matches_command(command, bot_username, "/buy"):
             await self._handle_order_command("BUY", argument, str(chat.get("id", "")).strip())
@@ -997,6 +1006,114 @@ class TelegramCommandHandler:
             _telegram_text(str(result)),
             reply_markup=self._market_reply_markup("quote", chat_id, stock),
         )
+
+    async def _handle_earnings(self, argument: str, chat_id: str) -> None:
+        parsed = self._parse_earnings_argument(argument)
+        if parsed is None:
+            await self._send_text_or_raise(EARNINGS_COMMAND_HELP)
+            return
+
+        stock, period = parsed
+        dart_arguments: dict[str, Any] = {"stock_name": stock}
+        if period:
+            dart_arguments["period"] = period
+
+        await self.notifier.send_chat_action("typing")
+        try:
+            dart_result, news_result = await asyncio.gather(
+                self.mcp_runner(DART_MCP_PARAMS, "get_earnings_report", dart_arguments),
+                self.mcp_runner(NEWS_MCP_PARAMS, "get_market_news", {"stock_name": stock}),
+            )
+            result = await self.llm_runner(
+                "nat",
+                self._earnings_analysis_prompt(stock, period, str(dart_result), str(news_result)),
+                conversation_id=f"telegram:{chat_id}:earnings:{_url_quote(stock, safe='')}",
+            )
+        except Exception as exc:
+            await self._send_text_or_raise(f"조회 실패: {_short_error(exc)}")
+            return
+
+        await self._send_text_or_raise(_telegram_text(self._format_earnings_response(str(result))))
+
+    def _parse_earnings_argument(self, argument: str) -> tuple[str, str | None] | None:
+        parts = argument.split()
+        if not parts:
+            return None
+
+        period = None
+        if re.match(r"^\d{4}(?:[-_\s]?Q[1-4]|[-_\s]?FY)$", parts[-1], flags=re.IGNORECASE):
+            period = parts[-1].upper().replace("-", "").replace("_", "")
+            parts = parts[:-1]
+
+        stock = " ".join(parts).strip()
+        if not stock:
+            return None
+        return stock, period
+
+    def _earnings_analysis_prompt(
+        self,
+        stock: str,
+        period: str | None,
+        dart_result: str,
+        news_result: str,
+    ) -> str:
+        period_line = f"조회 기간: {period}" if period else "조회 기간: DART MCP 기본값"
+        return (
+            "News Analyst 실적 분석 모드로 다음 종목의 구조화된 실적 리포트를 작성하라.\n"
+            f"종목: {stock}\n"
+            f"{period_line}\n\n"
+            "[DART 실적 데이터]\n"
+            f"{dart_result}\n\n"
+            "[최신 뉴스]\n"
+            f"{news_result}\n\n"
+            "반드시 다음 항목을 포함하라:\n"
+            "- 매출/영업이익/순이익 전년 동기 대비 증감\n"
+            "- 컨센서스 대비 서프라이즈/미스 판단. 컨센서스 데이터가 없으면 추정하지 말고 데이터 없음으로 표시\n"
+            "- 주요 뉴스 기반 정성적 코멘트\n"
+            "- 다음 분기 전망\n"
+            "첫 줄은 반드시 `호재`, `악재`, `중립` 중 하나의 판정과 한 줄 근거로 시작하라.\n"
+            "Markdown 문법(`#`, `**`, 표, 코드블록)을 쓰지 말고 Telegram에서 읽기 쉬운 일반 텍스트로 답하라.\n"
+            "투자 조언은 단정하지 말고, 확인된 DART·뉴스 근거와 한계를 구분해 한국어로 답하라."
+        )
+
+    def _format_earnings_response(self, text: str) -> str:
+        plain = self._telegram_plain_text(text)
+        verdict = self._earnings_verdict(plain)
+        if plain.startswith(("🟢 호재", "🔴 악재", "⚪ 중립")):
+            return plain
+        lines = plain.splitlines()
+        while lines and not lines[0].strip():
+            lines.pop(0)
+        if lines:
+            first = lines[0].strip()
+            for label in ("호재", "악재", "중립"):
+                if first == label:
+                    lines = lines[1:]
+                    while lines and not lines[0].strip():
+                        lines.pop(0)
+                    body = "\n".join(lines).strip()
+                    return f"{verdict}\n{body}".strip()
+                if first.startswith(f"{label}:") or first.startswith(f"{label} -"):
+                    lines[0] = first.replace(label, verdict, 1)
+                    return "\n".join(lines).strip()
+        return f"{verdict}\n{plain}".strip()
+
+    def _earnings_verdict(self, text: str) -> str:
+        if "악재" in text:
+            return "🔴 악재"
+        if "호재" in text:
+            return "🟢 호재"
+        return "⚪ 중립"
+
+    def _telegram_plain_text(self, text: str) -> str:
+        lines = []
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            line = re.sub(r"^#{1,6}\s*", "", line)
+            line = re.sub(r"^[-*]\s+", "• ", line)
+            line = line.replace("**", "").replace("__", "").replace("`", "")
+            lines.append(line)
+        return "\n".join(lines).strip()
 
     async def _handle_chat_fallback(self, text: str, chat_id: str) -> None:
         await self.notifier.send_chat_action("typing")
