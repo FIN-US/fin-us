@@ -5,6 +5,7 @@ import secrets
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from typing import Any, Callable
+from urllib.parse import quote as _url_quote
 
 import httpx
 from fastapi import HTTPException
@@ -1026,7 +1027,7 @@ class TelegramCommandHandler:
             result = await self.llm_runner(
                 "nat",
                 self._earnings_analysis_prompt(stock, period, str(dart_result), str(news_result)),
-                conversation_id=f"telegram:{chat_id}:earnings:{stock}",
+                conversation_id=f"telegram:{chat_id}:earnings:{_url_quote(stock, safe='')}",
             )
         except Exception as exc:
             await self._send_text_or_raise(f"조회 실패: {_short_error(exc)}")

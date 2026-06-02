@@ -592,7 +592,8 @@ async def test_earnings_command_combines_dart_news_and_nat_analysis():
     assert len(llm_calls) == 1
     provider, prompt, conversation_id = llm_calls[0]
     assert provider == "nat"
-    assert conversation_id == "telegram:123:earnings:삼성전자"
+    assert conversation_id == "telegram:123:earnings:%EC%82%BC%EC%84%B1%EC%A0%84%EC%9E%90"
+    conversation_id.encode("ascii")
     assert "DART 실적: 매출 +12%, 영업이익 +5%" in prompt
     assert "뉴스: 반도체 수요 회복" in prompt
     assert "컨센서스 대비 서프라이즈/미스" in prompt
