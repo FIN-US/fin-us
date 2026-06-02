@@ -93,6 +93,8 @@ def chat_response_plain_text(result: ChatResponse | str) -> str:
 
 def _is_holdings_news_request(chat_request: ChatRequest) -> bool:
     latest = latest_user_plain_text(chat_request.messages)
+    if any(word in latest for word in ("실적", "earnings", "분기보고서", "사업보고서")):
+        return False
     wants_news = "뉴스" in latest or "뉴" in latest
     refers_holdings = any(word in latest for word in ("보유", "포트폴리오", "종목", "보유종목"))
     return wants_news and refers_holdings
