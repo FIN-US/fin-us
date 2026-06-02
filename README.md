@@ -183,7 +183,7 @@ Backend 스케줄러는 매 거래일 오전 8시 30분에 Telegram 모닝 브�
 | `/trend <종목명>` | 외국인·기관·개인 수급 조회 | 💵 현재가 보기 |
 | `/earnings <종목명> [기간]` | DART 실적과 최신 뉴스 기반 구조화 리포트 생성. 기간 예: `2025Q1`, `2025FY` | - |
 
-`/earnings`는 OpenDART 실적 데이터와 Naver 뉴스를 NAT News Analyst에 전달합니다. OpenDART가 제공하지 않는 컨센서스/시장 기대치 데이터는 추정하지 않고 데이터 없음으로 표시합니다.
+`/earnings`는 OpenDART 실적 데이터와 Naver 뉴스를 NAT News Analyst에 전달합니다. OpenDART가 제공하지 않는 컨센서스/시장 기대치 데이터는 추정하지 않고 데이터 없음으로 표시합니다. Telegram 응답은 Markdown이 아닌 일반 텍스트이며 첫 줄에 `🟢 호재`, `🔴 악재`, `⚪ 중립` 판정을 표시합니다.
 
 **매매**
 

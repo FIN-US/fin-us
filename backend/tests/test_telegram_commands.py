@@ -598,8 +598,49 @@ async def test_earnings_command_combines_dart_news_and_nat_analysis():
     assert "뉴스: 반도체 수요 회복" in prompt
     assert "컨센서스 대비 서프라이즈/미스" in prompt
     assert "다음 분기 전망" in prompt
+    assert "Markdown 문법" in prompt
+    assert "호재`, `악재`, `중립" in prompt
     assert notifier.actions == ["typing"]
-    assert notifier.messages == ["실적 분석 응답"]
+    assert notifier.messages == ["⚪ 중립\n실적 분석 응답"]
+
+
+@pytest.mark.asyncio
+async def test_earnings_command_sends_plain_text_with_verdict_emoji():
+    async def mcp_runner(server_params, tool_name, arguments):
+        if server_params is DART_MCP_PARAMS:
+            return "DART 실적"
+        if server_params is NEWS_MCP_PARAMS:
+            return "뉴스"
+        raise AssertionError(f"unexpected server params: {server_params}")
+
+    async def llm_runner(provider, text, *, conversation_id=None):
+        return "\n".join(
+            [
+                "## **호재**",
+                "",
+                "### **실적 요약**",
+                "- **매출**: 전년 대비 증가",
+                "- **영업이익**: 개선",
+            ]
+        )
+
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        mcp_runner=mcp_runner,
+        llm_runner=llm_runner,
+    )
+
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/earnings 삼성전자"}})
+
+    message = notifier.messages[-1]
+    assert message.startswith("🟢 호재\n")
+    assert "호재\n호재" not in message
+    assert "#" not in message
+    assert "*" not in message
+    assert "- " not in message
+    assert "실적 요약" in message
+    assert "• 매출: 전년 대비 증가" in message
 
 
 @pytest.mark.asyncio

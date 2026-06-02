@@ -1033,7 +1033,7 @@ class TelegramCommandHandler:
             await self._send_text_or_raise(f"조회 실패: {_short_error(exc)}")
             return
 
-        await self._send_text_or_raise(_telegram_text(str(result)))
+        await self._send_text_or_raise(_telegram_text(self._format_earnings_response(str(result))))
 
     def _parse_earnings_argument(self, argument: str) -> tuple[str, str | None] | None:
         parts = argument.split()
@@ -1071,8 +1071,49 @@ class TelegramCommandHandler:
             "- 컨센서스 대비 서프라이즈/미스 판단. 컨센서스 데이터가 없으면 추정하지 말고 데이터 없음으로 표시\n"
             "- 주요 뉴스 기반 정성적 코멘트\n"
             "- 다음 분기 전망\n"
+            "첫 줄은 반드시 `호재`, `악재`, `중립` 중 하나의 판정과 한 줄 근거로 시작하라.\n"
+            "Markdown 문법(`#`, `**`, 표, 코드블록)을 쓰지 말고 Telegram에서 읽기 쉬운 일반 텍스트로 답하라.\n"
             "투자 조언은 단정하지 말고, 확인된 DART·뉴스 근거와 한계를 구분해 한국어로 답하라."
         )
+
+    def _format_earnings_response(self, text: str) -> str:
+        plain = self._telegram_plain_text(text)
+        verdict = self._earnings_verdict(plain)
+        if plain.startswith(("🟢 호재", "🔴 악재", "⚪ 중립")):
+            return plain
+        lines = plain.splitlines()
+        while lines and not lines[0].strip():
+            lines.pop(0)
+        if lines:
+            first = lines[0].strip()
+            for label in ("호재", "악재", "중립"):
+                if first == label:
+                    lines = lines[1:]
+                    while lines and not lines[0].strip():
+                        lines.pop(0)
+                    body = "\n".join(lines).strip()
+                    return f"{verdict}\n{body}".strip()
+                if first.startswith(f"{label}:") or first.startswith(f"{label} -"):
+                    lines[0] = first.replace(label, verdict, 1)
+                    return "\n".join(lines).strip()
+        return f"{verdict}\n{plain}".strip()
+
+    def _earnings_verdict(self, text: str) -> str:
+        if "악재" in text:
+            return "🔴 악재"
+        if "호재" in text:
+            return "🟢 호재"
+        return "⚪ 중립"
+
+    def _telegram_plain_text(self, text: str) -> str:
+        lines = []
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            line = re.sub(r"^#{1,6}\s*", "", line)
+            line = re.sub(r"^[-*]\s+", "• ", line)
+            line = line.replace("**", "").replace("__", "").replace("`", "")
+            lines.append(line)
+        return "\n".join(lines).strip()
 
     async def _handle_chat_fallback(self, text: str, chat_id: str) -> None:
         await self.notifier.send_chat_action("typing")
