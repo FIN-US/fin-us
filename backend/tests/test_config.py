@@ -1,5 +1,7 @@
+import importlib
 from pathlib import Path
 
+import backend.config as config
 from backend.config import DART_MCP_PARAMS, NEWS_MCP_PARAMS, TRADING_MCP_PARAMS, _stdio_server_params
 
 
@@ -25,3 +27,11 @@ def test_mcp_stdio_params_do_not_pass_parent_only_secrets(monkeypatch):
     assert params.env["FIN_US_TRACE_ID"] == "trace-id"
     assert "DATABASE_URL" not in params.env
     assert "OPENAI_API_KEY" not in params.env
+
+
+def test_visualization_url_is_trimmed_and_trailing_slash_preserved(monkeypatch):
+    monkeypatch.setenv("VISUALIZATION_URL", " https://finus-visual.example/portfolio/ ")
+
+    reloaded = importlib.reload(config)
+
+    assert reloaded.VISUALIZATION_URL == "https://finus-visual.example/portfolio/"
