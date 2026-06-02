@@ -237,6 +237,7 @@ python3 mcp-trading/scripts/update_stock_master.py
 ![OpenDART](https://img.shields.io/badge/OpenDART-API-005BAC)
 ![KIS](https://img.shields.io/badge/KIS-Open%20API-003B71)
 ![Naver](https://img.shields.io/badge/Naver-Search%20API-03C75A?logo=naver&logoColor=white)
+
 ---
 
 ## ⚖️ 참고
