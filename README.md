@@ -2,23 +2,6 @@
 
 Fin-Us는 **MCP (Model Context Protocol)** 아키텍처와 **멀티 에이전트 워크플로우**를 결합한 차세대 지능형 투자 시스템입니다. 독립적인 인격을 가진 에이전트들이 각자의 도구(MCP)를 활용해 협업하며, 뉴스 분석부터 실제 매매 집행까지의 복잡한 의사결정을 자율적으로 수행합니다.
 
-## 🧰 기술 스택
-
-![Python](https://img.shields.io/badge/Python-3.13-3776AB?logo=python&logoColor=white)
-![FastAPI](https://img.shields.io/badge/FastAPI-0.136-009688?logo=fastapi&logoColor=white)
-![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=20232A)
-![TypeScript](https://img.shields.io/badge/TypeScript-6-3178C6?logo=typescript&logoColor=white)
-![Vite](https://img.shields.io/badge/Vite-8-646CFF?logo=vite&logoColor=white)
-![Node.js](https://img.shields.io/badge/Node.js-24-5FA04E?logo=nodedotjs&logoColor=white)
-![MCP](https://img.shields.io/badge/MCP-1.29-000000)
-![Redis](https://img.shields.io/badge/Redis-7-DC382D?logo=redis&logoColor=white)
-![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)
-![OpenAI](https://img.shields.io/badge/OpenAI-API-412991?logo=openai&logoColor=white)
-![Anthropic](https://img.shields.io/badge/Anthropic-API-191919)
-![OpenDART](https://img.shields.io/badge/OpenDART-API-005BAC)
-![KIS](https://img.shields.io/badge/KIS-Open%20API-003B71)
-![Naver](https://img.shields.io/badge/Naver-Search%20API-03C75A?logo=naver&logoColor=white)
-
 ## 🤖 Multi-Agent Ecosystem
 
 Fin-Us는 단일 모델이 모든 일을 처리하지 않고, 역할이 분리된 전문 에이전트들이 협력합니다. 각 에이전트의 페르소나와 지침은 `finus_nat/configs/agents/`의 YAML 설정을 통해 관리됩니다.
@@ -236,6 +219,24 @@ python3 mcp-trading/scripts/update_stock_master.py
 
 슬래시 명령이 아닌 일반 텍스트는 NAT 채팅으로 전달됩니다. Telegram 채팅은 `telegram:{chat_id}` conversation id를 사용하므로 스케줄러 분석 리포트와 대화 이력이 섞이지 않습니다.
 
+--- 
+
+## 📚 기술 스택
+
+![Python](https://img.shields.io/badge/Python-3.13-3776AB?logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-0.136-009688?logo=fastapi&logoColor=white)
+![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=20232A)
+![TypeScript](https://img.shields.io/badge/TypeScript-6-3178C6?logo=typescript&logoColor=white)
+![Vite](https://img.shields.io/badge/Vite-8-646CFF?logo=vite&logoColor=white)
+![Node.js](https://img.shields.io/badge/Node.js-24-5FA04E?logo=nodedotjs&logoColor=white)
+![MCP](https://img.shields.io/badge/MCP-1.29-000000)
+![Redis](https://img.shields.io/badge/Redis-7-DC382D?logo=redis&logoColor=white)
+![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)
+![OpenAI](https://img.shields.io/badge/OpenAI-API-412991?logo=openai&logoColor=white)
+![Anthropic](https://img.shields.io/badge/Anthropic-API-191919)
+![OpenDART](https://img.shields.io/badge/OpenDART-API-005BAC)
+![KIS](https://img.shields.io/badge/KIS-Open%20API-003B71)
+![Naver](https://img.shields.io/badge/Naver-Search%20API-03C75A?logo=naver&logoColor=white)
 ---
 
 ## ⚖️ 참고
