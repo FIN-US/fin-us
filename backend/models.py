@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Optional
 from sqlmodel import Field, SQLModel
 
@@ -54,3 +54,20 @@ class Diary(SQLModel, table=True):
 class WatchlistItem(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     stock_name: str = Field(unique=True, index=True)
+
+
+class CatalystEvent(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    stock_name: str = Field(index=True)
+    stock_code: Optional[str] = Field(default=None, index=True)
+    event_type: str = Field(index=True, description="earnings | dividend | disclosure | agm")
+    event_date: date = Field(index=True)
+    description: str
+    source: str = Field(default="manual")
+    notified: bool = Field(default=False, index=True)
+    d1_notified: bool = Field(default=False)
+    d0_notified: bool = Field(default=False)
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        description="생성 일시",
+    )
