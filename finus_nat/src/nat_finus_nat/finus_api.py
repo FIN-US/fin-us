@@ -254,6 +254,25 @@ async def _mcp_dart_stock(
     )
 
 
+async def _mcp_dart_earnings_stock(
+    *,
+    vendor_root: str | None,
+    timeout_sec: float,
+    stock_name: str,
+    period: str | None = None,
+) -> str:
+    arguments = {"stock_name": stock_name}
+    if period:
+        arguments["period"] = period
+    return await _mcp_call_tool(
+        vendor_root=_resolve_vendor_root(vendor_root),
+        subdir="mcp-dart",
+        tool_name="get_earnings_report",
+        arguments=arguments,
+        timeout_sec=timeout_sec,
+    )
+
+
 async def _mcp_trading_call(
     *,
     vendor_root: str | None,
@@ -283,6 +302,10 @@ class FinusMarketNewsConfig(_FinusMcpStdioConfig, name="finus_market_news"):
 
 class FinusDisclosureSignalConfig(FinusMarketNewsConfig, name="finus_disclosure_signal"):
     """mcp-dart stdio MCP — OpenDART 지분공시 signal."""
+
+
+class FinusEarningsReportConfig(FinusMarketNewsConfig, name="finus_earnings_report"):
+    """mcp-dart stdio MCP — OpenDART 실적 리포트."""
 
 
 class FinusMcpTradingConfig(_FinusMcpStdioConfig, name="finus_mcp_trading_base"):
@@ -608,6 +631,26 @@ async def finus_disclosure_signal(config: FinusDisclosureSignalConfig, _builder:
 
     get_disclosure_signal.__doc__ = doc
     yield FunctionInfo.from_fn(get_disclosure_signal, description=doc)
+
+
+@register_function(config_type=FinusEarningsReportConfig)
+async def finus_earnings_report(config: FinusEarningsReportConfig, _builder: Builder):
+    doc = (
+        "Fin-Us mcp-dart stdio MCP: OpenDART 공식 API 실적 리포트 "
+        "(매출·영업이익·순이익 YoY). stock_name 예: 삼성전자, 005930. "
+        "period 선택 예: 2025Q1, 2025Q2, 2025Q3, 2025FY. DART_API_KEY 필요."
+    )
+
+    async def get_earnings_report(stock_name: str, period: str | None = None) -> str:
+        return await _mcp_dart_earnings_stock(
+            vendor_root=config.vendor_root,
+            timeout_sec=config.timeout_sec,
+            stock_name=stock_name,
+            period=period,
+        )
+
+    get_earnings_report.__doc__ = doc
+    yield FunctionInfo.from_fn(get_earnings_report, description=doc)
 
 
 @register_function(config_type=FinusMcpTradingTodayOrdersConfig)

@@ -18,6 +18,10 @@ functions:
   mcp-dart-get-disclosure-signal:
     _type: finus_disclosure_signal
 
+  # fin-us/mcp-dart stdio: get_earnings_report
+  mcp-dart-get-earnings-report:
+    _type: finus_earnings_report
+
 llms:
   openai_cloud_llm:
     _type: openai
