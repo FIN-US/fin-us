@@ -148,6 +148,19 @@ docker compose exec backend uv run --project /app/backend python /app/backend/sc
 docker compose exec backend uv run --project /app/backend python /app/backend/scripts/send_test_telegram_alert.py --dry-run
 ```
 
+### Telegram 모닝 브리핑
+
+Backend 스케줄러는 매 거래일 오전 8시 30분에 Telegram 모닝 브리핑을 자동 전송합니다.
+
+브리핑은 `mcp-news`, `mcp-trading`, NAT Strategy Planner 흐름을 사용해 아래 항목을 요약합니다.
+
+- 오늘의 시장 요약: 전일 미국/선물 시장 동향과 주요 이슈
+- 관심종목 동향: `/watch` 관심 종목별 최신 뉴스와 외국인·기관 수급
+- 오늘의 트레이딩 아이디어: 장 시작 전 참고할 간략 시나리오
+- 주요 촉매 이벤트: 당일/금주 실적, 배당락, 공시 등 확인 필요 이벤트
+
+모닝 브리핑은 정기 브리핑 메시지이므로 긴급 분석 알림 게이트와 분리되어 있습니다. `/alerts urgent|all|off|status`는 스케줄러 분석 알림의 전송 범위를 제어하며, 모닝 브리핑 자체의 발송 스케줄은 APScheduler의 `morning_briefing` 작업으로 관리합니다.
+
 같은 Telegram 봇에서 명령을 사용할 수 있습니다. 기본 알림 모드는 긴급 분석만 전송하는 `urgent`입니다.
 
 ### 명령어 목록

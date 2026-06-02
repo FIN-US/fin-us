@@ -139,6 +139,55 @@ async def test_perform_stock_analysis_includes_trigger_signal(monkeypatch):
     assert '"source_signals"' in prompts[0][1]
 
 
+@pytest.mark.asyncio
+async def test_generate_morning_briefing_collects_market_watchlist_and_strategy(monkeypatch):
+    calls = []
+    prompts = []
+
+    async def fake_run_mcp_tool(params, tool_name, arguments):
+        calls.append((params, tool_name, arguments))
+        if tool_name == "get_market_news":
+            return f"{arguments['stock_name']} 뉴스"
+        if tool_name == "get_balance":
+            return "[보유 종목 리스트]\n- 삼성전자 (005930): 10주"
+        if tool_name == "get_investor_trading":
+            return f"{arguments['stock_name']} 외국인 순매수"
+        raise AssertionError(tool_name)
+
+    async def fake_llm_chat(provider, prompt, *, conversation_id=None):
+        prompts.append((provider, prompt, conversation_id))
+        return (
+            '{"market_summary":"전일 미국 증시 상승",'
+            '"watchlist":["삼성전자: 외국인 순매수"],'
+            '"trading_ideas":["삼성전자 눌림목 관찰"],'
+            '"catalysts":["오늘 CPI 발표"]}'
+        )
+
+    monkeypatch.setattr(services, "run_mcp_tool", fake_run_mcp_tool)
+    monkeypatch.setattr(services, "llm_chat", fake_llm_chat)
+
+    briefing = await services.generate_morning_briefing(["삼성전자", "NAVER"])
+
+    assert briefing == {
+        "market_summary": "전일 미국 증시 상승",
+        "watchlist": ["삼성전자: 외국인 순매수"],
+        "trading_ideas": ["삼성전자 눌림목 관찰"],
+        "catalysts": ["오늘 CPI 발표"],
+    }
+    assert [call[1:] for call in calls] == [
+        ("get_market_news", {"stock_name": "미국 증시"}),
+        ("get_balance", {}),
+        ("get_market_news", {"stock_name": "삼성전자"}),
+        ("get_investor_trading", {"stock_name": "삼성전자"}),
+        ("get_market_news", {"stock_name": "NAVER"}),
+        ("get_investor_trading", {"stock_name": "NAVER"}),
+    ]
+    assert prompts[0][0] == "nat"
+    assert prompts[0][2] == f"morning-briefing:{date.today().isoformat()}"
+    assert "Strategy Planner" in prompts[0][1]
+    assert "NAVER 뉴스" in prompts[0][1]
+
+
 def test_analysis_from_nat_text_backfills_source_signals():
     data = services.analysis_from_nat_text(
         (

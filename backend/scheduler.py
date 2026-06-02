@@ -3,6 +3,7 @@ import logging
 import re
 from dataclasses import dataclass
 from datetime import date, datetime
+from zoneinfo import ZoneInfo
 from typing import Any, Callable
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from sqlmodel import Session
@@ -11,7 +12,12 @@ from .ws_manager import manager
 from .database import engine
 from .config import NEWS_MCP_PARAMS, TRADING_MCP_PARAMS, DART_MCP_PARAMS
 from .redis_state import RedisSchedulerState, signal_hash, redis_state
-from .services import perform_stock_analysis, run_mcp_tool, check_signal_significance
+from .services import (
+    perform_stock_analysis,
+    run_mcp_tool,
+    check_signal_significance,
+    generate_morning_briefing,
+)
 from .watchlist_repo import SqliteWatchlistRepo
 from .telegram_notifier import telegram_notifier
 from .telegram_notifier import should_send_telegram_alert
@@ -19,7 +25,8 @@ from .telegram_notifier import should_send_telegram_alert
 logger = logging.getLogger(__name__)
 
 # 비동기 스케줄러 인스턴스 생성
-scheduler = AsyncIOScheduler()
+KST = ZoneInfo("Asia/Seoul")
+scheduler = AsyncIOScheduler(timezone=KST)
 
 # 뉴스 필터링에 사용할 모델 제공자 (ollama 또는 openai)
 FILTER_PROVIDER = os.environ.get("NEWS_FILTER_PROVIDER", "ollama")
@@ -462,6 +469,24 @@ async def ping_task():
         "status": "active"
     })
 
+
+async def morning_briefing_task(watchlist_repo: SqliteWatchlistRepo | None = None):
+    try:
+        if watchlist_repo is None:
+            watchlist_repo = SqliteWatchlistRepo(lambda: Session(engine))
+        try:
+            watchlist = await watchlist_repo.get_watchlist()
+        except Exception as e:
+            logger.error("모닝 브리핑 관심 종목 조회 중 오류: %s", e)
+            watchlist = []
+
+        briefing = await generate_morning_briefing(watchlist)
+        message = telegram_notifier.format_morning_briefing(briefing)
+        await telegram_notifier.send_text(message)
+    except Exception as e:
+        logger.error("모닝 브리핑 작업 중 오류: %s", e)
+
+
 def start_scheduler():
     """스케줄러를 시작하고 작업을 등록합니다."""
     if not scheduler.running:
@@ -483,6 +508,14 @@ def start_scheduler():
             hour=8,
             minute=30,
             id="catalyst_calendar",
+        )
+        scheduler.add_job(
+            morning_briefing_task,
+            "cron",
+            day_of_week="mon-fri",
+            hour=8,
+            minute=30,
+            id="morning_briefing",
         )
         
         scheduler.start()

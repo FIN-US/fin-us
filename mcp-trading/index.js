@@ -8,7 +8,14 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import axios from "axios";
 import dotenv from "dotenv";
 import { z } from "zod";
+import { formatBalanceRlzPlReport } from "./balance-rlz-pl-report.js";
 import { buildBalanceParams, formatBalanceReport } from "./balance.js";
+import {
+  formatPercent,
+  formatQuantity,
+  formatWon,
+  isPaperTradingKisUrl,
+} from "./formatters.js";
 import {
   OrderDedupStore,
   createOrderDedupKey,
@@ -35,6 +42,20 @@ const {
 } = process.env;
 
 const KIS_BALANCE_TR_ID = KIS_URL?.includes("openapivts") ? "VTTC8434R" : "TTTC8434R";
+const KIS_DAILY_CCLD_TR_ID = (() => {
+  const override = (process.env.KIS_TR_ID_DAILY_CCLD || process.env.FINUS_KIS_TR_ID_DAILY_CCLD || "").trim();
+  if (override) return override;
+  return KIS_URL?.includes("openapivts") ? "VTTC0081R" : "TTTC0081R";
+})();
+const DAILY_CCLD_PATH = "/uapi/domestic-stock/v1/trading/inquire-daily-ccld";
+const DAILY_CCLD_MAX_PAGES = 50;
+const BALANCE_RLZ_PL_PATH = "/uapi/domestic-stock/v1/trading/inquire-balance-rlz-pl";
+const BALANCE_RLZ_PL_TR_ID = (() => {
+  const override = (process.env.KIS_TR_ID_BALANCE_RLZ_PL || process.env.FINUS_KIS_TR_ID_BALANCE_RLZ_PL || "").trim();
+  if (override) return override;
+  return "TTTC8494R";
+})();
+const BALANCE_RLZ_PL_MAX_PAGES = 50;
 const TOKEN_TTL_MARGIN_MS = 60_000;
 const TOKEN_CACHE_PATH = process.env.KIS_TOKEN_CACHE_PATH || path.join(
   os.tmpdir(),
@@ -125,7 +146,7 @@ async function getAccessToken() {
   }
 }
 
-async function kisGet(pathname, trId, params) {
+async function kisApiGet(pathname, trId, params, { trCont = "" } = {}) {
   const token = await getAccessToken();
   const response = await kisAxios.get(`${KIS_URL}${pathname}`, {
     headers: {
@@ -134,6 +155,7 @@ async function kisGet(pathname, trId, params) {
       appkey: KIS_API_KEY,
       appsecret: KIS_API_SECRET,
       tr_id: trId,
+      tr_cont: trCont,
       custtype: "P",
     },
     params,
@@ -143,7 +165,46 @@ async function kisGet(pathname, trId, params) {
   if (data.rt_cd !== "0") {
     throw new Error(`KIS API 오류: ${data.msg1 || data.msg_cd || "알 수 없는 오류"}`);
   }
-  return data;
+
+  const nextTrCont = response.headers?.tr_cont || response.headers?.["tr-cont"] || "";
+  return { body: data, trCont: nextTrCont };
+}
+
+async function kisGet(pathname, trId, params) {
+  const { body } = await kisApiGet(pathname, trId, params);
+  return body;
+}
+
+function isKisContinueTrCont(value) {
+  return value === "F" || value === "M";
+}
+
+function todayKstYmd() {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "Asia/Seoul",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date());
+  const year = parts.find((p) => p.type === "year")?.value;
+  const month = parts.find((p) => p.type === "month")?.value;
+  const day = parts.find((p) => p.type === "day")?.value;
+  return `${year}${month}${day}`;
+}
+
+function normalizeYmd(value, fallback) {
+  const text = String(value ?? "").trim();
+  if (!text) return fallback;
+  if (!/^\d{8}$/.test(text)) {
+    throw new Error("trade_date는 YYYYMMDD 형식이어야 합니다.");
+  }
+  return text;
+}
+
+function formatOrderTime(value) {
+  const text = String(value ?? "").trim();
+  if (!text || text.length < 6) return text || "-";
+  return `${text.slice(0, 2)}:${text.slice(2, 4)}:${text.slice(4, 6)}`;
 }
 
 async function createKisHashKey(body) {
@@ -190,16 +251,6 @@ async function kisPost(pathname, trId, body, { useHashKey = false } = {}) {
     throw error;
   }
   return data;
-}
-
-function formatWon(value) {
-  if (value === undefined || value === null || value === "") return "-";
-  return `${Number(value).toLocaleString("ko-KR")}원`;
-}
-
-function formatQuantity(value) {
-  if (value === undefined || value === null || value === "") return "-";
-  return Number(value).toLocaleString("ko-KR");
 }
 
 async function getStockQuote(stockName) {
@@ -323,8 +374,221 @@ async function placeOrder(args) {
   });
 }
 
+async function fetchAllDailyOrderCcld({
+  tradeDate,
+  stockCode = "",
+  ccldDvsn = "00",
+  sllBuyDvsn = "00",
+}) {
+  requireKisCredentials({ accountRequired: true });
+
+  const date = normalizeYmd(tradeDate, todayKstYmd());
+  const baseParams = {
+    CANO: KIS_ACCOUNT_NO.substring(0, 8),
+    ACNT_PRDT_CD: KIS_ACCOUNT_NO.substring(8, 10),
+    INQR_STRT_DT: date,
+    INQR_END_DT: date,
+    SLL_BUY_DVSN_CD: sllBuyDvsn,
+    INQR_DVSN: "00",
+    PDNO: stockCode,
+    CCLD_DVSN: ccldDvsn,
+    ORD_GNO_BRNO: "",
+    ODNO: "",
+    INQR_DVSN_3: "00",
+    INQR_DVSN_1: "",
+  };
+
+  const rows = [];
+  let summary = null;
+  let trCont = "";
+  let ctxFk = "";
+  let ctxNk = "";
+  let pages = 0;
+
+  while (pages < DAILY_CCLD_MAX_PAGES) {
+    const { body, trCont: respTrCont } = await kisApiGet(
+      DAILY_CCLD_PATH,
+      KIS_DAILY_CCLD_TR_ID,
+      {
+        ...baseParams,
+        CTX_AREA_FK100: ctxFk,
+        CTX_AREA_NK100: ctxNk,
+      },
+      { trCont },
+    );
+
+    const pageRows = Array.isArray(body.output1) ? body.output1 : [];
+    rows.push(...pageRows);
+    if (body.output2 && !summary) {
+      summary = Array.isArray(body.output2) ? body.output2[0] : body.output2;
+    }
+
+    ctxFk = body.ctx_area_fk100 || "";
+    ctxNk = body.ctx_area_nk100 || "";
+    pages += 1;
+
+    if (!isKisContinueTrCont(respTrCont)) {
+      break;
+    }
+    trCont = "N";
+  }
+
+  return { date, rows, summary, pages, trId: KIS_DAILY_CCLD_TR_ID };
+}
+
+function formatDailyOrderCcldReport({ date, rows, summary, pages, trId, stockLabel }) {
+  if (rows.length === 0) {
+    return `
+[당일 주문·체결 내역] ${date}${stockLabel ? ` / ${stockLabel}` : ""}
+- 조회 TR: ${trId} (주식일별주문체결조회 v1_국내주식-005)
+- 결과: 해당 조건의 주문·체결이 없습니다.
+    `.trim();
+  }
+
+  const lines = rows.map((row, index) => {
+    const side = row.sll_buy_dvsn_cd_name || row.sll_buy_dvsn_cd || "-";
+    const status = row.cncl_yn === "Y" ? "취소" : (Number(row.rmn_qty || 0) > 0 ? "미체결잔량" : "체결");
+    return [
+      `${index + 1}. ${row.prdt_name || "-"} (${row.pdno || "-"})`,
+      `   주문번호 ${row.odno || "-"} | ${side} | ${status}`,
+      `   주문 ${formatQuantity(row.ord_qty)}주 @ ${formatWon(row.ord_unpr)} (${formatOrderTime(row.ord_tmd)})`,
+      `   체결 ${formatQuantity(row.tot_ccld_qty)}주 / 잔량 ${formatQuantity(row.rmn_qty)}주 | 평균 ${formatWon(row.avg_prvs)} | 금액 ${formatWon(row.tot_ccld_amt)}`,
+    ].join("\n");
+  });
+
+  const summaryLines = summary
+    ? `- 집계(output2): 총주문수량 ${formatQuantity(summary.tot_ord_qty)}주 | 총체결수량 ${formatQuantity(summary.tot_ccld_qty)}주 | 총체결금액 ${formatWon(summary.tot_ccld_amt)}`
+    : "";
+
+  return `
+[당일 주문·체결 내역] ${date}${stockLabel ? ` / ${stockLabel}` : ""}
+- 조회 TR: ${trId} (주식일별주문체결조회 v1_국내주식-005)
+- 건수: ${rows.length}건 (${pages}회 API 호출, 연속조회 포함)
+${summaryLines}
+
+${lines.join("\n\n")}
+  `.trim();
+}
+
+async function getTodayDailyOrders({
+  trade_date: tradeDate,
+  stock_name: stockName,
+  ccld_dvsn: ccldDvsn = "00",
+  sll_buy_dvsn: sllBuyDvsn = "00",
+} = {}) {
+  let stockCode = "";
+  let stockLabel = "";
+  if (stockName) {
+    const stock = resolveStock(stockName);
+    stockCode = stock.code;
+    stockLabel = stock.name;
+  }
+
+  const normalizedCcld = String(ccldDvsn || "00").trim();
+  const normalizedSide = String(sllBuyDvsn || "00").trim();
+  if (!["00", "01", "02"].includes(normalizedCcld)) {
+    throw new Error("ccld_dvsn은 00(전체), 01(체결), 02(미체결) 중 하나여야 합니다.");
+  }
+  if (!["00", "01", "02"].includes(normalizedSide)) {
+    throw new Error("sll_buy_dvsn은 00(전체), 01(매도), 02(매수) 중 하나여야 합니다.");
+  }
+
+  const result = await fetchAllDailyOrderCcld({
+    tradeDate: normalizeYmd(tradeDate, todayKstYmd()),
+    stockCode,
+    ccldDvsn: normalizedCcld,
+    sllBuyDvsn: normalizedSide,
+  });
+
+  return formatDailyOrderCcldReport({ ...result, stockLabel });
+}
+
+async function fetchAllBalanceRlzPl() {
+  requireKisCredentials({ accountRequired: true });
+
+  const baseParams = {
+    CANO: KIS_ACCOUNT_NO.substring(0, 8),
+    ACNT_PRDT_CD: KIS_ACCOUNT_NO.substring(8, 10),
+    AFHR_FLPR_YN: "N",
+    OFL_YN: "",
+    INQR_DVSN: "02",
+    UNPR_DVSN: "01",
+    FUND_STTL_ICLD_YN: "N",
+    FNCG_AMT_AUTO_RDPT_YN: "N",
+    PRCS_DVSN: "01",
+    COST_ICLD_YN: "N",
+  };
+
+  const rows = [];
+  let summary = null;
+  let trCont = "";
+  let ctxFk = "";
+  let ctxNk = "";
+  let pages = 0;
+
+  while (pages < BALANCE_RLZ_PL_MAX_PAGES) {
+    const { body, trCont: respTrCont } = await kisApiGet(
+      BALANCE_RLZ_PL_PATH,
+      BALANCE_RLZ_PL_TR_ID,
+      {
+        ...baseParams,
+        CTX_AREA_FK100: ctxFk,
+        CTX_AREA_NK100: ctxNk,
+      },
+      { trCont },
+    );
+
+    const pageRows = Array.isArray(body.output1) ? body.output1 : [];
+    rows.push(...pageRows);
+    if (body.output2 && !summary) {
+      summary = Array.isArray(body.output2) ? body.output2[0] : body.output2;
+    }
+
+    ctxFk = body.ctx_area_fk100 || "";
+    ctxNk = body.ctx_area_nk100 || "";
+    pages += 1;
+
+    if (!isKisContinueTrCont(respTrCont)) {
+      break;
+    }
+    trCont = "N";
+  }
+
+  return { rows, summary, pages, trId: BALANCE_RLZ_PL_TR_ID };
+}
+
+async function getBalanceRlzPl({ stock_name: stockName } = {}) {
+  if (isPaperTradingKisUrl(KIS_URL)) {
+    const balanceText = await getBalance();
+    const note =
+      "\n\n[안내] 모의투자(openapivts) 계좌는 실현손익 TR(v1_국내주식-041)을 지원하지 않아 잔고 요약으로 대체했습니다.";
+    return `${balanceText}${note}`;
+  }
+
+  const result = await fetchAllBalanceRlzPl();
+  let { rows } = result;
+  let stockLabel = "";
+
+  if (stockName) {
+    const stock = resolveStock(stockName);
+    stockLabel = stock.name;
+    rows = rows.filter((row) => row.pdno === stock.code || row.prdt_name === stock.name);
+  }
+
+  return formatBalanceRlzPlReport({ ...result, rows, stockLabel });
+}
+
 const stockNameSchema = z.object({
   stock_name: z.string().describe("주식 종목명 또는 6자리 종목코드"),
+});
+const optionalStockNameSchema = z.object({
+  stock_name: z.string().optional().describe("주식 종목명 또는 6자리 종목코드"),
+});
+const todayOrdersSchema = z.object({
+  trade_date: z.string().optional().describe("조회일 YYYYMMDD. 생략 시 당일(KST)"),
+  stock_name: z.string().optional().describe("종목명 또는 6자리 종목코드"),
+  ccld_dvsn: z.enum(["00", "01", "02"]).optional().describe("00: 전체, 01: 체결, 02: 미체결"),
+  sll_buy_dvsn: z.enum(["00", "01", "02"]).optional().describe("00: 전체, 01: 매도, 02: 매수"),
 });
 const placeOrderSchema = z.object({
   stock_name: z.string().optional().describe("주식 종목명 또는 6자리 종목코드"),
@@ -359,6 +623,14 @@ async function callTradingTool(name, args = {}) {
 
     if (name === "place_order") {
       return { content: [{ type: "text", text: await placeOrder(args) }] };
+    }
+
+    if (name === "get_today_daily_orders") {
+      return { content: [{ type: "text", text: await getTodayDailyOrders(args) }] };
+    }
+
+    if (name === "get_balance_rlz_pl") {
+      return { content: [{ type: "text", text: await getBalanceRlzPl(args) }] };
     }
   } catch (error) {
     const prefix = name === "get_balance" ? "잔고 조회 중" : `${name} 실행 중`;
@@ -414,6 +686,26 @@ server.registerTool(
     inputSchema: placeOrderSchema,
   },
   async (args) => callTradingTool("place_order", args),
+);
+
+server.registerTool(
+  "get_today_daily_orders",
+  {
+    description:
+      "당일(KST) 국내주식 주문·체결 내역을 조회합니다. 연속조회로 전체 건을 수집합니다.",
+    inputSchema: todayOrdersSchema,
+  },
+  async (args) => callTradingTool("get_today_daily_orders", args),
+);
+
+server.registerTool(
+  "get_balance_rlz_pl",
+  {
+    description:
+      "주식잔고조회_실현손익(v1_국내주식-041)으로 보유·평가·실현손익을 조회합니다. 실전 계좌 전용.",
+    inputSchema: optionalStockNameSchema,
+  },
+  async (args) => callTradingTool("get_balance_rlz_pl", args),
 );
 
 const transport = new StdioServerTransport();

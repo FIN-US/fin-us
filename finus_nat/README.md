@@ -43,8 +43,8 @@ JWT_SECRET= ...
 
 7. `http://localhost:3000 에 접속하여 이메일과 비밀번호로 로그인한다.`
 8. `왼쪽 대시보드 ACCOUNT/API keys 에서 api key를 발급받는다.`
-9. `cp finus_nat/.env.example finus/.env`
-10. `finus_nat/.env에서 Mem0 self-hosted 서버 설정을 위해 필요한 주석을 제거하고 MEM0_API_KEY를 채워넣는다.`
+9. `프로젝트 루트에서 cp .env.example .env (이미 만들었다면 생략)`
+10. `fin-us/.env에서 Mem0 self-hosted 서버 설정을 위해 필요한 주석(FINUS_MEM0_HOST/ORG_ID/PROJECT_ID 등)을 제거하고 MEM0_API_KEY를 채워넣는다.`
 11. `http://localhost:3000 대시보드의 ACCOUNT/Configuration 에서 LLM Provider를 Provider = openai, Model = gpt-5.4-mini 로 설정하고 API Key를 입력한다.`
 
 ## 2. Kis-trade-MCP
