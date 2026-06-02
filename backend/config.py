@@ -72,6 +72,7 @@ REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 # Telegram urgent alert settings.
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+VISUALIZATION_URL = os.getenv("VISUALIZATION_URL", "").strip()
 KIS_ORDER_ENV = os.environ.get("KIS_ORDER_ENV", "demo").strip().lower()
 KIS_REAL_ORDER_ENABLED = os.environ.get("KIS_REAL_ORDER_ENABLED", "").strip().lower() in {
     "1",

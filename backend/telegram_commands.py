@@ -17,6 +17,7 @@ from .config import (
     KIS_REAL_ORDER_ENABLED,
     NEWS_MCP_PARAMS,
     TRADING_MCP_PARAMS,
+    VISUALIZATION_URL,
 )
 from .catalyst_repo import SqliteCatalystEventRepo
 from .database import engine
@@ -70,6 +71,7 @@ TELEGRAM_INTERACTIVE_HELP = "\n".join(
         "/catalysts <종목명> - 예정 촉매 이벤트 조회",
         "/trade - 매수·매도 주문 입력 안내",
         "/lookup - 현재가·수급 조회 입력 안내",
+        "/visualize - Unity 포트폴리오 시각화 링크",
         "/quote <종목명> - 현재가 조회",
         "/trend <종목명> - 외국인·기관·개인 수급 조회",
         "/earnings <종목명> [기간] - DART 실적·뉴스 분석",
@@ -89,6 +91,7 @@ TELEGRAM_BOT_COMMANDS = [
     {"command": "trend", "description": "종목 외국인·기관·개인 수급 조회"},
     {"command": "earnings", "description": "DART 실적·뉴스 분석"},
     {"command": "alerts", "description": "Telegram 알림 모드 변경"},
+    {"command": "visualize", "description": "Unity 포트폴리오 시각화 링크"},
     {"command": "trade", "description": "매수·매도 주문 입력 안내"},
     {"command": "lookup", "description": "현재가·수급 조회 입력 안내"},
     {"command": "buy", "description": "매수 주문 준비 (예: /buy 삼성전자 1)"},
@@ -175,6 +178,7 @@ class TelegramCommandHandler:
         order_gateway: Any | None = None,
         trade_recorder: Any | None = None,
         now_factory: Callable[[], datetime] | None = None,
+        visualization_url: str = VISUALIZATION_URL,
     ):
         self.notifier = notifier
         self.state_factory = state_factory
@@ -185,6 +189,7 @@ class TelegramCommandHandler:
         self.order_gateway = order_gateway
         self.trade_recorder = trade_recorder
         self.now_factory = now_factory or (lambda: datetime.now(KST))
+        self.visualization_url = visualization_url.strip()
         self.pending_orders: dict[str, PendingOrder] = {}
         self.market_callbacks: dict[str, tuple[str, str]] = {}
 
@@ -233,6 +238,9 @@ class TelegramCommandHandler:
                 LOOKUP_COMMAND_HELP,
                 reply_markup=self._lookup_reply_markup(),
             )
+            return
+        if self._matches_command(command, bot_username, "/visualize"):
+            await self._handle_visualize()
             return
         if self._matches_command(command, bot_username, "/quote"):
             await self._handle_quote(argument, str(chat.get("id", "")).strip())
@@ -390,6 +398,15 @@ class TelegramCommandHandler:
 
         await self._answer_callback_query(callback_query_id)
         await self._handle_alerts(action)
+
+    async def _handle_visualize(self) -> None:
+        if not self.visualization_url:
+            await self._send_text_or_raise(
+                "시각화 URL이 설정되지 않았습니다. VISUALIZATION_URL 환경변수를 설정하세요."
+            )
+            return
+
+        await self._send_text_or_raise(f"Unity 포트폴리오 시각화:\n{self.visualization_url}")
 
     async def _handle_trade_callback(
         self,

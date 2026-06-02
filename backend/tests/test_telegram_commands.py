@@ -177,6 +177,7 @@ async def test_help_command_replies_with_supported_commands():
     assert "/balance - 예수금·총자산·보유 종목 조회" in notifier.messages[-1]
     assert "/trade - 매수·매도 주문 입력 안내" in notifier.messages[-1]
     assert "/lookup - 현재가·수급 조회 입력 안내" in notifier.messages[-1]
+    assert "/visualize - Unity 포트폴리오 시각화 링크" in notifier.messages[-1]
     assert "/earnings <종목명> [기간] - DART 실적·뉴스 분석" in notifier.messages[-1]
     assert "/quote <종목명> - 현재가 조회" in notifier.messages[-1]
     assert "/trend <종목명> - 외국인·기관·개인 수급 조회" in notifier.messages[-1]
@@ -274,6 +275,48 @@ async def test_lookup_command_replies_with_entrypoint_buttons():
 
 
 @pytest.mark.asyncio
+async def test_visualize_command_replies_with_configured_url():
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        visualization_url="http://100.64.0.10:8080/portfolio",
+    )
+
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/visualize"}})
+
+    assert notifier.messages == [
+        "Unity 포트폴리오 시각화:\nhttp://100.64.0.10:8080/portfolio"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_visualize_command_reports_missing_url():
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(notifier=notifier, visualization_url="")
+
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/visualize"}})
+
+    assert notifier.messages == [
+        "시각화 URL이 설정되지 않았습니다. VISUALIZATION_URL 환경변수를 설정하세요."
+    ]
+
+
+@pytest.mark.asyncio
+async def test_visualize_command_accepts_matching_telegram_bot_suffix():
+    notifier = FakeNotifier(bot_username="finus_bot")
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        visualization_url="http://100.64.0.10:8080/",
+    )
+
+    await handler.handle_update(
+        {"message": {"chat": {"id": 123}, "text": "/visualize@finus_bot"}}
+    )
+
+    assert notifier.messages[-1] == "Unity 포트폴리오 시각화:\nhttp://100.64.0.10:8080/"
+
+
+@pytest.mark.asyncio
 async def test_trade_menu_button_replies_with_buy_and_sell_guidance():
     notifier = FakeNotifier()
     handler = TelegramCommandHandler(notifier=notifier)
@@ -315,9 +358,8 @@ def test_bot_command_menu_includes_all_user_commands():
     commands = [command["command"] for command in telegram_commands.TELEGRAM_BOT_COMMANDS]
 
     assert commands == [
-        "help", "balance", "watch", "catalysts", "quote", "trend",
-        "earnings",
-        "alerts", "trade", "lookup", "buy", "sell", "confirm", "cancel",
+        "help", "balance", "watch", "catalysts", "quote", "trend", "earnings",
+        "alerts", "visualize", "trade", "lookup", "buy", "sell", "confirm", "cancel",
     ]
 
 
