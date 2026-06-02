@@ -71,6 +71,7 @@ Action Input (아래 Fin-Us 래퍼 도구 — ``tool_name``·``api_type``·``dom
 - ``finus-save-diary``: {{"title":"매매일지 YYYY-MM-DD","content":"본문"}}
 - ``finus-list-diaries``: {{}}
 - ``finus_market_news`` / ``finus_investor_trading`` / ``finus_disclosure``: {{"stock_name":"삼성전자"}}
+- ``mcp-dart-get-earnings-report``: {{"stock_name":"삼성전자","period":"2025Q1"}}
 """
 
 _FINUS_REACT_ACTION_INPUT_MIXED = """
@@ -97,6 +98,7 @@ def _react_system_prompt_for_tools(tools) -> str:
             "finus_market_news",
             "finus_investor_trading",
             "finus_disclosure",
+            "mcp-dart-get-earnings-report",
         )
     )
     if has_finus_wrapped and not has_kis:

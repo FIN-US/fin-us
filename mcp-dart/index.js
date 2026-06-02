@@ -20,9 +20,37 @@ const CORP_CODE_ENDPOINT = "https://opendart.fss.or.kr/api/corpCode.xml";
 const DISCLOSURE_LIST_ENDPOINT = "https://opendart.fss.or.kr/api/list.json";
 const MAJOR_STOCK_ENDPOINT = "https://opendart.fss.or.kr/api/majorstock.json";
 const ELE_STOCK_ENDPOINT = "https://opendart.fss.or.kr/api/elestock.json";
+const FINANCIAL_STATEMENT_ENDPOINT = "https://opendart.fss.or.kr/api/fnlttSinglAcntAll.json";
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const REQUEST_TIMEOUT_MS = 10000;
 const DISCLOSURE_DETAIL_TYPES = ["D001", "D002", "D005"];
+const EARNINGS_REPORT_CODES = {
+  Q1: "11013",
+  Q2: "11012",
+  Q3: "11014",
+  Q4: "11011",
+  FY: "11011",
+};
+const EARNINGS_ACCOUNT_MATCHERS = {
+  revenue: {
+    label: "매출",
+    accountIds: [
+      "ifrs-full_Revenue",
+      "ifrs-full_RevenueFromContractsWithCustomersExcludingAssessedTax",
+    ],
+    accountNames: ["매출액", "수익(매출액)", "영업수익"],
+  },
+  op_profit: {
+    label: "영업이익",
+    accountIds: ["dart_OperatingIncomeLoss", "ifrs-full_ProfitLossFromOperatingActivities"],
+    accountNames: ["영업이익", "영업이익(손실)"],
+  },
+  net_profit: {
+    label: "순이익",
+    accountIds: ["ifrs-full_ProfitLoss"],
+    accountNames: ["당기순이익", "분기순이익", "반기순이익", "연결당기순이익"],
+  },
+};
 
 function loadRootEnv() {
   if (!fs.existsSync(rootEnvPath)) return;
@@ -297,6 +325,164 @@ function disclosureViewerUrl(rceptNo) {
   return rceptNo ? `https://dart.fss.or.kr/dsaf001/main.do?rcpNo=${rceptNo}` : "";
 }
 
+function defaultEarningsPeriod() {
+  const now = new Date();
+  const kst = new Date(now.getTime() + 9 * 60 * 60 * 1000);
+  const year = kst.getUTCFullYear();
+  const month = kst.getUTCMonth() + 1;
+  const day = kst.getUTCDate();
+  const mmdd = month * 100 + day;
+
+  if (mmdd >= 1115) return `${year}Q3`;
+  if (mmdd >= 815) return `${year}Q2`;
+  if (mmdd >= 515) return `${year}Q1`;
+  return `${year - 1}FY`;
+}
+
+function parseEarningsPeriod(period) {
+  const normalized = cleanText(period || defaultEarningsPeriod()).toUpperCase().replace(/[-_\s]/g, "");
+  const match = normalized.match(/^(\d{4})(Q[1-4]|FY)$/);
+  if (!match) {
+    throw new Error("period는 YYYYQ1, YYYYQ2, YYYYQ3, YYYYQ4 또는 YYYYFY 형식이어야 합니다.");
+  }
+
+  const [, bsnsYear, quarter] = match;
+  return {
+    period: `${bsnsYear}${quarter}`,
+    bsns_year: bsnsYear,
+    reprt_code: EARNINGS_REPORT_CODES[quarter],
+    is_annual: quarter === "Q4" || quarter === "FY",
+  };
+}
+
+async function fetchFinancialStatements(apiKey, corp, periodInfo, fsDiv) {
+  const payload = await fetchJson(FINANCIAL_STATEMENT_ENDPOINT, {
+    crtfc_key: apiKey,
+    corp_code: corp.corp_code,
+    bsns_year: periodInfo.bsns_year,
+    reprt_code: periodInfo.reprt_code,
+    fs_div: fsDiv,
+  });
+  return asArray(payload.list);
+}
+
+async function fetchBestFinancialStatements(apiKey, corp, periodInfo) {
+  const cfs = await fetchFinancialStatements(apiKey, corp, periodInfo, "CFS");
+  if (cfs.length > 0) return { fs_div: "CFS", rows: cfs };
+  return { fs_div: "OFS", rows: await fetchFinancialStatements(apiKey, corp, periodInfo, "OFS") };
+}
+
+function parseAmount(value) {
+  const normalized = cleanText(value).replaceAll(",", "");
+  if (!normalized || normalized === "-") return null;
+  const negative = normalized.startsWith("(") && normalized.endsWith(")");
+  const numeric = Number(normalized.replace(/[()]/g, ""));
+  if (!Number.isFinite(numeric)) return null;
+  return negative ? -numeric : numeric;
+}
+
+function yoyPercent(current, previous) {
+  if (current === null || previous === null || previous === 0) return null;
+  return Number((((current - previous) / Math.abs(previous)) * 100).toFixed(2));
+}
+
+function isIncomeStatementRow(row) {
+  return ["IS", "CIS"].includes(cleanText(row.sj_div));
+}
+
+function accountScore(row, matcher) {
+  if (!isIncomeStatementRow(row)) return -1;
+  const accountId = cleanText(row.account_id);
+  const accountName = cleanText(row.account_nm);
+  if (matcher.accountIds.includes(accountId)) return 100;
+  if (matcher.accountNames.includes(accountName)) return 90;
+  if (matcher.accountNames.some((name) => accountName.includes(name))) return 70;
+  return -1;
+}
+
+function pickAccountRow(rows, matcher) {
+  return rows
+    .map((row) => ({ row, score: accountScore(row, matcher) }))
+    .filter((item) => item.score >= 0)
+    .sort((a, b) => b.score - a.score || Number(cleanText(a.row.ord) || 9999) - Number(cleanText(b.row.ord) || 9999))[0]
+    ?.row ?? null;
+}
+
+function extractEarningsAccount(rows, key, periodInfo) {
+  const matcher = EARNINGS_ACCOUNT_MATCHERS[key];
+  const row = pickAccountRow(rows, matcher);
+  if (!row) {
+    return {
+      label: matcher.label,
+      account_name: "",
+      current: null,
+      previous: null,
+      yoy_change: null,
+    };
+  }
+
+  const current = parseAmount(row.thstrm_amount);
+  const previous = parseAmount(periodInfo.is_annual ? row.frmtrm_amount : row.frmtrm_q_amount);
+  return {
+    label: matcher.label,
+    account_name: cleanText(row.account_nm),
+    current,
+    previous,
+    yoy_change: yoyPercent(current, previous),
+  };
+}
+
+function formatMoney(value, currency) {
+  if (value === null) return "N/A";
+  return `${value.toLocaleString("ko-KR")} ${currency || "KRW"}`;
+}
+
+function formatYoy(value) {
+  if (value === null) return "N/A";
+  return `${value > 0 ? "+" : ""}${value}%`;
+}
+
+function formatEarningsReport(corp, periodInfo, fsDiv, rows) {
+  if (rows.length === 0) {
+    return [
+      `[${corp.corp_name}] DART 실적 리포트`,
+      `- 종목코드: ${corp.stock_code}`,
+      `- 고유번호: ${corp.corp_code}`,
+      `- 조회기간: ${periodInfo.period}`,
+      "- 조회 결과: OpenDART 재무제표 데이터가 없습니다.",
+    ].join("\n");
+  }
+
+  const currency = cleanText(rows.find((row) => cleanText(row.currency))?.currency) || "KRW";
+  const accounts = {
+    revenue: extractEarningsAccount(rows, "revenue", periodInfo),
+    op_profit: extractEarningsAccount(rows, "op_profit", periodInfo),
+    net_profit: extractEarningsAccount(rows, "net_profit", periodInfo),
+  };
+  const firstReceipt = cleanText(rows.find((row) => cleanText(row.rcept_no))?.rcept_no);
+
+  return [
+    `[${corp.corp_name}] DART 실적 리포트`,
+    `- 종목코드: ${corp.stock_code}`,
+    `- 고유번호: ${corp.corp_code}`,
+    `- 조회기간: ${periodInfo.period}`,
+    `- 사업연도/보고서: ${periodInfo.bsns_year}/${periodInfo.reprt_code}`,
+    `- 재무제표: ${fsDiv}`,
+    `- 원문: ${disclosureViewerUrl(firstReceipt) || "N/A"}`,
+    "",
+    "[주요 실적]",
+    `- 매출: ${formatMoney(accounts.revenue.current, currency)} | YoY ${formatYoy(accounts.revenue.yoy_change)}`,
+    `- 영업이익: ${formatMoney(accounts.op_profit.current, currency)} | YoY ${formatYoy(accounts.op_profit.yoy_change)}`,
+    `- 순이익: ${formatMoney(accounts.net_profit.current, currency)} | YoY ${formatYoy(accounts.net_profit.yoy_change)}`,
+    "",
+    "[비교 기준]",
+    periodInfo.is_annual
+      ? "- YoY는 전기 사업보고서 금액 기준입니다."
+      : "- YoY는 전기 동분기 금액 기준입니다.",
+    "- 컨센서스 데이터는 OpenDART에서 제공되지 않으므로 별도 시장 기대치 소스가 필요합니다.",
+  ].join("\n");
+}
+
 function formatDisclosureItem(item) {
   const parts = [
     cleanText(item.rcept_dt),
@@ -374,6 +560,15 @@ async function getDisclosureSignal(stockName) {
   return formatDisclosureSignal(corp, window, disclosures, majorStocks, eleStocks);
 }
 
+async function getEarningsReport(stockName, period) {
+  const apiKey = requireDartApiKey();
+  const corp = resolveCorp(await getCorpCodes(apiKey), stockName);
+  const periodInfo = parseEarningsPeriod(period);
+  const { fs_div: fsDiv, rows } = await fetchBestFinancialStatements(apiKey, corp, periodInfo);
+
+  return formatEarningsReport(corp, periodInfo, fsDiv, rows);
+}
+
 server.registerTool(
   "get_disclosure_signal",
   {
@@ -394,6 +589,36 @@ server.registerTool(
     try {
       const signal = await getDisclosureSignal(stockName);
       return { content: [{ type: "text", text: signal }] };
+    } catch (error) {
+      return { content: [{ type: "text", text: `에러 발생: ${error.message}` }], isError: true };
+    }
+  },
+);
+
+server.registerTool(
+  "get_earnings_report",
+  {
+    description: "OpenDART 공식 API로 분기/연간 실적 주요 계정과 YoY 변화를 조회합니다.",
+    inputSchema: z.object({
+      stock_name: z.string().describe("주식 종목명 또는 6자리 종목코드"),
+      period: z
+        .string()
+        .optional()
+        .describe("조회 기간. 예: 2025Q1, 2025Q2, 2025Q3, 2025FY. 생략 시 최근 공시 가능 기간을 추정합니다."),
+    }),
+  },
+  async (args) => {
+    const stockName = args?.stock_name;
+    if (!stockName) {
+      return {
+        content: [{ type: "text", text: "에러: stock_name 파라미터가 누락되었습니다." }],
+        isError: true,
+      };
+    }
+
+    try {
+      const report = await getEarningsReport(stockName, args?.period);
+      return { content: [{ type: "text", text: report }] };
     } catch (error) {
       return { content: [{ type: "text", text: `에러 발생: ${error.message}` }], isError: true };
     }

@@ -6,10 +6,11 @@ import pytest
 from fastapi import HTTPException
 
 import backend.telegram_commands as telegram_commands
-from backend.config import TRADING_MCP_PARAMS
+from backend.config import DART_MCP_PARAMS, NEWS_MCP_PARAMS, TRADING_MCP_PARAMS
 from backend.telegram_commands import (
     BUY_COMMAND_HELP,
     CATALYST_COMMAND_HELP,
+    EARNINGS_COMMAND_HELP,
     QUOTE_COMMAND_HELP,
     TELEGRAM_INTERACTIVE_HELP,
     TRADE_COMMAND_HELP,
@@ -176,6 +177,7 @@ async def test_help_command_replies_with_supported_commands():
     assert "/balance - 예수금·총자산·보유 종목 조회" in notifier.messages[-1]
     assert "/trade - 매수·매도 주문 입력 안내" in notifier.messages[-1]
     assert "/lookup - 현재가·수급 조회 입력 안내" in notifier.messages[-1]
+    assert "/earnings <종목명> [기간] - DART 실적·뉴스 분석" in notifier.messages[-1]
     assert "/quote <종목명> - 현재가 조회" in notifier.messages[-1]
     assert "/trend <종목명> - 외국인·기관·개인 수급 조회" in notifier.messages[-1]
     assert "/buy <종목명> <수량> [지정가] - 매수 주문 준비" in notifier.messages[-1]
@@ -314,6 +316,7 @@ def test_bot_command_menu_includes_all_user_commands():
 
     assert commands == [
         "help", "balance", "watch", "catalysts", "quote", "trend",
+        "earnings",
         "alerts", "trade", "lookup", "buy", "sell", "confirm", "cancel",
     ]
 
@@ -567,6 +570,153 @@ async def test_trend_result_quote_button_uses_same_stock_name():
     ]
     assert notifier.callback_answers == [("quote-callback", None)]
     assert notifier.messages[-1] == "현재가 응답"
+
+
+@pytest.mark.asyncio
+async def test_earnings_command_combines_dart_news_and_nat_analysis():
+    mcp_calls = []
+    llm_calls = []
+
+    async def mcp_runner(server_params, tool_name, arguments):
+        mcp_calls.append((server_params, tool_name, arguments))
+        if server_params is DART_MCP_PARAMS:
+            return "DART 실적: 매출 +12%, 영업이익 +5%"
+        if server_params is NEWS_MCP_PARAMS:
+            return "뉴스: 반도체 수요 회복"
+        raise AssertionError(f"unexpected server params: {server_params}")
+
+    async def llm_runner(provider, text, *, conversation_id=None):
+        llm_calls.append((provider, text, conversation_id))
+        return "실적 분석 응답"
+
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        mcp_runner=mcp_runner,
+        llm_runner=llm_runner,
+    )
+
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/earnings 삼성전자"}})
+
+    assert mcp_calls == [
+        (DART_MCP_PARAMS, "get_earnings_report", {"stock_name": "삼성전자"}),
+        (NEWS_MCP_PARAMS, "get_market_news", {"stock_name": "삼성전자"}),
+    ]
+    assert len(llm_calls) == 1
+    provider, prompt, conversation_id = llm_calls[0]
+    assert provider == "nat"
+    assert conversation_id == "telegram:123:earnings:%EC%82%BC%EC%84%B1%EC%A0%84%EC%9E%90"
+    conversation_id.encode("ascii")
+    assert "DART 실적: 매출 +12%, 영업이익 +5%" in prompt
+    assert "뉴스: 반도체 수요 회복" in prompt
+    assert "컨센서스 대비 서프라이즈/미스" in prompt
+    assert "다음 분기 전망" in prompt
+    assert "Markdown 문법" in prompt
+    assert "호재`, `악재`, `중립" in prompt
+    assert notifier.actions == ["typing"]
+    assert notifier.messages == ["⚪ 중립\n실적 분석 응답"]
+
+
+@pytest.mark.asyncio
+async def test_earnings_command_sends_plain_text_with_verdict_emoji():
+    async def mcp_runner(server_params, tool_name, arguments):
+        if server_params is DART_MCP_PARAMS:
+            return "DART 실적"
+        if server_params is NEWS_MCP_PARAMS:
+            return "뉴스"
+        raise AssertionError(f"unexpected server params: {server_params}")
+
+    async def llm_runner(provider, text, *, conversation_id=None):
+        return "\n".join(
+            [
+                "## **호재**",
+                "",
+                "### **실적 요약**",
+                "- **매출**: 전년 대비 증가",
+                "- **영업이익**: 개선",
+            ]
+        )
+
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        mcp_runner=mcp_runner,
+        llm_runner=llm_runner,
+    )
+
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/earnings 삼성전자"}})
+
+    message = notifier.messages[-1]
+    assert message.startswith("🟢 호재\n")
+    assert "호재\n호재" not in message
+    assert "#" not in message
+    assert "*" not in message
+    assert "- " not in message
+    assert "실적 요약" in message
+    assert "• 매출: 전년 대비 증가" in message
+
+
+@pytest.mark.asyncio
+async def test_earnings_command_passes_optional_period_to_dart():
+    mcp_calls = []
+
+    async def mcp_runner(server_params, tool_name, arguments):
+        mcp_calls.append((server_params, tool_name, arguments))
+        if server_params is DART_MCP_PARAMS:
+            return "DART 실적"
+        if server_params is NEWS_MCP_PARAMS:
+            return "뉴스"
+        raise AssertionError(f"unexpected server params: {server_params}")
+
+    async def llm_runner(provider, text, *, conversation_id=None):
+        return "실적 분석 응답"
+
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        mcp_runner=mcp_runner,
+        llm_runner=llm_runner,
+    )
+
+    await handler.handle_update(
+        {"message": {"chat": {"id": 123}, "text": "/earnings 삼성전자 2025Q1"}}
+    )
+
+    assert mcp_calls[0] == (
+        DART_MCP_PARAMS,
+        "get_earnings_report",
+        {"stock_name": "삼성전자", "period": "2025Q1"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_earnings_command_requires_stock_name():
+    calls = []
+
+    async def mcp_runner(server_params, tool_name, arguments):
+        calls.append((server_params, tool_name, arguments))
+        return "unexpected"
+
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(notifier=notifier, mcp_runner=mcp_runner)
+
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/earnings"}})
+
+    assert calls == []
+    assert notifier.messages == [EARNINGS_COMMAND_HELP]
+
+
+@pytest.mark.asyncio
+async def test_earnings_command_reports_collection_failure():
+    async def mcp_runner(server_params, tool_name, arguments):
+        raise RuntimeError("dart down")
+
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(notifier=notifier, mcp_runner=mcp_runner)
+
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/earnings 삼성전자"}})
+
+    assert notifier.messages == ["조회 실패: dart down"]
 
 
 @pytest.mark.asyncio

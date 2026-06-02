@@ -35,7 +35,7 @@ Fin-Us는 단일 모델이 모든 일을 처리하지 않고, 역할이 분리�
 3.  **Tooling Layer (MCP Servers)**:
     - **News Provider (`mcp-news/`)**: 네이버 뉴스 검색 API 기반 최신 뉴스 공급.
     - **Trading Provider (`mcp-trading/`)**: 한국투자증권 Open API 기반 정형 금융 데이터 공급 및 명령 집행.
-    - **Disclosure Provider (`mcp-dart/`)**: OpenDART 공식 API 기반 5% 룰 및 임원·주요주주 지분공시 signal 공급.
+    - **Disclosure Provider (`mcp-dart/`)**: OpenDART 공식 API 기반 5% 룰·임원/주요주주 지분공시 signal 및 실적 리포트 공급.
 4.  **Presentation Layer (`frontend-react/`)**: React (TypeScript)
     - 실시간 투자 신호 및 분석 리포트를 시각화하여 사용자에게 제공합니다.
 
@@ -98,6 +98,7 @@ cd frontend-react && npm ci && npm run dev
 | **News Analyst**     | `get_market_news`      | 네이버 뉴스 검색 API 기반 최신 동향 수집      |
 |                      | `get_investor_trading` | KIS API 기반 기관/외국인 수급 데이터 분석     |
 |                      | `get_disclosure_signal` | OpenDART 공식 API 기반 지분공시 signal 조회   |
+|                      | `get_earnings_report`  | OpenDART 공식 API 기반 매출·영업이익·순이익 YoY 실적 리포트 |
 |                      | `get_research_reports` | deprecated: 공식 대체 API 미선정으로 비활성화 |
 | **Trading Executor** | `get_balance`          | 실시간 계좌 잔고 및 수익률 확인              |
 |                      | `execute_trade`        | 매수/매도 주문 실행 (KIS API)                |
@@ -182,6 +183,9 @@ Backend 스케줄러는 매 거래일 오전 8시 30분에 Telegram 모닝 브�
 | `/catalysts <종목명>` | 관심 종목의 예정 촉매 이벤트 조회 (실적·배당·공시·주주총회) | - |
 | `/quote <종목명>` | 현재가 조회 | 📊 수급 보기 |
 | `/trend <종목명>` | 외국인·기관·개인 수급 조회 | 💵 현재가 보기 |
+| `/earnings <종목명> [기간]` | DART 실적과 최신 뉴스 기반 구조화 리포트 생성. 기간 예: `2025Q1`, `2025FY` | - |
+
+`/earnings`는 OpenDART 실적 데이터와 Naver 뉴스를 NAT News Analyst에 전달합니다. OpenDART가 제공하지 않는 컨센서스/시장 기대치 데이터는 추정하지 않고 데이터 없음으로 표시합니다. Telegram 응답은 Markdown이 아닌 일반 텍스트이며 첫 줄에 `🟢 호재`, `🔴 악재`, `⚪ 중립` 판정을 표시합니다.
 
 **매매**
 
