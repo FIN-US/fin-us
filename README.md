@@ -219,9 +219,13 @@ python3 mcp-trading/scripts/update_stock_master.py
 
 슬래시 명령이 아닌 일반 텍스트는 NAT 채팅으로 전달됩니다. Telegram 채팅은 `telegram:{chat_id}` conversation id를 사용하므로 스케줄러 분석 리포트와 대화 이력이 섞이지 않습니다.
 
---- 
+---
 
-## 📚 기술 스택
+## ⚖️ 참고
+- 본 프로젝트는 **학술적 목적**의 캡스톤 디자인 결과물이며, 일체의 상업적 목적이 없습니다.
+
+
+--- 
 
 ![Python](https://img.shields.io/badge/Python-3.13-3776AB?logo=python&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.136-009688?logo=fastapi&logoColor=white)
@@ -238,7 +242,3 @@ python3 mcp-trading/scripts/update_stock_master.py
 ![KIS](https://img.shields.io/badge/KIS-Open%20API-003B71)
 ![Naver](https://img.shields.io/badge/Naver-Search%20API-03C75A?logo=naver&logoColor=white)
 
----
-
-## ⚖️ 참고
-- 본 프로젝트는 **학술적 목적**의 캡스톤 디자인 결과물이며, 일체의 상업적 목적이 없습니다. 
