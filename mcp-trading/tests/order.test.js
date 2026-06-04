@@ -129,10 +129,10 @@ test("formatBalanceReport displays unsettled cash fields and account return rate
     `[계좌 잔고 현황]
 - 총 평가금액: 1,210,000원
 - 순자산금액: 1,210,000원
-- 총 손익: 9,000원 (수익률: 🔴 ▲ +0.75%)
-- 예수금총액: 1,000,000원
-- 가수도정산금액: 1,009,000원
-- 익일정산금액: 790,000원
+- 총 손익: 9,000원 (수익률: 🔴 ▲ +2.23%)
+- 거래가능금액: 1,000,000원
+- 정산중 금액(가수도): 1,009,000원
+- 익일 정산예정금액: 790,000원
 - 금일 매수/매도: 210,000원 / 0원
 
 [보유 종목 리스트]
@@ -144,6 +144,80 @@ test("formatBalanceReport displays unsettled cash fields and account return rate
   평단가 201,000원 → 평가금액 200,500원
   손익 -500원 · 수익률 🔵 ▼ -0.25%`,
   );
+});
+
+test("formatBalanceReport uses profit-loss return rate before asset change rate", () => {
+  const text = formatBalanceReport({
+    output1: [
+      {
+        prdt_name: "SK하이닉스",
+        pdno: "000660",
+        hldg_qty: "1",
+        pchs_avg_pric: "2064000",
+        evlu_amt: "2268000",
+        evlu_pfls_amt: "204000",
+        evlu_pfls_rt: "9.88",
+      },
+    ],
+    output2: [
+      {
+        tot_evlu_amt: "11025741",
+        nass_amt: "11025741",
+        evlu_pfls_smtl_amt: "204000",
+        evlu_pfls_rt: "1.88",
+        asst_icdc_erng_rt: "-1.15",
+        dnca_tot_amt: "5546116",
+        prvs_rcdl_excc_amt: "8757741",
+        nxdy_excc_amt: "8064220",
+        thdt_buy_amt: "0",
+        thdt_sll_amt: "695000",
+      },
+    ],
+  });
+
+  assert.match(text, /총 손익: 204,000원 \(수익률: 🔴 ▲ \+9.88%\)/);
+});
+
+test("formatBalanceReport calculates account return rate when API rates conflict with profit", () => {
+  const text = formatBalanceReport({
+    output1: [
+      {
+        prdt_name: "SK하이닉스",
+        pdno: "000660",
+        hldg_qty: "1",
+        pchs_avg_pric: "2064000",
+        evlu_amt: "2300000",
+        evlu_pfls_amt: "236000",
+        evlu_pfls_rt: "11.43",
+      },
+      {
+        prdt_name: "삼성전자",
+        pdno: "005930",
+        hldg_qty: "2",
+        pchs_avg_pric: "353875",
+        evlu_amt: "713000",
+        evlu_pfls_amt: "5250",
+        evlu_pfls_rt: "0.74",
+      },
+    ],
+    output2: [
+      {
+        tot_evlu_amt: "11062891",
+        nass_amt: "11062891",
+        pchs_amt_smtl_amt: "2771750",
+        evlu_pfls_smtl_amt: "241250",
+        evlu_pfls_rt: "-0.81",
+        asst_icdc_erng_rt: "-0.81",
+        dnca_tot_amt: "5546116",
+        prvs_rcdl_excc_amt: "8049891",
+        nxdy_excc_amt: "8064220",
+        thdt_buy_amt: "707750",
+        thdt_sll_amt: "695000",
+      },
+    ],
+  });
+
+  assert.match(text, /총 손익: 241,250원 \(수익률: 🔴 ▲ \+8.70%\)/);
 });
 
 test("formatBalanceReport highlights negative return rates", () => {
@@ -173,10 +247,10 @@ test("formatBalanceReport highlights negative return rates", () => {
     `[계좌 잔고 현황]
 - 총 평가금액: 1,190,000원
 - 순자산금액: 1,190,000원
-- 총 손익: -10,000원 (수익률: 🔵 ▼ -0.84%)
-- 예수금총액: 1,000,000원
-- 가수도정산금액: -
-- 익일정산금액: -
+- 총 손익: -10,000원 (수익률: 🔵 ▼ -5.00%)
+- 거래가능금액: 1,000,000원
+- 정산중 금액(가수도): -
+- 익일 정산예정금액: -
 - 금일 매수/매도: - / -
 
 [보유 종목 리스트]

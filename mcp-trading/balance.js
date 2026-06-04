@@ -30,9 +30,15 @@ export function formatPercent(value) {
   return `⚪ ${formatted}%`;
 }
 
+function parseNumber(value) {
+  if (value === undefined || value === null || value === "") return null;
+  const number = Number(String(value).replaceAll(",", ""));
+  return Number.isFinite(number) ? number : null;
+}
+
 function formatAmount(value) {
   if (value === undefined || value === null || value === "") return "-";
-  const number = Number(String(value).replaceAll(",", ""));
+  const number = parseNumber(value);
   if (!Number.isFinite(number)) {
     return `${value}원`;
   }
@@ -41,7 +47,7 @@ function formatAmount(value) {
 
 function formatQuantity(value) {
   if (value === undefined || value === null || value === "") return "-";
-  const number = Number(String(value).replaceAll(",", ""));
+  const number = parseNumber(value);
   if (!Number.isFinite(number)) {
     return String(value);
   }
@@ -50,11 +56,35 @@ function formatQuantity(value) {
 
 function formatSignedAmount(value) {
   const formatted = formatAmount(value);
-  const number = Number(String(value ?? "").replaceAll(",", ""));
+  const number = parseNumber(value);
   if (!Number.isFinite(number) || number <= 0) {
     return formatted;
   }
   return `+${formatted}`;
+}
+
+function calculatePurchaseAmount(holdings) {
+  return holdings.reduce((total, holding) => {
+    const averagePrice = parseNumber(holding.pchs_avg_pric);
+    const quantity = parseNumber(holding.hldg_qty);
+    if (!Number.isFinite(averagePrice) || !Number.isFinite(quantity)) {
+      return total;
+    }
+    return total + averagePrice * quantity;
+  }, 0);
+}
+
+function calculateAccountReturnRate(summary, holdings) {
+  const profit = parseNumber(summary.evlu_pfls_smtl_amt);
+  const summaryPurchaseAmount = parseNumber(summary.pchs_amt_smtl_amt);
+  const purchaseAmount = summaryPurchaseAmount > 0
+    ? summaryPurchaseAmount
+    : calculatePurchaseAmount(holdings);
+
+  if (Number.isFinite(profit) && purchaseAmount > 0) {
+    return (profit / purchaseAmount) * 100;
+  }
+  return summary.evlu_pfls_rt || summary.asst_icdc_erng_rt;
 }
 
 export function formatBalanceReport(data) {
@@ -72,16 +102,16 @@ export function formatBalanceReport(data) {
     })
     .join("\n\n");
 
-  const accountReturnRate = summary.asst_icdc_erng_rt || summary.evlu_pfls_rt;
+  const accountReturnRate = calculateAccountReturnRate(summary, holdings);
 
   return `
 [계좌 잔고 현황]
 - 총 평가금액: ${formatAmount(summary.tot_evlu_amt)}
 - 순자산금액: ${formatAmount(summary.nass_amt || summary.pchs_amt_smtl_amt)}
 - 총 손익: ${formatAmount(summary.evlu_pfls_smtl_amt)} (수익률: ${formatPercent(accountReturnRate)})
-- 예수금총액: ${formatAmount(summary.dnca_tot_amt)}
-- 가수도정산금액: ${formatAmount(summary.prvs_rcdl_excc_amt)}
-- 익일정산금액: ${formatAmount(summary.nxdy_excc_amt)}
+- 거래가능금액: ${formatAmount(summary.dnca_tot_amt)}
+- 정산중 금액(가수도): ${formatAmount(summary.prvs_rcdl_excc_amt)}
+- 익일 정산예정금액: ${formatAmount(summary.nxdy_excc_amt)}
 - 금일 매수/매도: ${formatAmount(summary.thdt_buy_amt)} / ${formatAmount(summary.thdt_sll_amt)}
 
 [보유 종목 리스트]

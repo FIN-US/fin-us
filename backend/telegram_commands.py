@@ -1007,14 +1007,14 @@ class TelegramCommandHandler:
 
         current_price = self._first_line_containing(
             str(quote_result),
-            ("현재가", "price", "Price"),
+            ("현재가:", "price:", "Price:"),
         )
         if current_price:
             lines.append(current_price)
 
         balance = self._first_line_containing(
             str(balance_result),
-            ("주문가능", "예수금", "총자산", "balance"),
+            ("거래가능", "주문가능", "예수금", "총자산", "balance"),
         )
         if balance:
             lines.append(balance)

@@ -861,6 +861,33 @@ async def test_buy_command_creates_pending_order_and_prompts_confirmation():
 
 
 @pytest.mark.asyncio
+async def test_buy_command_includes_current_price_line_when_quote_has_header():
+    async def mcp_runner(server_params, tool_name, arguments):
+        if tool_name == "resolve_stock_code":
+            return "삼성전자 (005930, KOSPI)"
+        if tool_name == "get_stock_quote":
+            return "[삼성전자] 현재가 시세\n- 현재가: 354,000원\n- 전일 대비: +1,000 (0.28%)"
+        if tool_name == "get_balance":
+            return "[계좌 잔고 현황]\n- 거래가능금액: 5,546,116원"
+        raise AssertionError(f"unexpected tool: {tool_name}")
+
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        mcp_runner=mcp_runner,
+        now_factory=lambda: datetime(2026, 5, 20, 10, 0, tzinfo=KST),
+    )
+
+    await handler.handle_update(
+        {"message": {"chat": {"id": 123}, "text": "/buy 삼성전자 1 354000"}}
+    )
+
+    assert "[삼성전자] 현재가 시세" not in notifier.messages[-1]
+    assert "- 현재가: 354,000원" in notifier.messages[-1]
+    assert "- 거래가능금액: 5,546,116원" in notifier.messages[-1]
+
+
+@pytest.mark.asyncio
 async def test_buy_command_without_price_creates_market_order_and_prompts_confirmation():
     calls = []
 
