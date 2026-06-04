@@ -129,7 +129,7 @@ test("formatBalanceReport displays unsettled cash fields and account return rate
     `[계좌 잔고 현황]
 - 총 평가금액: 1,210,000원
 - 순자산금액: 1,210,000원
-- 총 손익: 9,000원 (수익률: 🔴 ▲ +0.75%)
+- 총 손익: 9,000원 (수익률: 🔴 ▲ +2.23%)
 - 예수금총액: 1,000,000원
 - 가수도정산금액: 1,009,000원
 - 익일정산금액: 790,000원
@@ -175,7 +175,49 @@ test("formatBalanceReport uses profit-loss return rate before asset change rate"
     ],
   });
 
-  assert.match(text, /총 손익: 204,000원 \(수익률: 🔴 ▲ \+1.88%\)/);
+  assert.match(text, /총 손익: 204,000원 \(수익률: 🔴 ▲ \+9.88%\)/);
+});
+
+test("formatBalanceReport calculates account return rate when API rates conflict with profit", () => {
+  const text = formatBalanceReport({
+    output1: [
+      {
+        prdt_name: "SK하이닉스",
+        pdno: "000660",
+        hldg_qty: "1",
+        pchs_avg_pric: "2064000",
+        evlu_amt: "2300000",
+        evlu_pfls_amt: "236000",
+        evlu_pfls_rt: "11.43",
+      },
+      {
+        prdt_name: "삼성전자",
+        pdno: "005930",
+        hldg_qty: "2",
+        pchs_avg_pric: "353875",
+        evlu_amt: "713000",
+        evlu_pfls_amt: "5250",
+        evlu_pfls_rt: "0.74",
+      },
+    ],
+    output2: [
+      {
+        tot_evlu_amt: "11062891",
+        nass_amt: "11062891",
+        pchs_amt_smtl_amt: "2771750",
+        evlu_pfls_smtl_amt: "241250",
+        evlu_pfls_rt: "-0.81",
+        asst_icdc_erng_rt: "-0.81",
+        dnca_tot_amt: "5546116",
+        prvs_rcdl_excc_amt: "8049891",
+        nxdy_excc_amt: "8064220",
+        thdt_buy_amt: "707750",
+        thdt_sll_amt: "695000",
+      },
+    ],
+  });
+
+  assert.match(text, /총 손익: 241,250원 \(수익률: 🔴 ▲ \+8.70%\)/);
 });
 
 test("formatBalanceReport highlights negative return rates", () => {
@@ -205,7 +247,7 @@ test("formatBalanceReport highlights negative return rates", () => {
     `[계좌 잔고 현황]
 - 총 평가금액: 1,190,000원
 - 순자산금액: 1,190,000원
-- 총 손익: -10,000원 (수익률: 🔵 ▼ -0.84%)
+- 총 손익: -10,000원 (수익률: 🔵 ▼ -5.00%)
 - 예수금총액: 1,000,000원
 - 가수도정산금액: -
 - 익일정산금액: -
