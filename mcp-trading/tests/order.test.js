@@ -146,6 +146,38 @@ test("formatBalanceReport displays unsettled cash fields and account return rate
   );
 });
 
+test("formatBalanceReport uses profit-loss return rate before asset change rate", () => {
+  const text = formatBalanceReport({
+    output1: [
+      {
+        prdt_name: "SK하이닉스",
+        pdno: "000660",
+        hldg_qty: "1",
+        pchs_avg_pric: "2064000",
+        evlu_amt: "2268000",
+        evlu_pfls_amt: "204000",
+        evlu_pfls_rt: "9.88",
+      },
+    ],
+    output2: [
+      {
+        tot_evlu_amt: "11025741",
+        nass_amt: "11025741",
+        evlu_pfls_smtl_amt: "204000",
+        evlu_pfls_rt: "1.88",
+        asst_icdc_erng_rt: "-1.15",
+        dnca_tot_amt: "5546116",
+        prvs_rcdl_excc_amt: "8757741",
+        nxdy_excc_amt: "8064220",
+        thdt_buy_amt: "0",
+        thdt_sll_amt: "695000",
+      },
+    ],
+  });
+
+  assert.match(text, /총 손익: 204,000원 \(수익률: 🔴 ▲ \+1.88%\)/);
+});
+
 test("formatBalanceReport highlights negative return rates", () => {
   assert.equal(
     formatBalanceReport({

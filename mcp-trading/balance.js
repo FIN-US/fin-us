@@ -72,7 +72,7 @@ export function formatBalanceReport(data) {
     })
     .join("\n\n");
 
-  const accountReturnRate = summary.asst_icdc_erng_rt || summary.evlu_pfls_rt;
+  const accountReturnRate = summary.evlu_pfls_rt || summary.asst_icdc_erng_rt;
 
   return `
 [계좌 잔고 현황]
