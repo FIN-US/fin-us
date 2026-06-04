@@ -1014,7 +1014,7 @@ class TelegramCommandHandler:
 
         balance = self._first_line_containing(
             str(balance_result),
-            ("주문가능", "예수금", "총자산", "balance"),
+            ("거래가능", "주문가능", "예수금", "총자산", "balance"),
         )
         if balance:
             lines.append(balance)
