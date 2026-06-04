@@ -110,8 +110,8 @@ export function formatBalanceReport(data) {
 - 순자산금액: ${formatAmount(summary.nass_amt || summary.pchs_amt_smtl_amt)}
 - 총 손익: ${formatAmount(summary.evlu_pfls_smtl_amt)} (수익률: ${formatPercent(accountReturnRate)})
 - 거래가능금액: ${formatAmount(summary.dnca_tot_amt)}
-- D+1 예수금: ${formatAmount(summary.prvs_rcdl_excc_amt)}
-- D+2 예수금: ${formatAmount(summary.nxdy_excc_amt)}
+- 정산중 금액(가수도): ${formatAmount(summary.prvs_rcdl_excc_amt)}
+- 익일 정산예정금액: ${formatAmount(summary.nxdy_excc_amt)}
 - 금일 매수/매도: ${formatAmount(summary.thdt_buy_amt)} / ${formatAmount(summary.thdt_sll_amt)}
 
 [보유 종목 리스트]
