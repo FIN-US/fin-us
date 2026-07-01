@@ -143,9 +143,59 @@ OPENAI_API_KEY=sk-live
 ANTHROPIC_API_KEY=your_anthropic_api_key_here
 """
     )
-    assert any("기본 실행" in message for message in messages)
-    assert any("다음 명령" in message for message in messages)
-    assert any("OPENAI_API_KEY" in prompt for prompt in prompts)
+    assert any("기본 AI 설정" in message for message in messages)
+    assert any("다음 단계" in message for message in messages)
+    assert any("OpenAI API 키" in prompt for prompt in prompts)
+
+
+def test_run_setup_uses_non_developer_friendly_copy(tmp_path):
+    write(tmp_path / ".env.example", EXAMPLE_ENV)
+    prompts: list[str] = []
+    answers = iter(["sk-live", "n", "n", "n", "n"])
+    messages: list[str] = []
+
+    setup_env.run_setup(
+        root_dir=tmp_path,
+        input_fn=lambda prompt: prompts.append(prompt) or next(answers),
+        output_fn=messages.append,
+        timestamp="20260701T120000",
+    )
+
+    joined_messages = "\n".join(messages)
+    joined_prompts = "\n".join(prompts)
+
+    assert "Fin-Us 첫 실행 설정" in joined_messages
+    assert "모르는 항목은 Enter" in joined_messages
+    assert "OpenAI API 키가 있으면 입력하세요" in joined_prompts
+    assert "뉴스/공시 데이터를 사용할까요" in joined_prompts
+    assert "계좌 조회와 매매 기능을 설정할까요" in joined_prompts
+    assert "설정된 기능" in joined_messages
+    assert "AI 분석" in joined_messages
+    assert "로컬 Ollama 모델" not in joined_messages
+    assert "다음 단계" in joined_messages
+
+
+def test_skipped_optional_defaults_are_not_reported_as_enabled(tmp_path):
+    write(
+        tmp_path / ".env.example",
+        EXAMPLE_ENV
+        + """
+OLLAMA_BASE_URL=http://host.docker.internal:11434/v1
+OLLAMA_MODEL=gemma4:e4b
+OLLAMA_API_KEY=ollama
+""",
+    )
+    answers = iter(["sk-live", "n", "n", "n", "n"])
+    messages: list[str] = []
+
+    setup_env.run_setup(
+        root_dir=tmp_path,
+        input_fn=lambda _prompt: next(answers),
+        output_fn=messages.append,
+        timestamp="20260701T120000",
+    )
+
+    assert "로컬 Ollama 모델" not in "\n".join(messages)
 
 
 def test_run_setup_keeps_existing_real_value_by_default(tmp_path):
@@ -163,12 +213,37 @@ def test_run_setup_keeps_existing_real_value_by_default(tmp_path):
     assert "OPENAI_API_KEY=sk-existing" in (tmp_path / ".env").read_text(encoding="utf-8")
 
 
+def test_existing_secret_prompt_uses_readable_label(tmp_path):
+    write(tmp_path / ".env.example", EXAMPLE_ENV)
+    write(tmp_path / ".env", "OPENAI_API_KEY=sk-existing\n")
+    prompts: list[str] = []
+    answers = iter(["", "n", "n", "n", "n"])
+
+    setup_env.run_setup(
+        root_dir=tmp_path,
+        input_fn=lambda prompt: prompts.append(prompt) or next(answers),
+        output_fn=lambda _message: None,
+        timestamp="20260701T120000",
+    )
+
+    assert "기존 OpenAI API 키가 설정되어 있습니다" in prompts[0]
+    assert "OPENAI_API_KEY" not in prompts[0]
+
+
 def test_shell_wrapper_invokes_python_setup_script_through_backend_uv_project():
     wrapper = Path("scripts/setup_env.sh").read_text(encoding="utf-8")
 
     assert "uv run --project" in wrapper
     assert "backend" in wrapper
     assert "backend/scripts/setup_env.py" in wrapper
+
+
+def test_help_text_is_korean_and_user_friendly():
+    help_text = setup_env.build_parser().format_help()
+
+    assert "Fin-Us 첫 실행 설정" in help_text
+    assert "설정할 프로젝트 폴더" in help_text
+    assert "도움말을 보여주고 종료합니다" in help_text
 
 
 def test_readme_and_existing_scripts_point_to_setup_env_command():
