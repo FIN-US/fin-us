@@ -169,3 +169,13 @@ def test_shell_wrapper_invokes_python_setup_script_through_backend_uv_project():
     assert "uv run --project" in wrapper
     assert "backend" in wrapper
     assert "backend/scripts/setup_env.py" in wrapper
+
+
+def test_readme_and_existing_scripts_point_to_setup_env_command():
+    readme = Path("README.md").read_text(encoding="utf-8")
+    check_env = Path("scripts/check_env.sh").read_text(encoding="utf-8")
+    compose_up = Path("scripts/_compose_up.sh").read_text(encoding="utf-8")
+
+    assert "bash scripts/setup_env.sh" in readme
+    assert "bash scripts/setup_env.sh" in check_env
+    assert "scripts/setup_env.sh" in compose_up
