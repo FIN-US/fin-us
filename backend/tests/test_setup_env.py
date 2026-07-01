@@ -121,3 +121,51 @@ def test_real_order_enablement_requires_confirmation_phrase():
 def test_mask_value_hides_secrets_but_leaves_non_secret_values_visible():
     assert setup_env.mask_value("OPENAI_API_KEY", "sk-live-secret") == "********cret"
     assert setup_env.mask_value("KIS_ACCOUNT_NO", "1234567801") == "1234567801"
+
+
+def test_run_setup_prompts_for_basic_key_and_writes_env(tmp_path):
+    write(tmp_path / ".env.example", EXAMPLE_ENV)
+    prompts: list[str] = []
+    answers = iter(["sk-live", "", "n", "n", "n", "n"])
+    messages: list[str] = []
+
+    result = setup_env.run_setup(
+        root_dir=tmp_path,
+        input_fn=lambda prompt: prompts.append(prompt) or next(answers),
+        output_fn=messages.append,
+        timestamp="20260701T120000",
+    )
+
+    assert result.backup_path is None
+    assert (tmp_path / ".env").read_text(encoding="utf-8").startswith(
+        """# LLM
+OPENAI_API_KEY=sk-live
+ANTHROPIC_API_KEY=your_anthropic_api_key_here
+"""
+    )
+    assert any("기본 실행" in message for message in messages)
+    assert any("다음 명령" in message for message in messages)
+    assert any("OPENAI_API_KEY" in prompt for prompt in prompts)
+
+
+def test_run_setup_keeps_existing_real_value_by_default(tmp_path):
+    write(tmp_path / ".env.example", EXAMPLE_ENV)
+    write(tmp_path / ".env", "OPENAI_API_KEY=sk-existing\n")
+    answers = iter(["", "n", "n", "n", "n"])
+
+    setup_env.run_setup(
+        root_dir=tmp_path,
+        input_fn=lambda _prompt: next(answers),
+        output_fn=lambda _message: None,
+        timestamp="20260701T120000",
+    )
+
+    assert "OPENAI_API_KEY=sk-existing" in (tmp_path / ".env").read_text(encoding="utf-8")
+
+
+def test_shell_wrapper_invokes_python_setup_script_through_backend_uv_project():
+    wrapper = Path("scripts/setup_env.sh").read_text(encoding="utf-8")
+
+    assert "uv run --project" in wrapper
+    assert "backend" in wrapper
+    assert "backend/scripts/setup_env.py" in wrapper
