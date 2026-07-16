@@ -46,7 +46,7 @@ _env_backend="${FIN_US_INTEGRATE_ROOT}/.env"
 if [[ -f "${_env_backend}" ]]; then
   echo "  ✓ root .env present (${_env_backend})"
 else
-  echo "  ! root .env missing — copy .env.example to .env" >&2
+  echo "  ! root .env missing — run: bash scripts/setup_env.sh" >&2
   warn=1
 fi
 

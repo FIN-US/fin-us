@@ -66,13 +66,13 @@ functions:
 
 ### 2. 환경 변수 설정
 
-프로젝트 루트 디렉토리의 `.env.example`을 참고하여 `.env` 파일을 생성합니다. Fin-Us는 이제 모든 설정을 단일 루트 `.env` 파일에서 관리합니다.
+Fin-Us는 모든 설정을 단일 루트 `.env` 파일에서 관리합니다. 처음 실행하는 경우 초기 설정 CLI로 `.env`를 생성합니다.
 
 ```bash
-# 프로젝트 루트의 .env 파일 생성 및 편집
-cp .env.example .env
-# OpenAI, Anthropic, KIS, Naver, DART API 키 및 Ollama 설정을 입력하세요.
+bash scripts/setup_env.sh
 ```
+
+기존처럼 `.env.example`을 참고해 `.env`를 직접 편집할 수도 있습니다.
 
 ### 3. 시스템 가동
 
@@ -122,8 +122,7 @@ Backend는 `GET /api/v1/disclosures?stock=삼성전자`로 DART 지분공시 sig
 ## Docker로 한번에 설치하기
 
 ```bash
-cp .env.example .env
-# 키 입력 후:
+bash scripts/setup_env.sh
 bash scripts/setup_deps.sh
 ```
 
@@ -241,4 +240,3 @@ python3 mcp-trading/scripts/update_stock_master.py
 ![OpenDART](https://img.shields.io/badge/OpenDART-API-005BAC)
 ![KIS](https://img.shields.io/badge/KIS-Open%20API-003B71)
 ![Naver](https://img.shields.io/badge/Naver-Search%20API-03C75A?logo=naver&logoColor=white)
-
