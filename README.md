@@ -134,6 +134,20 @@ bash scripts/run_stack.sh
 
 - 로컬에서 `uvicorn --reload`만 쓰고 싶다면 볼륨 마운트된 소스로 호스트에서 실행하면 됩니다.
 
+### 주문 멱등 원장 영속화
+
+`/buy`·`/sell` 확정 주문이 중복 제출되는 것을 막는 마지막 방어선은 `mcp-trading/order-dedup.js`의 파일 기반 원장입니다. 백엔드 측 방어(`backend/telegram_commands.py`의 `pending_orders`)는 프로세스 메모리에만 존재하므로 재시작하면 사라지지만, 이 원장은 파일에 남아 컨테이너가 재생성되어도 최근 주문 이력을 유지합니다.
+
+Docker Compose에서는 `KIS_ORDER_DEDUP_PATH` 기본값에 따라 원장이 호스트의 `./.state/kis-order-dedup.json`에 저장됩니다(`.:/app` 바인드 마운트 덕분). 이 경로는 `.gitignore`·`.dockerignore`에 등록되어 있어 커밋되지도, 이미지에 구워지지도 않습니다.
+
+`.env`나 셸 환경변수로 `KIS_ORDER_DEDUP_PATH`를 직접 지정하면 위 기본값을 덮어씁니다. 이때 지정하는 값은 **호스트 경로가 아니라 컨테이너 내부 경로**입니다. 바인드 마운트된 `/app` 아래를 벗어난 경로를 넣으면 오류 없이 컨테이너 쓰기 계층에 원장이 만들어지고, 재생성과 함께 사라집니다.
+
+> **주의**: `scripts/reset_clean.sh`나 `docker compose down -v`는 이 파일을 지우지 않습니다(바인드 마운트라 호스트에 그대로 남습니다). 다만 사용자가 `./.state/`를 직접 삭제하면 TTL이 만료될 때까지 중복 주문 방어선이 사라집니다.
+
+기본 TTL은 120초(`mcp-trading/order-dedup.js:6`)로 사용자의 연타 클릭을 막기 위한 값입니다. 재빌드를 동반한 재배포는 보통 2분을 넘기므로 TTL이 이미 만료된 뒤라, 원장을 영속화해도 재배포 사이의 중복 주문까지는 막지 못합니다. 배포 창 전체를 덮으려면 `KIS_ORDER_DEDUP_TTL_MS`를 상향 조정하세요.
+
+원장 파일에는 주문 요청 body와 KIS 응답이 그대로 저장되며, 여기에는 계좌번호(`CANO`, `mcp-trading/order.js:81-82`)가 평문으로 포함됩니다. 생성 시 파일 권한이 `0600`(`mcp-trading/order-dedup.js:121`)으로 지정되지만 이는 Linux 호스트에서만 의미가 있고, 어느 경우든 호스트 파일시스템에 그대로 남는다는 점을 유의하세요.
+
 ### Telegram 긴급 알림 수동 테스트
 
 Docker Compose가 실행 중이고 `.env`에 `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`가 설정되어 있으면 backend 컨테이너에서 테스트 알림을 보낼 수 있습니다.
