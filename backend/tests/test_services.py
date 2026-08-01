@@ -112,6 +112,7 @@ async def test_run_mcp_tool_raises_tool_level_error_detail(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_perform_stock_analysis_includes_trigger_signal(monkeypatch):
+    services._stock_code_cache.clear()
     prompts = []
 
     captured_cids = []
@@ -121,7 +122,11 @@ async def test_perform_stock_analysis_includes_trigger_signal(monkeypatch):
         captured_cids.append(conversation_id)
         return "plain analysis"
 
+    async def fake_run_mcp_tool(params, tool_name, arguments):
+        return "삼성전자 (005930, KOSPI)"
+
     monkeypatch.setattr(services, "llm_chat", fake_llm_chat)
+    monkeypatch.setattr(services, "run_mcp_tool", fake_run_mcp_tool)
 
     await services.perform_stock_analysis(
         "삼성전자",
@@ -137,6 +142,133 @@ async def test_perform_stock_analysis_includes_trigger_signal(monkeypatch):
     assert "분석 트리거 데이터 출처: sns" in prompts[0][1]
     assert "SNS mentions spiked after earnings guidance" in prompts[0][1]
     assert '"source_signals"' in prompts[0][1]
+
+
+@pytest.mark.asyncio
+async def test_perform_stock_analysis_resolves_stock_code_via_mcp(monkeypatch):
+    services._stock_code_cache.clear()
+
+    async def fake_llm_chat(provider, prompt, *, conversation_id=None):
+        return "plain analysis"
+
+    mcp_calls = []
+
+    async def fake_run_mcp_tool(params, tool_name, arguments):
+        mcp_calls.append((tool_name, arguments))
+        return "삼성전자 (005930, KOSPI)"
+
+    monkeypatch.setattr(services, "llm_chat", fake_llm_chat)
+    monkeypatch.setattr(services, "run_mcp_tool", fake_run_mcp_tool)
+
+    fake_session = FakeSession()
+    await services.perform_stock_analysis("삼성전자", "openai", fake_session)
+
+    assert fake_session.report.stock_code == "005930"
+    assert fake_session.report.stock_name == "삼성전자"
+    assert mcp_calls == [("resolve_stock_code", {"stock_name": "삼성전자"})]
+
+
+@pytest.mark.asyncio
+async def test_perform_stock_analysis_resolves_alphanumeric_stock_code(monkeypatch):
+    """KIS 종목코드는 6자리 숫자만이 아니다.
+
+    코스닥 스팩·리츠 등 종목마스터의 약 18%가 0001A0 같은 영숫자 코드다.
+    숫자 6자리만 인정하면 MCP가 정확히 돌려준 코드를 백엔드가 버리게 된다.
+    """
+    services._stock_code_cache.clear()
+
+    async def fake_llm_chat(provider, prompt, *, conversation_id=None):
+        return "plain analysis"
+
+    mcp_calls = []
+
+    async def fake_run_mcp_tool(params, tool_name, arguments):
+        mcp_calls.append((tool_name, arguments))
+        return "덕양에너젠 (0001A0, KOSDAQ)"
+
+    monkeypatch.setattr(services, "llm_chat", fake_llm_chat)
+    monkeypatch.setattr(services, "run_mcp_tool", fake_run_mcp_tool)
+
+    fake_session = FakeSession()
+    await services.perform_stock_analysis("덕양에너젠", "openai", fake_session)
+
+    assert fake_session.report.stock_code == "0001A0"
+    assert mcp_calls == [("resolve_stock_code", {"stock_name": "덕양에너젠"})]
+
+
+def test_looks_like_stock_code_accepts_alphanumeric_and_rejects_plain_names():
+    assert services._looks_like_stock_code("005930")
+    assert services._looks_like_stock_code("0001A0")
+    # 숫자가 없는 6~7자 영문은 종목명일 가능성이 높으므로 코드로 보지 않는다.
+    assert not services._looks_like_stock_code("SAMSUNG")
+    assert not services._looks_like_stock_code("삼성전자")
+
+
+@pytest.mark.asyncio
+async def test_perform_stock_analysis_falls_back_to_empty_stock_code_on_mcp_failure(
+    monkeypatch, caplog
+):
+    services._stock_code_cache.clear()
+
+    async def fake_llm_chat(provider, prompt, *, conversation_id=None):
+        return "plain analysis"
+
+    async def failing_run_mcp_tool(params, tool_name, arguments):
+        raise HTTPException(status_code=500, detail="종목코드 조회 도구 오류")
+
+    monkeypatch.setattr(services, "llm_chat", fake_llm_chat)
+    monkeypatch.setattr(services, "run_mcp_tool", failing_run_mcp_tool)
+
+    fake_session = FakeSession()
+    with caplog.at_level(logging.WARNING, logger=services.logger.name):
+        result = await services.perform_stock_analysis("삼성전자", "openai", fake_session)
+
+    # 종목코드 조회 실패해도 리포트 저장은 정상적으로 진행되어야 한다.
+    assert fake_session.report.stock_code == ""
+    assert fake_session.report.stock_name == "삼성전자"
+    assert result is not None
+    assert "종목코드 조회 실패" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_perform_stock_analysis_skips_mcp_when_stock_is_already_code(monkeypatch):
+    services._stock_code_cache.clear()
+
+    async def fake_llm_chat(provider, prompt, *, conversation_id=None):
+        return "plain analysis"
+
+    async def unexpected_run_mcp_tool(params, tool_name, arguments):
+        raise AssertionError("이미 종목코드가 주어진 경우 MCP를 호출하면 안 된다")
+
+    monkeypatch.setattr(services, "llm_chat", fake_llm_chat)
+    monkeypatch.setattr(services, "run_mcp_tool", unexpected_run_mcp_tool)
+
+    fake_session = FakeSession()
+    await services.perform_stock_analysis("005930", "openai", fake_session)
+
+    assert fake_session.report.stock_code == "005930"
+
+
+@pytest.mark.asyncio
+async def test_perform_stock_analysis_caches_resolved_stock_code(monkeypatch):
+    services._stock_code_cache.clear()
+
+    async def fake_llm_chat(provider, prompt, *, conversation_id=None):
+        return "plain analysis"
+
+    mcp_calls = []
+
+    async def fake_run_mcp_tool(params, tool_name, arguments):
+        mcp_calls.append(arguments)
+        return "삼성전자 (005930, KOSPI)"
+
+    monkeypatch.setattr(services, "llm_chat", fake_llm_chat)
+    monkeypatch.setattr(services, "run_mcp_tool", fake_run_mcp_tool)
+
+    await services.perform_stock_analysis("삼성전자", "openai", FakeSession())
+    await services.perform_stock_analysis("삼성전자", "openai", FakeSession())
+
+    assert len(mcp_calls) == 1
 
 
 @pytest.mark.asyncio

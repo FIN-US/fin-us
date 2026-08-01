@@ -1,6 +1,7 @@
 import json
 import httpx
 import logging
+import re
 from datetime import date
 from typing import Any, Literal, Optional
 from urllib.parse import quote as _url_quote
@@ -23,6 +24,70 @@ from .models import AgentReport
 
 logger = logging.getLogger(__name__)
 _NAT_RESPONSE_LOG_PREVIEW_CHARS = 800
+
+# KIS 국내 종목코드는 6자리 숫자(005930)만이 아니다. 코스닥 스팩·리츠 등 약 18%가
+# 영문이 섞인 형태(0001A0)이고, 펀드는 더 길다(F70100026). 숫자 6자리만 인정하면
+# MCP가 정확히 돌려준 코드를 백엔드가 스스로 버리게 된다.
+_STOCK_CODE_RE = re.compile(r"^[0-9A-Z]{6,7}$")
+# resolve_stock_code 응답 형식: "종목명 (코드, 시장)" — mcp-trading/index.js
+# 종목명 자체에 괄호가 들어가는 경우가 있어(예: "...테이블1(A)") 코드+쉼표 조합에 앵커한다.
+_STOCK_CODE_EXTRACT_RE = re.compile(r"\(([0-9A-Z]{6,}),")
+
+# 종목명 -> 종목코드 프로세스 메모리 캐시.
+# resolve_stock_code MCP 호출은 매번 새 stdio 서브프로세스를 띄우는 비용이 있고
+# (run_mcp_tool 참고), 종목명-코드 매핑은 사실상 불변이므로 캐싱해 재조회를 피한다.
+_stock_code_cache: dict[str, str] = {}
+
+
+def _looks_like_stock_code(stock: str) -> bool:
+    """이미 종목코드 형태여서 MCP 조회를 생략해도 되는지 판정합니다.
+
+    mcp-trading/stock-master.js가 입력을 코드로 인정하는 범위(6~7자 영숫자)를 따르되,
+    실제 코드는 항상 숫자를 포함하므로 숫자 포함을 함께 요구합니다.
+    이 조건이 없으면 6~7자 영문 종목명이 코드로 오인됩니다.
+    """
+    value = stock.strip().upper()
+    return bool(_STOCK_CODE_RE.match(value)) and any(ch.isdigit() for ch in value)
+
+
+async def _resolve_stock_code(stock: str) -> str:
+    """종목명(또는 이미 종목코드인 값)을 종목코드로 변환합니다.
+
+    이미 종목코드 형태이면 MCP 호출 없이 그대로 사용합니다.
+    조회 실패/예외 시 리포트 저장을 막지 않도록 빈 문자열로 폴백합니다.
+    """
+    stock = stock.strip()
+    if _looks_like_stock_code(stock):
+        return stock.upper()
+
+    cached = _stock_code_cache.get(stock)
+    if cached is not None:
+        return cached
+
+    try:
+        resolved = await run_mcp_tool(
+            TRADING_MCP_PARAMS,
+            "resolve_stock_code",
+            {"stock_name": stock},
+        )
+        match = _STOCK_CODE_EXTRACT_RE.search(str(resolved))
+        if match is None:
+            logger.warning(
+                "종목코드 추출 실패, 빈 문자열로 폴백: stock=%s, response=%s",
+                stock,
+                resolved,
+            )
+            return ""
+        code = match.group(1)
+        _stock_code_cache[stock] = code
+        return code
+    except Exception as exc:
+        logger.warning(
+            "종목코드 조회 실패, 빈 문자열로 폴백: stock=%s, error=%s",
+            stock,
+            exc,
+        )
+        return ""
 
 
 def _find_http_exception(exc: BaseException) -> HTTPException | None:
@@ -105,8 +170,9 @@ async def perform_stock_analysis(
     # 분석 리포트를 데이터베이스에 자동으로 저장
     try:
         details = data.get("details", {})
+        stock_code = await _resolve_stock_code(stock)
         report = AgentReport(
-            stock_code="",  # 향후 개선: MCP를 통해 코드를 가져오거나 분석 결과에서 추출
+            stock_code=stock_code,
             stock_name=stock,
             provider=key,
             summary=data.get("summary", ""),
