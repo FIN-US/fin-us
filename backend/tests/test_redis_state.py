@@ -2,8 +2,6 @@ import pytest
 
 from backend.redis_state import (
     RedisSchedulerState,
-    news_hash,
-    normalize_news_text,
     signal_hash,
     normalize_signal_text,
 )
@@ -33,25 +31,23 @@ class FakeRedis:
         return 0
 
 
-def test_news_hash_normalizes_order_and_whitespace():
+def test_signal_hash_normalizes_order_and_whitespace():
     first = " 삼성전자  급등\nSK하이닉스   실적 개선\n삼성전자 급등"
     second = "sk하이닉스 실적 개선\n삼성전자 급등"
 
-    assert normalize_news_text(first) == normalize_news_text(second)
-    assert news_hash(first) == news_hash(second)
     assert normalize_signal_text(first) == normalize_signal_text(second)
     assert signal_hash(first) == signal_hash(second)
 
 
 @pytest.mark.asyncio
-async def test_last_news_hash_round_trip():
+async def test_last_signal_hash_round_trip():
     state = RedisSchedulerState(FakeRedis())
-    digest = news_hash("삼성전자 신규 뉴스")
+    digest = signal_hash("삼성전자 신규 뉴스")
 
-    await state.set_last_news("삼성전자", "삼성전자 신규 뉴스", digest)
+    await state.set_last_signal("news", "삼성전자", "삼성전자 신규 뉴스", digest)
 
-    assert await state.get_last_news_hash("삼성전자") == digest
-    assert await state.get_last_news_text("삼성전자") == "삼성전자 신규 뉴스"
+    assert await state.get_last_signal_hash("news", "삼성전자") == digest
+    assert await state.get_last_signal_text("news", "삼성전자") == "삼성전자 신규 뉴스"
 
 
 @pytest.mark.asyncio
