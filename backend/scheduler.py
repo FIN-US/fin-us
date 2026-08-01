@@ -87,7 +87,10 @@ def extract_stocks_from_balance(balance_text: str) -> list[str]:
         lines = balance_text.split("[보유 종목 리스트]")[1].strip().split("\n")
         for line in lines:
             if line.startswith("- "):
-                # "- 종목명 (코드): ..." 형식에서 종목명 추출
+                # "- 종목명 (코드) · 수량주" 형식(첫 줄만)에서 종목명 추출.
+                # 이 파서는 mcp-trading/balance.js 의 formatBalanceReport() 출력 형식에 의존한다.
+                # 종목 한 건은 3줄 블록(헤더 줄 + 공백 2칸 들여쓰기 2줄)이며, 들여쓴 줄은
+                # "- " 로 시작하지 않으므로 이 조건에 걸리지 않는다.
                 name = line.split("(")[0].replace("- ", "").strip()
                 if name:
                     stocks.append(name)
