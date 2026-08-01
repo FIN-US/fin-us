@@ -9,7 +9,7 @@ import axios from "axios";
 import dotenv from "dotenv";
 import { z } from "zod";
 import { formatBalanceRlzPlReport } from "./balance-rlz-pl-report.js";
-import { buildBalanceParams, formatBalanceReport } from "./balance.js";
+import { buildBalanceParams, fetchAllBalance, formatBalanceReport } from "./balance.js";
 import {
   formatPercent,
   formatQuantity,
@@ -307,13 +307,19 @@ ${lines.join("\n")}
 async function getBalance() {
   requireKisCredentials({ accountRequired: true });
 
-  const data = await kisGet(
-    "/uapi/domestic-stock/v1/trading/inquire-balance",
-    KIS_BALANCE_TR_ID,
-    buildBalanceParams(KIS_ACCOUNT_NO),
+  const { rows, summary, pages, truncated } = await fetchAllBalance(
+    ({ ctxAreaFk100, ctxAreaNk100, trCont }) => kisApiGet(
+      "/uapi/domestic-stock/v1/trading/inquire-balance",
+      KIS_BALANCE_TR_ID,
+      buildBalanceParams(KIS_ACCOUNT_NO, { ctxAreaFk100, ctxAreaNk100 }),
+      { trCont },
+    ),
   );
 
-  return formatBalanceReport(data);
+  return formatBalanceReport(
+    { output1: rows, output2: summary ? [summary] : [] },
+    { pages, truncated },
+  );
 }
 
 async function placeOrder(args) {
