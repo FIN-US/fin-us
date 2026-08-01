@@ -93,3 +93,37 @@ test("OrderDedupStore releases failed reservations", () => {
 
   assert.doesNotThrow(() => store.reserve("same-order", { stockCode: "005930" }));
 });
+
+test("OrderDedupStore resolves filePath from KIS_ORDER_DEDUP_PATH env var, falling back to os.tmpdir()", (t) => {
+  const originalEnvValue = process.env.KIS_ORDER_DEDUP_PATH;
+  t.after(() => {
+    if (originalEnvValue === undefined) {
+      delete process.env.KIS_ORDER_DEDUP_PATH;
+    } else {
+      process.env.KIS_ORDER_DEDUP_PATH = originalEnvValue;
+    }
+  });
+
+  const envPath = path.join(os.tmpdir(), "finus-order-dedup-env-override.json");
+  process.env.KIS_ORDER_DEDUP_PATH = envPath;
+  assert.equal(new OrderDedupStore().filePath, envPath);
+
+  delete process.env.KIS_ORDER_DEDUP_PATH;
+  assert.equal(
+    new OrderDedupStore().filePath,
+    path.join(os.tmpdir(), "finus-kis-order-dedup.json"),
+  );
+});
+
+test("OrderDedupStore blocks duplicate reservations across separate instances sharing a filePath", () => {
+  const filePath = tempLedgerPath();
+  const storeA = new OrderDedupStore({ filePath, ttlMs: 60_000, now: () => 1_000 });
+  const storeB = new OrderDedupStore({ filePath, ttlMs: 60_000, now: () => 1_000 });
+
+  storeA.reserve("same-order", { stockCode: "005930" });
+
+  assert.throws(
+    () => storeB.reserve("same-order", { stockCode: "005930" }),
+    DuplicateOrderError,
+  );
+});
