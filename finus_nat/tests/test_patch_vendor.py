@@ -264,6 +264,73 @@ def test_conflict_when_sentinel_and_original_coexist(pv, tmp_path):
     assert target.read_text(encoding="utf-8") == before
 
 
+def test_ambiguous_when_old_appears_twice_without_sentinel(pv, tmp_path):
+    """old가 sentinel 없이 두 번 나타나면 AMBIGUOUS로 실패하고 파일은 그대로 남는다.
+
+    `text.replace(old, new, 1)`은 첫 번째 발생만 바꾼다. 조용히 첫 번째만 바꾸고
+    APPLIED로 보고하면, 두 번째 발생은 미적용인 채로 남는데도 exit 0으로 통과한다 -
+    이 스크립트가 없애려던 바로 그 실패 양상이 패치 텍스트 레벨에서 재현된 것이다.
+    """
+    venv, site_packages = _make_site_packages(tmp_path)
+    memory_patch = _patch_by_name(pv, MEMORY_NAME)
+    replacement = memory_patch.replacements[0]
+    duplicated = replacement.old + "\n# 상류가 같은 블록을 실수로 두 번 넣은 상황을 흉내낸다\n" + replacement.old
+    target = _write_target(site_packages, memory_patch.parts, duplicated)
+    before = target.read_text(encoding="utf-8")
+
+    exit_code = pv.main(["--venv", str(venv)])
+
+    assert exit_code == 1
+    marker = _read_marker(pv, site_packages)
+    assert marker["results"][MEMORY_NAME] == pv.AMBIGUOUS
+    assert marker["ok"] is False
+    assert target.read_text(encoding="utf-8") == before
+
+
+def test_sentinel_and_duplicate_old_is_conflict_not_ambiguous(pv, tmp_path):
+    """sentinel과 old(2회)가 동시에 있으면 CONFLICT다. AMBIGUOUS가 아니다.
+
+    sentinel 검사가 count 검사보다 먼저 실행돼야 하는 이유를 고정하는 순서 테스트다.
+    순서가 바뀌면(count 검사가 먼저면), old가 우연히 두 번 있는 이미 적용된 트리가
+    재실행 때마다 AMBIGUOUS로 잘못 실패하게 된다.
+    """
+    venv, site_packages = _make_site_packages(tmp_path)
+    memory_patch = _patch_by_name(pv, MEMORY_NAME)
+    replacement = memory_patch.replacements[0]
+    content = f'DEFAULT_KEY = "{replacement.sentinel}"\n\n{replacement.old}\n\n{replacement.old}'
+    target = _write_target(site_packages, memory_patch.parts, content)
+
+    exit_code = pv.main(["--venv", str(venv)])
+
+    assert exit_code == 1
+    marker = _read_marker(pv, site_packages)
+    assert marker["results"][MEMORY_NAME] == pv.CONFLICT
+
+
+def test_ambiguous_stays_ambiguous_on_rerun(pv, tmp_path):
+    """AMBIGUOUS는 부분 적용 후 다음 실행에 다른 상태로 바뀌는 식이 아니라, 매 실행
+    같은 상태(AMBIGUOUS)와 같은 바이트를 유지해야 한다 - 첫 실행이 조용히 첫
+    발생만 바꿔놓고 그다음부터 다른 상태로 보이는 부분 적용은 없다.
+    """
+    venv, site_packages = _make_site_packages(tmp_path)
+    memory_patch = _patch_by_name(pv, MEMORY_NAME)
+    replacement = memory_patch.replacements[0]
+    duplicated = replacement.old + "\n# duplicate\n" + replacement.old
+    target = _write_target(site_packages, memory_patch.parts, duplicated)
+
+    first_exit = pv.main(["--venv", str(venv)])
+    content_after_first = target.read_text(encoding="utf-8")
+    second_exit = pv.main(["--venv", str(venv)])
+    content_after_second = target.read_text(encoding="utf-8")
+
+    assert first_exit == 1
+    assert second_exit == 1
+    assert content_after_first == duplicated
+    assert content_after_second == duplicated
+    marker = _read_marker(pv, site_packages)
+    assert marker["results"][MEMORY_NAME] == pv.AMBIGUOUS
+
+
 def test_marker_records_ok_true_on_success(pv, tmp_path):
     """성공한 실행은 마커에 ok=True로 남는다.
 

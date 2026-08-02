@@ -12,17 +12,20 @@
 ## 실패를 드러내는 방식
 
 기존 `run.sh`는 `if old in text:` 형태라 상류 코드가 바뀌면 **조용히 아무것도 하지
-않았다.** 이 스크립트는 세 상태를 구분한다.
+않았다.** 이 스크립트는 다섯 상태를 구분한다.
 
-- `already`  — sentinel이 이미 있음. 재실행해도 안전(멱등).
-- `applied`  — 기대한 원본을 찾아 치환함.
-- `drift`    — 파일은 있는데 sentinel도 원본도 없음. **상류가 바뀐 것이므로 실패로 처리한다.**
-- `conflict` — sentinel과 원본이 동시에 존재. sentinel 오탐이므로 실패로 처리한다.
+- `already`   — sentinel이 이미 있음. 재실행해도 안전(멱등).
+- `applied`   — 기대한 원본을 찾아 치환함.
+- `drift`     — 파일은 있는데 sentinel도 원본도 없음. **상류가 바뀐 것이므로 실패로 처리한다.**
+- `conflict`  — sentinel과 원본이 동시에 존재. sentinel 오탐이므로 실패로 처리한다.
+- `ambiguous` — 원본 문자열(`old`)이 텍스트에 두 번 이상 나타남. `str.replace(..., 1)`은
+                첫 번째만 바꾸므로, 두 번째 발생은 조용히 미적용으로 남을 수 있다.
+                sentinel이 없는데 `old`가 둘 이상이면 실패로 처리한다.
 
 ## 종료 코드
 
 - `0` — 모든 대상이 applied/already. `--require` 없는 missing도 여기 포함.
-- `1` — drift 또는 conflict가 하나라도 있거나, `--require` 대상이 없거나,
+- `1` — drift·conflict·ambiguous가 하나라도 있거나, `--require` 대상이 없거나,
         site-packages를 못 찾았거나 후보가 모호함.
 - `2` — 인자 오류 (정의되지 않은 `--require` 이름 등).
 
@@ -54,7 +57,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 # 패치 내용이 바뀔 때마다 올린다. 마커 파일과 비교해 재적용 필요 여부를 판단한다.
-PATCH_SET_VERSION = 1
+#
+# 1 -> 2: 패치 대상 텍스트(old/new)는 그대로지만, 스크립트 자체가 바뀌었다.
+# (1) 쓰기 경로가 hardlink-safe 원자적 쓰기로 바뀌어, v1으로 찍힌 마커는 uv 캐시를
+#     오염시켰을 수 있는 write_text() 경로로 만들어졌을 가능성이 있다.
+# (2) old가 2번 이상 나타나는 경우를 감지하는 AMBIGUOUS 상태가 새로 생겼다.
+# 마커의 patch_set_version만으로 "이 마커가 v1 스크립트로 만들어졌는지"를 구분할 수
+# 있어야 그 트리를 신뢰할지 판단할 수 있으므로, 내용이 아니라 스크립트가 바뀌었어도
+# 올린다.
+PATCH_SET_VERSION = 2
 
 MARKER_FILENAME = ".finus_vendor_patch.json"
 
@@ -196,6 +207,7 @@ ALREADY = "already"
 MISSING = "missing"
 DRIFT = "drift"
 CONFLICT = "conflict"
+AMBIGUOUS = "ambiguous"
 
 
 class AmbiguousSitePackages(RuntimeError):
@@ -285,11 +297,26 @@ def apply_patch(site_packages: Path, patch: VendorPatch) -> tuple[str, str]:
                 )
             already.append(str(index))
             continue
-        if replacement.old not in text:
+        # sentinel 검사가 먼저 끝나 있어야 한다: 이미 적용된 트리에서 old가 우연히
+        # 두 번 나타나면(재실행 시나리오) count 검사를 먼저 하는 순서로는 매번
+        # AMBIGUOUS로 튄다. sentinel 분기에서 이미 already/conflict로 반환됐으므로,
+        # 여기 도달했다는 것은 sentinel이 없다는 뜻이고 count만으로 판단해도 된다.
+        count = text.count(replacement.old)
+        if count == 0:
             # 상류가 바뀌었다. 조용히 넘어가면 런타임에 원인 불명으로 실패한다.
             return DRIFT, (
                 f"{patch.name} 치환 #{index}: 기대한 원본을 찾지 못했고 적용 표식도 없습니다. "
                 f"NAT/mem0 상류가 바뀐 것으로 보입니다. sentinel={replacement.sentinel!r}"
+            )
+        if count > 1:
+            # text.replace(old, new, 1)은 첫 번째 발생만 바꾼다. old가 두 번 이상
+            # 나타나면 어느 쪽이 실제로 바꿔야 할 자리인지 이 스크립트는 알 수 없다.
+            # 그냥 첫 번째를 바꾸면 두 번째 자리는 조용히 미적용으로 남는데, 그게
+            # 바로 이 스크립트가 없애려던 실패 양상이다. 자동으로 고르지 않고 실패시킨다.
+            return AMBIGUOUS, (
+                f"{patch.name} 치환 #{index}: 원본 문자열이 {count}번 나타나 어느 자리를 "
+                f"바꿔야 할지 확정할 수 없습니다. old에 주변 문맥을 추가해 유일한 문자열이 "
+                f"되도록 좁히세요. sentinel={replacement.sentinel!r}"
             )
         text = text.replace(replacement.old, replacement.new, 1)
         applied.append(str(index))
@@ -369,9 +396,9 @@ def main(argv: list[str] | None = None) -> int:
     for patch in PATCHES:
         status, message = apply_patch(site_packages, patch)
         results[patch.name] = status
-        stream = sys.stderr if status in (DRIFT, CONFLICT, MISSING) else sys.stdout
+        stream = sys.stderr if status in (DRIFT, CONFLICT, AMBIGUOUS, MISSING) else sys.stdout
         print(f"[patch_vendor] {status:<8} {message}", file=stream)
-        if status in (DRIFT, CONFLICT):
+        if status in (DRIFT, CONFLICT, AMBIGUOUS):
             failed = True
         elif status == MISSING and patch.name in args.require:
             failed = True
