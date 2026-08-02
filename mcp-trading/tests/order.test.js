@@ -389,6 +389,53 @@ test('fetchAllBalance preserves already-fetched pages and reports truncated="err
   assert.equal(result.truncated, "error");
 });
 
+test("fetchAllBalance logs only the error message and failing page number to stderr on a swallowed continuation error, never the account number, app key, secret, or bearer token", async (t) => {
+  const errorMock = t.mock.method(console, "error", () => {});
+
+  const secretMessage = "초당 거래건수를 초과하였습니다.";
+  const secretError = new Error(secretMessage);
+  // Mirror an axios error: config.params carries CANO, config.headers carries appkey/
+  // appsecret/Authorization. Logging the error object (rather than error.message) would
+  // leak all of these to stderr.
+  secretError.config = {
+    params: { CANO: "87654321" },
+    headers: {
+      appkey: "test-app-key-secret",
+      appsecret: "test-app-secret-value",
+      authorization: "Bearer test-bearer-token-value",
+    },
+  };
+
+  let calls = 0;
+  const fetchPage = async () => {
+    calls += 1;
+    if (calls === 1) {
+      return {
+        body: {
+          output1: [{ prdt_name: "삼성전자", pdno: "005930" }],
+          output2: [{ tot_evlu_amt: "1000000" }],
+          ctx_area_fk100: "FK1",
+          ctx_area_nk100: "NK1",
+        },
+        trCont: "F",
+      };
+    }
+    throw secretError;
+  };
+
+  await fetchAllBalance(fetchPage);
+
+  const logged = errorMock.mock.calls.map((call) => call.arguments.join(" ")).join("\n");
+
+  assert.match(logged, /초당 거래건수를 초과하였습니다\./);
+  assert.match(logged, /2/); // the failing page number (pages=1 completed, so page 2 failed)
+  assert.doesNotMatch(logged, /87654321/);
+  assert.doesNotMatch(logged, /test-app-key-secret/);
+  assert.doesNotMatch(logged, /test-app-secret-value/);
+  assert.doesNotMatch(logged, /Bearer/);
+  assert.doesNotMatch(logged, /test-bearer-token-value/);
+});
+
 test("formatBalanceReport omits the truncation note when the fetch was not truncated", () => {
   const text = formatBalanceReport(
     { output1: [], output2: [] },

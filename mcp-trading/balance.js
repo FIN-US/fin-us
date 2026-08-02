@@ -84,6 +84,13 @@ export async function fetchAllBalance(fetchPage, {
       // 2페이지 이후 실패는 이미 확보한 페이지를 버리지 않고 부분 결과 + 잘림 표시로 반환한다.
       // (누락 방지가 목적인데 일시적 오류 1회로 잔고 전체가 사라지면 방향이 반대다.)
       if (pages === 0) throw error;
+      // balance.js는 MCP 서버에 import되어 stdout이 JSON-RPC 채널로 쓰인다. 여기서
+      // console.log를 쓰면 프로토콜이 깨지므로 반드시 console.error(stderr)만 사용한다.
+      // error 객체 전체나 error.config/error.response는 절대 남기지 않는다 — axios가
+      // config.params(CANO 계좌번호)와 config.headers(appkey, appsecret,
+      // authorization: Bearer 토큰)를 그대로 들고 있어 그대로 로그를 남기면 인증정보가
+      // 노출된다. message만 남긴다.
+      console.error(`잔고 연속조회 ${pages + 1}페이지 조회 실패: ${error.message}`);
       truncated = "error";
       break;
     }
