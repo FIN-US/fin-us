@@ -535,6 +535,13 @@ def test_replace_failure_leaves_target_intact_and_cleans_tmp(pv, tmp_path, monke
     venv, site_packages = _make_site_packages(tmp_path)
     memory_patch = _patch_by_name(pv, MEMORY_NAME)
     target = _write_target(site_packages, memory_patch.parts, pv._MEMORY_OLD)
+    # target을 읽기 전용으로 만들어야 `shutil.copymode(target, tmp)`가 그 모드를
+    # tmp에 물려줘 tmp도 읽기 전용이 된다 - 그래야 finally의 unlink가 (Windows에서)
+    # 실제로 PermissionError를 낼 수 있는 조건이 되어 그 예외를 삼키는 마스킹
+    # 가드가 실질적으로 검증된다. 기본(쓰기 가능) 모드로 두면 tmp도 쓰기 가능해
+    # unlink가 애초에 실패하지 않으므로, 가드를 없애도 이 테스트는 계속 통과해
+    # 마스킹 수정이 실은 검증되지 않는 상태로 남는다.
+    target.chmod(0o444)
     original_bytes = target.read_bytes()
 
     def _raise(*_args, **_kwargs):
@@ -545,11 +552,17 @@ def test_replace_failure_leaves_target_intact_and_cleans_tmp(pv, tmp_path, monke
     # 별칭)만 패치해 범위를 이 모듈 안으로 좁힌다.
     monkeypatch.setattr(pv, "_replace", _raise)
 
-    with pytest.raises(OSError, match="simulated os.replace failure"):
-        pv.apply_patch(site_packages, memory_patch)
+    try:
+        with pytest.raises(OSError, match="simulated os.replace failure"):
+            pv.apply_patch(site_packages, memory_patch)
 
-    assert target.read_bytes() == original_bytes
-    assert list(target.parent.glob("*.tmp")) == []
+        assert target.read_bytes() == original_bytes
+        assert list(target.parent.glob("*.tmp")) == []
+    finally:
+        # 예외 경로에서 target은 원래 모드(0o444)로 복원된다(patch_vendor.py의
+        # replace-실패 복원 로직). 일부 러너는 읽기 전용 파일이 남으면 tmp_path
+        # 정리(teardown)에서 실패하므로 여기서 되돌린다.
+        target.chmod(0o644)
 
 
 def test_write_succeeds_when_target_is_read_only(pv, tmp_path):
