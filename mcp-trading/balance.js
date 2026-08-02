@@ -3,11 +3,13 @@
 // 이 값은 KIS가 tr_cont를 계속 "F"/"M"으로 응답하는 이상 상황에 대한 2차 안전장치다.
 export const BALANCE_MAX_PAGES = 20;
 
-// get_balance 전체 호출은 backend의 run_mcp_tool이 30초에서 끊는다(backend/services.py:447).
+// get_balance 전체 호출은 backend의 run_mcp_tool(backend/services.py)이 30초에서 끊는다.
 // 여기에 MCP stdio 서브프로세스 기동/핸드셰이크(수백 ms~1초대)와, 예산 초과 판정 이후에도
-// 이미 시작된 요청 1회가 kisAxios의 8초 타임아웃(mcp-trading/index.js:72)만큼 더 걸릴 수 있는
-// 여유를 더해야 한다. 15초 예산 + 최대 8초 초과분 + 기동 오버헤드(~1-2초)로 상위 30초 한도
-// 안에 안전하게 들어오도록 잡았다.
+// 이미 시작된 요청 1회가 kisAxios 인스턴스(mcp-trading/index.js)의 8초 타임아웃만큼 더 걸릴
+// 수 있는 여유를 더해야 한다. getAccessToken()의 토큰 발급 요청은 fetchPage(index.js의
+// kisApiGet) 내부에서 일어나고, startedAt은 아래 루프 진입 전에 기록되므로 토큰 발급 시간도
+// 이미 이 15초 예산 측정 구간 안에 포함된다 — 별도로 더 얹을 필요가 없다. 15초 예산 + 최대
+// 8초 초과분 + 기동 오버헤드(~1-2초)로 상위 30초 한도 안에 안전하게 들어오도록 잡았다.
 export const BALANCE_TIME_BUDGET_MS = 15_000;
 
 function isContinuationTrCont(value) {
@@ -41,7 +43,7 @@ export function buildBalanceParams(accountNo, { ctxAreaFk100 = "", ctxAreaNk100 
  *   - trCont: 응답 tr_cont 헤더 값
  *
  * 반환: { rows, summary, pages, truncated }
- *   - truncated: null | "max_pages" | "time_budget"
+ *   - truncated: null | "max_pages" | "time_budget" | "no_cursor" | "repeated_cursor" | "error"
  */
 export async function fetchAllBalance(fetchPage, {
   maxPages = BALANCE_MAX_PAGES,
@@ -213,7 +215,7 @@ function calculateAccountReturnRate(summary, holdings) {
 function formatTruncationNote(truncated, pages) {
   if (!truncated) return "";
   const reasons = {
-    max_pages: `페이지 상한(${pages}회)을 초과하여`,
+    max_pages: `페이지 상한(${pages}회)에 도달하여`,
     time_budget: "조회 시간 예산을 초과하여",
     no_cursor: "연속조회 커서가 오지 않아",
     repeated_cursor: "동일한 연속조회 커서가 반복되어",

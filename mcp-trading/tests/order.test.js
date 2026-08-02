@@ -463,7 +463,7 @@ test("formatBalanceReport's truncation note stays outside the holdings section s
     { pages: 20, truncated: "max_pages" },
   );
 
-  assert.match(text, /\[안내\] 페이지 상한\(20회\)을 초과하여/);
+  assert.match(text, /\[안내\] 페이지 상한\(20회\)에 도달하여/);
 
   // Mirror backend/scheduler.py's extract_stocks_from_balance(): everything after
   // "[보유 종목 리스트]", split into lines, keep only lines starting with "- ".
