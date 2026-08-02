@@ -61,22 +61,26 @@ _STOCK_CODE_EXTRACT_RE = re.compile(r"\(([0-9A-Z]{6,}),")
 # (run_mcp_tool 참고), 종목명-코드 매핑은 사실상 불변이므로 캐싱해 재조회를 피한다.
 _stock_code_cache: dict[str, str] = {}
 # 종목마스터는 4,353종(별칭 포함해도 여유롭게 포함)이므로 이 상한을 정상적으로
-# 채울 일은 없다. _normalize_cache_key의 정규화가 stock-master.js의 정규화와
+# 채울 일은 없다. _normalize_stock_input의 정규화가 stock-master.js의 정규화와
 # 다시 어긋나는 미래의 변경이 있어도(둘은 서로 다른 언어의 별개 구현이다) 캐시가
 # 무한정 자라지 않도록 하는 독립적인 방어선이다.
 _STOCK_CODE_CACHE_MAX = 8192
 
 
-def _normalize_cache_key(stock: str) -> str:
-    """캐시 키를 정규화합니다.
+def _normalize_stock_input(stock: str) -> str:
+    """입력을 JS String.trim()과 동일하게 양끝만 정규화합니다.
 
     JS String.trim()이 제거하는 WhiteSpace/LineTerminator 집합 중 Python str.strip()이
     유일하게 남기는 문자가 U+FEFF(BOM)임을 확인했다(그 외 문자는 두 언어가 동일하게
-    처리한다). 이 차이를 그대로 두면 stock-master.js의 정확한 이름 매칭 경로가 BOM을
-    지운 채로 응답해, "\ufeff삼성전자" 같은 입력이 매번 다른 캐시 키로 쌓인다.
-    읽기/쓰기 양쪽에서 이 함수를 통해서만 키를 만들어 둘이 어긋나지 않게 한다.
+    처리한다). 양끝(trim)만 처리하고 문자열 내부의 BOM은 지우지 않는다 — 내부까지
+    지우면 이 함수의 결과가 실제로 MCP에 보내는 질의 문자열보다 더 뭉개져,
+    "삼성﻿전자" 같은 입력이 캐시에 이미 있는 무관한 이름("삼성전자")과 우연히
+    같아질 수 있다. 그러면 같은 입력인데도 캐시 상태에 따라 결과가 달라진다.
+
+    입력 판정(_looks_like_stock_code), MCP 질의, 캐시 키까지 이 함수를 거친 같은
+    문자열을 공유해야 세 곳이 서로 어긋나지 않는다.
     """
-    return stock.replace("\ufeff", "").strip()
+    return stock.strip().strip("﻿").strip()
 
 
 def _has_code_digit(value: str) -> bool:
@@ -104,12 +108,11 @@ async def _resolve_stock_code(stock: str) -> str:
     이미 종목코드 형태이면 MCP 호출 없이 그대로 사용합니다.
     조회 실패/예외 시 리포트 저장을 막지 않도록 빈 문자열로 폴백합니다.
     """
-    stock = stock.strip()
+    stock = _normalize_stock_input(stock)
     if _looks_like_stock_code(stock):
         return stock.upper()
 
-    cache_key = _normalize_cache_key(stock)
-    cached = _stock_code_cache.get(cache_key)
+    cached = _stock_code_cache.get(stock)
     if cached is not None:
         return cached
 
@@ -132,13 +135,13 @@ async def _resolve_stock_code(stock: str) -> str:
         # stock-master.js의 코드 형태 지름길이 입력을 그대로 되돌려준 경우(응답의 종목명 == 코드)는
         # 종목명->코드 매핑이 아니므로 캐싱하지 않는다. 이 조건은 지름길이 실제로 트리거된
         # 좁은 경우만 잡아낸다 — BOM이 붙은 "종목명" 입력은 지름길이 아니라 정확한 이름
-        # 매칭 경로로 응답이 오므로 이 조건을 통과해버린다. 그 경로는 캐시 키 정규화
-        # (_normalize_cache_key)와 크기 상한(_STOCK_CODE_CACHE_MAX)으로 따로 막는다.
+        # 매칭 경로로 응답이 오므로 이 조건을 통과해버린다. 그 경로는 입력 정규화
+        # (_normalize_stock_input)와 크기 상한(_STOCK_CODE_CACHE_MAX)으로 따로 막는다.
         name_part = resolved_text[: match.start()].strip()
         if name_part.upper() == code.upper():
             return code
         if len(_stock_code_cache) < _STOCK_CODE_CACHE_MAX:
-            _stock_code_cache[cache_key] = code
+            _stock_code_cache[stock] = code
         return code
     except Exception as exc:
         logger.warning(

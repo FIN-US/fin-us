@@ -459,6 +459,70 @@ async def test_perform_stock_analysis_bom_prefixed_name_caches_under_normalized_
 
 
 @pytest.mark.asyncio
+async def test_perform_stock_analysis_interior_bom_name_not_served_from_unrelated_cache(
+    monkeypatch,
+):
+    """내부 BOM 정규화(구 버전의 replace 방식)에 대한 회귀 가드.
+
+    "삼성﻿전자"의 BOM은 문자열 중간에 있다. JS String.trim()은 양끝만 자르므로
+    stock-master.js가 실제로 받는 질의 문자열도 BOM을 포함한 그대로다. 정규화가
+    내부 BOM까지 지우면(replace) 이 입력이 "삼성전자" 캐시 엔트리와 충돌해, 결과가
+    무관한 이전 요청 이력에 좌우된다. 정규화는 양끝만 다뤄야 이 입력이 그 캐시
+    엔트리를 재사용하지 않고 매번 MCP로 간다.
+    """
+    mcp_calls = []
+
+    async def fake_llm_chat(provider, prompt, *, conversation_id=None):
+        return "plain analysis"
+
+    async def fake_run_mcp_tool(params, tool_name, arguments):
+        mcp_calls.append(arguments)
+        return "삼성전자 (005930, KOSPI)"
+
+    monkeypatch.setattr(services, "llm_chat", fake_llm_chat)
+    monkeypatch.setattr(services, "run_mcp_tool", fake_run_mcp_tool)
+
+    # "삼성전자" 캐시 엔트리를 먼저 채운다.
+    await services.perform_stock_analysis("삼성전자", "openai", FakeSession())
+    assert services._stock_code_cache == {"삼성전자": "005930"}
+    assert len(mcp_calls) == 1
+
+    # 내부에 BOM이 낀 입력은 위 캐시 엔트리를 재사용하면 안 되고 MCP를 다시 타야 한다.
+    interior_bom_session = FakeSession()
+    await services.perform_stock_analysis("삼성﻿전자", "openai", interior_bom_session)
+
+    assert len(mcp_calls) == 2
+    assert mcp_calls[1] == {"stock_name": "삼성﻿전자"}
+    assert interior_bom_session.report.stock_code == "005930"
+
+
+@pytest.mark.asyncio
+async def test_perform_stock_analysis_bom_prefixed_code_skips_mcp(monkeypatch):
+    """BOM 붙은 종목코드는 정규화 후 MCP 호출 없이 바로 반환되어야 한다.
+
+    입력 판정(_looks_like_stock_code)이 정규화 이전의 원본 문자열에 적용되면
+    "﻿005930"은 코드로 인식되지 못해 MCP를 호출한다. stock-master.js 지름길이
+    응답을 그대로 돌려줘 에코 스킵으로 캐싱은 막히지만, 동일 입력이 올 때마다
+    매번 새 MCP 서브프로세스가 뜨는 문제(run_mcp_tool의 30초 타임아웃이 상한인 지연)가
+    남는다. 정규화를 판정보다 앞에 두면 MCP 호출 자체가 없어야 한다.
+    """
+
+    async def fake_llm_chat(provider, prompt, *, conversation_id=None):
+        return "plain analysis"
+
+    async def unexpected_run_mcp_tool(params, tool_name, arguments):
+        raise AssertionError("BOM 붙은 종목코드는 정규화 후 MCP를 호출하면 안 된다")
+
+    monkeypatch.setattr(services, "llm_chat", fake_llm_chat)
+    monkeypatch.setattr(services, "run_mcp_tool", unexpected_run_mcp_tool)
+
+    fake_session = FakeSession()
+    await services.perform_stock_analysis("﻿005930", "openai", fake_session)
+
+    assert fake_session.report.stock_code == "005930"
+
+
+@pytest.mark.asyncio
 async def test_perform_stock_analysis_stock_code_cache_is_capped(monkeypatch):
     async def fake_llm_chat(provider, prompt, *, conversation_id=None):
         return "plain analysis"
