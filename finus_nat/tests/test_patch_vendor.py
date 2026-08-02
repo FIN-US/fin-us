@@ -597,3 +597,47 @@ def test_write_succeeds_when_target_is_read_only(pv, tmp_path):
         # target의 읽기 전용 비트만 잠깐 걷어냈다가 tmp(원래 모드를 copymode로
         # 물려받음)가 그 자리를 대신하므로 최종 모드는 원본과 같다.
         assert final_mode == 0o444
+
+
+def test_target_writable_bit_is_cleared_before_replace_is_called(pv, tmp_path, monkeypatch):
+    """`os.chmod(target, ...)`가 `_replace` 호출 *이전에* 실제로 target을 쓰기
+    가능하게 만들었는지, 메커니즘 자체를 직접 검증한다.
+
+    바로 위 `test_write_succeeds_when_target_is_read_only`는 최종 결과(성공,
+    모드 보존)만 보는 행동 테스트라 Windows에서만 실질 신호가 있다 - POSIX의
+    rename(2)은 대상의 권한 비트를 보지 않으므로, `os.chmod` 호출이 아예 없어도
+    (즉 이 HIGH-2 수정이 통째로 없어도) 통과해버린다. CI는 ubuntu-latest뿐이라
+    그 테스트만으로는 이 수정이 CI에서 한 번도 실행되지 않은 채로 green이다.
+
+    `os.chmod`를 프로세스 전역으로 몽키패치하면 이 프로세스의 다른 소비자(pytest
+    내부 포함)에도 영향을 준다. 대신 patch_vendor.py 전용 `_replace` 별칭
+    seam(다른 테스트들이 이미 쓰는 좁은 접합부)을 스파이로 바꿔, `_replace`가
+    호출되는 바로 그 시점에 target이 이미 쓰기 가능한 모드인지 `os.stat`으로
+    직접 확인한다 - 플랫폼과 무관하게 메커니즘 자체를 고정하는 어서션이라
+    POSIX(CI)에서도 신호가 있다.
+    """
+    venv, site_packages = _make_site_packages(tmp_path)
+    memory_patch = _patch_by_name(pv, MEMORY_NAME)
+    target = _write_target(site_packages, memory_patch.parts, pv._MEMORY_OLD)
+    target.chmod(0o444)
+
+    real_replace = pv._replace
+    observed_modes: list[int] = []
+
+    def _spy_replace(src, dst):
+        # 이 시점에 target(dst)은 아직 원래 파일이다 - os.replace가 아직 안 불렸다.
+        observed_modes.append(stat.S_IMODE(os.stat(dst).st_mode))
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(pv, "_replace", _spy_replace)
+
+    try:
+        exit_code = pv.main(["--venv", str(venv)])
+    finally:
+        target.chmod(0o644)
+
+    assert exit_code == 0
+    assert len(observed_modes) == 1, "스파이를 거치지 않고 replace가 호출됐거나 여러 번 불렸다"
+    # replace가 불리는 시점에는 target이 이미 쓰기 가능해야 한다 - chmod가
+    # replace보다 먼저 실행됐다는 증거다. 원래 모드(0o444)에는 이 비트가 없었다.
+    assert observed_modes[0] & stat.S_IWRITE
