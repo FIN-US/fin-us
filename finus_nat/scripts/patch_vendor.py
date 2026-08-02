@@ -219,6 +219,15 @@ MISSING = "missing"
 DRIFT = "drift"
 CONFLICT = "conflict"
 AMBIGUOUS = "ambiguous"
+ERROR = "error"  # apply_patch가 아니라 OS 쓰기 자체가 실패함 (디스크 가득 참, 권한 등)
+
+# `os.replace`를 직접 부르지 않고 이 모듈 전용 별칭을 거친다. 테스트가 실패를
+# 시뮬레이션하려고 `os.replace`를 몽키패치하면 `os` 자체가 공유 모듈이라 이
+# 프로세스의 모든 소비자(pytest 내부 포함)에 영향을 준다 - 테스트가 끝나면
+# 되돌려지긴 하지만, 그동안 다른 코드가 `os.replace`를 부르면 오작동한다.
+# `_replace`는 이 모듈 하나만 참조하는 좁은 접합부라 몽키패치 범위가 그만큼
+# 좁아진다.
+_replace = os.replace
 
 
 class AmbiguousSitePackages(RuntimeError):
@@ -291,7 +300,7 @@ def _write_patched(target: Path, text: str) -> None:
         # 자리를 차지하므로 최종 모드는 굳이 다시 복원하지 않아도 원래 값(0o444)
         # 그대로 남는다.
         os.chmod(target, stat.S_IWRITE | os.stat(target).st_mode)
-        os.replace(tmp, target)
+        _replace(tmp, target)
     finally:
         # 성공 경로에서는 os.replace()가 이미 tmp를 target 자리로 옮겨서 tmp가 더 이상
         # 존재하지 않는다. missing_ok=True 없이 무조건 unlink하면 그 성공을
@@ -431,7 +440,20 @@ def main(argv: list[str] | None = None) -> int:
     results: dict[str, str] = {}
     failed = False
     for patch in PATCHES:
-        status, message = apply_patch(site_packages, patch)
+        try:
+            status, message = apply_patch(site_packages, patch)
+        except OSError as exc:
+            # 파일별 쓰기(_write_patched)는 원자적이지만 이 반복 자체는 아니다:
+            # patch #1이 성공하고 patch #3의 쓰기에서 OSError(디스크 가득 참, 권한
+            # 문제 등)가 나면, 예외를 그냥 전파시킬 경우 write_marker가 전혀 호출되지
+            # 않아 트리는 절반만 패치된 채로 남고 호출자는 마커도 없이 raw
+            # traceback만 보게 된다. 여기서 잡아 이 대상만 실패로 기록하고 나머지
+            # 대상은 계속 시도한다 - 한 파일의 쓰기 오류가 다른 대상의 진단 정보까지
+            # 가려서는 안 된다.
+            results[patch.name] = ERROR
+            failed = True
+            print(f"[patch_vendor] {ERROR:<8} {patch.name}: 쓰기 중 오류: {exc}", file=sys.stderr)
+            continue
         results[patch.name] = status
         stream = sys.stderr if status in (DRIFT, CONFLICT, AMBIGUOUS, MISSING) else sys.stdout
         print(f"[patch_vendor] {status:<8} {message}", file=stream)

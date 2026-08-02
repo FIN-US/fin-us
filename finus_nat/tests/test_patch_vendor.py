@@ -352,6 +352,54 @@ def test_marker_records_ok_true_on_success(pv, tmp_path):
     assert _read_marker(pv, site_packages)["ok"] is True
 
 
+def test_mid_run_os_error_is_recorded_in_marker_and_returns_nonzero(pv, tmp_path, monkeypatch):
+    """패치 루프 도중 한 대상의 쓰기에서 OSError(디스크 가득 참, 권한 문제 등)가
+    나도 예외가 그냥 새지 않는다.
+
+    각 파일 쓰기(`_write_patched`)는 원자적이지만 `main`의 반복 자체는 아니다:
+    patch #1이 성공하고 patch #3의 쓰기가 실패하면, 예외가 그대로 전파될 경우
+    `write_marker`가 아예 호출되지 않아 트리는 절반만 패치된 채 마커도 없이
+    호출자에게 raw traceback만 남긴다. 이 PR이 만든 회귀는 아니지만(원자적 쓰기가
+    생기기 전부터 있던 문제) 같은 파일에서 함께 고친다. 이 테스트는 실패한
+    대상만 ERROR로 기록되고 나머지 대상은 계속 시도되며, 이미 성공한 대상(여기서는
+    memory.py)의 쓰기 결과는 그대로 남는지 확인한다.
+    """
+    venv, site_packages = _make_site_packages(tmp_path)
+    memory_patch = _patch_by_name(pv, MEMORY_NAME)
+    editor_patch = _patch_by_name(pv, EDITOR_NAME)
+    memory_target = _write_target(site_packages, memory_patch.parts, pv._MEMORY_OLD)
+    editor_original_content = (
+        "class MemoryEditor:\n"
+        + pv._EDITOR_ADD_ITEMS_OLD
+        + "        ...\n"
+        + pv._EDITOR_METADATA_OLD
+        + "\n"
+        + "    async def search(self, query, top_k=10, **kwargs):\n"
+        + pv._EDITOR_SEARCH_OLD
+    )
+    editor_target = _write_target(site_packages, editor_patch.parts, editor_original_content)
+
+    real_replace = pv._replace
+
+    def _flaky_replace(src, dst):
+        if Path(dst) == editor_target:
+            raise OSError("simulated disk full")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(pv, "_replace", _flaky_replace)
+
+    exit_code = pv.main(["--venv", str(venv)])
+
+    assert exit_code == 1
+    marker = _read_marker(pv, site_packages)
+    assert marker["ok"] is False
+    assert marker["results"][MEMORY_NAME] == pv.APPLIED
+    assert marker["results"][EDITOR_NAME] == pv.ERROR
+    # memory.py 쓰기는 editor.py 쓰기 실패와 무관하게 이미 완료돼 있어야 한다 -
+    # 한 대상의 오류가 이미 끝난 다른 대상의 결과를 되돌리지 않는다.
+    assert memory_target.read_text(encoding="utf-8") == pv._MEMORY_NEW
+
+
 def test_ambiguous_site_packages_is_rejected(pv, tmp_path):
     """site-packages 후보가 둘 이상이면 임의로 고르지 않고 실패한다.
 
@@ -469,8 +517,14 @@ def test_no_tmp_residue_after_applied_run(pv, tmp_path):
 
 def test_replace_failure_leaves_target_intact_and_cleans_tmp(pv, tmp_path, monkeypatch):
     """`finally`의 `missing_ok=True` unlink가 실제로 동작하는지 검증하는 유일한
-    테스트다. `os.replace`를 강제로 실패시켜, target이 원본 그대로 남고 tmp
+    테스트다. `_replace`를 강제로 실패시켜, target이 원본 그대로 남고 tmp
     잔여물도 없는지 확인한다.
+
+    `apply_patch`를 직접 호출한다 - `main()`은 이 예외를 잡아 ERROR로 기록하고
+    exit 1을 돌려주므로(`test_mid_run_os_error_is_recorded_in_marker_and_returns_nonzero`
+    참고) 더는 여기까지 전파시키지 않는다. 이 테스트가 보는 건 그 아래 계층인
+    `apply_patch`/`_write_patched`의 계약(예외를 삼키지 않고, tmp를 남기지 않는다)
+    자체다.
 
     `pytest.raises(OSError)`만으로는 부족하다: `PermissionError`도 `OSError`의
     서브클래스라, `finally`의 unlink가 (읽기 전용 tmp 등으로) 두 번째
@@ -486,10 +540,13 @@ def test_replace_failure_leaves_target_intact_and_cleans_tmp(pv, tmp_path, monke
     def _raise(*_args, **_kwargs):
         raise OSError("simulated os.replace failure")
 
-    monkeypatch.setattr(pv.os, "replace", _raise)
+    # `pv.os`는 실제 `os` 모듈이라 `os.replace`를 몽키패치하면 이 프로세스의 모든
+    # 소비자(pytest 내부 포함)에 영향을 준다. `pv._replace`(patch_vendor.py 전용
+    # 별칭)만 패치해 범위를 이 모듈 안으로 좁힌다.
+    monkeypatch.setattr(pv, "_replace", _raise)
 
     with pytest.raises(OSError, match="simulated os.replace failure"):
-        pv.main(["--venv", str(venv)])
+        pv.apply_patch(site_packages, memory_patch)
 
     assert target.read_bytes() == original_bytes
     assert list(target.parent.glob("*.tmp")) == []
