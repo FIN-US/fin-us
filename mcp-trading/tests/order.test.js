@@ -288,6 +288,46 @@ test('fetchAllBalance stops after two calls and reports truncated="no_cursor" wh
   assert.equal(result.truncated, "no_cursor");
 });
 
+test('fetchAllBalance stops after two calls and reports truncated="no_cursor" when KIS pads the continuation cursor with spaces instead of leaving it empty', async () => {
+  const calls = [];
+  let callCount = 0;
+  const fetchPage = async ({ ctxAreaFk100, ctxAreaNk100, trCont }) => {
+    calls.push({ ctxAreaFk100, ctxAreaNk100, trCont });
+    callCount += 1;
+    if (callCount === 1) {
+      return {
+        body: {
+          output1: [{ prdt_name: "삼성전자", pdno: "005930" }],
+          output2: [{ tot_evlu_amt: "1000000" }],
+          // fixed-width KIS response: padded rather than actually empty
+          ctx_area_fk100: " FK1 ",
+          ctx_area_nk100: "NK1",
+        },
+        trCont: "F",
+      };
+    }
+    // Pathological case: the cursor KIS hands back is space-padded, not empty.
+    // A naive `!ctxNk` check treats padded whitespace as truthy and keeps looping.
+    return {
+      body: {
+        output1: [{ prdt_name: `종목${callCount}`, pdno: String(callCount).padStart(6, "0") }],
+        output2: [],
+        ctx_area_fk100: "",
+        ctx_area_nk100: "   ",
+      },
+      trCont: "F",
+    };
+  };
+
+  const result = await fetchAllBalance(fetchPage, { maxPages: 20, timeBudgetMs: 60_000 });
+
+  assert.equal(callCount, 2);
+  assert.equal(result.pages, 2);
+  assert.equal(result.truncated, "no_cursor");
+  // the outgoing cursor to the second call must be trimmed, not just checked by the guard
+  assert.deepEqual(calls[1], { ctxAreaFk100: "FK1", ctxAreaNk100: "NK1", trCont: "N" });
+});
+
 test("fetchAllBalance rethrows when the first page fetch fails, so auth/account errors are not swallowed", async () => {
   const authError = new Error("EGW00123 인증 오류");
   const fetchPage = async () => {

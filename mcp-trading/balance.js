@@ -93,8 +93,11 @@ export async function fetchAllBalance(fetchPage, {
       if (candidate) summary = candidate;
     }
 
-    ctxFk = body.ctx_area_fk100 || "";
-    ctxNk = body.ctx_area_nk100 || "";
+    // KIS는 ctx_area_* 필드를 고정폭으로 반환해 값이 없을 때 빈 문자열 대신
+    // 공백으로 채워진 문자열("          ")을 줄 수 있다. 공백 문자열은 truthy라
+    // trim 없이 두면 아래 !ctxNk 가드를 통과해 버려 같은 페이지를 재요청하게 된다.
+    ctxFk = String(body.ctx_area_fk100 ?? "").trim();
+    ctxNk = String(body.ctx_area_nk100 ?? "").trim();
     pages += 1;
 
     if (!isContinuationTrCont(respTrCont)) {
