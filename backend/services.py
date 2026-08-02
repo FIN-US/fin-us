@@ -39,6 +39,14 @@ _STOCK_CODE_EXTRACT_RE = re.compile(r"\(([0-9A-Z]{6,}),")
 _stock_code_cache: dict[str, str] = {}
 
 
+def _has_code_digit(value: str) -> bool:
+    """실제 종목코드는 항상 숫자를 포함한다(종목마스터 4,353종 전수 확인, 0건 예외).
+
+    입력 판정과 MCP 추출 결과 검증이 같은 불변식을 쓰도록 한 곳에 둔다.
+    """
+    return any(ch in "0123456789" for ch in value)
+
+
 def _looks_like_stock_code(stock: str) -> bool:
     """이미 종목코드 형태여서 MCP 조회를 생략해도 되는지 판정합니다.
 
@@ -47,7 +55,7 @@ def _looks_like_stock_code(stock: str) -> bool:
     이 조건이 없으면 6~7자 영문 종목명이 코드로 오인됩니다.
     """
     value = stock.strip().upper()
-    return bool(_STOCK_CODE_RE.match(value)) and any(ch.isdigit() for ch in value)
+    return bool(_STOCK_CODE_RE.match(value)) and _has_code_digit(value)
 
 
 async def _resolve_stock_code(stock: str) -> str:
@@ -71,14 +79,14 @@ async def _resolve_stock_code(stock: str) -> str:
             {"stock_name": stock},
         )
         match = _STOCK_CODE_EXTRACT_RE.search(str(resolved))
-        if match is None:
+        code = match.group(1) if match else None
+        if code is None or not _has_code_digit(code):
             logger.warning(
                 "종목코드 추출 실패, 빈 문자열로 폴백: stock=%s, response=%s",
                 stock,
                 resolved,
             )
             return ""
-        code = match.group(1)
         _stock_code_cache[stock] = code
         return code
     except Exception as exc:

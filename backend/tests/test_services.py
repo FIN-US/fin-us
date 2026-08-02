@@ -297,6 +297,82 @@ async def test_perform_stock_analysis_extraction_failure_not_cached(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_perform_stock_analysis_rejects_digitless_extracted_code(monkeypatch, caplog):
+    """SIMPAC(009160)은 실제 KOSPI 상장 종목명이 숫자 없는 6자 영문이다.
+
+    stock-master.js의 지름길(6~7자 영숫자 입력을 그대로 코드로 되돌림)이 정확한 명칭
+    매칭보다 먼저 실행되므로, resolveStock("SIMPAC")은 "SIMPAC (SIMPAC, UNKNOWN)"을
+    돌려준다. `_STOCK_CODE_EXTRACT_RE`는 이 값을 코드처럼 추출하지만 숫자가 없으므로
+    `_has_code_digit`이 걸러내야 한다. 종목마스터에서 같은 형태인 이름은
+    INVENI(015360), WISCOM(024070) 두 개뿐이다.
+    """
+
+    async def fake_llm_chat(provider, prompt, *, conversation_id=None):
+        return "plain analysis"
+
+    async def fake_run_mcp_tool(params, tool_name, arguments):
+        return "SIMPAC (SIMPAC, UNKNOWN)"
+
+    monkeypatch.setattr(services, "llm_chat", fake_llm_chat)
+    monkeypatch.setattr(services, "run_mcp_tool", fake_run_mcp_tool)
+
+    fake_session = FakeSession()
+    with caplog.at_level(logging.WARNING, logger=services.logger.name):
+        await services.perform_stock_analysis("SIMPAC", "openai", fake_session)
+
+    assert fake_session.report.stock_code == ""
+    assert "종목코드 추출 실패" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_perform_stock_analysis_digitless_extracted_code_not_cached(monkeypatch):
+    async def fake_llm_chat(provider, prompt, *, conversation_id=None):
+        return "plain analysis"
+
+    mcp_calls = []
+
+    async def fake_run_mcp_tool(params, tool_name, arguments):
+        mcp_calls.append(arguments)
+        return "SIMPAC (SIMPAC, UNKNOWN)"
+
+    monkeypatch.setattr(services, "llm_chat", fake_llm_chat)
+    monkeypatch.setattr(services, "run_mcp_tool", fake_run_mcp_tool)
+
+    await services.perform_stock_analysis("SIMPAC", "openai", FakeSession())
+    await services.perform_stock_analysis("SIMPAC", "openai", FakeSession())
+
+    assert len(mcp_calls) == 2
+    assert services._stock_code_cache == {}
+
+
+@pytest.mark.asyncio
+async def test_perform_stock_analysis_resolves_nine_char_fund_code(monkeypatch):
+    """회귀 가드용 테스트 — 이 유닛의 변경 전/후 모두 통과한다.
+
+    실제 stocks.json 항목(코드 F70100026, 종목명 "한투글로벌넥스트웨이브1(A)",
+    시장 KOSPI)을 실제 응답 포맷 "{name} ({code}, {market})"으로 재현한다.
+    이 테스트가 막으려는 것은 추출부에서 `_looks_like_stock_code`를 재사용하려는
+    유혹이다. 그 함수의 `{6,7}` 상한은 9자 펀드 코드 75종 전부를 조용히 떨어뜨린다.
+    또한 종목명에 괄호가 포함된 경우("...1(A)")에도 코드+쉼표 앵커링이
+    올바르게 동작하는지도 함께 고정한다.
+    """
+
+    async def fake_llm_chat(provider, prompt, *, conversation_id=None):
+        return "plain analysis"
+
+    async def fake_run_mcp_tool(params, tool_name, arguments):
+        return "한투글로벌넥스트웨이브1(A) (F70100026, KOSPI)"
+
+    monkeypatch.setattr(services, "llm_chat", fake_llm_chat)
+    monkeypatch.setattr(services, "run_mcp_tool", fake_run_mcp_tool)
+
+    fake_session = FakeSession()
+    await services.perform_stock_analysis("한투글로벌넥스트웨이브1(A)", "openai", fake_session)
+
+    assert fake_session.report.stock_code == "F70100026"
+
+
+@pytest.mark.asyncio
 async def test_perform_stock_analysis_skips_mcp_when_stock_is_already_code(monkeypatch):
     async def fake_llm_chat(provider, prompt, *, conversation_id=None):
         return "plain analysis"
