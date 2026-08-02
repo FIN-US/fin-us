@@ -58,6 +58,25 @@ class TestBalanceExtraction(unittest.TestCase):
         result = extract_stocks_from_balance(mutated_text)
         self.assertEqual(result, [])
 
+    def test_extract_stocks_skips_empty_name(self):
+        """mcp-trading/balance.js의 종목 줄 템플릿
+        (`- ${h.prdt_name} (${h.pdno}) · ${formatQuantity(h.hldg_qty)}주\\n`)은
+        prdt_name이 빈 문자열이면 "-  (005930) · 3주"처럼 대시-공백 접두사 뒤에
+        공백이 하나 더 남는 줄을 만듭니다("(" 앞의 고정 공백 때문). 이 줄 옆에 정상
+        종목이 있을 때, extract_stocks_from_balance의 `if name:` 가드가 빈 이름
+        줄만 건너뛰고 정상 종목은 그대로 추출하는지 확인합니다.
+        """
+        balance_text = """[보유 종목 리스트]
+- 삼성전자 (005930) · 3주
+  평단가 67,000원 → 평가금액 210,000원
+  손익 +9,000원 · 수익률 🔴 ▲ +4.48%
+
+-  (035420) · 1주
+  평단가 201,000원 → 평가금액 200,500원
+  손익 -500원 · 수익률 🔵 ▼ -0.25%"""
+        result = extract_stocks_from_balance(balance_text)
+        self.assertEqual(result, ["삼성전자"])
+
     def test_extract_stocks_empty(self):
         balance_text = """
 [계좌 잔고 현황]
