@@ -189,7 +189,7 @@ bash scripts/run_stack.sh
 | `finus-nat` | 8001 | 멀티 에이전트 엔진 |
 | `redis` | 6379 | 신호 중복 방지 캐시 |
 
-- `backend`는 `finus-nat`과 `redis`가 정상(healthy)이 된 뒤에 뜹니다. `finus-nat`은 기동에 최대 90초까지 걸릴 수 있습니다.
+- `backend`는 `finus-nat`과 `redis`가 정상(healthy)이 된 뒤에 뜹니다. `finus-nat`은 준비되는 대로 healthy가 되며, 처음 90초 동안은 헬스체크가 실패해도 재시도로 세지 않습니다(`docker-compose.yml`의 `start_period`). 90초가 지난 뒤에도 응답이 없으면 15초 간격으로 10번 더 확인한 뒤 unhealthy로 판정하므로, 최악의 경우 약 4분 뒤에 `backend` 기동이 중단됩니다.
 - 로컬에서 `uvicorn --reload`만 쓰고 싶다면 볼륨 마운트된 소스로 호스트에서 실행하면 됩니다.
 
 전부 지우고 처음부터 다시 하려면 아래를 실행합니다. 컨테이너·볼륨·로컬 이미지와 `node_modules`/`venv`/`__pycache__`를 지우며 되돌릴 수 없습니다.
@@ -372,7 +372,14 @@ python3 mcp-trading/scripts/update_stock_master.py
 
 **컨테이너가 안 떠요**
 
-`finus-nat`이 기동에 최대 90초 걸립니다. `docker compose logs -f finus-nat` 으로 확인하세요. `backend`는 `finus-nat`이 healthy가 돼야 시작합니다.
+`backend`는 `finus-nat`이 healthy가 돼야 시작합니다. `finus-nat`은 처음 90초 동안 헬스체크 실패를 눈감아 주고, 그 뒤 15초 간격 10회까지 기다린 다음 unhealthy로 판정합니다. 즉 최대 4분가량 걸릴 수 있으니 그 전에는 기다려도 됩니다.
+
+```bash
+docker compose ps                    # STATUS 열에서 health 상태 확인
+docker compose logs -f finus-nat     # 실제 실패 원인 확인
+```
+
+4분이 지나도 healthy가 되지 않으면 로그가 원인을 말해 줍니다.
 
 <a id="limitations" name="limitations"></a>
 
