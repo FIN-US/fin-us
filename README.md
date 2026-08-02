@@ -67,6 +67,8 @@ Fin-Us는 단일 모델이 모든 일을 처리하지 않고, 역할이 분리�
 
 ## 설치 및 시작하기
 
+<a id="prerequisites" name="prerequisites"></a>
+
 ### 사전 준비 사항
 
 - Python 3.13
@@ -99,6 +101,8 @@ Fin-Us는 단일 모델이 모든 일을 처리하지 않고, 역할이 분리�
 5. 응답의 `"chat":{"id":...}` 값이 `TELEGRAM_CHAT_ID` 입니다.
 
 > 이 봇은 `TELEGRAM_CHAT_ID` 와 일치하는 대화에서만 명령을 받습니다. 다른 사람이 봇을 찾아 명령해도 무시됩니다.
+
+<a id="nat-config" name="nat-config"></a>
 
 ### 1. NAT 에이전트 설정
 
@@ -192,6 +196,8 @@ bash scripts/run_stack.sh
 bash scripts/reset_clean.sh
 ```
 
+<a id="order-dedup" name="order-dedup"></a>
+
 ### 주문 멱등 원장 영속화
 
 `/buy`·`/sell` 확정 주문이 중복 제출되는 것을 막는 마지막 방어선은 `mcp-trading/order-dedup.js`의 파일 기반 원장입니다. 백엔드 측 방어(`backend/telegram_commands.py`의 `pending_orders`)는 프로세스 메모리에만 존재하므로 재시작하면 사라지지만, 이 원장은 파일에 남아 컨테이너가 재생성되어도 최근 주문 이력을 유지합니다.
@@ -242,6 +248,8 @@ Backend는 `GET /api/v1/disclosures?stock=삼성전자`로 DART 지분공시 sig
 
 감시 대상은 `/watch`로 등록한 관심 종목과 현재 보유 중인 종목입니다. 같은 뉴스로 반복 분석하지 않도록 이전 신호의 해시를 Redis에 저장(14일 보관)하며, 내용이 바뀌지 않으면 AI 호출 자체를 건너뜁니다.
 
+<a id="telegram-test" name="telegram-test"></a>
+
 ### Telegram 긴급 알림 수동 테스트
 
 Docker Compose가 실행 중이고 `.env`에 `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`가 설정되어 있으면 backend 컨테이너에서 테스트 알림을 보낼 수 있습니다.
@@ -255,6 +263,8 @@ docker compose exec backend uv run --project /app/backend python /app/backend/sc
 ```bash
 docker compose exec backend uv run --project /app/backend python /app/backend/scripts/send_test_telegram_alert.py --dry-run
 ```
+
+<a id="morning-briefing" name="morning-briefing"></a>
 
 ### Telegram 모닝 브리핑
 
@@ -386,6 +396,8 @@ python3 mcp-trading/scripts/update_stock_master.py
 - [ ] AWS App Runner & Docker 기반 클라우드 배포
 
 ---
+
+<a id="notes" name="notes"></a>
 
 ## 참고
 
