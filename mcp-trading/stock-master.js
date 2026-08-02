@@ -29,29 +29,44 @@ export function normalizeStockInput(value) {
   return String(value ?? "").trim();
 }
 
+const CODE_SHAPE_PATTERN = /^[A-Z0-9]{6,7}$/i;
+const NUMERIC_CODE_PATTERN = /^[0-9]{6,7}$/;
+
 export function resolveStock(stockName, stocks) {
   const input = normalizeStockInput(stockName);
   if (!input) {
     throw new Error("stock_name 파라미터가 누락되었습니다.");
   }
 
-  if (/^[A-Z0-9]{6,7}$/i.test(input)) {
-    const code = input.toUpperCase();
-    return { code, name: code, market: "UNKNOWN", aliases: [] };
+  // Pure numeric input can never be a registered stock name (Korean/English
+  // company names always contain at least one non-digit character), so it is
+  // safe to treat it as a direct code without paying for a master lookup.
+  if (NUMERIC_CODE_PATTERN.test(input)) {
+    return { code: input, name: input, market: "UNKNOWN", aliases: [] };
   }
+
+  const isCodeShaped = CODE_SHAPE_PATTERN.test(input);
 
   const stockList = stocks ?? getDefaultStocks();
   const matches = stockList.filter((stock) => {
     const aliases = Array.isArray(stock.aliases) ? stock.aliases : [];
-    return stock.name === input || aliases.includes(input);
+    if (stock.name === input || aliases.includes(input)) {
+      return true;
+    }
+    // A code-shaped input (e.g. a ticker-like company name such as SIMPAC)
+    // may be typed in any case, mirroring the case-insensitivity the code
+    // shortcut below already provides for direct codes.
+    if (isCodeShaped) {
+      const upperInput = input.toUpperCase();
+      if (stock.name.toUpperCase() === upperInput) {
+        return true;
+      }
+      if (aliases.some((alias) => alias.toUpperCase() === upperInput)) {
+        return true;
+      }
+    }
+    return false;
   });
-
-  if (matches.length === 0) {
-    throw new Error(
-      `'${input}'의 종목 코드를 찾을 수 없습니다. ` +
-        "6자리 종목코드로 직접 입력하거나 mcp-trading/data/stocks.json을 갱신하세요.",
-    );
-  }
 
   if (matches.length > 1) {
     const candidates = matches
@@ -60,8 +75,22 @@ export function resolveStock(stockName, stocks) {
     throw new Error(`'${input}'의 종목 매칭이 모호합니다: ${candidates}. 6자리 종목코드를 직접 입력하세요.`);
   }
 
-  return {
-    aliases: [],
-    ...matches[0],
-  };
+  if (matches.length === 1) {
+    return {
+      aliases: [],
+      ...matches[0],
+    };
+  }
+
+  // Nothing in the master matches by name or alias: only now treat a
+  // code-shaped input (e.g. an alphanumeric ETN/fund code) as a direct code.
+  if (isCodeShaped) {
+    const code = input.toUpperCase();
+    return { code, name: code, market: "UNKNOWN", aliases: [] };
+  }
+
+  throw new Error(
+    `'${input}'의 종목 코드를 찾을 수 없습니다. ` +
+      "6자리 종목코드로 직접 입력하거나 mcp-trading/data/stocks.json을 갱신하세요.",
+  );
 }
