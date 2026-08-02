@@ -73,11 +73,6 @@ export async function fetchAllBalance(fetchPage, {
       break;
     }
 
-    // 이번 페이지의 행을 rows에 추가하기 전 길이를 기억해 둔다. 반복 커서가
-    // 감지되면 이번에 받은 페이지는 재조회(같은 페이지 재수신)이므로, 방금
-    // 추가한 행을 되돌려 rows에 중복이 남지 않게 한다.
-    const rowsBeforePage = rows.length;
-
     let body;
     let respTrCont;
     try {
@@ -128,12 +123,17 @@ export async function fetchAllBalance(fetchPage, {
       break;
     }
     if (seenCursors.has(ctxNk)) {
-      // 이전에 이미 받았던 커서가 다시 왔다 = 이번 페이지는 예전에 받은 페이지의
-      // 재조회다. 그대로 두면 리포트에 같은 종목이 여러 번 실리므로, 방금 추가한
-      // 이번 페이지 행을 되돌려 중복을 남기지 않는다. pdno 기준 중복 제거는 하지
-      // 않는다 — KIS가 페이지마다 동일한 pdno를 돌려주는 경우(예: 시간 예산 테스트
-      // 픽스처)가 있어 서로 다른 실제 보유 종목을 하나로 합쳐버릴 위험이 있다.
-      rows.length = rowsBeforePage;
+      // 이전에 이미 받았던 커서가 다시 왔다 = 다음 조회에 보낼 커서가 예전에
+      // 보냈던 커서와 같다. 즉 반복되는 것은 "다음에 받을 페이지"이지 방금
+      // 받은 이 페이지가 아니다 — 방금 받은 페이지는 이번에 처음 그 커서로
+      // 조회해서 받은 실제 신규 데이터이므로 rows에 남겨야 한다. 다음 조회를
+      // 계속하면 그 페이지가 재조회가 되므로, 그 전에 멈춘다. pdno 기준 중복
+      // 제거는 하지 않는다 — 행별 pdno가 유일하다는 전제는 buildBalanceParams가
+      // INQR_DVSN을 항상 "02"(종목별)로 고정하기 때문에만 성립한다. "01"
+      // (대출일별) 조회라면 같은 pdno가 여러 행에 정당하게 걸쳐 나타날 수 있어,
+      // 행 단위 dedup은 서로 다른 실제 보유 종목을 하나로 합쳐버리게 된다.
+      // 혹시라도 진짜 중복 행이 들어오는 경우가 있더라도, 조용히 종목을
+      // 빠뜨리는 것보다는 [안내] 잘림 표시와 함께 과다 집계되는 쪽이 낫다.
       truncated = "repeated_cursor";
       break;
     }
