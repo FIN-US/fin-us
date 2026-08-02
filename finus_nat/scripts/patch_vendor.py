@@ -59,6 +59,7 @@ import argparse
 import json
 import os
 import shutil
+import stat
 import sys
 import tempfile
 from dataclasses import dataclass, field
@@ -274,12 +275,32 @@ def _write_patched(target: Path, text: str) -> None:
             os.fsync(handle.fileno())
         shutil.copymode(target, tmp)  # 방향 주의: target -> tmp. 반대로 하면 읽기 전용
         # 원본이 tmp를 읽기 전용으로 만들어 os.replace()를 막는다.
+        #
+        # target 자체가 읽기 전용(예: 0o444)이면 Windows의 MoveFileEx(os.replace 내부
+        # 구현)가 그 자리를 갈아치우길 거부해 PermissionError를 낸다(실측: 0o444
+        # 대상에서 재현됨. os.chmod(tmp, ...)로 tmp만 쓰기 가능하게 만들어도 target이
+        # 여전히 읽기 전용이면 실패는 그대로다 - 막는 쪽은 새로 들어올 tmp가 아니라
+        # 갈아치워질 target이다). 그래서 target의 읽기 전용 비트만 잠깐 걷어내
+        # replace가 통과하게 한다. tmp의 모드는 건드리지 않는다 - 위 copymode가 이미
+        # target의 원래 모드를 tmp에 옮겨뒀고, replace가 성공하면 그 tmp가 target
+        # 자리를 차지하므로 최종 모드는 굳이 다시 복원하지 않아도 원래 값(0o444)
+        # 그대로 남는다.
+        os.chmod(target, stat.S_IWRITE | os.stat(target).st_mode)
         os.replace(tmp, target)
     finally:
         # 성공 경로에서는 os.replace()가 이미 tmp를 target 자리로 옮겨서 tmp가 더 이상
         # 존재하지 않는다. missing_ok=True 없이 무조건 unlink하면 그 성공을
         # FileNotFoundError로 뒤집어버린다.
-        Path(tmp).unlink(missing_ok=True)
+        #
+        # os.replace()가 실패하는 경우(예: 위 chmod로도 못 피한 다른 권한 문제)
+        # tmp는 여전히 읽기 전용일 수 있어 이 unlink 자체도 PermissionError를 낼 수
+        # 있다. try 블록의 진짜 예외가 finally에서 발생한 두 번째 예외로 덮이면
+        # 호출자는 원인을 영영 알 수 없게 된다 - 정리 실패가 원본 실패를 가려서는
+        # 안 된다.
+        try:
+            Path(tmp).unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def apply_patch(site_packages: Path, patch: VendorPatch) -> tuple[str, str]:

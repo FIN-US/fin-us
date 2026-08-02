@@ -461,6 +461,12 @@ def test_replace_failure_leaves_target_intact_and_cleans_tmp(pv, tmp_path, monke
     """`finally`의 `missing_ok=True` unlink가 실제로 동작하는지 검증하는 유일한
     테스트다. `os.replace`를 강제로 실패시켜, target이 원본 그대로 남고 tmp
     잔여물도 없는지 확인한다.
+
+    `pytest.raises(OSError)`만으로는 부족하다: `PermissionError`도 `OSError`의
+    서브클래스라, `finally`의 unlink가 (읽기 전용 tmp 등으로) 두 번째
+    `PermissionError`를 던져 원래 예외를 가려도 이 단언은 그냥 통과해버린다.
+    그래서 예외 메시지까지 확인해 실제로 새어나온 게 시뮬레이션한 그 예외인지
+    확정한다.
     """
     venv, site_packages = _make_site_packages(tmp_path)
     memory_patch = _patch_by_name(pv, MEMORY_NAME)
@@ -472,8 +478,42 @@ def test_replace_failure_leaves_target_intact_and_cleans_tmp(pv, tmp_path, monke
 
     monkeypatch.setattr(pv.os, "replace", _raise)
 
-    with pytest.raises(OSError):
+    with pytest.raises(OSError, match="simulated os.replace failure"):
         pv.main(["--venv", str(venv)])
 
     assert target.read_bytes() == original_bytes
     assert list(target.parent.glob("*.tmp")) == []
+
+
+def test_write_succeeds_when_target_is_read_only(pv, tmp_path):
+    """target이 읽기 전용(0o444)이어도 `_write_patched`는 성공해야 한다.
+
+    Windows에서는 `os.replace`(MoveFileEx)가 갈아치울 대상(target)이 읽기
+    전용이면 거부한다 - 원본(tmp)의 모드는 상관없다(실측 확인됨). 그러면
+    `os.replace` 자체가 `PermissionError`로 실패하고, `finally`의 unlink도 (tmp가
+    copymode로 target의 읽기 전용 모드를 물려받았으므로) 같은 이유로 실패해
+    원래 예외를 두 번째 `PermissionError`로 덮어쓰며 `.tmp` 잔여물까지
+    site-packages 안에 남긴다. 이 테스트는 POSIX에서도 실행되긴 하지만(POSIX의
+    rename(2)은 대상 파일의 권한 비트를 보지 않으므로 0o444가 `os.replace`를 막지
+    않아 수정 전에도 통과한다), 실제 회귀 신호는 Windows에서만 나온다.
+    """
+    venv, site_packages = _make_site_packages(tmp_path)
+    memory_patch = _patch_by_name(pv, MEMORY_NAME)
+    target = _write_target(site_packages, memory_patch.parts, pv._MEMORY_OLD)
+    target.chmod(0o444)
+
+    try:
+        exit_code = pv.main(["--venv", str(venv)])
+        final_mode = stat.S_IMODE(target.stat().st_mode) if os.name != "nt" else None
+    finally:
+        # 일부 러너는 읽기 전용 파일이 남으면 tmp_path 정리(teardown)에서 실패한다.
+        target.chmod(0o644)
+
+    assert exit_code == 0
+    assert target.read_text(encoding="utf-8") == pv._MEMORY_NEW
+    assert list(target.parent.glob("*.tmp")) == []
+    if final_mode is not None:
+        # POSIX에서는 원래 모드(0o444)가 그대로 보존돼야 한다 - target이 아니라
+        # target의 읽기 전용 비트만 잠깐 걷어냈다가 tmp(원래 모드를 copymode로
+        # 물려받음)가 그 자리를 대신하므로 최종 모드는 원본과 같다.
+        assert final_mode == 0o444
