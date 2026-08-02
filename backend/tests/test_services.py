@@ -523,7 +523,12 @@ async def test_perform_stock_analysis_bom_prefixed_code_skips_mcp(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_perform_stock_analysis_stock_code_cache_is_capped(monkeypatch):
+async def test_perform_stock_analysis_stock_code_cache_is_capped(monkeypatch, caplog):
+    """상한 도달 시 조용히 쓰기를 건너뛰지 않고, 최초(가장 오래된) 항목을 축출한
+    뒤 로그를 남기고 새 항목을 넣는다. dict는 삽입 순서를 보존하므로
+    ``next(iter(...))``가 FIFO로 가장 오래된 키를 가리킨다.
+    """
+
     async def fake_llm_chat(provider, prompt, *, conversation_id=None):
         return "plain analysis"
 
@@ -538,11 +543,15 @@ async def test_perform_stock_analysis_stock_code_cache_is_capped(monkeypatch):
     )
 
     fake_session = FakeSession()
-    await services.perform_stock_analysis("새종목", "openai", fake_session)
+    with caplog.at_level(logging.WARNING, logger=services.logger.name):
+        await services.perform_stock_analysis("새종목", "openai", fake_session)
 
     assert fake_session.report.stock_code == "999999"
-    assert "새종목" not in services._stock_code_cache
+    # 상한을 유지한 채 가장 오래된 항목("기존종목0")은 축출되고 새 항목은 들어와야 한다.
     assert len(services._stock_code_cache) == services._STOCK_CODE_CACHE_MAX
+    assert "새종목" in services._stock_code_cache
+    assert "기존종목0" not in services._stock_code_cache
+    assert "종목코드 캐시 상한 도달" in caplog.text
 
 
 @pytest.mark.asyncio

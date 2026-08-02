@@ -140,8 +140,18 @@ async def _resolve_stock_code(stock: str) -> str:
         name_part = resolved_text[: match.start()].strip()
         if name_part.upper() == code.upper():
             return code
-        if len(_stock_code_cache) < _STOCK_CODE_CACHE_MAX:
-            _stock_code_cache[stock] = code
+        # 상한 도달은 정상 조건이 아니다 — 종목마스터 4,353종 규모에서는 일어나지
+        # 않아야 하며, 발생했다면 입력 정규화가 stock-master.js와 다시 어긋났다는
+        # 신호다. dict는 자동으로 비우지 않으므로 침묵한 채 자라기만 하면 상한을
+        # 채운 항목들이 영구히 자리를 차지해, 그 이후 정상적인 신규 종목명마다
+        # 매번 MCP 서브프로세스를 새로 띄우는 지연이 조용히 고정된다.
+        if len(_stock_code_cache) >= _STOCK_CODE_CACHE_MAX:
+            logger.warning(
+                "종목코드 캐시 상한 도달(%d), 최초 항목 축출: stock=%s",
+                _STOCK_CODE_CACHE_MAX, stock,
+            )
+            _stock_code_cache.pop(next(iter(_stock_code_cache)))
+        _stock_code_cache[stock] = code
         return code
     except Exception as exc:
         logger.warning(
