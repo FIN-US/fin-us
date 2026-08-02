@@ -73,10 +73,10 @@ def _normalize_cache_key(stock: str) -> str:
     JS String.trim()이 제거하는 WhiteSpace/LineTerminator 집합 중 Python str.strip()이
     유일하게 남기는 문자가 U+FEFF(BOM)임을 확인했다(그 외 문자는 두 언어가 동일하게
     처리한다). 이 차이를 그대로 두면 stock-master.js의 정확한 이름 매칭 경로가 BOM을
-    지운 채로 응답해, "﻿삼성전자" 같은 입력이 매번 다른 캐시 키로 쌓인다.
+    지운 채로 응답해, "\ufeff삼성전자" 같은 입력이 매번 다른 캐시 키로 쌓인다.
     읽기/쓰기 양쪽에서 이 함수를 통해서만 키를 만들어 둘이 어긋나지 않게 한다.
     """
-    return stock.replace("﻿", "").strip()
+    return stock.replace("\ufeff", "").strip()
 
 
 def _has_code_digit(value: str) -> bool:
