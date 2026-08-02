@@ -418,6 +418,66 @@ async def test_perform_stock_analysis_does_not_cache_shortcut_echo(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_perform_stock_analysis_bom_prefixed_name_caches_under_normalized_key(
+    monkeypatch,
+):
+    """BOM(U+FEFF)이 붙은 "종목명" 입력은 에코 스킵(위 테스트)에 걸리지 않는다.
+
+    JS String.trim()은 BOM을 지우지만 Python str.strip()은 그대로 두므로,
+    "﻿삼성전자"는 MCP 호출까지는 가지만 stock-master.js 쪽에서는 정확한 이름 매칭으로
+    끝나 응답의 종목명("삼성전자")이 코드("005930")와 다르다. 즉 에코 스킵 조건을
+    통과해 캐싱 경로를 탄다. 이때 캐시 키가 정규화되지 않으면 BOM 개수만큼 서로 다른
+    키가 쌓인다 — 이 테스트는 정규화로 그것이 하나의 키로 합쳐짐을 고정한다.
+    """
+
+    mcp_calls = []
+
+    async def fake_llm_chat(provider, prompt, *, conversation_id=None):
+        return "plain analysis"
+
+    async def fake_run_mcp_tool(params, tool_name, arguments):
+        mcp_calls.append(arguments)
+        return "삼성전자 (005930, KOSPI)"
+
+    monkeypatch.setattr(services, "llm_chat", fake_llm_chat)
+    monkeypatch.setattr(services, "run_mcp_tool", fake_run_mcp_tool)
+
+    await services.perform_stock_analysis("﻿삼성전자", "openai", FakeSession())
+
+    assert len(mcp_calls) == 1
+    assert services._stock_code_cache == {"삼성전자": "005930"}
+
+    # 서로 다른 BOM 변형도 같은 정규화 키로 수렴해야 MCP를 다시 타지 않는다.
+    await services.perform_stock_analysis("﻿﻿삼성전자", "openai", FakeSession())
+
+    assert len(mcp_calls) == 1
+    assert services._stock_code_cache == {"삼성전자": "005930"}
+
+
+@pytest.mark.asyncio
+async def test_perform_stock_analysis_stock_code_cache_is_capped(monkeypatch):
+    async def fake_llm_chat(provider, prompt, *, conversation_id=None):
+        return "plain analysis"
+
+    async def fake_run_mcp_tool(params, tool_name, arguments):
+        return "새종목 (999999, KOSPI)"
+
+    monkeypatch.setattr(services, "llm_chat", fake_llm_chat)
+    monkeypatch.setattr(services, "run_mcp_tool", fake_run_mcp_tool)
+
+    services._stock_code_cache.update(
+        {f"기존종목{i}": f"{i:06d}" for i in range(services._STOCK_CODE_CACHE_MAX)}
+    )
+
+    fake_session = FakeSession()
+    await services.perform_stock_analysis("새종목", "openai", fake_session)
+
+    assert fake_session.report.stock_code == "999999"
+    assert "새종목" not in services._stock_code_cache
+    assert len(services._stock_code_cache) == services._STOCK_CODE_CACHE_MAX
+
+
+@pytest.mark.asyncio
 async def test_perform_stock_analysis_caches_resolved_stock_code(monkeypatch):
     async def fake_llm_chat(provider, prompt, *, conversation_id=None):
         return "plain analysis"

@@ -51,6 +51,23 @@ _STOCK_CODE_EXTRACT_RE = re.compile(r"\(([0-9A-Z]{6,}),")
 # resolve_stock_code MCP 호출은 매번 새 stdio 서브프로세스를 띄우는 비용이 있고
 # (run_mcp_tool 참고), 종목명-코드 매핑은 사실상 불변이므로 캐싱해 재조회를 피한다.
 _stock_code_cache: dict[str, str] = {}
+# 종목마스터는 4,353종(별칭 포함해도 여유롭게 포함)이므로 이 상한을 정상적으로
+# 채울 일은 없다. _normalize_cache_key의 정규화가 stock-master.js의 정규화와
+# 다시 어긋나는 미래의 변경이 있어도(둘은 서로 다른 언어의 별개 구현이다) 캐시가
+# 무한정 자라지 않도록 하는 독립적인 방어선이다.
+_STOCK_CODE_CACHE_MAX = 8192
+
+
+def _normalize_cache_key(stock: str) -> str:
+    """캐시 키를 정규화합니다.
+
+    JS String.trim()이 제거하는 WhiteSpace/LineTerminator 집합 중 Python str.strip()이
+    유일하게 남기는 문자가 U+FEFF(BOM)임을 확인했다(그 외 문자는 두 언어가 동일하게
+    처리한다). 이 차이를 그대로 두면 stock-master.js의 정확한 이름 매칭 경로가 BOM을
+    지운 채로 응답해, "﻿삼성전자" 같은 입력이 매번 다른 캐시 키로 쌓인다.
+    읽기/쓰기 양쪽에서 이 함수를 통해서만 키를 만들어 둘이 어긋나지 않게 한다.
+    """
+    return stock.replace("﻿", "").strip()
 
 
 def _has_code_digit(value: str) -> bool:
@@ -82,7 +99,8 @@ async def _resolve_stock_code(stock: str) -> str:
     if _looks_like_stock_code(stock):
         return stock.upper()
 
-    cached = _stock_code_cache.get(stock)
+    cache_key = _normalize_cache_key(stock)
+    cached = _stock_code_cache.get(cache_key)
     if cached is not None:
         return cached
 
@@ -103,13 +121,15 @@ async def _resolve_stock_code(stock: str) -> str:
             )
             return ""
         # stock-master.js의 코드 형태 지름길이 입력을 그대로 되돌려준 경우(응답의 종목명 == 코드)는
-        # 종목명->코드 매핑이 아니므로 캐싱하지 않는다. 이 조건이 캐시 키 공간을 stocks.json의
-        # 종목명·별칭으로 한정한다. (JS trim()과 Python strip()의 공백 집합이 달라
-        # U+FEFF 같은 문자가 붙은 입력이 지름길에 도달할 수 있다.)
+        # 종목명->코드 매핑이 아니므로 캐싱하지 않는다. 이 조건은 지름길이 실제로 트리거된
+        # 좁은 경우만 잡아낸다 — BOM이 붙은 "종목명" 입력은 지름길이 아니라 정확한 이름
+        # 매칭 경로로 응답이 오므로 이 조건을 통과해버린다. 그 경로는 캐시 키 정규화
+        # (_normalize_cache_key)와 크기 상한(_STOCK_CODE_CACHE_MAX)으로 따로 막는다.
         name_part = resolved_text[: match.start()].strip()
         if name_part.upper() == code.upper():
             return code
-        _stock_code_cache[stock] = code
+        if len(_stock_code_cache) < _STOCK_CODE_CACHE_MAX:
+            _stock_code_cache[cache_key] = code
         return code
     except Exception as exc:
         logger.warning(
