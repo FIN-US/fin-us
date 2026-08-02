@@ -14,7 +14,7 @@ const createdDirs = [];
 function tempLedgerPath(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "finus-order-dedup-test-"));
   createdDirs.push(dir);
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 }));
   return path.join(dir, "ledger.json");
 }
 
@@ -152,6 +152,8 @@ test("OrderDedupStore resolves ttlMs from KIS_ORDER_DEDUP_TTL_MS env var, silent
     }
   });
 
+  const consoleError = t.mock.method(console, "error");
+
   const DEFAULT_TTL_MS = 120_000;
   const cases = [
     ["600000", 600_000], // 유효한 값은 그대로 사용된다
@@ -169,4 +171,10 @@ test("OrderDedupStore resolves ttlMs from KIS_ORDER_DEDUP_TTL_MS env var, silent
 
   delete process.env.KIS_ORDER_DEDUP_TTL_MS;
   assert.equal(new OrderDedupStore().ttlMs, DEFAULT_TTL_MS, "env=unset");
+
+  assert.equal(
+    consoleError.mock.callCount(),
+    0,
+    "잘못된 값에 대한 폴백은 조용히 처리되어야 합니다(console.error 호출 없음)",
+  );
 });
