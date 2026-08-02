@@ -3,11 +3,14 @@ import unittest
 from backend.scheduler import extract_stocks_from_balance
 
 # 아래 픽스처는 mcp-trading/balance.js의 formatBalanceReport()가 실제로 생성하는
-# 문자열을 그대로 재현한 것입니다. 근거:
-#   - 생성부: mcp-trading/balance.js:90-119 (특히 종목 줄 템플릿 :97-101, join("\n\n") :103)
-#   - 검증부: mcp-trading/tests/order.test.js:92-146
-#     ("formatBalanceReport displays unsettled cash fields and account return rate" 테스트의
-#      입력/기대값을 그대로 옮겼습니다.)
+# 문자열을 그대로 재현한 것입니다. 근거(줄 번호 대신 심볼/테스트명으로 고정 — 이 저장소
+# 안의 mcp-trading/ 디렉터리를 대상으로 git grep 으로 바로 확인 가능합니다):
+#   - 생성부: mcp-trading/balance.js 의 formatBalanceReport() — 종목 줄 템플릿과
+#     종목 사이 구분자 .join("\n\n")
+#   - 검증부: mcp-trading/tests/order.test.js 의
+#     "formatBalanceReport displays unsettled cash fields and account return rate" 테스트
+# REAL_BALANCE_TEXT는 그 테스트의 기대값 리터럴을 그대로 복사한 것이므로, balance.js의
+# 종목 줄 템플릿을 바꾸면 이 픽스처와 그 테스트의 기대값 양쪽을 함께 수정해야 합니다.
 # 종목 한 건은 3줄 블록(헤더 줄 + 공백 2칸 들여쓰기 2줄)이며, 종목 사이에는 빈 줄이 하나 있습니다.
 REAL_BALANCE_TEXT = """[계좌 잔고 현황]
 - 총 평가금액: 1,210,000원
