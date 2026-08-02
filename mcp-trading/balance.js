@@ -122,7 +122,13 @@ export async function fetchAllBalance(fetchPage, {
       truncated = "no_cursor";
       break;
     }
-    if (seenCursors.has(ctxNk)) {
+    // 다음 요청에 실리는 커서는 FK/NK 쌍이므로(buildBalanceParams가 둘 다 내보낸다)
+    // 쌍 전체를 키로 삼는다. NK만 같고 FK가 다르면 서로 다른 요청이라 반복이 아닌데,
+    // NK만 보면 조기 중단해 이 함수가 없애려는 조용한 누락을 만든다.
+    // 구분자는 커서 값에 나타날 수 없는 NUL을 쓴다. 공백을 쓰면
+    // ("A B","C")와 ("A","B C")가 같은 키가 된다.
+    const cursorKey = `${ctxFk}\u0000${ctxNk}`;
+    if (seenCursors.has(cursorKey)) {
       // 이전에 이미 받았던 커서가 다시 왔다 = 다음 조회에 보낼 커서가 예전에
       // 보냈던 커서와 같다. 즉 반복되는 것은 "다음에 받을 페이지"이지 방금
       // 받은 이 페이지가 아니다 — 방금 받은 페이지는 이번에 처음 그 커서로
@@ -137,7 +143,7 @@ export async function fetchAllBalance(fetchPage, {
       truncated = "repeated_cursor";
       break;
     }
-    seenCursors.add(ctxNk);
+    seenCursors.add(cursorKey);
     trCont = "N";
   }
 

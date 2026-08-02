@@ -379,6 +379,38 @@ test('fetchAllBalance detects a period-2 repeated-cursor cycle (A,B,A) that a pr
   assert.deepEqual(result.rows.map((row) => row.pdno), ["000001", "000002", "000003"]);
 });
 
+test("fetchAllBalance keeps paging when ctx_area_nk100 repeats but ctx_area_fk100 differs, since the outgoing cursor is the FK/NK pair", async () => {
+  // 다음 요청에 실리는 커서는 CTX_AREA_FK100/CTX_AREA_NK100 쌍이다(buildBalanceParams).
+  // NK만 같고 FK가 다르면 서로 다른 요청이므로 반복이 아니다. 반복 판정을 NK 하나로만
+  // 하면 여기서 조기 중단해, 이 함수가 없애려는 조용한 누락을 스스로 만든다.
+  const pages = [
+    { fk: "FK-1", nk: "NK" },
+    { fk: "FK-2", nk: "NK" },
+    { fk: "FK-3", nk: "NK" },
+  ];
+  let calls = 0;
+  const fetchPage = async () => {
+    calls += 1;
+    const page = pages[calls - 1];
+    return {
+      body: {
+        output1: [{ prdt_name: `종목${calls}`, pdno: String(calls).padStart(6, "0") }],
+        output2: calls === 1 ? [{ tot_evlu_amt: "1" }] : [],
+        ctx_area_fk100: page.fk,
+        ctx_area_nk100: page.nk,
+      },
+      // 4번째 호출은 fixture가 없으므로, 여기까지 왔다면 상한이 아니라 페이지 소진으로 끝난다.
+      trCont: calls < pages.length ? "F" : "D",
+    };
+  };
+
+  const result = await fetchAllBalance(fetchPage, { maxPages: 20, timeBudgetMs: 60_000 });
+
+  assert.equal(calls, 3);
+  assert.equal(result.truncated, null);
+  assert.deepEqual(result.rows.map((row) => row.pdno), ["000001", "000002", "000003"]);
+});
+
 test("fetchAllBalance rethrows when the first page fetch fails, so auth/account errors are not swallowed", async () => {
   const authError = new Error("EGW00123 인증 오류");
   const fetchPage = async () => {
