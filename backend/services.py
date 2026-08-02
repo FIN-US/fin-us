@@ -78,7 +78,8 @@ async def _resolve_stock_code(stock: str) -> str:
             "resolve_stock_code",
             {"stock_name": stock},
         )
-        match = _STOCK_CODE_EXTRACT_RE.search(str(resolved))
+        resolved_text = str(resolved)
+        match = _STOCK_CODE_EXTRACT_RE.search(resolved_text)
         code = match.group(1) if match else None
         if code is None or not _has_code_digit(code):
             logger.warning(
@@ -87,6 +88,13 @@ async def _resolve_stock_code(stock: str) -> str:
                 resolved,
             )
             return ""
+        # stock-master.js의 코드 형태 지름길이 입력을 그대로 되돌려준 경우(응답의 종목명 == 코드)는
+        # 종목명->코드 매핑이 아니므로 캐싱하지 않는다. 이 조건이 캐시 키 공간을 stocks.json의
+        # 종목명·별칭으로 한정한다. (JS trim()과 Python strip()의 공백 집합이 달라
+        # U+FEFF 같은 문자가 붙은 입력이 지름길에 도달할 수 있다.)
+        name_part = resolved_text[: match.start()].strip()
+        if name_part.upper() == code.upper():
+            return code
         _stock_code_cache[stock] = code
         return code
     except Exception as exc:

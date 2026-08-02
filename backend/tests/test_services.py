@@ -390,6 +390,34 @@ async def test_perform_stock_analysis_skips_mcp_when_stock_is_already_code(monke
 
 
 @pytest.mark.asyncio
+async def test_perform_stock_analysis_does_not_cache_shortcut_echo(monkeypatch):
+    """JS String.trim()은 U+FEFF(BOM)를 제거하지만 파이썬 str.strip()은 그대로 둔다
+    (`'﻿'.isspace()`가 False). 그래서 "﻿005930"은:
+    - stock.strip()으로도 안 지워져 _STOCK_CODE_RE에 안 걸림 -> MCP 호출됨
+    - stock-master.js의 normalizeStockInput()이 BOM을 지워 지름길에 걸림 ->
+      "005930 (005930, UNKNOWN)"으로 응답(종목명 == 코드)
+    - 추출된 코드는 숫자를 포함하므로 Unit 3의 가드는 통과함 -> 캐싱되면
+      '﻿005930', '005930﻿' 등 사실상 무한한 변형이 서로 다른 캐시 키로 쌓인다.
+    반환값 자체는 올바르므로 stock_code는 여전히 채워져야 하고, 캐시에만 남지 않아야 한다.
+    """
+
+    async def fake_llm_chat(provider, prompt, *, conversation_id=None):
+        return "plain analysis"
+
+    async def fake_run_mcp_tool(params, tool_name, arguments):
+        return "005930 (005930, UNKNOWN)"
+
+    monkeypatch.setattr(services, "llm_chat", fake_llm_chat)
+    monkeypatch.setattr(services, "run_mcp_tool", fake_run_mcp_tool)
+
+    fake_session = FakeSession()
+    await services.perform_stock_analysis("﻿005930", "openai", fake_session)
+
+    assert fake_session.report.stock_code == "005930"
+    assert services._stock_code_cache == {}
+
+
+@pytest.mark.asyncio
 async def test_perform_stock_analysis_caches_resolved_stock_code(monkeypatch):
     async def fake_llm_chat(provider, prompt, *, conversation_id=None):
         return "plain analysis"
