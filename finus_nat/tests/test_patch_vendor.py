@@ -180,25 +180,10 @@ def test_marker_file_records_version_and_per_target_status(pv, tmp_path):
 def test_drift_in_third_replacement_leaves_earlier_matches_unwritten(pv, tmp_path):
     """mem0_editor.py처럼 치환이 3개인 파일에서 앞 2개는 매칭, 3번째만 drift인 경우.
 
-    `apply_patch`를 읽어보면 루프 안에서는 `text`라는 로컬 변수만 갱신하고,
-    `target.write_text(...)`는 루프를 다 돈 "뒤"에 딱 한 번만 호출한다(스크립트
-    222~226행 주석 "여기서는 루프 밖에서 한 번만 쓴다" 참고). 3번째 치환에서
-    old도 sentinel도 못 찾아 DRIFT를 조기 return하면, 그 return은 write_text
-    호출 지점보다 앞에 있으므로 앞의 2개 치환이 로컬 변수에는 반영돼 있어도
-    디스크에는 전혀 쓰이지 않는다.
-
-    즉 이 구현은 "부분 적용을 조용히 디스크에 쓰는" 원본 run.sh의 108행 버그와는
-    다르다. run.sh는 write_text를 세 번째 if 블록 안에 둬서, 세 번째 조건이
-    거짓이면(이미 적용됐거나 매칭 안 되거나) 앞의 두 치환 결과를 담은 text 변수가
-    아예 write_text 호출 자체를 못 만나 버려졌다 - 하지만 결과적으로 "조용히
-    성공 종료"했다는 게 진짜 문제였다.
-
-    새 구현의 결과 자체(파일 미변경)는 run.sh와 같지만, 성격이 다르다: 전부
-    적용되거나 전혀 안 쓰이거나 둘 중 하나만 있는 all-or-nothing 원자적 쓰기이고,
-    무엇보다 exit code 1 + DRIFT 상태로 "실패"를 크게 알린다. 파일을 절반만
-    패치된 상태로 남기지 않는다는 점에서 안전하고, 원본 run.sh처럼 아무 신호 없이
-    넘어가지도 않는다. 그래서 이 동작은 버그가 아니라 의도된 설계로 판단하고,
-    "파일이 원본 그대로 유지된다"는 사실을 여기서 고정한다. (별도 위험 보고 없음.)
+    `apply_patch`는 루프 안에서 로컬 변수 `text`만 갱신하고 `_write_patched`는 루프
+    밖에서 한 번만 부르므로, 3번째 치환에서 DRIFT로 조기 반환하면 앞 2개가 매칭됐어도
+    디스크에는 전혀 쓰이지 않는다 - 그리고 `_write_patched` 자체도 tmp+os.replace로
+    원자적이라 부분 쓰기가 없다.
     """
     venv, site_packages = _make_site_packages(tmp_path)
     editor_patch = _patch_by_name(pv, EDITOR_NAME)
@@ -229,6 +214,17 @@ def test_drift_in_third_replacement_leaves_earlier_matches_unwritten(pv, tmp_pat
 def test_find_site_packages_locates_posix_layout(pv, tmp_path):
     """venv/lib/python3.13/site-packages 형태(posix)를 찾아낸다."""
     venv, site_packages = _make_site_packages(tmp_path)
+
+    found = pv.find_site_packages(venv)
+
+    assert found == site_packages
+
+
+def test_find_site_packages_locates_windows_layout(pv, tmp_path):
+    """venv/Lib/site-packages 형태(Windows)도 찾아낸다."""
+    venv = tmp_path / "venv"
+    site_packages = venv / "Lib" / "site-packages"
+    site_packages.mkdir(parents=True)
 
     found = pv.find_site_packages(venv)
 
