@@ -276,6 +276,9 @@ def _write_patched(target: Path, text: str) -> None:
     CRLF인 업스트림 대상을 추가하는 사람은 이 함수가 그것도 LF로 바꿔버린다는 걸 알아야 한다.
     """
     fd, tmp = tempfile.mkstemp(dir=target.parent, prefix=target.name + ".", suffix=".tmp")
+    # replace 실패 시 되돌릴 수 있도록, 아래에서 쓰기 가능 비트를 걷어내기 전의
+    # 원래 모드를 미리 잡아둔다.
+    original_mode = os.stat(target).st_mode
     try:
         # mkstemp는 이미 열린 OS 레벨 fd를 준다. 이름으로 다시 열지 않고 그 fd를
         # 그대로 소비해야 한다 — 그러지 않으면 fd가 열린 채 남아 Windows에서
@@ -299,18 +302,35 @@ def _write_patched(target: Path, text: str) -> None:
         # target의 원래 모드를 tmp에 옮겨뒀고, replace가 성공하면 그 tmp가 target
         # 자리를 차지하므로 최종 모드는 굳이 다시 복원하지 않아도 원래 값(0o444)
         # 그대로 남는다.
-        os.chmod(target, stat.S_IWRITE | os.stat(target).st_mode)
-        _replace(tmp, target)
+        os.chmod(target, stat.S_IWRITE | original_mode)
+        try:
+            _replace(tmp, target)
+        except OSError:
+            # replace가 실패하면(예: 위 chmod로도 못 피한 다른 권한 문제) target은
+            # 여전히 원래 파일 그대로인데 방금 건 쓰기 가능 비트만 풀린 채로 남는다.
+            # 여기서 되돌리지 않으면 site-packages 안의 벤더 파일이 실패한 실행
+            # 이후에도 영구히 쓰기 가능한 상태로 방치된다 - 재실행이나 재로그가
+            # 아니라 exception 자체가 유일한 신호인데, 그마저도 파일 모드에는
+            # 아무 흔적을 안 남기는 셈이다. 원래 모드로 복원한 뒤 그대로 다시 던진다.
+            os.chmod(target, original_mode)
+            raise
     finally:
         # 성공 경로에서는 os.replace()가 이미 tmp를 target 자리로 옮겨서 tmp가 더 이상
         # 존재하지 않는다. missing_ok=True 없이 무조건 unlink하면 그 성공을
         # FileNotFoundError로 뒤집어버린다.
         #
         # os.replace()가 실패하는 경우(예: 위 chmod로도 못 피한 다른 권한 문제)
-        # tmp는 여전히 읽기 전용일 수 있어 이 unlink 자체도 PermissionError를 낼 수
-        # 있다. try 블록의 진짜 예외가 finally에서 발생한 두 번째 예외로 덮이면
-        # 호출자는 원인을 영영 알 수 없게 된다 - 정리 실패가 원본 실패를 가려서는
-        # 안 된다.
+        # tmp는 여전히 읽기 전용일 수 있다 - 위 copymode(target, tmp)가 target의
+        # (읽기 전용일 수 있는) 원래 모드를 이미 tmp에 물려줬기 때문이다. 그 상태로
+        # 그냥 unlink하면 이 정리 자체도 PermissionError를 낼 수 있고, try 블록의
+        # 진짜 예외가 finally에서 발생한 두 번째 예외로 덮이면 호출자는 원인을 영영
+        # 알 수 없게 된다 - 정리 실패가 원본 실패를 가려서는 안 된다. 그래서 unlink
+        # 전에 tmp를 쓰기 가능하게 만들어 정리가 실제로 성공하게 한다(tmp는 이미
+        # site-packages 밖으로 나갈 일이 없는 임시 파일이라 모드 복원이 필요 없다).
+        try:
+            os.chmod(tmp, stat.S_IWRITE | os.stat(tmp).st_mode)
+        except OSError:
+            pass
         try:
             Path(tmp).unlink(missing_ok=True)
         except OSError:
