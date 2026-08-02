@@ -70,9 +70,17 @@ export function buildCashOrderBody({ accountNo, stockCode, quantity, price, orde
   if (account.length < 10) {
     throw new Error("KIS_ACCOUNT_NO가 올바르지 않습니다. 계좌번호 앞 8자리와 상품코드 2자리를 붙여 설정하세요.");
   }
+  // 아래 두 가드가 함께 "숫자 6~7자만 주문 가능"이라는 하나의 정책을 이룬다.
+  // 첫 번째는 영숫자 코드(0001A0 등)에 전용 메시지를 주기 위한 것이고, 실제로 범위를
+  // 확정하는 건 두 번째다. 9자 펀드코드(F70100026)는 첫 번째에 매치조차 되지 않고
+  // 두 번째에서 거절된다.
   if (/^[0-9A-Z]{6,7}$/i.test(code) && !/^\d{6,7}$/.test(code)) {
     throw new Error("이 종목은 현재 주문을 지원하지 않습니다.");
   }
+  // 이 범위가 backend/telegram_commands.py의 _ORDERABLE_STOCK_CODE_RE(`\A[0-9]{6,7}\Z`)와
+  // 쌍을 이룬다. 백엔드가 같은 정책을 복제해 조기 거절하므로, 영숫자 코드 주문 지원을
+  // 검토할 때(#138) 위 두 가드와 백엔드 상수를 **모두** 함께 바꿔야 한다. 하나라도 남기면
+  // 그 계층에서 조용히 계속 막힌다.
   if (!/^\d{6,7}$/.test(code)) {
     throw new Error("stock_code는 6자리 또는 7자리 종목코드여야 합니다.");
   }
