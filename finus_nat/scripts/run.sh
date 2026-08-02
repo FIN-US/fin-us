@@ -122,46 +122,75 @@ done
 # 이어질 수 있어서, _CONFIG_FILE 자체(leaf)에는 mem0_memory가 한 번도 안 나와도
 # base 체인을 타고 들어가면 Mem0 워크플로로 귀결될 수 있다. leaf만 grep하면 이
 # 경우를 조용히 놓친다 - 그게 issue #65가 없애려는 바로 그 silent-skip 부류다.
-# 그래서 leaf 하나만 보지 않고 yaml_tools.py와 같은 방식으로 base: 체인을 따라간다.
+#
+# 이 체인 해석은 셸에서 직접 흉내내지 않는다. 예전에는 grep/sed로 `base:` 줄을
+# 파싱해 따라갔는데, yaml_tools.py의 실제 로더와 두 지점에서 갈라졌다: (1) 절대
+# 경로 base(`base: /abs/path.yml`)를 상대 경로처럼 현재 디렉터리에 이어붙여
+# "파일을 찾을 수 없다"로 조용히 skip했고, (2) `base: deep.yml  # comment`처럼
+# 인라인 주석이 붙으면 sed가 그 주석까지 파일명에 포함시켜 역시 조용히 skip했다.
+# 둘 다 게이트를 무력화하는 결과(GATE=SKIP)라 issue #65가 없애려던 바로 그
+# silent-skip이 가드 안에서 재현되는 셈이었다. 셸로 nat 로더를 재구현하며 계속
+# 따라잡는 대신, nat.utils.io.yaml_tools.yaml_load()를 그대로 호출해 병합된
+# dict를 검사한다 - 상속 규칙이 갈라질 여지 자체가 없다. 인터프리터는 두 줄
+# 뒤 patch_vendor.py 호출에서 어차피 필요하므로 추가 의존성도 아니다.
+#
+# 종료 코드: 0=mem0 사용, 1=mem0 미사용, 2=판단 불가(설정 파일 없음/파싱 실패/
+# 순환 참조 등). 2는 "쓰지 않는다"고 조용히 넘어가면 안 되는 경우이므로 호출부가
+# fail-fast로 처리한다 - 존재하지 않는 설정 파일에 대해 "찾을 수 없습니다" 경고를
+# 찍고 나서 바로 "mem0_memory를 쓰지 않습니다"라고 단정하는 것은 이 스크립트가
+# 방금 확인 불가하다고 말한 사실을 스스로 뒤집는 것이었다.
 _config_uses_mem0() {
   local file="${1}"
-  local depth=0
-  while [[ -n "${file}" ]]; do
-    if [[ ! -f "${file}" ]]; then
-      echo "경고: 설정 파일을 찾을 수 없습니다: ${file}. Mem0 사용 여부를 판단할 수 없어 벤더 패치를 건너뜁니다." >&2
-      return 1
-    fi
-    if grep -q 'mem0_memory' "${file}"; then
-      return 0
-    fi
-    local dir base_line base_rel
-    dir="$(dirname "${file}")"
-    base_line="$(grep -m1 '^base:' "${file}" || true)"
-    if [[ -z "${base_line}" ]]; then
-      return 1
-    fi
-    base_rel="${base_line#base:}"
-    base_rel="$(echo "${base_rel}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e "s/^['\"]//" -e "s/['\"]\$//")"
-    file="${dir}/${base_rel}"
-    depth=$((depth + 1))
-    if [[ "${depth}" -ge 20 ]]; then
-      echo "경고: base: 상속 체인이 20단계를 넘었습니다(${_CONFIG_FILE}). mem0_memory 탐지를 중단합니다." >&2
-      return 1
-    fi
-  done
-  return 1
+  CONFIG_FILE_FOR_PY="${file}" uv run --project "${FE_PKG}" python -c '
+import os
+import sys
+
+try:
+    from nat.utils.io.yaml_tools import yaml_load
+except Exception as exc:
+    print(f"경고: nat.utils.io.yaml_tools를 불러오지 못했습니다: {exc}", file=sys.stderr)
+    sys.exit(2)
+
+path = os.environ["CONFIG_FILE_FOR_PY"]
+
+
+def _contains_mem0(value) -> bool:
+    if isinstance(value, dict):
+        return any(_contains_mem0(v) for v in value.values())
+    if isinstance(value, list):
+        return any(_contains_mem0(v) for v in value)
+    return isinstance(value, str) and "mem0_memory" in value
+
+
+try:
+    config = yaml_load(path)
+except Exception as exc:
+    print(f"경고: 설정 파일을 읽지 못했습니다({path}): {exc}", file=sys.stderr)
+    sys.exit(2)
+
+sys.exit(0 if _contains_mem0(config) else 1)
+'
 }
 
-if _config_uses_mem0 "${_CONFIG_FILE}"; then
-  if ! uv run --project "${FE_PKG}" python "${FE_PKG}/scripts/patch_vendor.py" \
-    --venv "${FE_PKG_ABS}/.venv"; then
-    echo "오류: 벤더 패치를 적용하지 못했습니다. ${_CONFIG_FILE}이(가) mem0_memory를 쓰는데 패치가 없으면 Mem0 경로가 런타임에 원인 불명으로 실패합니다." >&2
-    echo "      NAT/mem0 버전을 올렸다면 ${FE_PKG}/scripts/patch_vendor.py 의 원본 문자열을 갱신하세요." >&2
+_mem0_rc=0
+_config_uses_mem0 "${_CONFIG_FILE}" || _mem0_rc=$?
+case "${_mem0_rc}" in
+  0)
+    if ! uv run --project "${FE_PKG}" python "${FE_PKG}/scripts/patch_vendor.py" \
+      --venv "${FE_PKG_ABS}/.venv"; then
+      echo "오류: 벤더 패치를 적용하지 못했습니다. ${_CONFIG_FILE}이(가) mem0_memory를 쓰는데 패치가 없으면 Mem0 경로가 런타임에 원인 불명으로 실패합니다." >&2
+      echo "      NAT/mem0 버전을 올렸다면 ${FE_PKG}/scripts/patch_vendor.py 의 원본 문자열을 갱신하세요." >&2
+      exit 1
+    fi
+    ;;
+  1)
+    echo "벤더 패치 건너뜀: ${_CONFIG_FILE}이(가) mem0_memory를 쓰지 않습니다." >&2
+    ;;
+  *)
+    echo "오류: ${_CONFIG_FILE}의 mem0 사용 여부를 판단할 수 없습니다(위 경고 참고). 원인 불명 실패로 이어지느니 여기서 멈춘다." >&2
     exit 1
-  fi
-else
-  echo "벤더 패치 건너뜀: ${_CONFIG_FILE}이(가) mem0_memory를 쓰지 않습니다." >&2
-fi
+    ;;
+esac
 
 if [[ "${_run_mode}" == "chat" ]]; then
   _own_serve=0
