@@ -53,6 +53,21 @@ jobs:
       - name: finus_nat 테스트 실행
         run: uv run --project finus_nat pytest finus_nat/tests/
 
+      # 벤더 패치는 NAT·mem0 상류 소스와 바이트 단위로 맞물려 있다. 상류가 바뀌면
+      # 패치가 조용히 안 붙는데, 위 pytest는 임시 디렉터리의 가짜 트리만 검증하므로
+      # 이를 잡지 못한다. 이 스텝은 uv sync가 설치한 실제 패키지에 스크립트를 돌려
+      # 의존성 갱신 PR 시점에 drift를 빨간불로 드러낸다.
+      # Dockerfile보다 --require를 넓게 잡는다. 빌드는 memory.py만 있으면 되지만,
+      # 나머지가 사라진 것도 여기서는 알아야 할 신호이기 때문이다.
+      - name: 벤더 패치 적용 검증 (NAT 상류 drift 사전 감지)
+        run: |
+          uv run --project finus_nat python finus_nat/scripts/patch_vendor.py \
+            --venv finus_nat/.venv \
+            --require nat/plugins/mem0ai/memory.py \
+            --require mem0/client/main.py \
+            --require nat/plugins/mem0ai/mem0_editor.py \
+            --require nat/plugins/langchain/agent/auto_memory_wrapper/agent.py
+
   mcp-trading-test:
     name: mcp-trading npm test
     runs-on: ubuntu-latest

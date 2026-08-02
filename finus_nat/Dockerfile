@@ -35,29 +35,17 @@ RUN npm ci --omit=dev
 
 WORKDIR /workspace/finus_nat
 RUN uv sync --no-dev
-# DL3059: uv sync와 mem0ai 패치는 캐시 무효화 시점이 다르므로 일부러 RUN을 분리한다.
+# 벤더(site-packages) 패치는 scripts/patch_vendor.py 단일 진입점으로 통합돼 있다.
+# 로컬 실행(scripts/run.sh)과 같은 스크립트를 써서 두 경로가 갈라지지 않게 한다.
+# 상류가 바뀌어 패치를 못 붙이면 스크립트가 0이 아닌 코드로 종료해 빌드가 실패한다.
+# 이게 drift의 강제 지점이다. run.sh는 로컬 편의를 위해 경고만 하고 넘어간다.
+#
+# DL3059: uv sync와 패치를 한 RUN으로 합치면 실패 지점을 구분할 수 없어 분리한다.
+# (patch_vendor.py가 위 COPY에 실려 있어 이 파일을 고치면 uv sync 레이어도 함께
+#  무효화된다. 의존성 레이어 분리는 별도 과제다.)
 # hadolint ignore=DL3059
-RUN python - <<'PY'
-from pathlib import Path
-
-venv_lib = Path("/workspace/finus_nat/.venv/lib")
-matches = list(venv_lib.glob("python3.*/site-packages/nat/plugins/mem0ai/memory.py"))
-if len(matches) != 1:
-    raise SystemExit(f"Expected one mem0ai memory.py, found {matches!r}")
-target = matches[0]
-text = target.read_text()
-old = """    mem0_api_key = os.environ.get(\"MEM0_API_KEY\")\n\n    if mem0_api_key is None:\n        raise RuntimeError(\"Mem0 API key is not set. Please specify it in the environment variable 'MEM0_API_KEY'.\")\n"""
-new = """    mem0_api_key = os.environ.get(\"MEM0_API_KEY\")\n\n    if mem0_api_key is None:\n        if config.host:\n            # Self-hosted Mem0: keep client init deterministic without env provisioning.\n            mem0_api_key = \"selfhost-mem0-static-key\"\n        else:\n            raise RuntimeError(\"Mem0 API key is not set. Please specify it in the environment variable 'MEM0_API_KEY'.\")\n"""
-if old not in text:
-    raise SystemExit("Expected Mem0 API key block not found")
-text = text.replace(old, new, 1)
-
-old = """    mem0_client = AsyncMemoryClient(api_key=mem0_api_key,\n                                    host=config.host,\n                                    org_id=config.org_id,\n                                    project_id=config.project_id)\n"""
-new = """    if config.host:\n        # Open-source self-hosted Mem0 does not expose /v1/ping; bypass cloud-style API key validation.\n        original_validate = AsyncMemoryClient._validate_api_key\n\n        def _skip_validate(self):\n            return \"selfhost-user\"\n\n        AsyncMemoryClient._validate_api_key = _skip_validate\n        try:\n            mem0_client = AsyncMemoryClient(api_key=mem0_api_key,\n                                            host=config.host,\n                                            org_id=config.org_id,\n                                            project_id=config.project_id)\n        finally:\n            AsyncMemoryClient._validate_api_key = original_validate\n    else:\n        mem0_client = AsyncMemoryClient(api_key=mem0_api_key,\n                                        host=config.host,\n                                        org_id=config.org_id,\n                                        project_id=config.project_id)\n"""
-if old not in text:
-    raise SystemExit("Expected Mem0 client initialization block not found")
-target.write_text(text.replace(old, new, 1))
-PY
+RUN python scripts/patch_vendor.py --venv /workspace/finus_nat/.venv \
+    --require nat/plugins/mem0ai/memory.py
 
 EXPOSE 8000
 

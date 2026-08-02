@@ -46,82 +46,18 @@ fi
 
 # Self-hosted Mem0 compatibility for local `run.sh` execution:
 # mem0 OSS endpoints may not implement cloud `/v1/ping` validation.
+# 패치 정의는 Dockerfile과 공유하는 scripts/patch_vendor.py 하나에만 둔다.
+#
+# 여기서는 실패해도 런처를 죽이지 않는다. 이 게이트는 위에서 source한 공용 .env의
+# MEM0_API_KEY만 있어도 통과하므로, Mem0를 쓰지 않는 기본 --nomemory 실행까지
+# 벤더 drift 하나로 막히게 된다. 강제 지점은 Docker 빌드(Dockerfile)이고,
+# 로컬은 경고로 충분하다. set -e에 걸리지 않도록 || 로 받는다.
 if [[ -n "${FINUS_MEM0_HOST:-}" || -n "${MEM0_API_KEY:-}" ]]; then
-  uv run --project "${FE_PKG}" python - <<'PY'
-from pathlib import Path
-
-
-def _venv_site(*parts: str) -> Path | None:
-    lib = Path("finus_nat/.venv/lib")
-    if not lib.is_dir():
-        return None
-    for py_dir in sorted(lib.glob("python3.*")):
-        candidate = py_dir / "site-packages" / Path(*parts)
-        if candidate.is_file():
-            return candidate
-    return None
-
-
-target = _venv_site("nat", "plugins", "mem0ai", "memory.py")
-if target is None:
-    raise SystemExit(0)
-
-text = target.read_text()
-old = """    mem0_api_key = os.environ.get("MEM0_API_KEY")\n\n    if mem0_api_key is None:\n        raise RuntimeError("Mem0 API key is not set. Please specify it in the environment variable 'MEM0_API_KEY'.")\n\n    mem0_client = AsyncMemoryClient(api_key=mem0_api_key,\n                                    host=config.host,\n                                    org_id=config.org_id,\n                                    project_id=config.project_id)\n"""
-new = """    mem0_api_key = os.environ.get("MEM0_API_KEY")\n\n    if mem0_api_key is None:\n        if config.host:\n            mem0_api_key = "selfhost-mem0-static-key"\n        else:\n            raise RuntimeError("Mem0 API key is not set. Please specify it in the environment variable 'MEM0_API_KEY'.")\n\n    if config.host:\n        original_validate = AsyncMemoryClient._validate_api_key\n\n        def _skip_validate(self):\n            return "selfhost-user"\n\n        AsyncMemoryClient._validate_api_key = _skip_validate\n        try:\n            mem0_client = AsyncMemoryClient(api_key=mem0_api_key,\n                                            host=config.host,\n                                            org_id=config.org_id,\n                                            project_id=config.project_id)\n        finally:\n            AsyncMemoryClient._validate_api_key = original_validate\n\n        mem0_client.async_client.headers.pop("Authorization", None)\n        mem0_client.async_client.headers.pop("Mem0-User-ID", None)\n    else:\n        mem0_client = AsyncMemoryClient(api_key=mem0_api_key,\n                                        host=config.host,\n                                        org_id=config.org_id,\n                                        project_id=config.project_id)\n"""
-
-if old in text and new not in text:
-    target.write_text(text.replace(old, new, 1))
-
-client_target = _venv_site("mem0", "client", "main.py")
-if client_target is not None:
-    client_text = client_target.read_text()
-    client_old = """        response = await self.async_client.post("/v1/memories/", json=payload)\n"""
-    client_new = """        endpoint = "/memories" if self.host and "api.mem0.ai" not in self.host else "/v1/memories/"\n        response = await self.async_client.post(endpoint, json=payload)\n"""
-    if client_old in client_text and client_new not in client_text:
-        client_text = client_text.replace(client_old, client_new, 1)
-
-    client_old = """        response = await self.async_client.post(f"/{version}/memories/search/", json=payload)\n"""
-    client_new = """        endpoint = "/search" if self.host and "api.mem0.ai" not in self.host else f"/{version}/memories/search/"\n        response = await self.async_client.post(endpoint, json=payload)\n"""
-    if client_old in client_text and client_new not in client_text:
-        client_text = client_text.replace(client_old, client_new, 1)
-
-    client_target.write_text(client_text)
-
-editor_target = _venv_site("nat", "plugins", "mem0ai", "mem0_editor.py")
-if editor_target is not None:
-    editor_text = editor_target.read_text()
-    editor_old = """    async def add_items(self, items: list[MemoryItem]) -> None:\n"""
-    editor_new = """    async def add_items(self, items: list[MemoryItem], **kwargs) -> None:\n"""
-    if editor_old in editor_text and editor_new not in editor_text:
-        editor_text = editor_text.replace(editor_old, editor_new, 1)
-
-    editor_old = """                                 metadata=item_meta,\n                                 output_format="v1.1"))\n"""
-    editor_new = """                                 metadata=item_meta,\n                                 output_format="v1.1",\n                                 **kwargs))\n"""
-    if editor_old in editor_text and editor_new not in editor_text:
-        editor_text = editor_text.replace(editor_old, editor_new, 1)
-
-    editor_old = """        user_id = kwargs.pop("user_id")  # Ensure user ID is in keyword arguments\n\n        search_result = await self._client.search(query, user_id=user_id, top_k=top_k, output_format="v1.1", **kwargs)\n"""
-    editor_new = """        user_id = kwargs.pop("user_id")  # Ensure user ID is in keyword arguments\n        search_kwargs = dict(kwargs)\n\n        host = getattr(self._client, "host", "") or ""\n        if "api.mem0.ai" in host:\n            search_kwargs["user_id"] = user_id\n        else:\n            search_kwargs["filters"] = {"user_id": user_id}\n\n        try:\n            search_result = await self._client.search(query, top_k=top_k, output_format="v1.1", **search_kwargs)\n        except Exception:\n            if "api.mem0.ai" in host:\n                raise\n\n            response = await self._client.async_client.get("/memories", params={"user_id": user_id})\n            response.raise_for_status()\n            results = response.json().get("results", [])\n            needle = query.casefold().strip()\n            if needle:\n                matched = [item for item in results if needle in str(item.get("memory", "")).casefold()]\n                if matched:\n                    results = matched\n            search_result = {"results": results[:top_k]}\n"""
-    if editor_old in editor_text and editor_new not in editor_text:
-        editor_text = editor_text.replace(editor_old, editor_new, 1)
-        editor_target.write_text(editor_text)
-
-agent_target = _venv_site("nat", "plugins", "langchain", "agent", "auto_memory_wrapper", "agent.py")
-if agent_target is not None:
-    agent_text = agent_target.read_text()
-    agent_old = """        user_manager = self._context.user_manager\n"""
-    agent_new = """        user_manager = getattr(self._context, "user_manager", None)\n"""
-    if agent_old in agent_text and agent_new not in agent_text:
-        agent_text = agent_text.replace(agent_old, agent_new, 1)
-
-    agent_old = """        if self._context.metadata and self._context.metadata.headers:\n            user_id = self._context.metadata.headers.get("x-user-id")\n"""
-    agent_new = """        metadata = getattr(self._context, "metadata", None)\n        headers = getattr(metadata, "headers", None)\n        if headers:\n            user_id = headers.get("x-user-id")\n"""
-    if agent_old in agent_text and agent_new not in agent_text:
-        agent_text = agent_text.replace(agent_old, agent_new, 1)
-
-    agent_target.write_text(agent_text)
-PY
+  uv run --project "${FE_PKG}" python "${FE_PKG}/scripts/patch_vendor.py" \
+    --venv "${FE_PKG_ABS}/.venv" || {
+    echo "경고: 벤더 패치를 적용하지 못했습니다. Mem0(--memory) 경로가 정상 동작하지 않을 수 있습니다." >&2
+    echo "      NAT/mem0 버전을 올렸다면 ${FE_PKG}/scripts/patch_vendor.py 의 원본 문자열을 갱신하세요." >&2
+  }
 fi
 
 _default_config="${FE_PKG}/configs/router_nomemory.yml"
