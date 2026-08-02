@@ -134,14 +134,8 @@ async def _resolve_stock_code(stock: str) -> str:
                 resolved,
             )
             return ""
-        # stock-master.js의 코드 형태 지름길이 입력을 그대로 되돌려준 경우(응답의 종목명 == 코드)는
-        # 종목명->코드 매핑이 아니므로 캐싱하지 않는다. 이 조건은 지름길이 실제로 트리거된
-        # 좁은 경우만 잡아낸다 — BOM이 붙은 "종목명" 입력은 지름길이 아니라 정확한 이름
-        # 매칭 경로로 응답이 오므로 이 조건을 통과해버린다. 그 경로는 입력 정규화
-        # (_normalize_stock_input)와 크기 상한(_STOCK_CODE_CACHE_MAX)으로 따로 막는다.
-        name_part = resolved_text[: match.start()].strip()
-        if name_part.upper() == code.upper():
-            return code
+        # 지름길 에코("SIMPAC (SIMPAC, UNKNOWN)")는 숫자가 없어 위 _has_code_digit
+        # 가드에서 이미 걸러진다.
         # 상한 도달은 정상 조건이 아니다 — 종목마스터 4,353종 규모에서는 일어나지
         # 않아야 하며, 발생했다면 입력 정규화가 stock-master.js와 다시 어긋났다는
         # 신호다. dict는 자동으로 비우지 않으므로 침묵한 채 자라기만 하면 상한을
