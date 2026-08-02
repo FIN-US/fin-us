@@ -1,6 +1,7 @@
 import pytest
 
 from backend.redis_state import (
+    SIGNAL_HASH_TTL_SEC,
     RedisSchedulerState,
     signal_hash,
     normalize_signal_text,
@@ -10,6 +11,7 @@ from backend.redis_state import (
 class FakeRedis:
     def __init__(self):
         self.store = {}
+        self.calls = []
 
     async def get(self, key):
         return self.store.get(key)
@@ -17,6 +19,7 @@ class FakeRedis:
     async def set(self, key, value, *, ex=None, nx=False):
         if nx and key in self.store:
             return False
+        self.calls.append((key, value, ex))
         self.store[key] = value
         return True
 
@@ -40,14 +43,21 @@ def test_signal_hash_normalizes_order_and_whitespace():
 
 
 @pytest.mark.asyncio
-async def test_last_signal_hash_round_trip():
-    state = RedisSchedulerState(FakeRedis())
-    digest = signal_hash("삼성전자 신규 뉴스")
+async def test_set_last_signal_writes_only_hash_and_text_with_ttl():
+    """이 리팩터링이 실제로 바꾼 것(쓰기 3건 → 2건, 두 키 모두 TTL 부여)을 고정한다.
 
-    await state.set_last_signal("news", "삼성전자", "삼성전자 신규 뉴스", digest)
+    왕복 검증은 test_last_signal_state_is_scoped_by_source가 이미 덮으므로,
+    여기서는 쓰기 횟수와 TTL만 본다.
+    """
+    redis = FakeRedis()
+    state = RedisSchedulerState(redis)
 
-    assert await state.get_last_signal_hash("news", "삼성전자") == digest
-    assert await state.get_last_signal_text("news", "삼성전자") == "삼성전자 신규 뉴스"
+    await state.set_last_signal("news", "삼성전자", "삼성전자 신규 뉴스", "d")
+
+    assert redis.calls == [
+        ("finus:signal:last_hash:news:삼성전자", "d", SIGNAL_HASH_TTL_SEC),
+        ("finus:signal:last_text:news:삼성전자", "삼성전자 신규 뉴스", SIGNAL_HASH_TTL_SEC),
+    ]
 
 
 @pytest.mark.asyncio
