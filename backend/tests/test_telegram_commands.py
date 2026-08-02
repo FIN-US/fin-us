@@ -1198,7 +1198,14 @@ def test_extract_stock_code_returns_none_when_unmatched():
 )
 @pytest.mark.parametrize(
     "text_template",
-    ["/buy {name} 10", "/sell {name} 10", "{name} 10주 시장가로 매수해줘"],
+    [
+        "/buy {name} 10",
+        "/sell {name} 10",
+        # 자연어 경로는 _parse_natural_order_text가 "매수"/"매도" 리터럴을 요구한다.
+        # 매수·매도 양쪽 분기를 모두 거쳐 _handle_order_command로 합류하는지 본다.
+        "{name} 10주 시장가로 매수해줘",
+        "{name} 10주 시장가로 매도해줘",
+    ],
 )
 @pytest.mark.asyncio
 async def test_order_command_rejects_unorderable_stock_code_before_quote_and_balance(
@@ -1237,10 +1244,14 @@ async def test_order_command_rejects_unorderable_stock_code_before_quote_and_bal
     )
 
     assert [call[1] for call in calls] == ["resolve_stock_code"]
-    # 거절 사유는 종목코드 형태인데 사용자가 입력한 건 종목명이므로 둘 다 보여준다.
-    assert stock_name in notifier.messages[-1]
-    assert stock_code in notifier.messages[-1]
-    assert "주문을 지원하지 않습니다" in notifier.messages[-1]
+    message = notifier.messages[-1]
+    # 이름과 코드를 따로 단언하면 resolve_stock_code 응답("덕양에너젠 (0001A0, KOSDAQ)")을
+    # 그대로 흘려보내도 통과한다. 조합된 형태를 단언해야 실제로 우리가 만든 문장이 나갔음이
+    # 고정된다.
+    assert f"{stock_name}({stock_code})" in message
+    assert "주문을 지원하지 않습니다" in message
+    # 왜 안 되는지를 설명하는 문장이 이 수정의 핵심이므로 함께 고정한다.
+    assert "ETN·펀드 등 영숫자 종목코드는 아직 주문 대상이 아닙니다." in message
     assert handler.pending_orders == {}
 
 

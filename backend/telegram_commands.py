@@ -47,8 +47,8 @@ NATURAL_ORDER_HELP = "자연어 주문을 해석할 수 없습니다. /buy 또�
 # 종목명에 괄호가 들어가고 닫히지 않는 종목이 있어(예: "KIWOOM 엔비디아미국30년국채혼합액티브(H")
 # 단순 괄호 매칭 대신 코드+쉼표 조합에 앵커한다. 종목명에 쉼표가 들어가는 종목은 없다.
 # 코드 길이는 6자(3,889종목)·7자 ETN(389종목)·9자 펀드(75종목)가 섞여 있어 상한을 두지 않는다.
-# backend/services.py에도 같은 정규식이 별도로 정의되어 있다(#125). 공용 헬퍼 추출은
-# 두 PR이 동시에 열려 있어 미뤘고, 둘 다 머지된 뒤 정리한다.
+# PR #133(이슈 #125)이 services.py에 같은 정규식을 추가 중이다. 두 PR이 동시에 열려 있어
+# 머지 컨플릭트를 피하려고 공용 헬퍼 추출은 미뤘고, 둘 다 머지된 뒤 정리한다(#140).
 _STOCK_CODE_EXTRACT_RE = re.compile(r"\(([0-9A-Z]{6,}),")
 # 추출 가능한 코드 전부가 주문 가능한 건 아니다. mcp-trading/order.js의
 # buildCashOrderBody()가 적용하는 허용 범위(`/^\d{6,7}$/`)와 일치시킨다.
@@ -693,8 +693,9 @@ class TelegramCommandHandler:
             if not _ORDERABLE_STOCK_CODE_RE.fullmatch(stock_code):
                 # 사용자가 입력한 건 종목명인데 거절 사유는 종목코드 형태다.
                 # 코드를 함께 보여주지 않으면 인과가 보이지 않는다.
+                # 조사(은/는)는 코드 끝자리 받침에 따라 갈리므로 아예 쓰지 않는다.
                 await self._send_text_or_raise(
-                    f"주문 불가: {stock_name}({stock_code})은 현재 주문을 지원하지 않습니다. "
+                    f"주문 불가: {stock_name}({stock_code}) — 현재 주문을 지원하지 않습니다. "
                     "ETN·펀드 등 영숫자 종목코드는 아직 주문 대상이 아닙니다."
                 )
                 return
