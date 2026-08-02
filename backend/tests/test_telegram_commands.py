@@ -1186,20 +1186,31 @@ def test_extract_stock_code_returns_none_when_unmatched():
 
 
 @pytest.mark.parametrize(
-    "stock_name, resolved",
+    "stock_name, resolved, stock_code",
     [
-        ("덕양에너젠", "덕양에너젠 (0001A0, KOSDAQ)"),
-        ("한투글로벌넥스트웨이브1(A)", "한투글로벌넥스트웨이브1(A) (F70100026, KOSPI)"),
+        ("덕양에너젠", "덕양에너젠 (0001A0, KOSDAQ)", "0001A0"),
+        (
+            "한투글로벌넥스트웨이브1(A)",
+            "한투글로벌넥스트웨이브1(A) (F70100026, KOSPI)",
+            "F70100026",
+        ),
     ],
 )
+@pytest.mark.parametrize(
+    "text_template",
+    ["/buy {name} 10", "/sell {name} 10", "{name} 10주 시장가로 매수해줘"],
+)
 @pytest.mark.asyncio
-async def test_buy_command_rejects_unorderable_stock_code_before_quote_and_balance(
-    stock_name, resolved
+async def test_order_command_rejects_unorderable_stock_code_before_quote_and_balance(
+    stock_name, resolved, stock_code, text_template
 ):
     """주문 미지원 코드는 시세·잔고 조회 전에 끊고 사유를 정확히 알린다.
 
-    코드 추출은 성공하지만 mcp-trading/order.js:73-78이 숫자 코드만 받는다(#73).
-    가드가 없으면 /confirm 이후에야 실패하면서 60초 대기 슬롯까지 점유한다.
+    코드 추출은 성공하지만 mcp-trading/order.js의 buildCashOrderBody()가 숫자
+    코드만 받는다(#73). 가드가 없으면 /confirm 이후에야 실패하면서 60초 대기
+    슬롯까지 점유한다.
+
+    자연어 주문도 _handle_order_command로 합류하므로 세 경로를 함께 고정한다.
     """
     calls = []
 
@@ -1217,11 +1228,19 @@ async def test_buy_command_rejects_unorderable_stock_code_before_quote_and_balan
     )
 
     await handler.handle_update(
-        {"message": {"chat": {"id": 123}, "text": f"/buy {stock_name} 10"}}
+        {
+            "message": {
+                "chat": {"id": 123},
+                "text": text_template.format(name=stock_name),
+            }
+        }
     )
 
     assert [call[1] for call in calls] == ["resolve_stock_code"]
-    assert notifier.messages[-1] == "주문 불가: 이 종목은 현재 주문을 지원하지 않습니다."
+    # 거절 사유는 종목코드 형태인데 사용자가 입력한 건 종목명이므로 둘 다 보여준다.
+    assert stock_name in notifier.messages[-1]
+    assert stock_code in notifier.messages[-1]
+    assert "주문을 지원하지 않습니다" in notifier.messages[-1]
     assert handler.pending_orders == {}
 
 
