@@ -211,10 +211,14 @@ def test_looks_like_stock_code_accepts_alphanumeric_and_rejects_plain_names():
 async def test_perform_stock_analysis_falls_back_to_empty_stock_code_on_mcp_failure(
     monkeypatch, caplog
 ):
+    call_count = 0
+
     async def fake_llm_chat(provider, prompt, *, conversation_id=None):
         return "plain analysis"
 
     async def failing_run_mcp_tool(params, tool_name, arguments):
+        nonlocal call_count
+        call_count += 1
         raise HTTPException(status_code=500, detail="종목코드 조회 도구 오류")
 
     monkeypatch.setattr(services, "llm_chat", fake_llm_chat)
@@ -229,6 +233,67 @@ async def test_perform_stock_analysis_falls_back_to_empty_stock_code_on_mcp_fail
     assert fake_session.report.stock_name == "삼성전자"
     assert result is not None
     assert "종목코드 조회 실패" in caplog.text
+
+    # 예외 경로 결과도 캐시되면 안 된다. cached("") is not None이 True가 되어
+    # 두 번째 호출이 MCP를 건너뛰게 되는 회귀를 막는다.
+    await services.perform_stock_analysis("삼성전자", "openai", FakeSession())
+
+    assert call_count == 2
+    assert services._stock_code_cache == {}
+
+
+@pytest.mark.asyncio
+async def test_perform_stock_analysis_falls_back_to_empty_stock_code_on_extraction_failure(
+    monkeypatch, caplog
+):
+    """resolveStock은 찾을 수 없음/모호함 모두 예외를 던지므로, 추출 실패로 이어지는
+    성공 응답은 run_mcp_tool 자체의 `if not result.content: return ""` 경로에서만
+    실제로 발생한다. 그래서 스텁도 빈 문자열을 그대로 돌려준다.
+    """
+
+    async def fake_llm_chat(provider, prompt, *, conversation_id=None):
+        return "plain analysis"
+
+    async def fake_run_mcp_tool(params, tool_name, arguments):
+        return ""
+
+    monkeypatch.setattr(services, "llm_chat", fake_llm_chat)
+    monkeypatch.setattr(services, "run_mcp_tool", fake_run_mcp_tool)
+
+    fake_session = FakeSession()
+    with caplog.at_level(logging.WARNING, logger=services.logger.name):
+        result = await services.perform_stock_analysis("삼성전자", "openai", fake_session)
+
+    assert fake_session.report.stock_code == ""
+    assert result is not None
+    # "종목코드 추출 실패"(match is None)와 "종목코드 조회 실패"(예외)는 다른 분기다.
+    # if match is None 가드가 사라지면 match.group(1)이 AttributeError를 던지고
+    # 바깥 except가 그것도 삼켜 stock_code는 여전히 ""가 되므로, stock_code 단정만으로는
+    # 이 가드가 사라진 회귀를 잡지 못한다. 로그 문구가 실질적인 증거다.
+    assert "종목코드 추출 실패" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_perform_stock_analysis_extraction_failure_not_cached(monkeypatch):
+    async def fake_llm_chat(provider, prompt, *, conversation_id=None):
+        return "plain analysis"
+
+    mcp_calls = []
+
+    async def fake_run_mcp_tool(params, tool_name, arguments):
+        mcp_calls.append(arguments)
+        return ""
+
+    monkeypatch.setattr(services, "llm_chat", fake_llm_chat)
+    monkeypatch.setattr(services, "run_mcp_tool", fake_run_mcp_tool)
+
+    await services.perform_stock_analysis("삼성전자", "openai", FakeSession())
+    await services.perform_stock_analysis("삼성전자", "openai", FakeSession())
+
+    # 캐시된 값이 없어야 두 번째 호출도 MCP를 다시 탄다. `if cached is not None`이
+    # `if cached:`로 바뀌면 캐시된 ""도 참으로 취급되어 이 단정이 깨진다.
+    assert len(mcp_calls) == 2
+    assert services._stock_code_cache == {}
 
 
 @pytest.mark.asyncio
