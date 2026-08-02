@@ -19,6 +19,8 @@ class FakeRedis:
     async def set(self, key, value, *, ex=None, nx=False):
         if nx and key in self.store:
             return False
+        # nx 조기 반환 뒤에 기록하므로 calls에는 "실제로 쓰인 것"만 남는다.
+        # 획득 실패한 락 시도는 잡히지 않으니, 시도 횟수를 보려면 별도 카운터가 필요하다.
         self.calls.append((key, value, ex))
         self.store[key] = value
         return True
@@ -46,8 +48,9 @@ def test_signal_hash_normalizes_order_and_whitespace():
 async def test_set_last_signal_writes_only_hash_and_text_with_ttl():
     """이 리팩터링이 실제로 바꾼 것(쓰기 3건 → 2건, 두 키 모두 TTL 부여)을 고정한다.
 
-    왕복 검증은 test_last_signal_state_is_scoped_by_source가 이미 덮으므로,
-    여기서는 쓰기 횟수와 TTL만 본다.
+    값 왕복은 test_last_signal_state_is_scoped_by_source가 덮으므로 여기서는
+    쓰기 대상·횟수·TTL만 본다. 키 문자열은 RedisKeys에서 받아 와, 키 포맷이
+    바뀌었을 때 이 테스트가 엉뚱한 사유로 실패하지 않게 한다.
     """
     redis = FakeRedis()
     state = RedisSchedulerState(redis)
@@ -55,8 +58,12 @@ async def test_set_last_signal_writes_only_hash_and_text_with_ttl():
     await state.set_last_signal("news", "삼성전자", "삼성전자 신규 뉴스", "d")
 
     assert redis.calls == [
-        ("finus:signal:last_hash:news:삼성전자", "d", SIGNAL_HASH_TTL_SEC),
-        ("finus:signal:last_text:news:삼성전자", "삼성전자 신규 뉴스", SIGNAL_HASH_TTL_SEC),
+        (state.keys.last_hash("news", "삼성전자"), "d", SIGNAL_HASH_TTL_SEC),
+        (
+            state.keys.last_text("news", "삼성전자"),
+            "삼성전자 신규 뉴스",
+            SIGNAL_HASH_TTL_SEC,
+        ),
     ]
 
 
