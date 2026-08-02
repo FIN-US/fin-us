@@ -139,10 +139,10 @@ test("OrderDedupStore blocks duplicate reservations across separate instances sh
   );
 });
 
-// 이 테스트는 parsePositiveInteger()의 현재 동작(잘못된 값을 조용히 기본값으로
-// 대체)을 있는 그대로 문서화한다. 이 침묵하는 폴백은 바람직한 설계로 보증하는
-// 것이 아니라 별도 이슈로 추적 중이며, 이번 PR에서는 손대지 않는다.
-test("OrderDedupStore resolves ttlMs from KIS_ORDER_DEDUP_TTL_MS env var, silently falling back on invalid values", (t) => {
+// 잘못된 KIS_ORDER_DEDUP_TTL_MS 값은 기본값으로 폴백하되, 사용자가 실제로
+// 값을 지정했는데 파싱에 실패한 경우 stderr에 경고를 남긴다(#148).
+// 값이 아예 없는 경우(정상적인 기본값 사용)는 조용해야 한다.
+test("OrderDedupStore resolves ttlMs from KIS_ORDER_DEDUP_TTL_MS env var, warning on invalid values but staying silent when unset", (t) => {
   const originalEnvValue = process.env.KIS_ORDER_DEDUP_TTL_MS;
   t.after(() => {
     if (originalEnvValue === undefined) {
@@ -152,11 +152,11 @@ test("OrderDedupStore resolves ttlMs from KIS_ORDER_DEDUP_TTL_MS env var, silent
     }
   });
 
-  const consoleError = t.mock.method(console, "error");
+  const consoleError = t.mock.method(console, "error", () => {});
 
   const DEFAULT_TTL_MS = 120_000;
-  const cases = [
-    ["600000", 600_000], // 유효한 값은 그대로 사용된다
+  const validCase = ["600000", 600_000]; // 유효한 값은 그대로 사용되고 경고가 없다
+  const invalidCases = [
     ["600_000", DEFAULT_TTL_MS], // JS 숫자 구분자(_) 습관 - Number()는 이를 파싱하지 못함
     ["10m", DEFAULT_TTL_MS], // 단위 접미사 오타
     ["0", DEFAULT_TTL_MS], // <= 0 분기
@@ -164,17 +164,69 @@ test("OrderDedupStore resolves ttlMs from KIS_ORDER_DEDUP_TTL_MS env var, silent
     ["60.5", DEFAULT_TTL_MS], // !Number.isInteger 분기
   ];
 
-  for (const [envValue, expectedTtlMs] of cases) {
-    process.env.KIS_ORDER_DEDUP_TTL_MS = envValue;
-    assert.equal(new OrderDedupStore().ttlMs, expectedTtlMs, `env=${envValue}`);
-  }
-
-  delete process.env.KIS_ORDER_DEDUP_TTL_MS;
-  assert.equal(new OrderDedupStore().ttlMs, DEFAULT_TTL_MS, "env=unset");
-
+  // 유효한 값: 파싱된 값을 그대로 쓰고, 경고가 없어야 한다.
+  const [validEnvValue, expectedValidTtlMs] = validCase;
+  process.env.KIS_ORDER_DEDUP_TTL_MS = validEnvValue;
+  assert.equal(new OrderDedupStore().ttlMs, expectedValidTtlMs, `env=${validEnvValue}`);
   assert.equal(
     consoleError.mock.callCount(),
     0,
-    "잘못된 값에 대한 폴백은 조용히 처리되어야 합니다(console.error 호출 없음)",
+    `유효한 값(env=${validEnvValue})에는 경고가 없어야 합니다`,
+  );
+
+  // 잘못된 값: 기본값으로 폴백하되, 값마다 경고가 한 번씩 발생해야 한다.
+  for (const [envValue, expectedTtlMs] of invalidCases) {
+    consoleError.mock.resetCalls();
+    process.env.KIS_ORDER_DEDUP_TTL_MS = envValue;
+    assert.equal(new OrderDedupStore().ttlMs, expectedTtlMs, `env=${envValue}`);
+    assert.equal(
+      consoleError.mock.callCount(),
+      1,
+      `잘못된 값(env=${envValue})에는 경고가 한 번 발생해야 합니다`,
+    );
+    const [message] = consoleError.mock.calls[0].arguments;
+    assert.match(
+      message,
+      /KIS_ORDER_DEDUP_TTL_MS/,
+      `경고 메시지에 변수명이 포함되어야 합니다(env=${envValue})`,
+    );
+    assert.ok(
+      message.includes(envValue),
+      `경고 메시지에 잘못된 값이 포함되어야 합니다: ${message}`,
+    );
+  }
+
+  // 값이 아예 없는 경우(정상적인 기본값 사용)는 조용해야 한다.
+  consoleError.mock.resetCalls();
+  delete process.env.KIS_ORDER_DEDUP_TTL_MS;
+  assert.equal(new OrderDedupStore().ttlMs, DEFAULT_TTL_MS, "env=unset");
+  assert.equal(
+    consoleError.mock.callCount(),
+    0,
+    "env var가 설정되지 않은 정상 폴백 경로는 조용해야 합니다(console.error 호출 없음)",
+  );
+});
+
+test("OrderDedupStore stays silent when KIS_ORDER_DEDUP_TTL_MS is set but blank", (t) => {
+  const originalEnvValue = process.env.KIS_ORDER_DEDUP_TTL_MS;
+  t.after(() => {
+    if (originalEnvValue === undefined) {
+      delete process.env.KIS_ORDER_DEDUP_TTL_MS;
+    } else {
+      process.env.KIS_ORDER_DEDUP_TTL_MS = originalEnvValue;
+    }
+  });
+
+  const consoleError = t.mock.method(console, "error", () => {});
+
+  // 빈 문자열(KIS_ORDER_DEDUP_TTL_MS=)은 .env 파일에서 값을 비워둔 상태와
+  // 동일하게 취급한다 - 오타로 값을 지정한 것이 아니라 사실상 미설정과
+  // 같은 상태이므로 경고하지 않는다.
+  process.env.KIS_ORDER_DEDUP_TTL_MS = "";
+  assert.equal(new OrderDedupStore().ttlMs, 120_000, "env=blank");
+  assert.equal(
+    consoleError.mock.callCount(),
+    0,
+    "빈 문자열은 미설정과 동일하게 조용히 처리되어야 합니다",
   );
 });
