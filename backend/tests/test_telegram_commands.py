@@ -1133,6 +1133,98 @@ async def test_buy_command_rejects_unresolved_stock_code_before_quote_and_balanc
     assert handler.pending_orders == {}
 
 
+def test_extract_stock_code_numeric():
+    handler = TelegramCommandHandler(notifier=FakeNotifier())
+    assert handler._extract_stock_code("삼성전자 (005930, KOSPI)") == "005930"
+
+
+def test_extract_stock_code_alphanumeric():
+    handler = TelegramCommandHandler(notifier=FakeNotifier())
+    assert handler._extract_stock_code("덕양에너젠 (0001A0, KOSDAQ)") == "0001A0"
+
+
+def test_extract_stock_code_ignores_parentheses_in_stock_name():
+    """종목명에 괄호가 있어도 코드+쉼표 앵커가 코드만 뽑아낸다.
+
+    종목마스터 실제 항목이다. 이름의 괄호가 닫히지 않는 종목(0015E0)까지 있어
+    단순 괄호 매칭으로는 안전하지 않다.
+    """
+    handler = TelegramCommandHandler(notifier=FakeNotifier())
+    assert (
+        handler._extract_stock_code("한투글로벌넥스트웨이브1(A-e) (F70100027, KOSPI)")
+        == "F70100027"
+    )
+    assert (
+        handler._extract_stock_code(
+            "KIWOOM 엔비디아미국30년국채혼합액티브(H (0015E0, KOSPI)"
+        )
+        == "0015E0"
+    )
+
+
+def test_extract_stock_code_accepts_seven_and_nine_char_codes():
+    """코드 길이 상한을 두지 않는 이유를 고정한다.
+
+    종목마스터 코드 길이는 6자 3,889 / 7자 ETN 389 / 9자 펀드 75종목이다.
+    정규식을 {6}으로 좁히면 464종목이, {6,7}로 좁히면 9자 펀드 75종목이
+    조용히 추출 실패로 돌아간다.
+    """
+    handler = TelegramCommandHandler(notifier=FakeNotifier())
+    assert (
+        handler._extract_stock_code("신한 레버리지 다우존스지수 선물 ETN(H) (Q500020, KOSPI)")
+        == "Q500020"
+    )
+    assert (
+        handler._extract_stock_code("한투글로벌넥스트웨이브1(A) (F70100026, KOSPI)")
+        == "F70100026"
+    )
+
+
+def test_extract_stock_code_returns_none_when_unmatched():
+    handler = TelegramCommandHandler(notifier=FakeNotifier())
+    assert handler._extract_stock_code("종목을 찾지 못했습니다") is None
+
+
+@pytest.mark.parametrize(
+    "stock_name, resolved",
+    [
+        ("덕양에너젠", "덕양에너젠 (0001A0, KOSDAQ)"),
+        ("한투글로벌넥스트웨이브1(A)", "한투글로벌넥스트웨이브1(A) (F70100026, KOSPI)"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_buy_command_rejects_unorderable_stock_code_before_quote_and_balance(
+    stock_name, resolved
+):
+    """주문 미지원 코드는 시세·잔고 조회 전에 끊고 사유를 정확히 알린다.
+
+    코드 추출은 성공하지만 mcp-trading/order.js:73-78이 숫자 코드만 받는다(#73).
+    가드가 없으면 /confirm 이후에야 실패하면서 60초 대기 슬롯까지 점유한다.
+    """
+    calls = []
+
+    async def mcp_runner(server_params, tool_name, arguments):
+        calls.append((server_params, tool_name, arguments))
+        if tool_name == "resolve_stock_code":
+            return resolved
+        raise AssertionError(f"주문 불가 종목인데 호출됨: {tool_name}")
+
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        mcp_runner=mcp_runner,
+        now_factory=lambda: datetime(2026, 5, 20, 10, 0, tzinfo=KST),
+    )
+
+    await handler.handle_update(
+        {"message": {"chat": {"id": 123}, "text": f"/buy {stock_name} 10"}}
+    )
+
+    assert [call[1] for call in calls] == ["resolve_stock_code"]
+    assert notifier.messages[-1] == "주문 불가: 이 종목은 현재 주문을 지원하지 않습니다."
+    assert handler.pending_orders == {}
+
+
 @pytest.mark.asyncio
 async def test_cancel_removes_pending_order():
     async def mcp_runner(server_params, tool_name, arguments):
