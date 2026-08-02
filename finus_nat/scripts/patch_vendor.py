@@ -273,8 +273,11 @@ def _write_patched(target: Path, text: str) -> None:
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
-        shutil.copymode(target, tmp)  # 방향 주의: target -> tmp. 반대로 하면 읽기 전용
-        # 원본이 tmp를 읽기 전용으로 만들어 os.replace()를 막는다.
+        shutil.copymode(target, tmp)  # 방향: target -> tmp. target의 원래 모드(예:
+        # 0o444)를 tmp에 물려줘, 아래 replace 이후에도 벤더 파일의 모드가 보존되게
+        # 한다(반대 방향 copymode(tmp, target)는 이 목적에 맞지 않는다 - tmp는 새로
+        # 만든 파일이라 물려줄 의미 있는 모드가 없고, target을 tmp의 기본 모드로
+        # 덮어써 원래 모드를 잃는다).
         #
         # target 자체가 읽기 전용(예: 0o444)이면 Windows의 MoveFileEx(os.replace 내부
         # 구현)가 그 자리를 갈아치우길 거부해 PermissionError를 낸다(실측: 0o444

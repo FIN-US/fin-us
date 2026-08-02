@@ -427,8 +427,9 @@ def test_write_normalizes_to_lf_no_crlf_injected(pv, tmp_path):
 
 @pytest.mark.skipif(os.name == "nt", reason="Windows는 POSIX 파일 모드 비트를 쓰지 않는다.")
 def test_write_preserves_file_mode(pv, tmp_path):
-    """`shutil.copymode`의 방향은 target -> tmp다. 뒤집으면 읽기 전용 원본이
-    tmp까지 읽기 전용으로 만들어 `os.replace()`를 막는다.
+    """`shutil.copymode`의 방향은 target -> tmp다. target의 원래 모드를 tmp에
+    물려줘, replace 이후에도 벤더 파일의 모드가 보존되게 하기 위해서다(tmp는
+    새로 만든 파일이라 물려줄 의미 있는 모드가 없다).
     """
     venv, site_packages = _make_site_packages(tmp_path)
     memory_patch = _patch_by_name(pv, MEMORY_NAME)

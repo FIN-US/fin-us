@@ -38,7 +38,8 @@ RUN uv sync --no-dev
 # 벤더(site-packages) 패치는 scripts/patch_vendor.py 단일 진입점으로 통합돼 있다.
 # 로컬 실행(scripts/run.sh)과 같은 스크립트를 써서 두 경로가 갈라지지 않게 한다.
 # 상류가 바뀌어 패치를 못 붙이면 스크립트가 0이 아닌 코드로 종료해 빌드가 실패한다.
-# 이게 drift의 강제 지점이다. run.sh는 로컬 편의를 위해 경고만 하고 넘어간다.
+# run.sh도 이제 config가 실제로 mem0_memory를 쓰면 로컬에서도 fatal이다(더는
+# 경고만 하고 넘어가지 않는다) - 여기(Docker 빌드)가 유일한 강제 지점은 아니다.
 #
 # DL3059: uv sync와 패치를 한 RUN으로 합치면 실패 지점을 구분할 수 없어 분리한다.
 # (patch_vendor.py가 위 COPY에 실려 있어 이 파일을 고치면 uv sync 레이어도 함께
