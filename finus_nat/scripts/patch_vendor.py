@@ -277,8 +277,11 @@ def _write_patched(target: Path, text: str) -> None:
     """
     fd, tmp = tempfile.mkstemp(dir=target.parent, prefix=target.name + ".", suffix=".tmp")
     # replace 실패 시 되돌릴 수 있도록, 아래에서 쓰기 가능 비트를 걷어내기 전의
-    # 원래 모드를 미리 잡아둔다.
-    original_mode = os.stat(target).st_mode
+    # 원래 모드를 미리 잡아둔다. `stat.S_IMODE()`로 권한 비트만 추린다 - 순수
+    # `st_mode`에는 `S_IFREG` 같은 파일 타입 비트도 섞여 있어, 그걸 그대로
+    # `os.chmod()`에 넘기면 (OS가 그 비트를 무시해 결과적으론 무해하지만) 의도가
+    # "권한만 바꾼다"는 것과 어긋난다.
+    original_mode = stat.S_IMODE(os.stat(target).st_mode)
     try:
         # mkstemp는 이미 열린 OS 레벨 fd를 준다. 이름으로 다시 열지 않고 그 fd를
         # 그대로 소비해야 한다 — 그러지 않으면 fd가 열린 채 남아 Windows에서
@@ -328,7 +331,7 @@ def _write_patched(target: Path, text: str) -> None:
         # 전에 tmp를 쓰기 가능하게 만들어 정리가 실제로 성공하게 한다(tmp는 이미
         # site-packages 밖으로 나갈 일이 없는 임시 파일이라 모드 복원이 필요 없다).
         try:
-            os.chmod(tmp, stat.S_IWRITE | os.stat(tmp).st_mode)
+            os.chmod(tmp, stat.S_IWRITE | stat.S_IMODE(os.stat(tmp).st_mode))
         except OSError:
             pass
         try:

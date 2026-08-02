@@ -131,8 +131,13 @@ done
 # 둘 다 게이트를 무력화하는 결과(GATE=SKIP)라 issue #65가 없애려던 바로 그
 # silent-skip이 가드 안에서 재현되는 셈이었다. 셸로 nat 로더를 재구현하며 계속
 # 따라잡는 대신, nat.utils.io.yaml_tools.yaml_load()를 그대로 호출해 병합된
-# dict를 검사한다 - 상속 규칙이 갈라질 여지 자체가 없다. 인터프리터는 두 줄
-# 뒤 patch_vendor.py 호출에서 어차피 필요하므로 추가 의존성도 아니다.
+# dict를 검사한다 - 상속 규칙이 갈라질 여지 자체가 없다. 다만 이건 공짜가
+# 아니다: `--nomemory`(기본값)는 게이트가 3(미사용)을 반환한 뒤 바로 아래
+# case 문에서 skip하고 patch_vendor.py를 아예 호출하지 않으므로, "두 줄 뒤
+# 어차피 필요하다"는 말은 이 경로에서는 성립하지 않는다. 실측 비용은
+# 인터프리터 직접 기동 ~180-210ms, `uv run` 경유 시 ~260-280ms인 반면(콜드
+# uv 캐시가 아닌 정상 상태 기준), 예전 grep/sed 방식은 ~5ms였다. 매 실행마다
+# 이 오버헤드를 내는 대신, silent-skip을 없애기 위한 값싼 비용으로 받아들인다.
 #
 # 종료 코드: 0=mem0 사용, 3=mem0 미사용, 2=판단 불가(설정 파일 없음/파싱 실패/
 # 순환 참조 등). 2는 "쓰지 않는다"고 조용히 넘어가면 안 되는 경우이므로 호출부가
@@ -164,7 +169,11 @@ except Exception as exc:
 
 def _contains_mem0(value) -> bool:
     if isinstance(value, dict):
-        return any(_contains_mem0(v) for v in value.values())
+        # 키도 재귀한다: `mem0_memory:`처럼 값 없이 키 이름만으로 memory를
+        # 정의하는 config는 값(.values())만 보면 놓친다. 지금 router.yml은
+        # `router_mem0_memory:` 키에 `_type: mem0_memory` 값을 짝지어 쓰므로
+        # 값 검사만으로도 걸리지만, 그 짝을 강제하는 스키마는 없다.
+        return any(_contains_mem0(k) or _contains_mem0(v) for k, v in value.items())
     if isinstance(value, list):
         return any(_contains_mem0(v) for v in value)
     return isinstance(value, str) and "mem0_memory" in value
