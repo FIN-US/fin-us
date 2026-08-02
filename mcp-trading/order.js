@@ -70,6 +70,9 @@ export function buildCashOrderBody({ accountNo, stockCode, quantity, price, orde
   if (account.length < 10) {
     throw new Error("KIS_ACCOUNT_NO가 올바르지 않습니다. 계좌번호 앞 8자리와 상품코드 2자리를 붙여 설정하세요.");
   }
+  // 이 허용 범위는 backend/telegram_commands.py의 _ORDERABLE_STOCK_CODE_RE와 쌍을 이룬다.
+  // 백엔드가 같은 정책을 복제해 조기 거절하므로, 여기만 풀면 백엔드가 조용히 계속 막는다.
+  // 영숫자 코드 주문 지원을 검토할 때(#138) 반드시 두 곳을 함께 바꿔야 한다.
   if (/^[0-9A-Z]{6,7}$/i.test(code) && !/^\d{6,7}$/.test(code)) {
     throw new Error("이 종목은 현재 주문을 지원하지 않습니다.");
   }
