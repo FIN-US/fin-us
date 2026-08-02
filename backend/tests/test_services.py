@@ -10,6 +10,13 @@ from fastapi import HTTPException
 from backend import services
 
 
+@pytest.fixture(autouse=True)
+def _clear_stock_code_cache():
+    services._stock_code_cache.clear()
+    yield
+    services._stock_code_cache.clear()
+
+
 class FakeSession:
     def add(self, report):
         self.report = report
@@ -112,7 +119,6 @@ async def test_run_mcp_tool_raises_tool_level_error_detail(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_perform_stock_analysis_includes_trigger_signal(monkeypatch):
-    services._stock_code_cache.clear()
     prompts = []
 
     captured_cids = []
@@ -146,8 +152,6 @@ async def test_perform_stock_analysis_includes_trigger_signal(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_perform_stock_analysis_resolves_stock_code_via_mcp(monkeypatch):
-    services._stock_code_cache.clear()
-
     async def fake_llm_chat(provider, prompt, *, conversation_id=None):
         return "plain analysis"
 
@@ -175,7 +179,6 @@ async def test_perform_stock_analysis_resolves_alphanumeric_stock_code(monkeypat
     코스닥 스팩·리츠 등 종목마스터의 약 18%가 0001A0 같은 영숫자 코드다.
     숫자 6자리만 인정하면 MCP가 정확히 돌려준 코드를 백엔드가 버리게 된다.
     """
-    services._stock_code_cache.clear()
 
     async def fake_llm_chat(provider, prompt, *, conversation_id=None):
         return "plain analysis"
@@ -208,8 +211,6 @@ def test_looks_like_stock_code_accepts_alphanumeric_and_rejects_plain_names():
 async def test_perform_stock_analysis_falls_back_to_empty_stock_code_on_mcp_failure(
     monkeypatch, caplog
 ):
-    services._stock_code_cache.clear()
-
     async def fake_llm_chat(provider, prompt, *, conversation_id=None):
         return "plain analysis"
 
@@ -232,8 +233,6 @@ async def test_perform_stock_analysis_falls_back_to_empty_stock_code_on_mcp_fail
 
 @pytest.mark.asyncio
 async def test_perform_stock_analysis_skips_mcp_when_stock_is_already_code(monkeypatch):
-    services._stock_code_cache.clear()
-
     async def fake_llm_chat(provider, prompt, *, conversation_id=None):
         return "plain analysis"
 
@@ -251,8 +250,6 @@ async def test_perform_stock_analysis_skips_mcp_when_stock_is_already_code(monke
 
 @pytest.mark.asyncio
 async def test_perform_stock_analysis_caches_resolved_stock_code(monkeypatch):
-    services._stock_code_cache.clear()
-
     async def fake_llm_chat(provider, prompt, *, conversation_id=None):
         return "plain analysis"
 
