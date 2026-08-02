@@ -87,7 +87,22 @@ def extract_stocks_from_balance(balance_text: str) -> list[str]:
         lines = balance_text.split("[보유 종목 리스트]")[1].strip().split("\n")
         for line in lines:
             if line.startswith("- "):
-                # "- 종목명 (코드): ..." 형식에서 종목명 추출
+                # "- 종목명 (코드) · 수량주" 형식(첫 줄만)에서 종목명 추출.
+                # 이 파서는 mcp-trading/balance.js 의 formatBalanceReport() 출력 형식에 의존한다.
+                # 종목 한 건은 3줄 블록(헤더 줄 + 공백 2칸 들여쓰기 2줄)이며, 들여쓴 줄은
+                # "- " 로 시작하지 않으므로 이 조건에 걸리지 않는다.
+                #
+                # 아래 한 줄에는 기존부터 있던 부작용이 두 가지 있다.
+                # 1) split("(")[0] 은 첫 "(" 앞까지만 남기므로, 종목명 자체에 괄호가
+                #    있으면 그 뒤가 잘린다. 예: "CJ4우(전환) (00104K) · 1주" → "CJ4우".
+                #    mcp-trading/data/stocks.json 기준 종목명 4,353개(aliases 필드는 제외한
+                #    수치이며, 포함해도 4,359개로 348건이라는 결과는 그대로다) 중 348개가
+                #    "(" 를 포함하므로 드문 경우가 아니다.
+                # 2) replace("- ", "") 는 count 인자가 없어 문자열 전체에서 전역으로
+                #    치환되므로, 종목명 중간에 "- " 가 있으면 그 부분도 함께 지워진다.
+                #    예: "- 한국 - 전력 (015760) · 1주" → "한국 전력". 같은 stocks.json
+                #    기준으로는 종목명에 "- " 를 포함하는 경우가 0건이라 아직 관측된 적은
+                #    없지만, 이론상 발생 가능한 위험으로 남아 있다.
                 name = line.split("(")[0].replace("- ", "").strip()
                 if name:
                     stocks.append(name)
