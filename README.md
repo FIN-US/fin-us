@@ -148,7 +148,7 @@ Docker Compose에서는 `KIS_ORDER_DEDUP_PATH` 기본값에 따라 원장이 호
 
 원장 파일에는 주문 요청 body와 KIS 응답이 그대로 저장되며, 여기에는 계좌번호(`CANO`, `buildCashOrderBody`, `mcp-trading/order.js`)가 평문으로 포함됩니다. 생성 시 파일 권한이 `0600`(`#writeLedger`의 `0600` 지정, `mcp-trading/order-dedup.js`)으로 지정되지만 이는 Linux 호스트에서만 의미가 있고, 어느 경우든 호스트 파일시스템에 그대로 남는다는 점을 유의하세요.
 
-> **문제 해결**: `/buy`·`/sell` 실행 시 Telegram에 `EACCES`·`EROFS`·`ENOSPC`류 에러가 그대로 노출되며 모든 주문이 차단된다면, 원장 경로(`KIS_ORDER_DEDUP_PATH`, 기본값 `./.state/kis-order-dedup.json`)에 쓰기 권한이 없는 상태입니다. `mcp-trading/index.js`는 `orderDedupStore.reserve(...)`를 KIS 호출용 `try` 블록 바깥에서 실행하고, `order-dedup.js`의 `#writeLedger`는 `fs.mkdirSync`·`fs.writeFileSync` 실패를 감싸지 않으므로 원장에 쓸 수 없으면 즉시 실패합니다. 이는 버그가 아니라 방어선이 깨진 상태에서 주문을 조용히 허용하지 않기 위한 fail-closed 설계입니다. `ls -la ./.state/`와 `docker compose logs backend`로 원인을 확인하고, 임시로는 `KIS_ORDER_DEDUP_PATH`를 바인드 마운트된 `/app` 아래의 쓰기 가능한 경로로 지정해 우회할 수 있습니다.
+> **문제 해결**: `/buy`·`/sell` 실행 시 Telegram에 `EACCES`·`EROFS`·`ENOSPC`류 에러가 그대로 노출되며 모든 주문이 차단된다면, 원장 경로(`KIS_ORDER_DEDUP_PATH`, 코드 기본값은 `os.tmpdir()`의 `finus-kis-order-dedup.json`, Docker Compose 기본값은 컨테이너 내부 경로 `/app/.state/kis-order-dedup.json`)에 쓰기 권한이 없는 상태입니다. `mcp-trading/index.js`는 `orderDedupStore.reserve(...)`를 KIS 호출용 `try` 블록 바깥에서 실행하고, `order-dedup.js`의 `#writeLedger`는 `fs.mkdirSync`·`fs.writeFileSync` 실패를 감싸지 않으므로 원장에 쓸 수 없으면 즉시 실패합니다. 이는 버그가 아니라 방어선이 깨진 상태에서 주문을 조용히 허용하지 않기 위한 fail-closed 설계입니다. `ls -la ./.state/`와 `docker compose logs backend`로 원인을 확인하고, 임시로는 `KIS_ORDER_DEDUP_PATH`를 바인드 마운트된 `/app` 아래의 쓰기 가능한 경로로 지정해 우회할 수 있습니다.
 
 ### Telegram 긴급 알림 수동 테스트
 
