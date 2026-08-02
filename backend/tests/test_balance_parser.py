@@ -33,7 +33,7 @@ class TestBalanceExtraction(unittest.TestCase):
         """실제 mcp-trading 출력 형식(3줄 블록, 종목 사이 빈 줄)에서 종목명만 정확히 추출되는지 확인합니다.
 
         들여쓴 2·3번째 줄("  평단가 ...", "  손익 ...")은 "- " 접두사가 없으므로
-        종목으로 오인되지 않아야 합니다. 결과 개수가 정확히 2개(들여쓴 줄이 섞이지 않음)인지도 함께 검증합니다.
+        종목으로 오인되지 않아야 합니다.
         """
         # 픽스처 무결성 전제: 종목 사이에 빈 줄이 실제로 있는지 확인합니다. 이 assertIn이
         # 실패한다면 REAL_BALANCE_TEXT가 축약되면서 종목 사이 빈 줄이 사라졌다는 뜻이며,
@@ -42,7 +42,6 @@ class TestBalanceExtraction(unittest.TestCase):
         expected = ["삼성전자", "NAVER"]
         result = extract_stocks_from_balance(REAL_BALANCE_TEXT)
         self.assertEqual(result, expected)
-        self.assertEqual(len(result), 2)
 
     def test_extract_stocks_requires_dash_space_prefix(self):
         """파서가 의존하는 계약을 명시적으로 고정합니다: 종목 줄이 "- " 로 시작하지 않으면
