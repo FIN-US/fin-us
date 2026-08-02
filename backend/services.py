@@ -25,13 +25,27 @@ from .models import AgentReport
 logger = logging.getLogger(__name__)
 _NAT_RESPONSE_LOG_PREVIEW_CHARS = 800
 
+# 입력이 이미 종목코드 형태인지 판정하는 범위. mcp-trading/stock-master.js의
+# resolveStock() 지름길(6~7자 영숫자를 그대로 코드로 인정)과 상한을 맞춘다.
 # KIS 국내 종목코드는 6자리 숫자(005930)만이 아니다. 코스닥 스팩·리츠 등 약 18%가
 # 영문이 섞인 형태(0001A0)이고, 펀드는 더 길다(F70100026). 숫자 6자리만 인정하면
 # MCP가 정확히 돌려준 코드를 백엔드가 스스로 버리게 된다.
 _STOCK_CODE_RE = re.compile(r"^[0-9A-Z]{6,7}$")
 # resolve_stock_code 응답 형식: "종목명 (코드, 시장)" — mcp-trading/index.js
 # 종목명 자체에 괄호가 들어가는 경우가 있어(예: "...테이블1(A)") 코드+쉼표 조합에 앵커한다.
+# 입력 판정(_STOCK_CODE_RE)과 달리 상한을 두지 않는다({6,}) — 이건 MCP *응답*에서 코드를
+# 뽑아내는 정규식이라 6자(3,889종목)·7자 ETN(389종목)·9자 펀드(75종목, 전체 4,353종목 중)가
+# 모두 나올 수 있다. {6,7}로 좁히면 펀드 코드 75종 전부가 조용히 빠진다.
+# telegram_commands.py의 같은 정규식 위쪽 주석에 더 자세한 배경과 #140 통합 메모가 있다.
+# 두 곳은 정규식 문자열은 동일하지만 실패 시 반환값이 다르다: 여기(services.py)는 ""를,
+# telegram_commands._extract_stock_code는 None을 반환한다.
 _STOCK_CODE_EXTRACT_RE = re.compile(r"\(([0-9A-Z]{6,}),")
+# 비대칭 주의: 위 두 정규식의 상한이 다르다 보니, 사용자가 9자 펀드 코드를 직접 입력해도
+# 그대로 통과되지 않는다. _looks_like_stock_code의 {6,7}이 9자 입력을 코드로 보지 않아
+# MCP를 호출하지만, stock-master.js의 지름길도 똑같이 {6,7}이라 이 입력을 코드로 인정하지
+# 않고 정확한 종목명 매칭으로 넘어가 결국 "찾을 수 없음" 예외를 던진다. 즉 추출 쪽 상한을
+# 넓힌 것은 MCP가 돌려준 9자 코드를 버리지 않기 위함이지, 사용자가 9자 코드를 직접 입력해도
+# 왕복되게 만들지는 않는다.
 
 # 종목명 -> 종목코드 프로세스 메모리 캐시.
 # resolve_stock_code MCP 호출은 매번 새 stdio 서브프로세스를 띄우는 비용이 있고
