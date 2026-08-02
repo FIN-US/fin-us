@@ -82,7 +82,7 @@ def _normalize_stock_input(stock: str) -> str:
     입력 판정(_looks_like_stock_code), MCP 질의, 캐시 키까지 이 함수를 거친 같은
     문자열을 공유해야 세 곳이 서로 어긋나지 않는다.
     """
-    return stock.strip().strip("﻿").strip()
+    return stock.strip().strip("\ufeff").strip()
 
 
 def _has_code_digit(value: str) -> bool:
