@@ -326,6 +326,17 @@ async def test_perform_stock_analysis_rejects_digitless_extracted_code(monkeypat
 
 @pytest.mark.asyncio
 async def test_perform_stock_analysis_digitless_extracted_code_not_cached(monkeypatch):
+    """이름과 코드가 같은 SIMPAC 응답 대신 서로 다른 응답으로 digit guard의
+    no-cache 경로를 실제로 태운다.
+
+    이전 버전은 "SIMPAC (SIMPAC, UNKNOWN)"을 썼는데, 이름==코드라 `_has_code_digit`을
+    지워도 에코 스킵(name_part == code, Unit 4)이 먼저 캐싱을 막아 이 테스트가
+    `..._does_not_cache_shortcut_echo`와 같은 것을 검증하는 셈이 되어 있었다
+    (리뷰어가 뮤테이션으로 확인). 이름이 코드와 다른 "가상종목 (ABCDEF, KOSDAQ)"으로
+    바꾸면 에코 스킵은 트리거되지 않고, 숫자 없는 코드를 걸러내는 것은
+    `_has_code_digit`뿐이므로 그 가드가 실제로 캐싱을 막는지를 검증하게 된다.
+    """
+
     async def fake_llm_chat(provider, prompt, *, conversation_id=None):
         return "plain analysis"
 
@@ -333,13 +344,13 @@ async def test_perform_stock_analysis_digitless_extracted_code_not_cached(monkey
 
     async def fake_run_mcp_tool(params, tool_name, arguments):
         mcp_calls.append(arguments)
-        return "SIMPAC (SIMPAC, UNKNOWN)"
+        return "가상종목 (ABCDEF, KOSDAQ)"
 
     monkeypatch.setattr(services, "llm_chat", fake_llm_chat)
     monkeypatch.setattr(services, "run_mcp_tool", fake_run_mcp_tool)
 
-    await services.perform_stock_analysis("SIMPAC", "openai", FakeSession())
-    await services.perform_stock_analysis("SIMPAC", "openai", FakeSession())
+    await services.perform_stock_analysis("가상종목", "openai", FakeSession())
+    await services.perform_stock_analysis("가상종목", "openai", FakeSession())
 
     assert len(mcp_calls) == 2
     assert services._stock_code_cache == {}
