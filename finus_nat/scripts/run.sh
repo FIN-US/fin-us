@@ -134,11 +134,21 @@ done
 # dict를 검사한다 - 상속 규칙이 갈라질 여지 자체가 없다. 인터프리터는 두 줄
 # 뒤 patch_vendor.py 호출에서 어차피 필요하므로 추가 의존성도 아니다.
 #
-# 종료 코드: 0=mem0 사용, 1=mem0 미사용, 2=판단 불가(설정 파일 없음/파싱 실패/
+# 종료 코드: 0=mem0 사용, 3=mem0 미사용, 2=판단 불가(설정 파일 없음/파싱 실패/
 # 순환 참조 등). 2는 "쓰지 않는다"고 조용히 넘어가면 안 되는 경우이므로 호출부가
 # fail-fast로 처리한다 - 존재하지 않는 설정 파일에 대해 "찾을 수 없습니다" 경고를
 # 찍고 나서 바로 "mem0_memory를 쓰지 않습니다"라고 단정하는 것은 이 스크립트가
 # 방금 확인 불가하다고 말한 사실을 스스로 뒤집는 것이었다.
+#
+# "미사용"에 1이 아니라 3을 쓰는 이유: 1은 `uv run` 자체가 실패했을 때도 나오는
+# 종료 코드다(예: 오프라인 상태의 콜드 캐시에서 `litellm==1.83.0` 다운로드 실패,
+# 또는 -c 스크립트 안의 미처리 예외). 예전에는 그 1이 그대로 "mem0 미사용"으로
+# 해석돼, 네트워크 문제나 리졸버 실패가 "이 설정은 mem0를 안 쓴다"는 확신에 찬
+# 오판으로 둔갑했다 - issue #65가 없애려던 바로 그 silent-skip 부류다. 그래서
+# "미사용"은 이 스크립트가 명시적으로 고르는 흔치 않은 코드(3)로 옮기고, 0/2/3
+# 이외의 모든 값(1 포함)은 게이트 자체가 실패한 것으로 간주해 무조건 fatal
+# 처리한다. `os.environ["CONFIG_FILE_FOR_PY"]`의 KeyError나 `_contains_mem0`
+# 안의 RecursionError 같은 미처리 예외도 이제 이 catch-all(2)로 떨어진다.
 _config_uses_mem0() {
   local file="${1}"
   CONFIG_FILE_FOR_PY="${file}" uv run --project "${FE_PKG}" python -c '
@@ -151,8 +161,6 @@ except Exception as exc:
     print(f"경고: nat.utils.io.yaml_tools를 불러오지 못했습니다: {exc}", file=sys.stderr)
     sys.exit(2)
 
-path = os.environ["CONFIG_FILE_FOR_PY"]
-
 
 def _contains_mem0(value) -> bool:
     if isinstance(value, dict):
@@ -163,12 +171,14 @@ def _contains_mem0(value) -> bool:
 
 
 try:
+    path = os.environ["CONFIG_FILE_FOR_PY"]
     config = yaml_load(path)
+    uses_mem0 = _contains_mem0(config)
 except Exception as exc:
-    print(f"경고: 설정 파일을 읽지 못했습니다({path}): {exc}", file=sys.stderr)
+    print(f"경고: mem0 사용 여부를 판단하지 못했습니다({exc.__class__.__name__}): {exc}", file=sys.stderr)
     sys.exit(2)
 
-sys.exit(0 if _contains_mem0(config) else 1)
+sys.exit(0 if uses_mem0 else 3)
 '
 }
 
@@ -183,11 +193,15 @@ case "${_mem0_rc}" in
       exit 1
     fi
     ;;
-  1)
+  3)
     echo "벤더 패치 건너뜀: ${_CONFIG_FILE}이(가) mem0_memory를 쓰지 않습니다." >&2
     ;;
-  *)
+  2)
     echo "오류: ${_CONFIG_FILE}의 mem0 사용 여부를 판단할 수 없습니다(위 경고 참고). 원인 불명 실패로 이어지느니 여기서 멈춘다." >&2
+    exit 1
+    ;;
+  *)
+    echo "오류: mem0 게이트(_config_uses_mem0)가 예상 밖 종료 코드(${_mem0_rc})로 끝났습니다. uv run 자체가 실패했을 수 있습니다(오프라인/의존성 다운로드 실패 등). 원인 불명 실패로 이어지느니 여기서 멈춘다." >&2
     exit 1
     ;;
 esac
