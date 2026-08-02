@@ -2,16 +2,27 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
+import test, { after } from "node:test";
 import {
   DuplicateOrderError,
   OrderDedupStore,
   createOrderDedupKey,
 } from "../order-dedup.js";
 
-function tempLedgerPath() {
-  return path.join(fs.mkdtempSync(path.join(os.tmpdir(), "finus-order-dedup-test-")), "ledger.json");
+const createdDirs = [];
+
+function tempLedgerPath(t) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "finus-order-dedup-test-"));
+  createdDirs.push(dir);
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  return path.join(dir, "ledger.json");
 }
+
+after(() => {
+  for (const dir of createdDirs) {
+    assert.equal(fs.existsSync(dir), false, `임시 디렉터리가 정리되지 않았습니다: ${dir}`);
+  }
+});
 
 test("createOrderDedupKey normalizes equivalent order arguments", () => {
   const first = createOrderDedupKey({
@@ -52,9 +63,9 @@ test("createOrderDedupKey ignores original price for market orders", () => {
   );
 });
 
-test("OrderDedupStore blocks duplicate reservations before TTL expires", () => {
+test("OrderDedupStore blocks duplicate reservations before TTL expires", (t) => {
   const store = new OrderDedupStore({
-    filePath: tempLedgerPath(),
+    filePath: tempLedgerPath(t),
     ttlMs: 60_000,
     now: () => 1_000,
   });
@@ -67,10 +78,10 @@ test("OrderDedupStore blocks duplicate reservations before TTL expires", () => {
   );
 });
 
-test("OrderDedupStore allows reservation after TTL expires", () => {
+test("OrderDedupStore allows reservation after TTL expires", (t) => {
   let now = 1_000;
   const store = new OrderDedupStore({
-    filePath: tempLedgerPath(),
+    filePath: tempLedgerPath(t),
     ttlMs: 60_000,
     now: () => now,
   });
@@ -81,9 +92,9 @@ test("OrderDedupStore allows reservation after TTL expires", () => {
   assert.doesNotThrow(() => store.reserve("same-order", { stockCode: "005930" }));
 });
 
-test("OrderDedupStore releases failed reservations", () => {
+test("OrderDedupStore releases failed reservations", (t) => {
   const store = new OrderDedupStore({
-    filePath: tempLedgerPath(),
+    filePath: tempLedgerPath(t),
     ttlMs: 60_000,
     now: () => 1_000,
   });
@@ -115,8 +126,8 @@ test("OrderDedupStore resolves filePath from KIS_ORDER_DEDUP_PATH env var, falli
   );
 });
 
-test("OrderDedupStore blocks duplicate reservations across separate instances sharing a filePath", () => {
-  const filePath = tempLedgerPath();
+test("OrderDedupStore blocks duplicate reservations across separate instances sharing a filePath", (t) => {
+  const filePath = tempLedgerPath(t);
   const storeA = new OrderDedupStore({ filePath, ttlMs: 60_000, now: () => 1_000 });
   const storeB = new OrderDedupStore({ filePath, ttlMs: 60_000, now: () => 1_000 });
 
