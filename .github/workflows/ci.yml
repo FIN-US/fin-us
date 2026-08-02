@@ -36,6 +36,14 @@ jobs:
   nat-test:
     name: finus_nat pytest
     runs-on: ubuntu-latest
+    # 아래 "벤더 패치 적용 검증" 스텝이 uv sync가 만든 실제 venv를 patch_vendor.py로 직접
+    # 쓴다. uv 기본 link mode(hardlink)면 site-packages 파일이 ~/.cache/uv/archive-v0/...와
+    # inode를 공유하고, 패치 스크립트가 그걸 truncate+rewrite하면서 enable-cache: true가
+    # 저장한 캐시가 이미 패치된 상태로 오염된다. 그러면 다음 실행부터 uv sync가 오염된
+    # 캐시를 하드링크해 오고, 스크립트는 already만 보고 exit 0으로 통과해 이 검증 스텝이
+    # 아무것도 검증하지 못하게 된다. copy 모드로 강제해 캐시와 venv의 inode를 분리한다.
+    env:
+      UV_LINK_MODE: copy
     steps:
       - uses: actions/checkout@v4
 

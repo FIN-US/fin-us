@@ -46,7 +46,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import shutil
 import sys
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -222,6 +225,43 @@ def find_site_packages(venv: Path) -> Path | None:
     return candidates[0] if candidates else None
 
 
+def _write_patched(target: Path, text: str) -> None:
+    """`target`을 site-packages 안에서 hardlink-safe하게, 원자적으로 덮어쓴다.
+
+    uv 기본 link mode는 `hardlink`라 site-packages의 파일이 `~/.cache/uv/archive-v0/...`와
+    같은 inode를 공유할 수 있다(`st_nlink` >= 2). 그 상태에서 `Path.write_text()`로 그냥
+    덮어쓰면 inode를 그대로 truncate+rewrite하므로 uv의 전역 캐시까지 오염된다(실측:
+    `st_nlink=2`, 캐시 엔트리가 그 자리에서 바뀜). 그래서 여기서는 같은 디렉터리에 새
+    임시 파일을 만들고 `os.replace()`로 경로만 갈아치운다 — 원래 inode는 캐시 쪽에
+    그대로 남고 `target` 경로만 새 inode를 가리키게 된다.
+
+    주의: 이 함수는 줄바꿈을 LF로 **정규화**한다. 원본의 CRLF/LF를 그대로 보존하는 게
+    아니다. `newline="\\n"`로 열기 때문에 `text`에 있는 `\\n`은 항상 LF 그대로 쓰인다
+    (반대로 `write_text(..., encoding="utf-8")`는 `newline=None`이라 매 `\\n`을 OS
+    개행으로 바꾸는데, Windows에서는 그게 CRLF라 매 실행마다 파일 전체가 CRLF로 재작성된다).
+    `read_text()`가 `newline=None`이라 읽을 때 CRLF -> LF로 이미 접혀 있고, 이 스크립트가
+    아는 네 대상은 pin된 버전에서 전부 순수 LF라 지금은 실질적 영향이 없다. 다음에 정말
+    CRLF인 업스트림 대상을 추가하는 사람은 이 함수가 그것도 LF로 바꿔버린다는 걸 알아야 한다.
+    """
+    fd, tmp = tempfile.mkstemp(dir=target.parent, prefix=target.name + ".", suffix=".tmp")
+    try:
+        # mkstemp는 이미 열린 OS 레벨 fd를 준다. 이름으로 다시 열지 않고 그 fd를
+        # 그대로 소비해야 한다 — 그러지 않으면 fd가 열린 채 남아 Windows에서
+        # os.replace()가 매번 PermissionError로 실패한다.
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        shutil.copymode(target, tmp)  # 방향 주의: target -> tmp. 반대로 하면 읽기 전용
+        # 원본이 tmp를 읽기 전용으로 만들어 os.replace()를 막는다.
+        os.replace(tmp, target)
+    finally:
+        # 성공 경로에서는 os.replace()가 이미 tmp를 target 자리로 옮겨서 tmp가 더 이상
+        # 존재하지 않는다. missing_ok=True 없이 무조건 unlink하면 그 성공을
+        # FileNotFoundError로 뒤집어버린다.
+        Path(tmp).unlink(missing_ok=True)
+
+
 def apply_patch(site_packages: Path, patch: VendorPatch) -> tuple[str, str]:
     """패치 하나를 적용하고 (상태, 메시지)를 돌려준다. 파일 쓰기는 한 번만 한다."""
     target = site_packages.joinpath(*patch.parts)
@@ -257,7 +297,7 @@ def apply_patch(site_packages: Path, patch: VendorPatch) -> tuple[str, str]:
     # run.sh는 마지막 치환 블록 안에서만 write_text를 호출해, 앞선 치환이 조용히
     # 버려질 수 있었다. 여기서는 루프 밖에서 한 번만 쓴다.
     if text != original:
-        target.write_text(text, encoding="utf-8")
+        _write_patched(target, text)
         return APPLIED, f"{patch.name}: 치환 {len(applied)}건 적용, {len(already)}건 기적용"
 
     return ALREADY, f"{patch.name}: 이미 적용됨"

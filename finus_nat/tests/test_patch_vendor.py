@@ -11,6 +11,8 @@ import하지 않는다).
 
 import importlib.util
 import json
+import os
+import stat
 import sys
 from pathlib import Path
 
@@ -292,3 +294,123 @@ def test_ambiguous_site_packages_is_rejected(pv, tmp_path):
         pv.find_site_packages(venv)
 
     assert pv.main(["--venv", str(venv)]) == 1
+
+
+# ---------------------------------------------------------------------------
+# _write_patched: hardlink 안전성 / 원자성 / LF 정규화 / 모드 보존
+#
+# LF·모드 테스트는 CI(ubuntu-latest)에서 신호가 0이다 - 개발자 로컬(특히 Windows)
+# 회귀를 잡기 위한 가드일 뿐이다.
+# ---------------------------------------------------------------------------
+
+
+def _make_hardlinked_target(pv, tmp_path) -> tuple[Path, Path, Path]:
+    """target과 inode를 공유하는 sibling(uv archive-v0 캐시 대역 흉내)을 만든다."""
+    venv, site_packages = _make_site_packages(tmp_path)
+    memory_patch = _patch_by_name(pv, MEMORY_NAME)
+    target = _write_target(site_packages, memory_patch.parts, pv._MEMORY_OLD)
+    sibling = tmp_path / "cache_sibling.py"
+    try:
+        os.link(target, sibling)
+    except OSError:
+        pytest.skip("이 파일시스템은 hardlink를 지원하지 않습니다 (os.link 실패).")
+    return venv, target, sibling
+
+
+def test_hardlink_sibling_content_untouched_after_write(pv, tmp_path):
+    """target이 다른 경로와 inode를 공유해도, 패치 쓰기가 그 경로의 내용을 바꾸지
+    않는다. `write_text()`가 공유 inode를 그대로 truncate+rewrite하던 시절에는
+    sibling도 함께 바뀌었다 - 그게 실제로 uv archive-v0 캐시를 오염시킨 메커니즘이다.
+    """
+    venv, target, sibling = _make_hardlinked_target(pv, tmp_path)
+
+    exit_code = pv.main(["--venv", str(venv)])
+
+    assert exit_code == 0
+    assert target.read_text(encoding="utf-8") == pv._MEMORY_NEW
+    assert sibling.read_text(encoding="utf-8") == pv._MEMORY_OLD
+
+
+def test_hardlink_inode_actually_breaks_after_write(pv, tmp_path):
+    """내용 비교만으로는 "우연히 내용이 맞아떨어진 in-place 쓰기"와 "os.replace로
+    경로를 진짜로 갈아치운 것"을 구분할 수 없다. inode 번호가 실제로 갈라졌는지까지
+    확인해야 메커니즘 자체를 증명한 것이 된다.
+    """
+    venv, target, sibling = _make_hardlinked_target(pv, tmp_path)
+    assert target.stat().st_ino == sibling.stat().st_ino  # sanity: hardlink 성립 확인
+
+    exit_code = pv.main(["--venv", str(venv)])
+
+    assert exit_code == 0
+    assert target.stat().st_ino != sibling.stat().st_ino
+
+
+def test_write_normalizes_to_lf_no_crlf_injected(pv, tmp_path):
+    """`Path.write_text(..., encoding="utf-8")`는 `newline=None`이라 Windows에서
+    매 `\\n`을 CRLF로 바꿔버린다(hardlink 여부와 무관하게 매 실행마다 발생).
+    `_write_patched`는 `newline="\\n"`로 열어 LF를 유지해야 한다.
+    """
+    venv, site_packages = _make_site_packages(tmp_path)
+    memory_patch = _patch_by_name(pv, MEMORY_NAME)
+    target = site_packages.joinpath(*memory_patch.parts)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(pv._MEMORY_OLD.encode("utf-8"))
+
+    exit_code = pv.main(["--venv", str(venv)])
+
+    assert exit_code == 0
+    assert b"\r\n" not in target.read_bytes()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows는 POSIX 파일 모드 비트를 쓰지 않는다.")
+def test_write_preserves_file_mode(pv, tmp_path):
+    """`shutil.copymode`의 방향은 target -> tmp다. 뒤집으면 읽기 전용 원본이
+    tmp까지 읽기 전용으로 만들어 `os.replace()`를 막는다.
+    """
+    venv, site_packages = _make_site_packages(tmp_path)
+    memory_patch = _patch_by_name(pv, MEMORY_NAME)
+    target = _write_target(site_packages, memory_patch.parts, pv._MEMORY_OLD)
+    target.chmod(0o640)
+
+    exit_code = pv.main(["--venv", str(venv)])
+
+    assert exit_code == 0
+    assert stat.S_IMODE(target.stat().st_mode) == 0o640
+
+
+def test_no_tmp_residue_after_applied_run(pv, tmp_path):
+    """DRIFT 실행으로 이 테스트를 만들면 안 된다: `apply_patch`는 쓰기 *전에* DRIFT를
+    반환하므로 `_write_patched`가 아예 호출되지 않고, 그러면 이 함수가 아무리
+    tmp를 흘려도 테스트가 통과해버려 검증이 공허해진다. 반드시 실제 쓰기가 일어나는
+    APPLIED 경로로 확인해야 한다.
+    """
+    venv, site_packages = _make_site_packages(tmp_path)
+    memory_patch = _patch_by_name(pv, MEMORY_NAME)
+    target = _write_target(site_packages, memory_patch.parts, pv._MEMORY_OLD)
+
+    exit_code = pv.main(["--venv", str(venv)])
+
+    assert exit_code == 0
+    assert list(target.parent.glob("*.tmp")) == []
+
+
+def test_replace_failure_leaves_target_intact_and_cleans_tmp(pv, tmp_path, monkeypatch):
+    """`finally`의 `missing_ok=True` unlink가 실제로 동작하는지 검증하는 유일한
+    테스트다. `os.replace`를 강제로 실패시켜, target이 원본 그대로 남고 tmp
+    잔여물도 없는지 확인한다.
+    """
+    venv, site_packages = _make_site_packages(tmp_path)
+    memory_patch = _patch_by_name(pv, MEMORY_NAME)
+    target = _write_target(site_packages, memory_patch.parts, pv._MEMORY_OLD)
+    original_bytes = target.read_bytes()
+
+    def _raise(*_args, **_kwargs):
+        raise OSError("simulated os.replace failure")
+
+    monkeypatch.setattr(pv.os, "replace", _raise)
+
+    with pytest.raises(OSError):
+        pv.main(["--venv", str(venv)])
+
+    assert target.read_bytes() == original_bytes
+    assert list(target.parent.glob("*.tmp")) == []
