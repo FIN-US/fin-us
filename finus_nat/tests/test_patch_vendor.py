@@ -90,7 +90,14 @@ def test_applies_patch_when_original_text_matches(pv, tmp_path):
 
 
 def test_second_run_is_idempotent(pv, tmp_path):
-    """이미 적용된 트리에 다시 실행하면 already이고 파일이 더 바뀌지 않는다."""
+    """이미 적용된 트리에 다시 실행하면 already이고 파일이 더 바뀌지 않는다.
+
+    `apply_patch`가 sentinel 검사를 count 검사보다 먼저 하는 순서를 이 테스트가
+    실질적으로 고정한다: 두 번째 실행 시점엔 `old`가 완전히 치환돼 사라졌으므로
+    (count=0), 검사 순서가 뒤집히면(count 검사가 먼저면) sentinel을 보기도 전에
+    `count == 0` 분기로 빠져 이 멀쩡한 재실행이 DRIFT로 오판된다. 즉 아래
+    `second_exit == 0` / `ALREADY` 단언이 실패하면 그 순서 결정이 깨졌다는 뜻이다.
+    """
     venv, site_packages = _make_site_packages(tmp_path)
     memory_patch = _patch_by_name(pv, MEMORY_NAME)
     target = _write_target(site_packages, memory_patch.parts, pv._MEMORY_OLD)
@@ -286,9 +293,11 @@ def test_ambiguous_when_old_appears_twice_without_sentinel(pv, tmp_path):
 def test_sentinel_and_duplicate_old_is_conflict_not_ambiguous(pv, tmp_path):
     """sentinel과 old(2회)가 동시에 있으면 CONFLICT다. AMBIGUOUS가 아니다.
 
-    sentinel 검사가 count 검사보다 먼저 실행돼야 하는 이유를 고정하는 순서 테스트다.
-    순서가 바뀌면(count 검사가 먼저면), old가 우연히 두 번 있는 이미 적용된 트리가
-    재실행 때마다 AMBIGUOUS로 잘못 실패하게 된다.
+    이 경우는 검사 순서와 무관하게 어느 쪽이든 exit 1이다 - 순서를 바꾸면 그냥
+    라벨만 AMBIGUOUS로 바뀔 뿐 통과/실패가 갈리지 않는다. 그래서 이 테스트는
+    "sentinel 우선 검사"라는 설계 결정 자체를 고정하는 게 아니라(그건
+    `test_second_run_is_idempotent`가 한다), 이 특정 라벨(CONFLICT)이 유지되는지만
+    본다.
     """
     venv, site_packages = _make_site_packages(tmp_path)
     memory_patch = _patch_by_name(pv, MEMORY_NAME)

@@ -65,16 +65,18 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-# 패치 내용이 바뀔 때마다 올린다. 마커 파일과 비교해 재적용 필요 여부를 판단한다.
+# 패치 내용(old/new 리터럴)이 바뀔 때마다 올린다. 마커 파일과 비교해 재적용
+# 필요 여부를 판단하는 소비자(예: `if marker < PATCH_SET_VERSION: 재적용`)가
+# 있다면, 그 판단은 "치환 결과가 달라졌는가"에만 걸려야 한다.
 #
-# 1 -> 2: 패치 대상 텍스트(old/new)는 그대로지만, 스크립트 자체가 바뀌었다.
-# (1) 쓰기 경로가 hardlink-safe 원자적 쓰기로 바뀌어, v1으로 찍힌 마커는 uv 캐시를
-#     오염시켰을 수 있는 write_text() 경로로 만들어졌을 가능성이 있다.
-# (2) old가 2번 이상 나타나는 경우를 감지하는 AMBIGUOUS 상태가 새로 생겼다.
-# 마커의 patch_set_version만으로 "이 마커가 v1 스크립트로 만들어졌는지"를 구분할 수
-# 있어야 그 트리를 신뢰할지 판단할 수 있으므로, 내용이 아니라 스크립트가 바뀌었어도
-# 올린다.
-PATCH_SET_VERSION = 2
+# 이 PR로 스크립트 동작은 여러 군데 바뀌었지만(쓰기 경로가 hardlink-safe 원자적
+# 쓰기로 교체, old 중복 발생을 감지하는 AMBIGUOUS 상태 추가, 읽기 전용 대상 쓰기
+# 수정 등) old/new 리터럴 자체는 그대로라 v1이 만든 트리와 v2가 만들 트리는
+# 바이트 단위로 동일하다 - 버전을 올릴 이유가 없다. 마커는 site-packages에
+# 남고 오염 가능성이 있던 write_text() 경로는 `~/.cache/uv/archive-v0`에 있었으니,
+# 마커의 버전 번호로 "이 트리가 오염된 캐시에서 왔는지"를 구분할 수도 없다 -
+# 재실행으로 청소되는 대상이 애초에 아니다.
+PATCH_SET_VERSION = 1
 
 MARKER_FILENAME = ".finus_vendor_patch.json"
 
@@ -329,10 +331,13 @@ def apply_patch(site_packages: Path, patch: VendorPatch) -> tuple[str, str]:
                 )
             already.append(str(index))
             continue
-        # sentinel 검사가 먼저 끝나 있어야 한다: 이미 적용된 트리에서 old가 우연히
-        # 두 번 나타나면(재실행 시나리오) count 검사를 먼저 하는 순서로는 매번
-        # AMBIGUOUS로 튄다. sentinel 분기에서 이미 already/conflict로 반환됐으므로,
-        # 여기 도달했다는 것은 sentinel이 없다는 뜻이고 count만으로 판단해도 된다.
+        # sentinel 검사가 먼저 끝나 있어야 한다: 정상적으로 이미 패치된 트리를
+        # 재실행하는 흔한 경우(sentinel 있음, old는 치환돼 사라져 count=0)를 생각해
+        # 보면, count 검사를 먼저 하는 순서에서는 sentinel을 보기도 전에
+        # `count == 0` 분기로 빠져 멀쩡한 재실행이 매번 DRIFT로 오판된다(멱등
+        # 재실행이 전부 실패로 뒤집힌다 - test_second_run_is_idempotent가 이 순서를
+        # 고정한다). sentinel 분기에서 이미 already/conflict로 반환됐으므로, 여기
+        # 도달했다는 것은 sentinel이 없다는 뜻이고 count만으로 판단해도 된다.
         count = text.count(replacement.old)
         if count == 0:
             # 상류가 바뀌었다. 조용히 넘어가면 런타임에 원인 불명으로 실패한다.
