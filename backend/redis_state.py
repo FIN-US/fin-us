@@ -91,23 +91,15 @@ class RedisSchedulerState:
         await self.redis.set(self.keys.last_hash(source, stock), digest, ex=self.signal_hash_ttl_sec)
         await self.redis.set(self.keys.last_text(source, stock), signal_text, ex=self.signal_hash_ttl_sec)
 
-    async def in_cooldown(self, source: str, stock: str | None = None) -> bool:
-        source, stock = self._coerce_source_stock(source, stock)
+    async def in_cooldown(self, source: str, stock: str) -> bool:
         return bool(await self.redis.exists(self.keys.analysis_cooldown(source, stock)))
 
-    async def set_cooldown(self, source: str, stock: str | None = None, reason: str | None = None) -> None:
-        source, stock = self._coerce_source_stock(source, stock)
+    async def set_cooldown(self, source: str, stock: str, reason: str | None = None) -> None:
         await self.redis.set(
             self.keys.analysis_cooldown(source, stock),
             reason or "analysis_failed",
             ex=self.cooldown_ttl_sec,
         )
-
-    @staticmethod
-    def _coerce_source_stock(source: str, stock: str | None) -> tuple[str, str]:
-        if stock is None:
-            return "news", source
-        return source, stock
 
     async def acquire_scheduler_lock(self, job_name: str = "market_monitoring") -> str | None:
         token = uuid4().hex
@@ -119,8 +111,7 @@ class RedisSchedulerState:
         )
         return token if acquired else None
 
-    async def acquire_analysis_lock(self, source: str, stock: str | None = None) -> str | None:
-        source, stock = self._coerce_source_stock(source, stock)
+    async def acquire_analysis_lock(self, source: str, stock: str) -> str | None:
         token = uuid4().hex
         acquired = await self.redis.set(
             self.keys.analysis_lock(source, stock),
