@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import util from "node:util";
 import { buildBalanceParams, fetchAllBalance, formatBalanceReport, formatPercent } from "../balance.js";
 import {
   buildCashOrderBody,
@@ -425,10 +426,10 @@ test("fetchAllBalance logs only the error message and failing page number to std
 
   await fetchAllBalance(fetchPage);
 
-  const logged = errorMock.mock.calls.map((call) => call.arguments.join(" ")).join("\n");
+  const logged = errorMock.mock.calls.map((call) => util.format(...call.arguments)).join("\n");
 
   assert.match(logged, /초당 거래건수를 초과하였습니다\./);
-  assert.match(logged, /2/); // the failing page number (pages=1 completed, so page 2 failed)
+  assert.match(logged, /2페이지/); // the failing page number (pages=1 completed, so page 2 failed)
   assert.doesNotMatch(logged, /87654321/);
   assert.doesNotMatch(logged, /test-app-key-secret/);
   assert.doesNotMatch(logged, /test-app-secret-value/);
