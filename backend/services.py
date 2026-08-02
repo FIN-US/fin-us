@@ -39,7 +39,7 @@ _STOCK_CODE_RE = re.compile(r"^[0-9A-Z]{6,7}$")
 # telegram_commands.py의 같은 정규식 위쪽 주석에 더 자세한 배경과 #140 통합 메모가 있다.
 # 두 곳은 정규식 문자열은 동일하지만 실패 시 반환값이 다르다: 여기(services.py)는 ""를,
 # telegram_commands._extract_stock_code는 None을 반환한다.
-# 497be1d 이후 두 곳은 숫자 불변식에서도 갈린다: 여기는 추출 결과에 _has_code_digit을
+# 두 곳은 숫자 불변식에서도 갈린다(#133): 여기는 추출 결과에 _has_code_digit을
 # 적용해 숫자 없는 매치를 거르지만, telegram_commands._extract_stock_code(origin/main
 # 기준)는 이 검사가 없어 숫자 없는 6자 영문 매치도 그대로 코드로 통과시킨다.
 # 실제 영향: SIMPAC(009160)처럼 종목명이 숫자 없는 6~7자 영문인 KOSPI 정상 종목은
@@ -71,8 +71,10 @@ def _normalize_stock_input(stock: str) -> str:
     """입력을 JS String.trim()과 동일하게 양끝만 정규화합니다.
 
     JS String.trim()이 제거하는 WhiteSpace/LineTerminator 집합 중 Python str.strip()이
-    유일하게 남기는 문자가 U+FEFF(BOM)임을 확인했다(그 외 문자는 두 언어가 동일하게
-    처리한다). 양끝(trim)만 처리하고 문자열 내부의 U+FEFF는 지우지 않는다 — 내부까지
+    남기는 문자는 U+FEFF(BOM) 하나뿐임을 확인했다. 반대 방향은 대칭이 아니어서 Python이
+    더 공격적이지만(U+001C~U+001F, U+0085를 추가로 제거) 그쪽은 문제가 되지 않는다 —
+    Python이 더 지우는 만큼 캐시 키가 뭉개질 뿐 JS가 보는 문자열과 어긋나지 않는다.
+    양끝(trim)만 처리하고 문자열 내부의 U+FEFF는 지우지 않는다 — 내부까지
     지우면 이 함수의 결과가 실제로 MCP에 보내는 질의 문자열보다 더 뭉개져,
     U+FEFF가 중간에 낀 입력이 캐시에 이미 있는 무관한 이름과 우연히 같아질 수
     있다. 그러면 같은 입력인데도 캐시 상태에 따라 결과가 달라진다.
