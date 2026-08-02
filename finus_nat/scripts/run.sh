@@ -44,22 +44,6 @@ fi
 # Mem0 등 NAT 전용 비밀(MEM0_API_KEY, FINUS_MEM0_*, FINUS_KIS_TRADING_MCP_URL,
 # FINUS_BACKEND_URL)도 fin-us/.env 로 통합되었습니다. 별도 finus_nat/.env 는 더 이상 사용하지 않습니다.
 
-# Self-hosted Mem0 compatibility for local `run.sh` execution:
-# mem0 OSS endpoints may not implement cloud `/v1/ping` validation.
-# 패치 정의는 Dockerfile과 공유하는 scripts/patch_vendor.py 하나에만 둔다.
-#
-# 여기서는 실패해도 런처를 죽이지 않는다. 이 게이트는 위에서 source한 공용 .env의
-# MEM0_API_KEY만 있어도 통과하므로, Mem0를 쓰지 않는 기본 --nomemory 실행까지
-# 벤더 drift 하나로 막히게 된다. 강제 지점은 Docker 빌드(Dockerfile)이고,
-# 로컬은 경고로 충분하다. set -e에 걸리지 않도록 || 로 받는다.
-if [[ -n "${FINUS_MEM0_HOST:-}" || -n "${MEM0_API_KEY:-}" ]]; then
-  uv run --project "${FE_PKG}" python "${FE_PKG}/scripts/patch_vendor.py" \
-    --venv "${FE_PKG_ABS}/.venv" || {
-    echo "경고: 벤더 패치를 적용하지 못했습니다. Mem0(--memory) 경로가 정상 동작하지 않을 수 있습니다." >&2
-    echo "      NAT/mem0 버전을 올렸다면 ${FE_PKG}/scripts/patch_vendor.py 의 원본 문자열을 갱신하세요." >&2
-  }
-fi
-
 _default_config="${FE_PKG}/configs/router_nomemory.yml"
 _CONFIG_FILE="${FINUS_NAT_CONFIG_FILE:-${_default_config}}"
 _CHAT_PORT="${FINUS_CHAT_PORT:-8765}"
@@ -115,6 +99,69 @@ EOF
       ;;
   esac
 done
+
+# Self-hosted Mem0 compatibility gate: mem0 OSS 엔드포인트는 클라우드 전용
+# /v1/ping 검증이 없어서, 벤더 패치(scripts/patch_vendor.py)가 안 붙으면 Mem0
+# 경로가 깨진다. 패치 정의는 Dockerfile과 공유하는 scripts/patch_vendor.py
+# 하나에만 둔다.
+#
+# 이 게이트는 파싱이 끝나 최종값이 된 _CONFIG_FILE(이 실행이 실제로 무엇을
+# 쓰는지)로 판단한다. 예전에는 env(FINUS_MEM0_HOST/MEM0_API_KEY) 존재만 보고
+# 판단했는데, 공용 .env가 항상 MEM0_API_KEY를 갖고 있어 Mem0를 전혀 쓰지 않는
+# 기본 --nomemory 실행까지 벤더 drift 경고에 걸렸다.
+#
+# 이전 코멘트는 "여기서는 실패해도 런처를 죽이지 않는다 … 강제 지점은 Docker
+# 빌드(Dockerfile)이고, 로컬은 경고로 충분하다"였다. 이제는 뒤집는다: 이 실행이
+# 실제로 mem0_memory를 쓰는 config를 골랐는데 패치가 안 붙었다면, 조용히
+# 넘어가는 것은 사용자에게 원인 불명의 런타임 실패만 남긴다. 게이트가 env
+# 스코프에서 config 스코프로 좁혀졌기 때문에 이제는 로컬에서도 fatal로
+# 처리해도 무관하다 - --nomemory 기본 실행은 애초에 이 블록에 들어오지 않는다.
+#
+# NAT config는 `base:` 상속(재귀 deep-merge, nat/utils/io/yaml_tools.py)을 쓴다.
+# router.yml -> agents/diary_agent.yml -> ... -> ../common.yml처럼 체인이 길게
+# 이어질 수 있어서, _CONFIG_FILE 자체(leaf)에는 mem0_memory가 한 번도 안 나와도
+# base 체인을 타고 들어가면 Mem0 워크플로로 귀결될 수 있다. leaf만 grep하면 이
+# 경우를 조용히 놓친다 - 그게 issue #65가 없애려는 바로 그 silent-skip 부류다.
+# 그래서 leaf 하나만 보지 않고 yaml_tools.py와 같은 방식으로 base: 체인을 따라간다.
+_config_uses_mem0() {
+  local file="${1}"
+  local depth=0
+  while [[ -n "${file}" ]]; do
+    if [[ ! -f "${file}" ]]; then
+      echo "경고: 설정 파일을 찾을 수 없습니다: ${file}. Mem0 사용 여부를 판단할 수 없어 벤더 패치를 건너뜁니다." >&2
+      return 1
+    fi
+    if grep -q 'mem0_memory' "${file}"; then
+      return 0
+    fi
+    local dir base_line base_rel
+    dir="$(dirname "${file}")"
+    base_line="$(grep -m1 '^base:' "${file}" || true)"
+    if [[ -z "${base_line}" ]]; then
+      return 1
+    fi
+    base_rel="${base_line#base:}"
+    base_rel="$(echo "${base_rel}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e "s/^['\"]//" -e "s/['\"]\$//")"
+    file="${dir}/${base_rel}"
+    depth=$((depth + 1))
+    if [[ "${depth}" -ge 20 ]]; then
+      echo "경고: base: 상속 체인이 20단계를 넘었습니다(${_CONFIG_FILE}). mem0_memory 탐지를 중단합니다." >&2
+      return 1
+    fi
+  done
+  return 1
+}
+
+if _config_uses_mem0 "${_CONFIG_FILE}"; then
+  if ! uv run --project "${FE_PKG}" python "${FE_PKG}/scripts/patch_vendor.py" \
+    --venv "${FE_PKG_ABS}/.venv"; then
+    echo "오류: 벤더 패치를 적용하지 못했습니다. ${_CONFIG_FILE}이(가) mem0_memory를 쓰는데 패치가 없으면 Mem0 경로가 런타임에 원인 불명으로 실패합니다." >&2
+    echo "      NAT/mem0 버전을 올렸다면 ${FE_PKG}/scripts/patch_vendor.py 의 원본 문자열을 갱신하세요." >&2
+    exit 1
+  fi
+else
+  echo "벤더 패치 건너뜀: ${_CONFIG_FILE}이(가) mem0_memory를 쓰지 않습니다." >&2
+fi
 
 if [[ "${_run_mode}" == "chat" ]]; then
   _own_serve=0
