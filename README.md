@@ -8,17 +8,19 @@ Fin-Us는 **MCP (Model Context Protocol)** 아키텍처와 **멀티 에이전트
 - [주요 특징](#features) — 설계 원칙
 - [시스템 아키텍처](#architecture) — 4개 레이어 구성
 - [설치 및 시작하기](#install) — 처음 실행까지
-  - [API 키별 용도](#api-keys)
-  - [텔레그램 봇 토큰 발급](#telegram-token)
-  - [환경 변수 설정](#env)
-  - [시스템 가동](#run)
+  - [사전 준비 사항](#prerequisites)
+    - [API 키별 용도](#api-keys)
+    - [텔레그램 봇 토큰 발급](#telegram-token)
+  - [1. NAT 에이전트 설정](#nat-config)
+  - [2. 환경 변수 설정](#env)
+  - [3. 시스템 가동](#run)
 - [Docker로 한번에 설치하기](#docker) — 권장 실행 경로
 - [에이전트별 보유 스킬 (MCP Tools)](#skills) — MCP 도구 목록
 - [Telegram 봇](#telegram) — 알림과 명령
-  - [명령어 목록](#commands)
 - [자주 겪는 문제](#troubleshooting) — 증상별 해결
 - [알려진 한계](#limitations) — 현재 안 되는 것
-- [로드맵](#roadmap)
+- [로드맵](#roadmap) — 완료·예정 항목
+- [참고](#notes) — 프로젝트 성격과 면책
 
 <a id="agents" name="agents"></a>
 
