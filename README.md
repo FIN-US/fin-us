@@ -1,8 +1,25 @@
-# 📈 Fin-Us: Multi-Agent AI Investment Orchestrator
+# Fin-Us: Multi-Agent AI Investment Orchestrator
 
 Fin-Us는 **MCP (Model Context Protocol)** 아키텍처와 **멀티 에이전트 워크플로우**를 결합한 차세대 지능형 투자 시스템입니다. 독립적인 인격을 가진 에이전트들이 각자의 도구(MCP)를 활용해 협업하며, 뉴스 분석부터 실제 매매 집행까지의 복잡한 의사결정을 자율적으로 수행합니다.
 
-## 🤖 Multi-Agent Ecosystem
+> **처음 쓰시나요? → [사용 설명서](docs/user-guide.md)**
+> API 키 발급부터 텔레그램 명령, 자주 겪는 문제까지 실제 사용 방법을 다룹니다.
+> 이 README는 시스템의 구조와 설치를 설명합니다.
+
+## 목차
+
+| | |
+| :--- | :--- |
+| [Multi-Agent Ecosystem](#multi-agent-ecosystem) | 6종 에이전트의 역할 |
+| [주요 특징](#주요-특징) | 설계 원칙 |
+| [시스템 아키텍처](#시스템-아키텍처) | 4개 레이어 구성 |
+| [설치 및 시작하기](#설치-및-시작하기) | 환경 변수 · Docker 실행 · 로컬 실행 |
+| [에이전트별 보유 스킬](#에이전트별-보유-스킬-mcp-tools) | MCP 도구 목록 |
+| [텔레그램 인터페이스](#텔레그램-인터페이스) | 대표 명령과 자동 동작 |
+| [로드맵](#로드맵) | 완료·예정 항목 |
+| [알려진 한계](#알려진-한계) | 현재 안 되는 것 |
+
+## Multi-Agent Ecosystem
 
 Fin-Us는 단일 모델이 모든 일을 처리하지 않고, 역할이 분리된 전문 에이전트들이 협력합니다. 각 에이전트의 페르소나와 지침은 `finus_nat/configs/agents/`의 YAML 설정을 통해 관리됩니다.
 
@@ -15,14 +32,14 @@ Fin-Us는 단일 모델이 모든 일을 처리하지 않고, 역할이 분리�
 | **Monitoring Agent** | 포트폴리오 파수꾼 | 실시간 잔고 및 시장 변화를 관찰하여 포트폴리오 건전성 유지 및 알림 |
 | **Diary Agent** | 매매 복기 기록가 | 매매 기록, 감정 정리, 투자 일지 초안 작성 및 성찰 지원 |
 
-## 🚀 주요 특징
+## 주요 특징
 
 - **NAT 기반 멀티 에이전트**: `finus_nat` 레이어를 통해 라우터 및 브랜치 구조의 복잡한 에이전트 워크플로우를 제어합니다.
 - **YAML 기반 에이전트 설정**: 에이전트의 성격, 배경지식, 작업 지침을 코드가 아닌 YAML 파일로 관리하여 유연한 튜닝이 가능합니다.
 - **관심사 분리 (SoC)**: MCP를 통해 도구(Tool)를 분리하고, 에이전트별로 역할을 분산하여 LLM의 할루시네이션(환각)을 최소화했습니다.
 - **실시간 지식 확장**: 공식 API 기반 MCP 서버를 통해 뉴스와 정형 금융 데이터에 접근합니다.
 
-## 🏗️ 시스템 아키텍처
+## 시스템 아키텍처
 
 시스템은 '관심사 분리' 원칙에 따라 다음과 같이 구성됩니다.
 
@@ -39,15 +56,62 @@ Fin-Us는 단일 모델이 모든 일을 처리하지 않고, 역할이 분리�
 4.  **Presentation Layer (`frontend-react/`)**: React (TypeScript)
     - 실시간 투자 신호 및 분석 리포트를 시각화하여 사용자에게 제공합니다.
 
-## 🛠️ 설치 및 시작하기
+## 설치 및 시작하기
 
 ### 사전 준비 사항
 
-- Python 3.13
-- Node.js & npm
-- API Keys: OpenAI/Anthropic API, 한국투자증권(KIS) API Key/Secret, Naver Search API, OpenDART API Key
+- Docker / Docker Compose (권장 실행 경로)
+- Python 3.13, Node.js & npm (로컬 실행 시)
+- API Keys: OpenAI/Anthropic API, 한국투자증권(KIS) API Key/Secret, Naver Search API, OpenDART API Key, Telegram Bot Token
 
-### 1. NAT 에이전트 설정
+> 각 키가 어떤 기능에 쓰이고 없으면 무엇이 막히는지, 텔레그램 봇 토큰은 어떻게 발급하는지는 [사용 설명서 2-1](docs/user-guide.md#2-1-준비물)에 있습니다.
+
+### 1. 환경 변수 설정
+
+Fin-Us는 모든 설정을 단일 루트 `.env` 파일에서 관리합니다. 초기 설정 CLI가 기능 묶음별로 사용 여부를 묻고, 쓴다고 한 항목만 입력받습니다.
+
+```bash
+bash scripts/setup_env.sh   # .env 생성
+bash scripts/check_env.sh   # 설정 점검
+```
+
+`.env.example`을 참고해 직접 편집해도 됩니다.
+
+### 2. 실행 (Docker 권장)
+
+```bash
+bash scripts/setup_deps.sh   # MCP 의존성 설치 + 이미지 빌드
+bash scripts/run_stack.sh    # 전체 스택 기동
+```
+
+| 서비스 | 포트 | 역할 |
+| :--- | :--- | :--- |
+| `frontend` | 5173 | 웹 대시보드 |
+| `backend` | 8000 | API·스케줄러·텔레그램 봇 |
+| `finus-nat` | 8001 | 멀티 에이전트 엔진 |
+| `redis` | 6379 | 신호 중복 방지 캐시 |
+
+`backend`는 `finus-nat`과 `redis`가 healthy가 된 뒤에 기동합니다. `finus-nat`은 최대 90초까지 걸릴 수 있습니다. 전부 지우고 다시 시작하려면 `bash scripts/reset_clean.sh`를 사용합니다.
+
+### 3. 로컬 실행 (선택)
+
+`uvicorn --reload`로 백엔드를 직접 띄우고 싶을 때 사용합니다.
+
+```bash
+# 1. MCP Servers (News, Trading, DART) 빌드
+(cd mcp-news && npm ci)
+(cd mcp-trading && npm ci)
+(cd mcp-dart && npm ci)
+
+# 2. Backend Orchestrator 실행 (프로젝트 루트에서)
+uv sync --project backend
+uv run --project backend uvicorn backend.main:app --host 0.0.0.0 --port 8000
+
+# 3. Frontend 실행
+cd frontend-react && npm ci && npm run dev
+```
+
+### 4. NAT 에이전트 설정
 
 에이전트의 페르소나, 도구 구성, 라우팅 지침은 NAT 레이어에서 정의합니다. `finus_nat/configs/agents/` 폴더 내의 YAML 파일을 수정하여 각 에이전트의 성격과 작업 지침을 관리할 수 있습니다.
 
@@ -64,34 +128,7 @@ functions:
       뉴스와 외국인/기관 매매 동향을 종합 분석합니다.
 ```
 
-### 2. 환경 변수 설정
-
-Fin-Us는 모든 설정을 단일 루트 `.env` 파일에서 관리합니다. 처음 실행하는 경우 초기 설정 CLI로 `.env`를 생성합니다.
-
-```bash
-bash scripts/setup_env.sh
-```
-
-기존처럼 `.env.example`을 참고해 `.env`를 직접 편집할 수도 있습니다.
-
-### 3. 시스템 가동
-
-```bash
-# 1. MCP Servers (News, Trading, DART) 빌드
-(cd mcp-news && npm ci)
-(cd mcp-trading && npm ci)
-(cd mcp-dart && npm ci)
-
-# 2. Backend Orchestrator 실행
-# 프로젝트 루트 디렉토리에서 실행하는 것을 권장합니다.
-uv sync --project backend
-uv run --project backend uvicorn backend.main:app --host 0.0.0.0 --port 8000
-
-# 3. Frontend 실행
-cd frontend-react && npm ci && npm run dev
-```
-
-## 📝 에이전트별 보유 스킬 (MCP Tools)
+## 에이전트별 보유 스킬 (MCP Tools)
 
 | 에이전트             | 스킬 이름              | 설명                                         |
 | :------------------- | :--------------------- | :------------------------------------------- |
@@ -106,7 +143,29 @@ cd frontend-react && npm ci && npm run dev
 Backend는 `GET /api/v1/disclosures?stock=삼성전자`로 DART 지분공시 signal을 제공하며, 스케줄러는 뉴스 signal과 함께 공시 signal도 주기적으로 수집합니다.
 관심 종목의 DART signal은 촉매 이벤트 캘린더에도 저장되며, 매일 오전 D-1/D-0 이벤트를 Telegram으로 사전 알림합니다.
 
-## 📅 로드맵
+## 텔레그램 인터페이스
+
+일상적인 사용은 대부분 텔레그램 봇에서 이뤄집니다. 웹 대시보드(5173)와 REST API(8000/docs)는 확인·개발용입니다.
+
+백엔드가 떠 있으면 **10분마다** 보유·관심 종목의 뉴스와 공시를 확인하고, 새로운 신호가 있을 때만 AI 분석을 돌려 텔레그램으로 알립니다. 평일 **08:30**에는 모닝 브리핑이 전송됩니다.
+
+| 명령 | 설명 |
+| :--- | :--- |
+| `/balance` | 예수금·총자산·보유 종목 조회 |
+| `/watch add <종목명>` | 관심 종목 등록 (자동 감시 대상에 포함) |
+| `/quote <종목명>` · `/trend <종목명>` | 현재가 · 외국인·기관 수급 |
+| `/earnings <종목명> [기간]` | DART 실적과 뉴스 기반 구조화 리포트 |
+| `/buy <종목명> <수량> [지정가]` | 매수 확인 대기 생성 (60초 내 확정 필요) |
+| `/alerts urgent\|all\|off\|status` | 분석 알림 모드 변경·확인 |
+| `/help` | 전체 명령 목록 |
+
+슬래시 명령이 아닌 일반 텍스트는 NAT 에이전트에게 전달됩니다. `삼성전자 1주 시장가로 매수해줘`처럼 자연어로 주문해도 동일한 확인 단계를 거칩니다.
+
+실계좌 주문은 `KIS_ORDER_ENV=real`, `KIS_REAL_ORDER_ENABLED=true`, 사용자의 60초 내 확정이 **모두** 충족돼야 실행됩니다. 기본값은 모의투자입니다.
+
+> 전체 명령 목록과 인라인 버튼, 알림 동작, 문제 해결은 [사용 설명서 3장](docs/user-guide.md#3-텔레그램으로-쓰기)과 [7장](docs/user-guide.md#7-자주-겪는-문제)에 있습니다.
+
+## 로드맵
 
 - [x] 멀티 에이전트 협업 구조 설계 (YAML-based NAT Layer)
 - [x] MCP 기반 뉴스 수집 및 트레이딩 도구 통합
@@ -117,110 +176,18 @@ Backend는 `GET /api/v1/disclosures?stock=삼성전자`로 DART 지분공시 sig
 - [ ] 기술적 분석(차트) 고도화 및 보조지표 분석 도구 추가
 - [ ] AWS App Runner & Docker 기반 클라우드 배포
 
----
+## 알려진 한계
 
-## Docker로 한번에 설치하기
+- **영숫자·9자리 종목코드는 주문 불가** — 코스닥 스팩·리츠·ETN·펀드 등 전체의 약 18%. 조회는 정상 ([#138](https://github.com/FIN-US/fin-us/issues/138))
+- **웹 대시보드 포트폴리오가 항상 비어 있음** — 계좌 → DB 동기화 미구현 ([#122](https://github.com/FIN-US/fin-us/issues/122))
+- **API에 인증이 없음** — 외부에 포트를 열지 마세요
+- **대기 주문이 메모리에만 존재** — 백엔드 재시작 시 확인 대기 중이던 주문이 사라짐 ([#63](https://github.com/FIN-US/fin-us/issues/63))
 
-```bash
-bash scripts/setup_env.sh
-bash scripts/setup_deps.sh
-```
-
-또는:
-
-```bash
-bash scripts/run_stack.sh
-```
-
-- 로컬에서 `uvicorn --reload`만 쓰고 싶다면 볼륨 마운트된 소스로 호스트에서 실행하면 됩니다.
-
-### Telegram 긴급 알림 수동 테스트
-
-Docker Compose가 실행 중이고 `.env`에 `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`가 설정되어 있으면 backend 컨테이너에서 테스트 알림을 보낼 수 있습니다.
-
-```bash
-docker compose exec backend uv run --project /app/backend python /app/backend/scripts/send_test_telegram_alert.py
-```
-
-메시지 포맷만 확인하려면 실제 전송 없이 dry-run으로 실행합니다.
-
-```bash
-docker compose exec backend uv run --project /app/backend python /app/backend/scripts/send_test_telegram_alert.py --dry-run
-```
-
-### Telegram 모닝 브리핑
-
-Backend 스케줄러는 매 거래일 오전 8시 30분에 Telegram 모닝 브리핑을 자동 전송합니다.
-
-브리핑은 `mcp-news`, `mcp-trading`, NAT Strategy Planner 흐름을 사용해 아래 항목을 요약합니다.
-
-- 오늘의 시장 요약: 전일 미국/선물 시장 동향과 주요 이슈
-- 관심종목 동향: `/watch` 관심 종목별 최신 뉴스와 외국인·기관 수급
-- 오늘의 트레이딩 아이디어: 장 시작 전 참고할 간략 시나리오
-- 주요 촉매 이벤트: 당일/금주 실적, 배당락, 공시 등 확인 필요 이벤트
-
-모닝 브리핑은 정기 브리핑 메시지이므로 긴급 분석 알림 게이트와 분리되어 있습니다. `/alerts urgent|all|off|status`는 스케줄러 분석 알림의 전송 범위를 제어하며, 모닝 브리핑 자체의 발송 스케줄은 APScheduler의 `morning_briefing` 작업으로 관리합니다.
-
-같은 Telegram 봇에서 명령을 사용할 수 있습니다. 기본 알림 모드는 긴급 분석만 전송하는 `urgent`입니다.
-
-### 명령어 목록
-
-**알림 설정**
-
-| 명령 | 설명 | 인라인 버튼 |
-| :--- | :--- | :--- |
-| `/alerts urgent\|all\|off\|status` | 알림 모드 변경 또는 현재 상태 확인 | 🚨 긴급만 · 📣 전체 · 🔕 끄기 · 🔎 현재 상태 |
-
-**조회**
-
-| 명령 | 설명 | 인라인 버튼 |
-| :--- | :--- | :--- |
-| `/balance` | 예수금·총자산·보유 종목 조회 | 🔄 새로고침 |
-| `/watch list` | 관심 종목 목록 조회 | 📋 목록 새로고침 |
-| `/watch add <종목명>` | 관심 종목 추가 (스케줄러 자동 모니터링 대상에 포함) | 📋 목록 새로고침 |
-| `/watch remove <종목명>` | 관심 종목 삭제 | 📋 목록 새로고침 |
-| `/catalysts <종목명>` | 관심 종목의 예정 촉매 이벤트 조회 (실적·배당·공시·주주총회) | - |
-| `/quote <종목명>` | 현재가 조회 | 📊 수급 보기 |
-| `/trend <종목명>` | 외국인·기관·개인 수급 조회 | 💵 현재가 보기 |
-| `/earnings <종목명> [기간]` | DART 실적과 최신 뉴스 기반 구조화 리포트 생성. 기간 예: `2025Q1`, `2025FY` | - |
-| `/visualize` | `VISUALIZATION_URL`에 설정된 Unity 포트폴리오 시각화 링크 제공 | - |
-
-`/earnings`는 OpenDART 실적 데이터와 Naver 뉴스를 NAT News Analyst에 전달합니다. OpenDART가 제공하지 않는 컨센서스/시장 기대치 데이터는 추정하지 않고 데이터 없음으로 표시합니다. Telegram 응답은 Markdown이 아닌 일반 텍스트이며 첫 줄에 `🟢 호재`, `🔴 악재`, `⚪ 중립` 판정을 표시합니다.
-
-`/visualize`는 홈서버나 Tailscale 시연 환경에서 접근 가능한 Unity WebGL URL을 그대로 안내합니다. 예: `VISUALIZATION_URL=http://100.x.y.z:8080/`
-
-**매매**
-
-| 명령 | 설명 | 인라인 버튼 |
-| :--- | :--- | :--- |
-| `/buy <종목명> <수량> [지정가]` | 60초 매수 확인 대기 생성. 지정가 생략 시 시장가 | ✅ 확정 · ❌ 취소 |
-| `/sell <종목명> <수량> [지정가]` | 60초 매도 확인 대기 생성. 지정가 생략 시 시장가 | ✅ 확정 · ❌ 취소 |
-| `/confirm` | 대기 중인 주문 실행 | - |
-| `/cancel` | 대기 중인 주문 취소 (증권사 제출 주문은 취소 불가) | - |
-
-**안내**
-
-| 명령 | 설명 | 인라인 버튼 |
-| :--- | :--- | :--- |
-| `/help` | 사용 가능한 명령 확인 | 💰 잔고 · 🔔 알림 · 🧾 매매 · 🔎 조회 |
-| `/trade` | 매수·매도 입력 안내 | 매수 입력법 · 매도 입력법 |
-| `/lookup` | 현재가·수급 조회 입력 안내 | 현재가 입력법 · 수급 입력법 |
-
-> 슬래시 명령 대신 `삼성전자 1주 시장가로 매수해줘`, `NAVER 2주 200,000원에 매도해줘`처럼 자연어로 입력해도 동일한 주문 확인 대기가 생성됩니다. 자연어 주문도 실제 제출 전 `확정` 버튼 또는 `/confirm`이 필요합니다.
->
-> 실계좌 주문은 `KIS_ORDER_ENV=real`과 `KIS_REAL_ORDER_ENABLED=true`가 모두 설정되어야 실행됩니다.
-
-`mcp-trading/data/stocks.json`은 KIS 공개 코스피/코스닥 종목 마스터 기반의 종목명 해석 캐시입니다. 신규 상장 등으로 종목명이 잡히지 않으면 6자리 종목코드를 직접 입력하거나 아래 명령으로 캐시를 갱신합니다.
-
-```bash
-python3 mcp-trading/scripts/update_stock_master.py
-```
-
-슬래시 명령이 아닌 일반 텍스트는 NAT 채팅으로 전달됩니다. Telegram 채팅은 `telegram:{chat_id}` conversation id를 사용하므로 스케줄러 분석 리포트와 대화 이력이 섞이지 않습니다.
+전체 목록은 [사용 설명서 8장](docs/user-guide.md#8-알아둘-한계)에 있습니다.
 
 ---
 
-## ⚖️ 참고
+## 참고
 - 본 프로젝트는 **학술적 목적**의 캡스톤 디자인 결과물이며, 일체의 상업적 목적이 없습니다.
 
 
