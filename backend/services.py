@@ -39,6 +39,15 @@ _STOCK_CODE_RE = re.compile(r"^[0-9A-Z]{6,7}$")
 # telegram_commands.py의 같은 정규식 위쪽 주석에 더 자세한 배경과 #140 통합 메모가 있다.
 # 두 곳은 정규식 문자열은 동일하지만 실패 시 반환값이 다르다: 여기(services.py)는 ""를,
 # telegram_commands._extract_stock_code는 None을 반환한다.
+# 497be1d 이후 두 곳은 숫자 불변식에서도 갈린다: 여기는 추출 결과에 _has_code_digit을
+# 적용해 숫자 없는 매치를 거르지만, telegram_commands._extract_stock_code(origin/main
+# 기준)는 이 검사가 없어 숫자 없는 6자 영문 매치도 그대로 코드로 통과시킨다.
+# 실제 영향: SIMPAC(009160)처럼 종목명이 숫자 없는 6~7자 영문인 KOSPI 정상 종목은
+# stock-master.js 지름길이 "SIMPAC (SIMPAC, UNKNOWN)"을 돌려주고, 텔레그램 쪽은 이를
+# 그대로 종목코드로 받아들여 telegram_commands._ORDERABLE_STOCK_CODE_RE 검사에서
+# 실패한다. 그 결과 `/buy SIMPAC 10`은 실제로는 숫자 코드가 있는 평범한 KOSPI 종목인데도
+# "ETN·펀드 등 영숫자 종목코드는 아직 주문 대상이 아닙니다"라는 사실과 다른 사유로
+# 사용자에게 거부된다. #140 통합 시 이 불변식도 함께 옮겨야 한다.
 _STOCK_CODE_EXTRACT_RE = re.compile(r"\(([0-9A-Z]{6,}),")
 # 비대칭 주의: 위 두 정규식의 상한이 다르다 보니, 사용자가 9자 펀드 코드를 직접 입력해도
 # 그대로 통과되지 않는다. _looks_like_stock_code의 {6,7}이 9자 입력을 코드로 보지 않아
