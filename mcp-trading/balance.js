@@ -67,6 +67,10 @@ export async function fetchAllBalance(fetchPage, {
       break;
     }
 
+    // fetchPage에 이번에 넘긴 커서를 기억해 둔다. 응답이 이 값을 그대로 되돌려주면
+    // (repeated_cursor 가드) 같은 페이지가 반복 조회되고 있다는 뜻이다.
+    const sentNk = ctxNk;
+
     let body;
     let respTrCont;
     try {
@@ -107,6 +111,14 @@ export async function fetchAllBalance(fetchPage, {
       // 연속 신호는 왔는데 이어받을 커서가 없다. 그대로 재요청하면 KIS가 초기 조회로 해석해
       // 같은 페이지를 상한까지 반복 조회한다. 중단하되 누락 가능성은 알린다.
       truncated = "no_cursor";
+      break;
+    }
+    if (sentNk && ctxNk === sentNk) {
+      // 같은 커서를 되돌려받았다. 그대로 재요청하면 동일 페이지를 상한까지 반복 조회하고
+      // 리포트에 같은 종목이 여러 번 실릴 수 있다. pdno 기준 중복 제거는 하지 않는다 —
+      // KIS가 페이지마다 동일한 pdno를 돌려주는 경우(예: 시간 예산 테스트 픽스처)가 있어
+      // 서로 다른 실제 보유 종목을 하나로 합쳐버릴 위험이 있다. 대신 중단하고 알린다.
+      truncated = "repeated_cursor";
       break;
     }
     trCont = "N";
@@ -197,6 +209,7 @@ function formatTruncationNote(truncated, pages) {
     max_pages: `페이지 상한(${pages}회)을 초과하여`,
     time_budget: "조회 시간 예산을 초과하여",
     no_cursor: "연속조회 커서가 오지 않아",
+    repeated_cursor: "동일한 연속조회 커서가 반복되어",
     error: "연속조회 중 오류가 발생하여",
   };
   const reason = reasons[truncated] || "연속조회가 완료되지 않아";

@@ -328,6 +328,32 @@ test('fetchAllBalance stops after two calls and reports truncated="no_cursor" wh
   assert.deepEqual(calls[1], { ctxAreaFk100: "FK1", ctxAreaNk100: "NK1", trCont: "N" });
 });
 
+test('fetchAllBalance stops after two calls and reports truncated="repeated_cursor" when KIS echoes back the same continuation cursor instead of advancing, without dropping either page\'s rows', async () => {
+  let calls = 0;
+  const fetchPage = async () => {
+    calls += 1;
+    return {
+      body: {
+        // Both pages return the same pdno, mirroring the time-budget fixture below. A
+        // pdno-keyed dedup would silently collapse these two distinct holdings into one;
+        // this test asserts nothing is dropped.
+        output1: [{ prdt_name: `종목${calls}`, pdno: "000000" }],
+        output2: calls === 1 ? [{ tot_evlu_amt: "1" }] : [],
+        ctx_area_fk100: "FK1",
+        ctx_area_nk100: "NK1",
+      },
+      trCont: "F",
+    };
+  };
+
+  const result = await fetchAllBalance(fetchPage, { maxPages: 20, timeBudgetMs: 60_000 });
+
+  assert.equal(calls, 2);
+  assert.equal(result.pages, 2);
+  assert.equal(result.truncated, "repeated_cursor");
+  assert.equal(result.rows.length, 2);
+});
+
 test("fetchAllBalance rethrows when the first page fetch fails, so auth/account errors are not swallowed", async () => {
   const authError = new Error("EGW00123 인증 오류");
   const fetchPage = async () => {
@@ -401,8 +427,8 @@ test("formatBalanceReport's truncation note stays outside the holdings section s
   assert.ok(stockLines.every((line) => !line.includes("안내") && !line.includes("상한")));
 });
 
-test("formatBalanceReport's no_cursor and error truncation notes also stay outside the holdings section", () => {
-  for (const truncated of ["no_cursor", "error"]) {
+test("formatBalanceReport's no_cursor, error, and repeated_cursor truncation notes also stay outside the holdings section", () => {
+  for (const truncated of ["no_cursor", "error", "repeated_cursor"]) {
     const text = formatBalanceReport(
       {
         output1: [
