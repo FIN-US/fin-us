@@ -29,6 +29,16 @@ def test_mcp_stdio_params_do_not_pass_parent_only_secrets(monkeypatch):
     assert "OPENAI_API_KEY" not in params.env
 
 
+def test_mcp_stdio_params_pass_order_dedup_ledger_settings(monkeypatch):
+    monkeypatch.setenv("KIS_ORDER_DEDUP_PATH", "/var/lib/finus/kis-order-dedup.json")
+    monkeypatch.setenv("KIS_ORDER_DEDUP_TTL_MS", "120000")
+
+    params = _stdio_server_params(Path("/opt/mcp-trading"))
+
+    assert params.env["KIS_ORDER_DEDUP_PATH"] == "/var/lib/finus/kis-order-dedup.json"
+    assert params.env["KIS_ORDER_DEDUP_TTL_MS"] == "120000"
+
+
 def test_visualization_url_is_trimmed_and_trailing_slash_preserved(monkeypatch):
     monkeypatch.setenv("VISUALIZATION_URL", " https://finus-visual.example/portfolio/ ")
 

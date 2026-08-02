@@ -35,6 +35,9 @@ services:
       TRADING_MCP_DIR: /opt/mcp-trading
       DART_MCP_DIR: /opt/mcp-dart
       REDIS_URL: redis://redis:6379/0
+      # 주문 멱등 원장(#124). `.:/app` bind mount 덕분에 호스트 ./.state/ 에 영속된다.
+      # 소스를 bind mount하지 않는 배포용 compose를 도입하면 named volume으로 전환할 것.
+      KIS_ORDER_DEDUP_PATH: ${KIS_ORDER_DEDUP_PATH:-/app/.state/kis-order-dedup.json}
     depends_on:
       finus-nat:
         condition: service_healthy

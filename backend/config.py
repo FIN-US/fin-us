@@ -56,6 +56,15 @@ _MCP_ENV_ALLOWED_KEYS = {
     "KIS_API_SECRET",
     "KIS_ACCOUNT_NO",
     "KIS_URL",
+    # 주문 멱등 원장(mcp-trading/order-dedup.js:50-51) 설정.
+    # Docker 이미지의 mcp-trading은 /opt/mcp-trading에 있고 .dockerignore가 .env를 배제하므로
+    # mcp-trading/index.js:34의 dotenv가 루트 .env를 읽지 못한다. 이 두 키를 자식 프로세스로
+    # 전달해야 원장 경로 재정의가 실제로 적용된다.
+    # KIS_REAL_ORDER_ENABLED는 의도적으로 제외한다 — 추가하면 Docker에서 실계좌 주문
+    # 가드(mcp-trading/order.js:56-61)에 사용자 .env 값이 반영되기 시작하므로,
+    # 전용 이슈·리뷰를 거쳐야 한다.
+    "KIS_ORDER_DEDUP_PATH",
+    "KIS_ORDER_DEDUP_TTL_MS",
     "NAVER_CLIENT_ID",
     "NAVER_CLIENT_SECRET",
     "DART_API_KEY",
