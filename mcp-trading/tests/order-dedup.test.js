@@ -138,3 +138,35 @@ test("OrderDedupStore blocks duplicate reservations across separate instances sh
     DuplicateOrderError,
   );
 });
+
+// 이 테스트는 parsePositiveInteger()의 현재 동작(잘못된 값을 조용히 기본값으로
+// 대체)을 있는 그대로 문서화한다. 이 침묵하는 폴백은 바람직한 설계로 보증하는
+// 것이 아니라 별도 이슈로 추적 중이며, 이번 PR에서는 손대지 않는다.
+test("OrderDedupStore resolves ttlMs from KIS_ORDER_DEDUP_TTL_MS env var, silently falling back on invalid values", (t) => {
+  const originalEnvValue = process.env.KIS_ORDER_DEDUP_TTL_MS;
+  t.after(() => {
+    if (originalEnvValue === undefined) {
+      delete process.env.KIS_ORDER_DEDUP_TTL_MS;
+    } else {
+      process.env.KIS_ORDER_DEDUP_TTL_MS = originalEnvValue;
+    }
+  });
+
+  const DEFAULT_TTL_MS = 120_000;
+  const cases = [
+    ["600000", 600_000], // 유효한 값은 그대로 사용된다
+    ["600_000", DEFAULT_TTL_MS], // JS 숫자 구분자(_) 습관 - Number()는 이를 파싱하지 못함
+    ["10m", DEFAULT_TTL_MS], // 단위 접미사 오타
+    ["0", DEFAULT_TTL_MS], // <= 0 분기
+    ["-1", DEFAULT_TTL_MS], // <= 0 분기, 음수
+    ["60.5", DEFAULT_TTL_MS], // !Number.isInteger 분기
+  ];
+
+  for (const [envValue, expectedTtlMs] of cases) {
+    process.env.KIS_ORDER_DEDUP_TTL_MS = envValue;
+    assert.equal(new OrderDedupStore().ttlMs, expectedTtlMs, `env=${envValue}`);
+  }
+
+  delete process.env.KIS_ORDER_DEDUP_TTL_MS;
+  assert.equal(new OrderDedupStore().ttlMs, DEFAULT_TTL_MS, "env=unset");
+});
