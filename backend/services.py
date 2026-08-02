@@ -1,6 +1,7 @@
 import json
 import httpx
 import logging
+import re
 from datetime import date
 from typing import Any, Literal, Optional
 from urllib.parse import quote as _url_quote
@@ -23,6 +24,134 @@ from .models import AgentReport
 
 logger = logging.getLogger(__name__)
 _NAT_RESPONSE_LOG_PREVIEW_CHARS = 800
+
+# 입력이 이미 종목코드 형태인지 판정하는 범위. mcp-trading/stock-master.js의
+# resolveStock() 지름길(6~7자 영숫자를 그대로 코드로 인정)과 상한을 맞춘다.
+# KIS 국내 종목코드는 6자리 숫자(005930)만이 아니다. 코스닥 스팩·리츠 등 약 18%가
+# 영문이 섞인 형태(0001A0)이고, 펀드는 더 길다(F70100026). 숫자 6자리만 인정하면
+# MCP가 정확히 돌려준 코드를 백엔드가 스스로 버리게 된다.
+_STOCK_CODE_RE = re.compile(r"^[0-9A-Z]{6,7}$")
+# resolve_stock_code 응답 형식: "종목명 (코드, 시장)" — mcp-trading/index.js
+# 종목명 자체에 괄호가 들어가는 경우가 있어(예: "...테이블1(A)") 코드+쉼표 조합에 앵커한다.
+# 입력 판정(_STOCK_CODE_RE)과 달리 상한을 두지 않는다({6,}) — 이건 MCP *응답*에서 코드를
+# 뽑아내는 정규식이라 6자(3,889종목)·7자 ETN(389종목)·9자 펀드(75종목, 전체 4,353종목 중)가
+# 모두 나올 수 있다. {6,7}로 좁히면 펀드 코드 75종 전부가 조용히 빠진다.
+# 숫자 불변식(_has_code_digit 적용)은 이 파일에만 있다 — telegram_commands.py의
+# 같은 정규식은 이 검사가 없다. #140에서 두 곳을 통합할 때 함께 옮겨야 한다.
+_STOCK_CODE_EXTRACT_RE = re.compile(r"\(([0-9A-Z]{6,}),")
+# 비대칭 주의: 위 두 정규식의 상한이 다르다 보니, 사용자가 9자 펀드 코드를 직접 입력해도
+# 그대로 통과되지 않는다. _looks_like_stock_code의 {6,7}이 9자 입력을 코드로 보지 않아
+# MCP를 호출하지만, stock-master.js의 지름길도 똑같이 {6,7}이라 이 입력을 코드로 인정하지
+# 않고 정확한 종목명 매칭으로 넘어가 결국 "찾을 수 없음" 예외를 던진다. 즉 추출 쪽 상한을
+# 넓힌 것은 MCP가 돌려준 9자 코드를 버리지 않기 위함이지, 사용자가 9자 코드를 직접 입력해도
+# 왕복되게 만들지는 않는다.
+
+# 종목명 -> 종목코드 프로세스 메모리 캐시.
+# resolve_stock_code MCP 호출은 매번 새 stdio 서브프로세스를 띄우는 비용이 있고
+# (run_mcp_tool 참고), 종목명-코드 매핑은 사실상 불변이므로 캐싱해 재조회를 피한다.
+_stock_code_cache: dict[str, str] = {}
+# 종목마스터는 4,353종(별칭 포함해도 여유롭게 포함)이므로 이 상한을 정상적으로
+# 채울 일은 없다. _normalize_stock_input의 정규화가 stock-master.js의 정규화와
+# 다시 어긋나는 미래의 변경이 있어도(둘은 서로 다른 언어의 별개 구현이다) 캐시가
+# 무한정 자라지 않도록 하는 독립적인 방어선이다.
+_STOCK_CODE_CACHE_MAX = 8192
+
+
+def _normalize_stock_input(stock: str) -> str:
+    r"""입력을 JS String.trim()과 동일하게 양끝만 정규화합니다.
+
+    Python의 공백 판정(정규식 \s, str.isspace()와 동일한 범위)은 JS String.trim()이
+    제거하는 WhiteSpace/LineTerminator 집합을 포함하고 U+FEFF(BOM) 하나만 빠짐을
+    확인했다. 그래서 문자 클래스에 U+FEFF를 더한 [\s\ufeff]로 앞뒤를 한 번에
+    훑으면, 공백과 BOM이 뒤섞여 나오는 입력(예: ' \ufeff \ufeffSAMSUNG')도
+    JS trim()과 동일하게 끝까지 벗겨낸다 — strip()을 여러 번 나눠 부르면 한
+    번 벗기다 멈춘 자리에서 그대로 멈춰 이런 입력을 끝까지 벗기지 못한다.
+    Python이 더 지우는 문자도 있지만(U+001C~U+001F, U+0085 — JS 기준으로는
+    공백이 아님) 문제가 되지 않는다: 캐시 키가 조금 더 뭉개질 뿐, 이 함수를
+    거친 같은 문자열이 입력 판정·MCP 질의·캐시 키에 그대로 쓰이므로 세 곳이
+    서로 어긋나지 않는다.
+    양끝(trim)만 처리하고 문자열 내부의 U+FEFF는 지우지 않는다 — 내부까지
+    지우면 이 함수의 결과가 실제로 MCP에 보내는 질의 문자열보다 더 뭉개져,
+    U+FEFF가 중간에 낀 입력이 캐시에 이미 있는 무관한 이름과 우연히 같아질 수
+    있다. 그러면 같은 입력인데도 캐시 상태에 따라 결과가 달라진다.
+
+    입력 판정(_looks_like_stock_code), MCP 질의, 캐시 키까지 이 함수를 거친 같은
+    문자열을 공유해야 세 곳이 서로 어긋나지 않는다.
+    """
+    return re.sub(r"^[\s\ufeff]+|[\s\ufeff]+$", "", stock)
+
+
+def _has_code_digit(value: str) -> bool:
+    """실제 종목코드는 항상 숫자를 포함한다(종목마스터 4,353종 전수 확인, 0건 예외).
+
+    입력 판정과 MCP 추출 결과 검증이 같은 불변식을 쓰도록 한 곳에 둔다.
+    """
+    return any(ch in "0123456789" for ch in value)
+
+
+def _looks_like_stock_code(stock: str) -> bool:
+    """이미 종목코드 형태여서 MCP 조회를 생략해도 되는지 판정합니다.
+
+    mcp-trading/stock-master.js가 입력을 코드로 인정하는 범위(6~7자 영숫자)를 따르되,
+    실제 코드는 항상 숫자를 포함하므로 숫자 포함을 함께 요구합니다.
+    이 조건이 없으면 6~7자 영문 종목명이 코드로 오인됩니다.
+    """
+    value = stock.strip().upper()
+    return bool(_STOCK_CODE_RE.match(value)) and _has_code_digit(value)
+
+
+async def _resolve_stock_code(stock: str) -> str:
+    """종목명(또는 이미 종목코드인 값)을 종목코드로 변환합니다.
+
+    이미 종목코드 형태이면 MCP 호출 없이 그대로 사용합니다.
+    조회 실패/예외 시 리포트 저장을 막지 않도록 빈 문자열로 폴백합니다.
+    """
+    stock = _normalize_stock_input(stock)
+    if _looks_like_stock_code(stock):
+        return stock.upper()
+
+    cached = _stock_code_cache.get(stock)
+    if cached is not None:
+        return cached
+
+    try:
+        resolved = await run_mcp_tool(
+            TRADING_MCP_PARAMS,
+            "resolve_stock_code",
+            {"stock_name": stock},
+        )
+        resolved_text = str(resolved)
+        match = _STOCK_CODE_EXTRACT_RE.search(resolved_text)
+        code = match.group(1) if match else None
+        if code is None or not _has_code_digit(code):
+            logger.warning(
+                "종목코드 추출 실패, 빈 문자열로 폴백: stock=%s, response=%s",
+                stock,
+                resolved,
+            )
+            return ""
+        # 지름길 에코("SIMPAC (SIMPAC, UNKNOWN)")는 숫자가 없어 위 _has_code_digit
+        # 가드에서 이미 걸러진다.
+        # 상한 도달은 정상 조건이 아니다 — 종목마스터 4,353종 규모에서는 일어나지
+        # 않아야 하며, 발생했다면 입력 정규화가 stock-master.js와 다시 어긋났다는
+        # 신호다. dict는 자동으로 비우지 않으므로 침묵한 채 자라기만 하면 상한을
+        # 채운 항목들이 영구히 자리를 차지해, 그 이후 정상적인 신규 종목명마다
+        # 매번 MCP 서브프로세스를 새로 띄우는 지연이 조용히 고정된다.
+        if len(_stock_code_cache) >= _STOCK_CODE_CACHE_MAX:
+            logger.warning(
+                "종목코드 캐시 상한 도달(%d), 최초 항목 축출: stock=%s",
+                _STOCK_CODE_CACHE_MAX, stock,
+            )
+            _stock_code_cache.pop(next(iter(_stock_code_cache)))
+        _stock_code_cache[stock] = code
+        return code
+    except Exception as exc:
+        logger.warning(
+            "종목코드 조회 실패, 빈 문자열로 폴백: stock=%s, error=%s",
+            stock,
+            exc,
+        )
+        return ""
 
 
 def _find_http_exception(exc: BaseException) -> HTTPException | None:
@@ -105,8 +234,9 @@ async def perform_stock_analysis(
     # 분석 리포트를 데이터베이스에 자동으로 저장
     try:
         details = data.get("details", {})
+        stock_code = await _resolve_stock_code(stock)
         report = AgentReport(
-            stock_code="",  # 향후 개선: MCP를 통해 코드를 가져오거나 분석 결과에서 추출
+            stock_code=stock_code,
             stock_name=stock,
             provider=key,
             summary=data.get("summary", ""),

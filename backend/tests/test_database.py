@@ -191,8 +191,12 @@ async def test_analyze_stock_saves_report(client: TestClient, session: Session, 
             }
         }
 
+    async def mock_run_mcp_tool(*args, **kwargs):
+        return "삼성전자 (005930, KOSPI)"
+
     monkeypatch.setattr("backend.services.llm_chat", mock_llm_chat)
     monkeypatch.setattr("backend.services.analysis_from_nat_text", mock_analysis_from_nat_text)
+    monkeypatch.setattr("backend.services.run_mcp_tool", mock_run_mcp_tool)
 
     # API Call
     response = client.get("/api/v1/analyze?stock=삼성전자")
@@ -205,3 +209,4 @@ async def test_analyze_stock_saves_report(client: TestClient, session: Session, 
     assert reports[0].stock_name == "삼성전자"
     assert reports[0].decision == "BUY"
     assert reports[0].confidence_score == 0.85
+    assert reports[0].stock_code == "005930"
