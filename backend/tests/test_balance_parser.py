@@ -53,8 +53,10 @@ class TestBalanceExtraction(unittest.TestCase):
         주의: 이 테스트는 파서 쪽 계약만 고정합니다. 포매터 쪽에는 "[보유 종목 리스트]"
         구간 안에서 종목 줄이 아닌 어떤 줄도 "- " 로 시작해서는 안 된다는 불변식이
         있어야 하며, 그 가드는 mcp-trading 쪽 테스트 스위트에 있어야 합니다.
-        mcp-trading/tests/order.test.js 에서 "stays outside the holdings section" 를
-        검색해 확인하세요 — 없다면 이 계약은 포매터 쪽에서 지켜지지 않고 있는 것입니다.
+        mcp-trading/tests/order.test.js 에서, "- " 로 시작하는 종목 줄만 걸러냈을 때
+        페이지 상한 안내 문구("[안내]", "상한")가 섞여 들어오지 않는지 확인하는 테스트를
+        찾아 확인하세요 — 정확한 테스트 이름 대신 이 동작을 기준으로 찾아야 테스트명이
+        브랜치마다 바뀌어도 근거가 깨지지 않습니다.
         """
         mutated_text = REAL_BALANCE_TEXT.replace("- 삼성전자", "• 삼성전자").replace(
             "- NAVER", "• NAVER"
@@ -65,7 +67,7 @@ class TestBalanceExtraction(unittest.TestCase):
     def test_extract_stocks_skips_empty_name(self):
         """mcp-trading/balance.js의 종목 줄 템플릿
         (`- ${h.prdt_name} (${h.pdno}) · ${formatQuantity(h.hldg_qty)}주\\n`)은
-        prdt_name이 빈 문자열이면 "-  (005930) · 3주"처럼 대시-공백 접두사 뒤에
+        prdt_name이 빈 문자열이면 "-  (035420) · 1주"처럼 대시-공백 접두사 뒤에
         공백이 하나 더 남는 줄을 만듭니다("(" 앞의 고정 공백 때문). 이 줄 옆에 정상
         종목이 있을 때, extract_stocks_from_balance의 `if name:` 가드가 빈 이름
         줄만 건너뛰고 정상 종목은 그대로 추출하는지 확인합니다.
