@@ -45,7 +45,10 @@ RUN uv sync --no-dev
 #  무효화된다. 의존성 레이어 분리는 별도 과제다.)
 # hadolint ignore=DL3059
 RUN python scripts/patch_vendor.py --venv /workspace/finus_nat/.venv \
-    --require nat/plugins/mem0ai/memory.py
+    --require nat/plugins/mem0ai/memory.py \
+    --require mem0/client/main.py \
+    --require nat/plugins/mem0ai/mem0_editor.py \
+    --require nat/plugins/langchain/agent/auto_memory_wrapper/agent.py
 
 EXPOSE 8000
 
