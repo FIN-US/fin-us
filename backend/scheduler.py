@@ -81,7 +81,12 @@ def _default_catalyst_repo() -> SqliteCatalystEventRepo:
     return SqliteCatalystEventRepo(lambda: Session(engine))
 
 def extract_stocks_from_balance(balance_text: str) -> list[str]:
-    """mcp-trading의 get_balance 결과에서 종목명 리스트를 추출합니다."""
+    """mcp-trading의 get_balance 결과에서 종목명 리스트를 추출합니다.
+
+    [보유 종목 리스트] 섹션 이후 "- "로 시작하는 모든 줄을 종목으로 해석하므로,
+    mcp-trading/balance.js의 formatTruncationNote가 그 섹션 뒤에 덧붙이는 잘림
+    안내 문구는 "- "로 시작해서는 안 된다.
+    """
     stocks = []
     if "[보유 종목 리스트]" in balance_text:
         lines = balance_text.split("[보유 종목 리스트]")[1].strip().split("\n")
