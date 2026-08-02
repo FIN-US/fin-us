@@ -329,16 +329,16 @@ test('fetchAllBalance stops after two calls and reports truncated="no_cursor" wh
   assert.deepEqual(calls[1], { ctxAreaFk100: "FK1", ctxAreaNk100: "NK1", trCont: "N" });
 });
 
-test('fetchAllBalance stops after two calls and reports truncated="repeated_cursor" when KIS echoes back the same continuation cursor instead of advancing, without dropping either page\'s rows', async () => {
+test('fetchAllBalance stops after two calls and reports truncated="repeated_cursor" when KIS echoes back the same continuation cursor instead of advancing, discarding the duplicated page\'s rows', async () => {
   let calls = 0;
   const fetchPage = async () => {
     calls += 1;
     return {
       body: {
-        // Both pages return the same pdno, mirroring the time-budget fixture below. A
-        // pdno-keyed dedup would silently collapse these two distinct holdings into one;
-        // this test asserts nothing is dropped.
-        output1: [{ prdt_name: `종목${calls}`, pdno: "000000" }],
+        // Both "pages" are in fact the same page re-sent by KIS (same cursor echoed back),
+        // so they carry the same holding. If the duplicate page's rows were kept, this
+        // holding would appear twice in the report and double-count the purchase amount.
+        output1: [{ prdt_name: "종목1", pdno: "000000" }],
         output2: calls === 1 ? [{ tot_evlu_amt: "1" }] : [],
         ctx_area_fk100: "FK1",
         ctx_area_nk100: "NK1",
@@ -352,7 +352,31 @@ test('fetchAllBalance stops after two calls and reports truncated="repeated_curs
   assert.equal(calls, 2);
   assert.equal(result.pages, 2);
   assert.equal(result.truncated, "repeated_cursor");
-  assert.equal(result.rows.length, 2);
+  assert.deepEqual(result.rows.map((row) => row.pdno), ["000000"]);
+});
+
+test('fetchAllBalance detects a period-2 repeated-cursor cycle (A,B,A) that a previous-value-only comparison would miss', async () => {
+  const cursors = ["A", "B", "A"];
+  let calls = 0;
+  const fetchPage = async () => {
+    calls += 1;
+    const cursor = cursors[calls - 1];
+    return {
+      body: {
+        output1: [{ prdt_name: `종목${calls}`, pdno: String(calls).padStart(6, "0") }],
+        output2: calls === 1 ? [{ tot_evlu_amt: "1" }] : [],
+        ctx_area_fk100: `FK-${cursor}`,
+        ctx_area_nk100: cursor,
+      },
+      trCont: "F",
+    };
+  };
+
+  const result = await fetchAllBalance(fetchPage, { maxPages: 20, timeBudgetMs: 60_000 });
+
+  assert.equal(calls, 3);
+  assert.equal(result.truncated, "repeated_cursor");
+  assert.deepEqual(result.rows.map((row) => row.pdno), ["000001", "000002"]);
 });
 
 test("fetchAllBalance rethrows when the first page fetch fails, so auth/account errors are not swallowed", async () => {

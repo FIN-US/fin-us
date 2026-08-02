@@ -58,6 +58,10 @@ export async function fetchAllBalance(fetchPage, {
   let pages = 0;
   let truncated = null;
   const startedAt = now();
+  // 지금까지 받아본 연속조회 커서 전체를 기억해 둔다. 직전 값하고만 비교하면
+  // A,B,A,B처럼 주기 2 이상으로 순환하는 커서를 놓치고 상한(20회)까지 같은
+  // 종목을 계속 중복 조회하게 된다.
+  const seenCursors = new Set();
 
   while (true) {
     if (pages >= maxPages) {
@@ -69,9 +73,10 @@ export async function fetchAllBalance(fetchPage, {
       break;
     }
 
-    // fetchPage에 이번에 넘긴 커서를 기억해 둔다. 응답이 이 값을 그대로 되돌려주면
-    // (repeated_cursor 가드) 같은 페이지가 반복 조회되고 있다는 뜻이다.
-    const sentNk = ctxNk;
+    // 이번 페이지의 행을 rows에 추가하기 전 길이를 기억해 둔다. 반복 커서가
+    // 감지되면 이번에 받은 페이지는 재조회(같은 페이지 재수신)이므로, 방금
+    // 추가한 행을 되돌려 rows에 중복이 남지 않게 한다.
+    const rowsBeforePage = rows.length;
 
     let body;
     let respTrCont;
@@ -122,14 +127,17 @@ export async function fetchAllBalance(fetchPage, {
       truncated = "no_cursor";
       break;
     }
-    if (sentNk && ctxNk === sentNk) {
-      // 같은 커서를 되돌려받았다. 그대로 재요청하면 동일 페이지를 상한까지 반복 조회하고
-      // 리포트에 같은 종목이 여러 번 실릴 수 있다. pdno 기준 중복 제거는 하지 않는다 —
-      // KIS가 페이지마다 동일한 pdno를 돌려주는 경우(예: 시간 예산 테스트 픽스처)가 있어
-      // 서로 다른 실제 보유 종목을 하나로 합쳐버릴 위험이 있다. 대신 중단하고 알린다.
+    if (seenCursors.has(ctxNk)) {
+      // 이전에 이미 받았던 커서가 다시 왔다 = 이번 페이지는 예전에 받은 페이지의
+      // 재조회다. 그대로 두면 리포트에 같은 종목이 여러 번 실리므로, 방금 추가한
+      // 이번 페이지 행을 되돌려 중복을 남기지 않는다. pdno 기준 중복 제거는 하지
+      // 않는다 — KIS가 페이지마다 동일한 pdno를 돌려주는 경우(예: 시간 예산 테스트
+      // 픽스처)가 있어 서로 다른 실제 보유 종목을 하나로 합쳐버릴 위험이 있다.
+      rows.length = rowsBeforePage;
       truncated = "repeated_cursor";
       break;
     }
+    seenCursors.add(ctxNk);
     trCont = "N";
   }
 
