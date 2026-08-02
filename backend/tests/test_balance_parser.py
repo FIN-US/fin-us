@@ -50,9 +50,11 @@ class TestBalanceExtraction(unittest.TestCase):
         """파서가 의존하는 계약을 명시적으로 고정합니다: 종목 줄이 "- " 로 시작하지 않으면
         추출되지 않습니다 (extract_stocks_from_balance 의 line.startswith("- ") 조건).
 
-        주의: 이 테스트는 파서 쪽 계약만 고정하며, mcp-trading 이 실제로 "- " 를 계속
-        내보내는지는 검증하지 못합니다. 그 크로스-레포 가드는 mcp-trading 쪽 테스트
-        ("...truncation note stays outside the holdings section...")가 담당합니다.
+        주의: 이 테스트는 파서 쪽 계약만 고정합니다. 포매터 쪽에는 "[보유 종목 리스트]"
+        구간 안에서 종목 줄이 아닌 어떤 줄도 "- " 로 시작해서는 안 된다는 불변식이
+        있어야 하며, 그 가드는 mcp-trading 쪽 테스트 스위트에 있어야 합니다.
+        mcp-trading/tests/order.test.js 에서 "stays outside the holdings section" 를
+        검색해 확인하세요 — 없다면 이 계약은 포매터 쪽에서 지켜지지 않고 있는 것입니다.
         """
         mutated_text = REAL_BALANCE_TEXT.replace("- 삼성전자", "• 삼성전자").replace(
             "- NAVER", "• NAVER"
