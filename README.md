@@ -380,9 +380,27 @@ python3 mcp-trading/scripts/update_stock_master.py
 
 `/alerts status`로 모드를 확인하세요. `off`이거나, `urgent`인데 긴급 조건에 걸리지 않았을 수 있습니다. `/alerts all`로 잠시 바꿔 확인해 보세요.
 
+**알림이 아예 하나도 안 와요**
+
+모니터링 태스크(`backend/scheduler.py`의 `_monitor_market_task`)는 `try` 블록의 첫 문장에서 `get_balance`를 호출합니다. KIS 조회가 실패하면 이 지점에서 예외가 발생해 태스크 전체가 중단되고, 바깥의 `except`는 로그만 남긴 채 넘어가므로 어떤 종목에도 알림이 가지 않습니다. 사용자에게 보이는 신호가 전혀 없는 것은 버그가 아니라 이 구조 때문입니다.
+
+```bash
+docker compose logs backend | grep "모니터링 태스크 시작 중 오류"
+```
+
+로그에 남는 메시지로 원인을 구분합니다(`backend/services.py`의 `run_mcp_tool`).
+
+| 로그 메시지 패턴 | 원인 | 대응 |
+| :--- | :--- | :--- |
+| `500: 잔고 조회 중 에러 발생: ...` | KIS API 호출 자체가 실패해 `mcp-trading/index.js`가 `isError`로 응답 | 메시지에 담긴 KIS 에러로 API 키·계좌번호·KIS 서버 상태를 확인 |
+| `504: 데이터 공급원(get_balance) 응답 타임아웃 (30초)` | MCP 호출이 30초 안에 끝나지 않음 | KIS 서버 지연이나 네트워크 상태를 확인 후 재시도 |
+| `500: 데이터 공급원(get_balance) 연결 실패: ...` | `mcp-trading` MCP 서버에 연결할 수 없음 | `docker compose ps`로 `mcp-trading` 프로세스·의존성을 확인 |
+
+`/balance`도 동일한 경로(`run_mcp_tool`, `get_balance`)를 사용하므로, `/balance`가 정상 응답한다면 이 문제는 아닙니다.
+
 **엉뚱한 종목 알림이 와요**
 
-계좌 조회에 실패하면 감시 대상이 기본값(`삼성전자`, `SK하이닉스`, `현대차`, `NAVER`)으로 대체됩니다. KIS 연결을 확인하세요.
+`backend/scheduler.py`의 모니터링 태스크는 보유 종목과 `/watch`로 등록한 관심 종목을 합쳐(중복 제거) 감시 대상(`stocks_to_monitor`)을 정합니다. 이 둘을 합친 목록이 완전히 비어 있을 때만(`if not stocks_to_monitor:`) 기본 종목(`삼성전자`, `SK하이닉스`, `현대차`, `NAVER`)으로 대체됩니다. `/balance`로 보유 종목이 있는지, `/watch list`로 관심 종목이 등록되어 있는지 확인하고, 없다면 `/watch add <종목명>`으로 등록하세요.
 
 **컨테이너가 안 떠요**
 
