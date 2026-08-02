@@ -200,6 +200,18 @@ def test_looks_like_stock_code_accepts_alphanumeric_and_rejects_plain_names():
     assert not services._looks_like_stock_code("삼성전자")
 
 
+def test_normalize_stock_input_handles_interleaved_bom_and_whitespace():
+    """공백과 BOM(U+FEFF)이 번갈아 나오는 입력도 JS String.trim()처럼 끝까지 벗겨낸다.
+
+    strip()을 세 단계로 나눠 부르는 방식은 한쪽을 벗기다 멈춘 자리에서 그대로
+    멈춰서, 공백과 BOM이 교대로 나오는 입력을 끝까지 벗기지 못했다. 문자열
+    내부의 BOM은 이 함수가 여전히 지우지 않는다(캐시 키 뭉개짐 방지).
+    """
+    assert services._normalize_stock_input(" ﻿ ﻿SAMSUNG") == "SAMSUNG"
+    assert services._normalize_stock_input("﻿ ﻿005930") == "005930"
+    assert services._normalize_stock_input("SAM﻿SUNG") == "SAM﻿SUNG"
+
+
 @pytest.mark.asyncio
 async def test_perform_stock_analysis_falls_back_to_empty_stock_code_on_mcp_failure(
     monkeypatch, caplog

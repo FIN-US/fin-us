@@ -68,12 +68,18 @@ _STOCK_CODE_CACHE_MAX = 8192
 
 
 def _normalize_stock_input(stock: str) -> str:
-    """입력을 JS String.trim()과 동일하게 양끝만 정규화합니다.
+    r"""입력을 JS String.trim()과 동일하게 양끝만 정규화합니다.
 
-    JS String.trim()이 제거하는 WhiteSpace/LineTerminator 집합 중 Python str.strip()이
-    남기는 문자는 U+FEFF(BOM) 하나뿐임을 확인했다. 반대 방향은 대칭이 아니어서 Python이
-    더 공격적이지만(U+001C~U+001F, U+0085를 추가로 제거) 그쪽은 문제가 되지 않는다 —
-    Python이 더 지우는 만큼 캐시 키가 뭉개질 뿐 JS가 보는 문자열과 어긋나지 않는다.
+    Python의 공백 판정(정규식 \s, str.isspace()와 동일한 범위)은 JS String.trim()이
+    제거하는 WhiteSpace/LineTerminator 집합을 포함하고 U+FEFF(BOM) 하나만 빠짐을
+    확인했다. 그래서 문자 클래스에 U+FEFF를 더한 [\s\ufeff]로 앞뒤를 한 번에
+    훑으면, 공백과 BOM이 뒤섞여 나오는 입력(예: ' \ufeff \ufeffSAMSUNG')도
+    JS trim()과 동일하게 끝까지 벗겨낸다 — strip()을 여러 번 나눠 부르면 한
+    번 벗기다 멈춘 자리에서 그대로 멈춰 이런 입력을 끝까지 벗기지 못한다.
+    Python이 더 지우는 문자도 있지만(U+001C~U+001F, U+0085 — JS 기준으로는
+    공백이 아님) 문제가 되지 않는다: 캐시 키가 조금 더 뭉개질 뿐, 이 함수를
+    거친 같은 문자열이 입력 판정·MCP 질의·캐시 키에 그대로 쓰이므로 세 곳이
+    서로 어긋나지 않는다.
     양끝(trim)만 처리하고 문자열 내부의 U+FEFF는 지우지 않는다 — 내부까지
     지우면 이 함수의 결과가 실제로 MCP에 보내는 질의 문자열보다 더 뭉개져,
     U+FEFF가 중간에 낀 입력이 캐시에 이미 있는 무관한 이름과 우연히 같아질 수
@@ -82,7 +88,7 @@ def _normalize_stock_input(stock: str) -> str:
     입력 판정(_looks_like_stock_code), MCP 질의, 캐시 키까지 이 함수를 거친 같은
     문자열을 공유해야 세 곳이 서로 어긋나지 않는다.
     """
-    return stock.strip().strip("\ufeff").strip()
+    return re.sub(r"^[\s\ufeff]+|[\s\ufeff]+$", "", stock)
 
 
 def _has_code_digit(value: str) -> bool:
