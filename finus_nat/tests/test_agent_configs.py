@@ -112,21 +112,37 @@ def test_agent_config_builds_with_valid_system_prompt(config_path: Path, functio
 # 프롬프트가 ``…`` 로 감싸 안내하는 도구성 토큰 중 실제 tool_names에 없는 값을 걸러낸다. 이 집합에
 # 들어가는 값은 KIS API 파라미터/값(tool_name, api_type, ...)처럼 도구 이름이 아닌 것으로 확인된
 # 토큰뿐이어야 한다 - 여기에 실수로 실제 도구 이름을 넣으면 그 이름에 대한 검사가 조용히 꺼진다.
+# inquire_account_balance/inquire_daily_itemchartprice/inqr_dvsn_1/overseas_stock은
+# additional_instructions까지 스캔 범위를 넓히면서 새로 드러난 항목 - domestic_stock/env_dv와
+# 같은 부류로, kis-trading-mcp-tool 하나에 대한 KIS TR(api_type)/tool_name 파라미터 값이지
+# NAT에 등록된 도구 이름이 아니다. 여섯 에이전트의 tool_names와 대조해 겹치지 않음을 확인했다.
 KNOWN_NON_TOOL_TOKENS = {
     "tool_name",
     "api_type",
     "domestic_stock",
+    "overseas_stock",
     "params",
     "find_api_detail",
     "period",
     "stock_name",
     "env_dv",
+    "inqr_dvsn_1",
+    "inquire_account_balance",
+    "inquire_daily_itemchartprice",
 }
 
 
 @pytest.mark.parametrize("config_path,function_name", ALL_CONFIGS, ids=ALL_CONFIG_IDS)
 def test_system_prompt_only_names_real_tools(config_path: Path, function_name: str):
-    """system_prompt가 ``도구이름`` 형태로 안내하는 이름이 실제 tool_names에 있는지 확인한다.
+    """system_prompt + additional_instructions가 ``도구이름`` 형태로 안내하는 이름이 실제
+    tool_names에 있는지 확인한다.
+
+    두 필드를 함께 스캔하는 이유: 벤더 `create_react_agent_prompt`(agent.py:489-490)가
+    `if config.additional_instructions: prompt_str += f" {{config.additional_instructions}}"`로
+    system_prompt 뒤에 그대로 이어붙여 모델에게 보낸다 - additional_instructions는 별도 필드가
+    아니라 같은 프롬프트 문자열의 일부다. system_prompt만 스캔하면 strategy_agent.yml의
+    additional_instructions에 있던 ``get_market_news``/``get_disclosure_signal``(실제 이름은
+    mcp-news-get-market-news/mcp-dart-get-disclosure-signal) 같은 오타가 green으로 통과한다.
 
     옛 죽은 프롬프트(register.py 몽키패치)에는 등록조차 안 된 이름(finus_market_news 등 common.yml의
     `_type` 값)이 섞여 있었고, 이제는 매 턴 살아 있는 텍스트라 오타/유령 이름이 곧바로
@@ -139,7 +155,11 @@ def test_system_prompt_only_names_real_tools(config_path: Path, function_name: s
     fn_config = config.functions[function_name]
 
     tools = {str(t) for t in fn_config.tool_names}
-    quoted = set(re.findall(r"``([\w.-]+)``", fn_config.system_prompt)) - KNOWN_NON_TOOL_TOKENS
+    # additional_instructions는 스키마상 `str | None`(기본값 None)이라 정의하지 않은 에이전트가
+    # 있을 수 있다 - 현재 6개 에이전트는 모두 값을 채워 두지만, agent.py의
+    # `if config.additional_instructions:` 가드와 동일하게 None을 방어적으로 처리한다.
+    prompt_text = fn_config.system_prompt + (f" {fn_config.additional_instructions}" if fn_config.additional_instructions else "")
+    quoted = set(re.findall(r"``([\w.-]+)``", prompt_text)) - KNOWN_NON_TOOL_TOKENS
     assert quoted <= tools, f"프롬프트가 보유하지 않은 도구를 안내함: {sorted(quoted - tools)}"
 
 
@@ -166,4 +186,6 @@ def test_kis_agents_share_identical_system_prompt():
         function_name: load_config(AGENTS_DIR / file_name).functions[function_name].system_prompt
         for file_name, function_name in _IDENTICAL_SYSTEM_PROMPT_AGENTS
     }
-    assert len(set(prompts.values())) == 1, f"프롬프트가 분기함: {list(prompts)}"
+    baseline_name, baseline_prompt = next(iter(prompts.items()))
+    diverged = [name for name, prompt in prompts.items() if prompt != baseline_prompt]
+    assert not diverged, f"{baseline_name} 기준으로 프롬프트가 분기한 에이전트: {diverged}"
