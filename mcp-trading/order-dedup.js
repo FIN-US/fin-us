@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-const DEFAULT_ORDER_DEDUP_TTL_MS = 120_000;
+export const DEFAULT_ORDER_DEDUP_TTL_MS = 120_000;
 const DEFAULT_ORDER_DEDUP_PATH = path.join(os.tmpdir(), "finus-kis-order-dedup.json");
 
 export class DuplicateOrderError extends Error {
@@ -37,9 +37,15 @@ export function createOrderDedupKey({
   return crypto.createHash("sha256").update(JSON.stringify(payload)).digest("hex");
 }
 
-function parsePositiveInteger(value, fallback) {
+function parsePositiveInteger(value, fallback, name = "값") {
   const parsed = Number(value);
   if (!Number.isInteger(parsed) || parsed <= 0) {
+    // 공백만 있는 값도 빈 문자열과 마찬가지로 "설정하지 않음"으로 취급한다.
+    if (value !== undefined && String(value).trim() !== "") {
+      console.error(
+        `${name}="${value}"는 양의 정수(ms)가 아니어서 기본값 ${fallback}ms를 사용합니다.`,
+      );
+    }
     return fallback;
   }
   return parsed;
@@ -48,7 +54,11 @@ function parsePositiveInteger(value, fallback) {
 export class OrderDedupStore {
   constructor({
     filePath = process.env.KIS_ORDER_DEDUP_PATH || DEFAULT_ORDER_DEDUP_PATH,
-    ttlMs = parsePositiveInteger(process.env.KIS_ORDER_DEDUP_TTL_MS, DEFAULT_ORDER_DEDUP_TTL_MS),
+    ttlMs = parsePositiveInteger(
+      process.env.KIS_ORDER_DEDUP_TTL_MS,
+      DEFAULT_ORDER_DEDUP_TTL_MS,
+      "KIS_ORDER_DEDUP_TTL_MS",
+    ),
     now = () => Date.now(),
   } = {}) {
     this.filePath = filePath;
