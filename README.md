@@ -394,7 +394,7 @@ docker compose logs backend | grep "모니터링 태스크 시작 중 오류"
 | :--- | :--- | :--- |
 | `500: 잔고 조회 중 에러 발생: ...` | KIS API 호출 자체가 실패해 `mcp-trading/index.js`가 `isError`로 응답 | 메시지에 담긴 KIS 에러로 API 키·계좌번호·KIS 서버 상태를 확인 |
 | `504: 데이터 공급원(get_balance) 응답 타임아웃 (30초)` | MCP 호출이 30초 안에 끝나지 않음 | KIS 서버 지연이나 네트워크 상태를 확인 후 재시도 |
-| `500: 데이터 공급원(get_balance) 연결 실패: ...` | `mcp-trading` MCP 서버에 연결할 수 없음 | `docker compose ps`로 `mcp-trading` 프로세스·의존성을 확인 |
+| `500: 데이터 공급원(get_balance) 연결 실패: ...` | `mcp-trading` MCP 서버 프로세스를 띄울 수 없음 | `mcp-trading`은 별도 컨테이너가 아니라 backend 컨테이너 안에서 stdio로 실행됩니다. `docker compose exec backend ls /opt/mcp-trading/node_modules`로 의존성 설치 여부를, `docker compose logs backend`로 실제 spawn 실패 원인을 확인하세요 |
 
 `/balance`도 동일한 경로(`run_mcp_tool`, `get_balance`)를 사용하므로, `/balance`가 정상 응답한다면 이 문제는 아닙니다.
 
