@@ -18,6 +18,7 @@ Config 파싱과 프롬프트 조립만으로 그 검증을 통과하는지 확�
 멀쩡한 다른 프롬프트는 두 검사 모두 통과하기 때문이다.
 """
 
+import re
 from pathlib import Path
 
 import pytest
@@ -91,3 +92,37 @@ def test_agent_config_builds_with_valid_system_prompt(config_path: Path, functio
         direct = load_config(AGENTS_DIR / AGENT_YAML[function_name]).functions[function_name]
         assert fn_config.system_prompt == direct.system_prompt
         assert [str(t) for t in fn_config.tool_names] == [str(t) for t in direct.tool_names]
+
+
+# 프롬프트가 ``…`` 로 감싸 안내하는 도구성 토큰 중 실제 tool_names에 없는 값을 걸러낸다. 이 집합에
+# 들어가는 값은 KIS API 파라미터/값(tool_name, api_type, ...)처럼 도구 이름이 아닌 것으로 확인된
+# 토큰뿐이어야 한다 - 여기에 실수로 실제 도구 이름을 넣으면 그 이름에 대한 검사가 조용히 꺼진다.
+KNOWN_NON_TOOL_TOKENS = {
+    "tool_name",
+    "api_type",
+    "domestic_stock",
+    "params",
+    "find_api_detail",
+    "period",
+    "stock_name",
+    "env_dv",
+}
+
+
+@pytest.mark.parametrize("config_path,function_name", ALL_CONFIGS, ids=ALL_CONFIG_IDS)
+def test_system_prompt_only_names_real_tools(config_path: Path, function_name: str):
+    """system_prompt가 ``도구이름`` 형태로 안내하는 이름이 실제 tool_names에 있는지 확인한다.
+
+    옛 죽은 프롬프트(register.py 몽키패치)에는 등록조차 안 된 이름(finus_market_news 등 common.yml의
+    `_type` 값)이 섞여 있었고, 이제는 매 턴 살아 있는 텍스트라 오타/유령 이름이 곧바로
+    TOOL_NOT_FOUND_ERROR_MESSAGE로 이어져 max_tool_calls 사이클을 하나 버린다.
+    """
+    import nat_finus_nat.register  # noqa: F401 - 등록 트리거만 필요
+    from nat.runtime.loader import load_config
+
+    config = load_config(config_path)
+    fn_config = config.functions[function_name]
+
+    tools = {str(t) for t in fn_config.tool_names}
+    quoted = set(re.findall(r"``([\w.-]+)``", fn_config.system_prompt)) - KNOWN_NON_TOOL_TOKENS
+    assert quoted <= tools, f"프롬프트가 보유하지 않은 도구를 안내함: {sorted(quoted - tools)}"
