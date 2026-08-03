@@ -24,21 +24,17 @@ def test_react_agent_graph_init_is_unpatched_vendor_code():
     되지 않았다), 세 Fin-Us ReAct 프롬프트는 이제 `system_prompt`로 YAML에서 직접 전달한다
     (`ReActAgentWorkflowConfig.system_prompt` -> `create_react_agent_prompt`).
 
-    이 테스트는 "패치 상태 문자열"이 아니라 그라운드 트루스를 확인한다: `ReActAgentGraph.__init__`이
-    여전히 벤더 모듈 소속의 원본 함수이고, 소스를 재작성하는 패치가 붙였을 `_finus_*` 속성이
-    전혀 없어야 한다. 누군가 이 unit이 되돌린 것과 같은 소스 재작성 패치를 다시 들여오는 순간
-    이 테스트가 실패한다.
+    이 테스트는 "패치 상태 문자열"이나 `_finus_*` 속성 이름이 아니라 소스 위치라는
+    그라운드 트루스를 확인한다: `__code__.co_filename`은 함수가 실제로 정의된 파일이며,
+    `functools.wraps`도 이 값은 건드리지 않고(`__module__`/`__name__`/`__doc__`는 복사하지만
+    `__code__`는 원본 그대로 남는다), `exec(compile(...))`로 재작성한 소스는 애초에
+    다른 filename(예: 옛 `_patch_react_agent_node_plain_final_after_tool`이 쓰던
+    `"<finus_react_agent_node_plain_final_patch>"`)으로 컴파일된다. 즉 패치가 속성 이름을
+    무엇으로 바꾸든 이 값은 위장할 수 없다. 누군가 소스 재작성 패치를 다시 들여오면
+    (마커 이름과 무관하게) 이 테스트가 실패한다.
     """
     import nat_finus_nat.register  # noqa: F401 - 등록 트리거만 필요
-    import nat.plugins.langchain.agent.react_agent.agent as ra_mod
     from nat.plugins.langchain.agent.react_agent.agent import ReActAgentGraph
 
-    init_fn = ReActAgentGraph.__init__
-    assert init_fn.__module__ == "nat.plugins.langchain.agent.react_agent.agent"
-    assert [name for name in vars(init_fn) if name.startswith("_finus")] == []
-
-    assert not hasattr(ReActAgentGraph, "_finus_plain_final_after_tool")
-
-    # 옛 `_patch_react_system_prompt`는 상류 호환 여부를 확인하지 않고 이 속성을
-    # 모듈에 무조건 심었다("applied" 오탐의 실체). 이제 그 패치 자체가 없다.
-    assert [name for name in vars(ra_mod) if name.startswith("_finus")] == []
+    assert ReActAgentGraph.agent_node.__code__.co_filename.endswith("agent.py")
+    assert ReActAgentGraph.__init__.__code__.co_filename.endswith("agent.py")

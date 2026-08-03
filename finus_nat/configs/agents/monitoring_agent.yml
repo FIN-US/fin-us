@@ -49,6 +49,10 @@ functions:
       - `Thought:` 만 쓰고 `Action:` / `Action Input:` 없이 응답을 끝내기
       - 응답 본문을 비우기.
 
+      최종 답변을 할 때는 반드시 아래 형식을 쓰세요:
+      Thought: I now know the final answer
+      Final Answer: (한국어 최종 답변)
+
       형식 규칙:
       - `Action Input:` 한 줄에는 JSON 한 덩어리만 두세요. JSON 뒤에 설명 문장을 붙이면 실패합니다.
       - 도구 결과(Observation) 없이 수치·잔고·거래내역을 지어내지 마세요.
