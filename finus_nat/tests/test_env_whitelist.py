@@ -1,23 +1,34 @@
 """NAT 경로 MCP 자식 프로세스 env 화이트리스트(_MCP_ENV_ALLOWED_PREFIXES) 테스트.
 
 backend/config.py에 같은 목적의 화이트리스트가 별도로 존재한다(#130). 이 파일은
-NAT 쪽 접두사 규칙만 검증하고, 마지막 테스트에서만 backend.config를 가져와 두
-경로가 반드시 같이 움직여야 하는 최소 차원(KIS_ 네임스페이스)이 어긋나지
-않는지 확인한다.
+NAT 쪽 접두사 규칙만 검증하고, 마지막 테스트에서만 backend/config.py 소스를
+정적으로 읽어(import하지 않는다) 두 경로가 반드시 같이 움직여야 하는 차원이
+어긋나지 않는지 확인한다.
 """
-import sys
+import ast
 from pathlib import Path
 
-# backend와 finus_nat은 별도 uv 프로젝트(별도 venv)라 기본적으로 서로의 패키지를
-# import할 수 없다. 마지막 테스트에서만 backend.config를 가져오기 위해 저장소
-# 루트를 sys.path에 추가한다 — backend/config.py는 dotenv·mcp만 있으면 되고
-# 둘 다 finus_nat venv에 이미 있다(nvidia-nat[mcp] 전이 의존성).
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
+from nat_finus_nat.finus_api import _MCP_ENV_ALLOWED_PREFIXES, _mcp_child_env
 
-import backend.config as backend_config  # noqa: E402
-from nat_finus_nat.finus_api import _MCP_ENV_ALLOWED_PREFIXES, _mcp_child_env  # noqa: E402
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _prefix_tuple(path: Path, name: str) -> tuple[str, ...]:
+    # backend와 finus_nat은 별도 uv 프로젝트(별도 venv)라 backend.config를
+    # import하면 dotenv·mcp 같은 전이 의존성 여부(현재는 우연히 finus_nat
+    # venv에도 있다)에 이 테스트 파일 전체의 수집(collection)이 묶이고,
+    # backend/config.py:9-10의 load_dotenv()가 import 시점에 실행되어 NAT
+    # 테스트 세션 전체의 os.environ을 개발자의 실제 저장소 루트 .env로
+    # 오염시킨다(CI는 .env가 없어 이 회귀가 CI에서는 절대 드러나지 않는다).
+    # 그래서 파일을 소스 텍스트로만 읽어 AST로 상수를 파싱한다 — 표준
+    # 라이브러리만 쓰고, import도 side effect도 없다.
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == name for target in node.targets
+        ):
+            return ast.literal_eval(node.value)
+    raise AssertionError(f"{name} not found in {path}")
 
 
 def test_mcp_child_env_forwards_kis_tr_id_overrides(monkeypatch):
@@ -74,17 +85,25 @@ def test_mcp_child_env_forwards_any_kis_prefixed_variable_by_mechanism(monkeypat
     assert env["KIS_FUTURE_VARIABLE_NOT_YET_INVENTED"] == "future-value"
 
 
-def test_kis_namespace_prefix_is_present_on_both_backend_and_nat_paths():
+def test_every_backend_prefix_is_subsumed_by_a_nat_prefix():
     # #130의 핵심은 "같은 목적의 화이트리스트 두 벌이 어긋난다"는 것이었다.
     # 두 _MCP_ENV_ALLOWED_PREFIXES 튜플을 완전히 동일한지(==) 비교하지는
     # 않는다 — backend는 FINUS_*를 FINUS_KIS_로 의도적으로 좁혀 FINUS_MEM0_*
-    # 등 backend/NAT 전용 변수가 새지 않게 막고, NAT는 이미 FINUS_ 전체를
-    # 넓게 허용한다(finus_api.py가 FINUS_BACKEND_URL 등도 스스로 쓰기
-    # 때문). 이 비대칭은 설계 의도이므로 완전 동일성 단언은 지금의 올바른
-    # 상태에서도 실패해 신호가 아니라 잡음이 된다.
+    # 등 backend/NAT 전용 변수가 새지 않게 막고, NAT의 FINUS_는 이 PR 이전부터
+    # 있던 기존 범위라 이번 변경의 대상이 아니다. 이 비대칭은 설계 의도이므로
+    # 완전 동일성 단언은 지금의 올바른 상태에서도 실패해 신호가 아니라
+    # 잡음이 된다.
     #
-    # 대신 두 경로가 반드시 같이 움직여야 하는 유일한 차원 — 자식 프로세스
-    # (mcp-trading 등)가 공유하는 KIS_ 네임스페이스 자체 — 만 고정한다. 이후
-    # 누군가 한쪽에서만 "KIS_"를 빼면 이 단언이 즉시 잡아낸다.
-    assert "KIS_" in backend_config._MCP_ENV_ALLOWED_PREFIXES
-    assert "KIS_" in _MCP_ENV_ALLOWED_PREFIXES
+    # 대신 더 정확한 불변식을 쓴다: backend가 통과시키는 모든 접두사는 NAT
+    # 접두사 중 하나로 시작해야 한다(포함 관계). 지금 상태에서 성립하는 이유는
+    # 각 backend 접두사가 그대로 NAT에도 있기 때문이다(FIN_US_→FIN_US_,
+    # FINUS_KIS_→FINUS_, KIS_→KIS_). 이 검사는 #130이 실제로 재발하는
+    # 시나리오 — 누군가 backend에 새 접두사를 추가하고 NAT을 깜빡하는 것 —
+    # 를 정확히 잡는다. 자기 자신과만 비교하는 "KIS_ in ..." 식의 단순 포함
+    # 검사보다 엄격하다.
+    backend_prefixes = _prefix_tuple(_REPO_ROOT / "backend" / "config.py", "_MCP_ENV_ALLOWED_PREFIXES")
+
+    assert all(
+        any(backend_prefix.startswith(nat_prefix) for nat_prefix in _MCP_ENV_ALLOWED_PREFIXES)
+        for backend_prefix in backend_prefixes
+    )
