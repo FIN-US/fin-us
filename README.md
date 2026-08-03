@@ -15,8 +15,10 @@ Fin-Us는 **MCP (Model Context Protocol)** 아키텍처와 **멀티 에이전트
   - [2. 환경 변수 설정](#env)
   - [3. 시스템 가동](#run)
 - [Docker로 한번에 설치하기](#docker) — 권장 실행 경로
+  - [주문 멱등 원장 영속화](#order-dedup)
 - [에이전트별 보유 스킬 (MCP Tools)](#skills) — MCP 도구 목록
 - [Telegram 봇](#telegram) — 알림과 명령
+  - [명령어 목록](#commands)
 - [자주 겪는 문제](#troubleshooting) — 증상별 해결
 - [알려진 한계](#limitations) — 현재 안 되는 것
 - [로드맵](#roadmap) — 완료·예정 항목
