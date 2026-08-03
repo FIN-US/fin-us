@@ -107,27 +107,85 @@ export class OrderDedupStore {
     this.#writeLedger(ledger);
   }
 
+  // ENOENT만 "원장 없음"으로 조용히 통과시킨다(신규 설치 정상 상태). 그 외
+  // 모든 읽기/파싱 실패와 형태 불일치는 던진다 — 이 원장은 중복 주문을 막는
+  // 마지막 방어선이라, 손상된 원장을 빈 원장으로 취급하면 중복 주문을
+  // 조용히 통과시키게 된다(fail-open). 손상 시에는 사람이 개입할 때까지
+  // 모든 주문을 막는 쪽(fail-closed)이 올바른 자세다. (#128)
   #readLedger(now) {
-    let ledger = {};
+    let ledger;
     try {
       ledger = JSON.parse(fs.readFileSync(this.filePath, "utf8"));
     } catch (error) {
-      if (error.code !== "ENOENT") {
-        console.error(`KIS order dedup ledger read failed: ${error.message}`);
+      if (error.code === "ENOENT") {
+        return {};
       }
+      throw this.#ledgerReadError(error.code || error.name);
     }
 
     if (!ledger || typeof ledger !== "object" || Array.isArray(ledger)) {
-      return {};
+      throw this.#ledgerReadError("INVALID_SHAPE");
     }
 
+    // 알려진 미해결 결함(#128 "본문에 없던 결함 2건", 의도적으로 남겨둠):
+    // 1) 만료 정리(여기)와 쓰기(#writeLedger)가 결합돼 있어, 이 호출이 만료된
+    //    항목을 걸러낸 결과를 markSucceeded/release가 그대로 저장하면 무관한
+    //    활성 예약까지 지워질 수 있다. 동시성이 필요해 현재 배포 불변식(단일
+    //    writer) 아래서는 도달 불가. 원자적 쓰기로는 닫히지 않는다 - 키별
+    //    파일로 나눠야 닫힌다.
+    // 2) KIS_ORDER_DEDUP_TTL_MS를 KIS 응답 지연보다 짧게 설정하면, 이 필터가
+    //    markSucceeded 호출 전에 이미 항목을 걷어내 성공 기록이 조용히
+    //    사라진다. 기본값(120초)에서는 도달 불가.
     return Object.fromEntries(
       Object.entries(ledger).filter(([, entry]) => Number(entry?.expiresAt) > now),
     );
   }
 
+  // 원장 항목에는 CANO(계좌번호)가 평문으로 들어 있으므로, 던지는 메시지와
+  // 로그 모두 원장 내용(entry, error.message 포함 - JSON.parse 실패 메시지는
+  // 엔진에 따라 입력값 일부를 포함할 수 있다)을 절대 담지 않는다. 경로와
+  // 조치 방법만 담는다.
+  #ledgerReadError(reason) {
+    console.error(`KIS order dedup ledger read failed (${reason}): ${this.filePath}`);
+    return new Error(
+      `KIS 주문 중복 방지 원장을 읽을 수 없습니다: ${this.filePath}\n` +
+        "원장이 손상되었을 수 있어 주문을 차단합니다. 이 파일을 삭제하면 주문이 재개됩니다.",
+    );
+  }
+
+  // 같은 디렉터리에 임시 파일을 만들고 fsync한 뒤 rename으로 경로만
+  // 갈아치우는 원자적 쓰기. 디렉터리 fsync는 하지 않는다(Windows에서 EPERM).
+  // 임시 파일 실패나 rename 실패는 그대로 던져 reserve()를 통해 주문을
+  // 차단한다 — 쓰기 경로는 기존부터 fail-closed였고 이 변경으로도 유지된다.
+  //
+  // 읽기 fail-closed 없이 이것만 넣으면 새로운 fail-open이 생긴다: rename은
+  // 파일이 아니라 디렉터리 쓰기 권한만 있으면 되므로, 읽을 수 없는 손상된
+  // 원장이 조용히 빈 원장으로 교체될 수 있다. 그래서 두 수정은 함께 간다.
   #writeLedger(ledger) {
-    fs.mkdirSync(path.dirname(this.filePath), { recursive: true });
-    fs.writeFileSync(this.filePath, JSON.stringify(ledger), { mode: 0o600 });
+    const dir = path.dirname(this.filePath);
+    fs.mkdirSync(dir, { recursive: true });
+
+    const tmpPath = path.join(
+      dir,
+      `.${path.basename(this.filePath)}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`,
+    );
+    const fd = fs.openSync(tmpPath, "w", 0o600);
+    try {
+      fs.writeSync(fd, JSON.stringify(ledger));
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
+
+    try {
+      fs.renameSync(tmpPath, this.filePath);
+    } catch (error) {
+      try {
+        fs.unlinkSync(tmpPath);
+      } catch {
+        // 정리 실패는 무시한다 - rename 실패라는 원래 원인을 가리면 안 된다.
+      }
+      throw error;
+    }
   }
 }
