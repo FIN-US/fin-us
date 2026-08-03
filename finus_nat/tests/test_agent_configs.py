@@ -19,6 +19,7 @@ Config 파싱과 프롬프트 조립만으로 그 검증을 통과하는지 확�
 """
 
 import re
+from functools import lru_cache
 from pathlib import Path
 
 import pytest
@@ -68,6 +69,19 @@ ALL_CONFIG_IDS = [f"{path.relative_to(CONFIGS_ROOT)}::{function_name}" for path,
 EXPECTED_PROMPT_INPUT_VARIABLES = {"tools", "tool_names", "question", "chat_history"}
 
 
+@lru_cache(maxsize=None)
+def _load_direct_agent_config(function_name: str):
+    """function_name이 정의된 agents/*.yml을 단독으로 로드한다.
+
+    12개 라우터 파라미터(2개 라우터 x 6개 함수)가 각자 같은 파일을 다시 로드하던 것을
+    함수당 1회로 줄인다.
+    """
+    import nat_finus_nat.register  # noqa: F401 - 등록 트리거만 필요
+    from nat.runtime.loader import load_config
+
+    return load_config(AGENTS_DIR / AGENT_YAML[function_name]).functions[function_name]
+
+
 @pytest.mark.parametrize("config_path,function_name", ALL_CONFIGS, ids=ALL_CONFIG_IDS)
 def test_agent_config_builds_with_valid_system_prompt(config_path: Path, function_name: str):
     import nat_finus_nat.register  # noqa: F401 - 등록 트리거만 필요
@@ -89,7 +103,8 @@ def test_agent_config_builds_with_valid_system_prompt(config_path: Path, functio
     assert set(prompt.input_variables) == EXPECTED_PROMPT_INPUT_VARIABLES
 
     if config_path.parent == CONFIGS_ROOT:  # router.yml / router_nomemory.yml
-        direct = load_config(AGENTS_DIR / AGENT_YAML[function_name]).functions[function_name]
+        direct = _load_direct_agent_config(function_name)
+        assert isinstance(direct, ReActAgentWorkflowConfig)
         assert fn_config.system_prompt == direct.system_prompt
         assert [str(t) for t in fn_config.tool_names] == [str(t) for t in direct.tool_names]
 
