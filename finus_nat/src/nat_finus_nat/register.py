@@ -1,10 +1,33 @@
 # agents, finus_api 모듈을 import하여 `@register_function` 등록을 로드한다.
 import functools
 import inspect
+import logging
 import textwrap
 from pathlib import Path
 
 from dotenv import load_dotenv
+
+logger = logging.getLogger(__name__)
+
+# NAT 상류 소스에 의존하는 런타임 패치의 적용 결과. 패치가 안 붙어도 앱은 뜨지만
+# 에이전트 동작이 조용히 달라지므로(도구 호출 후 평문 최종 답변 차단 등) 상태를 남긴다.
+# 진단 시 `nat_finus_nat.register.VENDOR_PATCH_STATUS`를 확인하면 된다.
+VENDOR_PATCH_STATUS: dict[str, str] = {}
+
+
+def _mark_patch(name: str, status: str, detail: str = "") -> None:
+    """패치 결과를 기록하고, 미적용이면 로그로 즉시 드러낸다."""
+    VENDOR_PATCH_STATUS[name] = status
+    if status == "applied":
+        logger.debug("NAT 런타임 패치 적용: %s", name)
+        return
+    logger.error(
+        "NAT 런타임 패치 미적용: %s (%s). NAT 버전 업그레이드로 상류 소스가 바뀌었을 수 "
+        "있습니다. finus_nat/src/nat_finus_nat/register.py를 갱신하세요.%s",
+        name,
+        status,
+        f" {detail}" if detail else "",
+    )
 
 # finus_nat 패키지 루트의 .env 파일을 찾아 환경 변수에 로드한다.
 # register.py -> nat_finus_nat/ -> src/ -> finus_nat/
@@ -119,9 +142,11 @@ def _strict_data_tools(tools) -> bool:
 # NAT ReAct 모듈에 도구별 프롬프트 선택 함수를 등록합니다.
 def _patch_react_system_prompt(ra_mod) -> None:
     if getattr(ra_mod, "_finus_system_prompt_patched", False):
+        _mark_patch("react_system_prompt", "applied")
         return
     ra_mod._finus_react_prompt_for_tools = _react_system_prompt_for_tools  # type: ignore[attr-defined]
     ra_mod._finus_system_prompt_patched = True
+    _mark_patch("react_system_prompt", "applied")
 
 
 # 도구를 한 번이라도 호출한 뒤에는 평문 최종 답변을 허용하도록 agent_node를 패치한다(사전 직접 답변은 차단 유지).
@@ -129,27 +154,34 @@ def _patch_react_agent_node_plain_final_after_tool(ra_mod, ReActAgentGraph) -> N
     """Allow a plain final answer after at least one tool call, while blocking pre-tool direct answers."""
     # 중복 패치 방지.
     if getattr(ReActAgentGraph, "_finus_plain_final_after_tool", False):
+        _mark_patch("agent_node_plain_final", "applied")
         return
     # 이미 패치된 소스(marker 포함)면 플래그만 설정하고 종료.
     marker = "self.accept_direct_answer_without_react_format or state.agent_scratchpad"
     src = textwrap.dedent(inspect.getsource(ReActAgentGraph.agent_node))
     if marker in src:
         ReActAgentGraph._finus_plain_final_after_tool = True  # type: ignore[attr-defined]
+        _mark_patch("agent_node_plain_final", "applied")
         return
     # scratchpad가 비어있지 않으면 평문 최종 답변을 허용하도록 조건을 OR로 확장한다.
     needle = "if (self.accept_direct_answer_without_react_format and ex.missing_action and content_str"
     repl = "if ((self.accept_direct_answer_without_react_format or state.agent_scratchpad) and ex.missing_action and content_str"
     src2 = src.replace(needle, repl, 1)
     if src2 == src:
+        # 상류 소스에서 기대한 조건문을 찾지 못했다. 그냥 넘어가면 도구 호출 뒤에도
+        # 평문 최종 답변이 차단돼 응답이 비는 증상으로만 나타난다.
+        _mark_patch("agent_node_plain_final", "needle_not_found", f"needle={needle!r}")
         return
     # 패치된 소스를 컴파일해 새 agent_node로 교체.
     out: dict[str, object] = {}
     exec(compile(src2, "<finus_react_agent_node_plain_final_patch>", "exec"), ra_mod.__dict__, out)
     fn = out.get("agent_node")
     if fn is None:
+        _mark_patch("agent_node_plain_final", "compiled_agent_node_missing")
         return
     ReActAgentGraph.agent_node = fn  # type: ignore[method-assign]
     ReActAgentGraph._finus_plain_final_after_tool = True  # type: ignore[attr-defined]
+    _mark_patch("agent_node_plain_final", "applied")
 
 
 # 위 패치들을 한 번에 적용하는 진입점: ReActAgentGraph.__init__를 감싸 strict 도구 사용 시 직접 답변을 차단한다.
@@ -163,10 +195,18 @@ def _patch_nat_react_accept_direct_for_kis_tools() -> None:
 
     _orig = ReActAgentGraph.__init__
     if getattr(_orig, "_finus_patched", False):
+        _mark_patch("react_graph_init", "applied")
         return
 
     sig = inspect.signature(_orig)
     if "accept_direct_answer_without_react_format" not in sig.parameters:
+        # 이 인자가 사라지면 strict 도구 에이전트의 '사전 직접 답변 차단'이 통째로
+        # 풀린다. KIS 조회 도구를 가진 에이전트가 도구를 안 쓰고 답할 수 있게 된다.
+        _mark_patch(
+            "react_graph_init",
+            "signature_changed",
+            f"parameters={sorted(sig.parameters)}",
+        )
         return
 
     @functools.wraps(_orig)
@@ -181,6 +221,7 @@ def _patch_nat_react_accept_direct_for_kis_tools() -> None:
 
     _wrapped._finus_patched = True  # type: ignore[attr-defined]
     ReActAgentGraph.__init__ = _wrapped
+    _mark_patch("react_graph_init", "applied")
 
 
 # 모듈 import 시점에 NAT ReAct 패치를 자동 적용한다.

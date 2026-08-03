@@ -36,6 +36,14 @@ jobs:
   nat-test:
     name: finus_nat pytest
     runs-on: ubuntu-latest
+    # 아래 "벤더 패치 적용 검증" 스텝이 uv sync가 만든 실제 venv를 patch_vendor.py로 직접
+    # 쓴다. uv 기본 link mode(hardlink)면 site-packages 파일이 ~/.cache/uv/archive-v0/...와
+    # inode를 공유하고, 패치 스크립트가 그걸 truncate+rewrite하면서 enable-cache: true가
+    # 저장한 캐시가 이미 패치된 상태로 오염된다. 그러면 다음 실행부터 uv sync가 오염된
+    # 캐시를 하드링크해 오고, 스크립트는 already만 보고 exit 0으로 통과해 이 검증 스텝이
+    # 아무것도 검증하지 못하게 된다. copy 모드로 강제해 캐시와 venv의 inode를 분리한다.
+    env:
+      UV_LINK_MODE: copy
     steps:
       - uses: actions/checkout@v4
 
@@ -52,6 +60,22 @@ jobs:
 
       - name: finus_nat 테스트 실행
         run: uv run --project finus_nat pytest finus_nat/tests/
+
+      # 벤더 패치는 NAT·mem0 상류 소스와 바이트 단위로 맞물려 있다. 상류가 바뀌면
+      # 패치가 조용히 안 붙는데, 위 pytest는 임시 디렉터리의 가짜 트리만 검증하므로
+      # 이를 잡지 못한다. 이 스텝은 uv sync가 설치한 실제 패키지에 스크립트를 돌려
+      # 의존성 갱신 PR 시점에 drift를 빨간불로 드러낸다.
+      # Dockerfile과 동일하게 네 대상 전부를 --require로 건다(scripts/patch_vendor.py
+      # 상단 docstring 참고). 하나만 걸던 시절엔 여기가 Dockerfile보다 넓은 검증
+      # 지점이었지만, Dockerfile도 네 개 전부를 강제하게 되면서 두 집합은 같아졌다.
+      - name: 벤더 패치 적용 검증 (NAT 상류 drift 사전 감지)
+        run: |
+          uv run --project finus_nat python finus_nat/scripts/patch_vendor.py \
+            --venv finus_nat/.venv \
+            --require nat/plugins/mem0ai/memory.py \
+            --require mem0/client/main.py \
+            --require nat/plugins/mem0ai/mem0_editor.py \
+            --require nat/plugins/langchain/agent/auto_memory_wrapper/agent.py
 
   mcp-trading-test:
     name: mcp-trading npm test

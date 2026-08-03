@@ -44,86 +44,6 @@ fi
 # Mem0 등 NAT 전용 비밀(MEM0_API_KEY, FINUS_MEM0_*, FINUS_KIS_TRADING_MCP_URL,
 # FINUS_BACKEND_URL)도 fin-us/.env 로 통합되었습니다. 별도 finus_nat/.env 는 더 이상 사용하지 않습니다.
 
-# Self-hosted Mem0 compatibility for local `run.sh` execution:
-# mem0 OSS endpoints may not implement cloud `/v1/ping` validation.
-if [[ -n "${FINUS_MEM0_HOST:-}" || -n "${MEM0_API_KEY:-}" ]]; then
-  uv run --project "${FE_PKG}" python - <<'PY'
-from pathlib import Path
-
-
-def _venv_site(*parts: str) -> Path | None:
-    lib = Path("finus_nat/.venv/lib")
-    if not lib.is_dir():
-        return None
-    for py_dir in sorted(lib.glob("python3.*")):
-        candidate = py_dir / "site-packages" / Path(*parts)
-        if candidate.is_file():
-            return candidate
-    return None
-
-
-target = _venv_site("nat", "plugins", "mem0ai", "memory.py")
-if target is None:
-    raise SystemExit(0)
-
-text = target.read_text()
-old = """    mem0_api_key = os.environ.get("MEM0_API_KEY")\n\n    if mem0_api_key is None:\n        raise RuntimeError("Mem0 API key is not set. Please specify it in the environment variable 'MEM0_API_KEY'.")\n\n    mem0_client = AsyncMemoryClient(api_key=mem0_api_key,\n                                    host=config.host,\n                                    org_id=config.org_id,\n                                    project_id=config.project_id)\n"""
-new = """    mem0_api_key = os.environ.get("MEM0_API_KEY")\n\n    if mem0_api_key is None:\n        if config.host:\n            mem0_api_key = "selfhost-mem0-static-key"\n        else:\n            raise RuntimeError("Mem0 API key is not set. Please specify it in the environment variable 'MEM0_API_KEY'.")\n\n    if config.host:\n        original_validate = AsyncMemoryClient._validate_api_key\n\n        def _skip_validate(self):\n            return "selfhost-user"\n\n        AsyncMemoryClient._validate_api_key = _skip_validate\n        try:\n            mem0_client = AsyncMemoryClient(api_key=mem0_api_key,\n                                            host=config.host,\n                                            org_id=config.org_id,\n                                            project_id=config.project_id)\n        finally:\n            AsyncMemoryClient._validate_api_key = original_validate\n\n        mem0_client.async_client.headers.pop("Authorization", None)\n        mem0_client.async_client.headers.pop("Mem0-User-ID", None)\n    else:\n        mem0_client = AsyncMemoryClient(api_key=mem0_api_key,\n                                        host=config.host,\n                                        org_id=config.org_id,\n                                        project_id=config.project_id)\n"""
-
-if old in text and new not in text:
-    target.write_text(text.replace(old, new, 1))
-
-client_target = _venv_site("mem0", "client", "main.py")
-if client_target is not None:
-    client_text = client_target.read_text()
-    client_old = """        response = await self.async_client.post("/v1/memories/", json=payload)\n"""
-    client_new = """        endpoint = "/memories" if self.host and "api.mem0.ai" not in self.host else "/v1/memories/"\n        response = await self.async_client.post(endpoint, json=payload)\n"""
-    if client_old in client_text and client_new not in client_text:
-        client_text = client_text.replace(client_old, client_new, 1)
-
-    client_old = """        response = await self.async_client.post(f"/{version}/memories/search/", json=payload)\n"""
-    client_new = """        endpoint = "/search" if self.host and "api.mem0.ai" not in self.host else f"/{version}/memories/search/"\n        response = await self.async_client.post(endpoint, json=payload)\n"""
-    if client_old in client_text and client_new not in client_text:
-        client_text = client_text.replace(client_old, client_new, 1)
-
-    client_target.write_text(client_text)
-
-editor_target = _venv_site("nat", "plugins", "mem0ai", "mem0_editor.py")
-if editor_target is not None:
-    editor_text = editor_target.read_text()
-    editor_old = """    async def add_items(self, items: list[MemoryItem]) -> None:\n"""
-    editor_new = """    async def add_items(self, items: list[MemoryItem], **kwargs) -> None:\n"""
-    if editor_old in editor_text and editor_new not in editor_text:
-        editor_text = editor_text.replace(editor_old, editor_new, 1)
-
-    editor_old = """                                 metadata=item_meta,\n                                 output_format="v1.1"))\n"""
-    editor_new = """                                 metadata=item_meta,\n                                 output_format="v1.1",\n                                 **kwargs))\n"""
-    if editor_old in editor_text and editor_new not in editor_text:
-        editor_text = editor_text.replace(editor_old, editor_new, 1)
-
-    editor_old = """        user_id = kwargs.pop("user_id")  # Ensure user ID is in keyword arguments\n\n        search_result = await self._client.search(query, user_id=user_id, top_k=top_k, output_format="v1.1", **kwargs)\n"""
-    editor_new = """        user_id = kwargs.pop("user_id")  # Ensure user ID is in keyword arguments\n        search_kwargs = dict(kwargs)\n\n        host = getattr(self._client, "host", "") or ""\n        if "api.mem0.ai" in host:\n            search_kwargs["user_id"] = user_id\n        else:\n            search_kwargs["filters"] = {"user_id": user_id}\n\n        try:\n            search_result = await self._client.search(query, top_k=top_k, output_format="v1.1", **search_kwargs)\n        except Exception:\n            if "api.mem0.ai" in host:\n                raise\n\n            response = await self._client.async_client.get("/memories", params={"user_id": user_id})\n            response.raise_for_status()\n            results = response.json().get("results", [])\n            needle = query.casefold().strip()\n            if needle:\n                matched = [item for item in results if needle in str(item.get("memory", "")).casefold()]\n                if matched:\n                    results = matched\n            search_result = {"results": results[:top_k]}\n"""
-    if editor_old in editor_text and editor_new not in editor_text:
-        editor_text = editor_text.replace(editor_old, editor_new, 1)
-        editor_target.write_text(editor_text)
-
-agent_target = _venv_site("nat", "plugins", "langchain", "agent", "auto_memory_wrapper", "agent.py")
-if agent_target is not None:
-    agent_text = agent_target.read_text()
-    agent_old = """        user_manager = self._context.user_manager\n"""
-    agent_new = """        user_manager = getattr(self._context, "user_manager", None)\n"""
-    if agent_old in agent_text and agent_new not in agent_text:
-        agent_text = agent_text.replace(agent_old, agent_new, 1)
-
-    agent_old = """        if self._context.metadata and self._context.metadata.headers:\n            user_id = self._context.metadata.headers.get("x-user-id")\n"""
-    agent_new = """        metadata = getattr(self._context, "metadata", None)\n        headers = getattr(metadata, "headers", None)\n        if headers:\n            user_id = headers.get("x-user-id")\n"""
-    if agent_old in agent_text and agent_new not in agent_text:
-        agent_text = agent_text.replace(agent_old, agent_new, 1)
-
-    agent_target.write_text(agent_text)
-PY
-fi
-
 _default_config="${FE_PKG}/configs/router_nomemory.yml"
 _CONFIG_FILE="${FINUS_NAT_CONFIG_FILE:-${_default_config}}"
 _CHAT_PORT="${FINUS_CHAT_PORT:-8765}"
@@ -179,6 +99,121 @@ EOF
       ;;
   esac
 done
+
+# Self-hosted Mem0 compatibility gate: mem0 OSS 엔드포인트는 클라우드 전용
+# /v1/ping 검증이 없어서, 벤더 패치(scripts/patch_vendor.py)가 안 붙으면 Mem0
+# 경로가 깨진다. 패치 정의는 Dockerfile과 공유하는 scripts/patch_vendor.py
+# 하나에만 둔다.
+#
+# 이 게이트는 파싱이 끝나 최종값이 된 _CONFIG_FILE(이 실행이 실제로 무엇을
+# 쓰는지)로 판단한다. 예전에는 env(FINUS_MEM0_HOST/MEM0_API_KEY) 존재만 보고
+# 판단했는데, 공용 .env가 항상 MEM0_API_KEY를 갖고 있어 Mem0를 전혀 쓰지 않는
+# 기본 --nomemory 실행까지 벤더 drift 경고에 걸렸다.
+#
+# 이전 코멘트는 "여기서는 실패해도 런처를 죽이지 않는다 … 강제 지점은 Docker
+# 빌드(Dockerfile)이고, 로컬은 경고로 충분하다"였다. 이제는 뒤집는다: 이 실행이
+# 실제로 mem0_memory를 쓰는 config를 골랐는데 패치가 안 붙었다면, 조용히
+# 넘어가는 것은 사용자에게 원인 불명의 런타임 실패만 남긴다. 게이트가 env
+# 스코프에서 config 스코프로 좁혀졌기 때문에 이제는 로컬에서도 fatal로
+# 처리해도 무관하다 - --nomemory 기본 실행은 애초에 이 블록에 들어오지 않는다.
+#
+# NAT config는 `base:` 상속(재귀 deep-merge, nat/utils/io/yaml_tools.py)을 쓴다.
+# router.yml -> agents/diary_agent.yml -> ... -> ../common.yml처럼 체인이 길게
+# 이어질 수 있어서, _CONFIG_FILE 자체(leaf)에는 mem0_memory가 한 번도 안 나와도
+# base 체인을 타고 들어가면 Mem0 워크플로로 귀결될 수 있다. leaf만 grep하면 이
+# 경우를 조용히 놓친다 - 그게 issue #65가 없애려는 바로 그 silent-skip 부류다.
+#
+# 이 체인 해석은 셸에서 직접 흉내내지 않는다. 예전에는 grep/sed로 `base:` 줄을
+# 파싱해 따라갔는데, yaml_tools.py의 실제 로더와 두 지점에서 갈라졌다: (1) 절대
+# 경로 base(`base: /abs/path.yml`)를 상대 경로처럼 현재 디렉터리에 이어붙여
+# "파일을 찾을 수 없다"로 조용히 skip했고, (2) `base: deep.yml  # comment`처럼
+# 인라인 주석이 붙으면 sed가 그 주석까지 파일명에 포함시켜 역시 조용히 skip했다.
+# 둘 다 게이트를 무력화하는 결과(GATE=SKIP)라 issue #65가 없애려던 바로 그
+# silent-skip이 가드 안에서 재현되는 셈이었다. 셸로 nat 로더를 재구현하며 계속
+# 따라잡는 대신, nat.utils.io.yaml_tools.yaml_load()를 그대로 호출해 병합된
+# dict를 검사한다 - 상속 규칙이 갈라질 여지 자체가 없다. 다만 이건 공짜가
+# 아니다: `--nomemory`(기본값)는 게이트가 3(미사용)을 반환한 뒤 바로 아래
+# case 문에서 skip하고 patch_vendor.py를 아예 호출하지 않으므로, "두 줄 뒤
+# 어차피 필요하다"는 말은 이 경로에서는 성립하지 않는다. 실측 비용은
+# 인터프리터 직접 기동 ~180-210ms, `uv run` 경유 시 ~260-280ms인 반면(콜드
+# uv 캐시가 아닌 정상 상태 기준), 예전 grep/sed 방식은 ~5ms였다. 매 실행마다
+# 이 오버헤드를 내는 대신, silent-skip을 없애기 위한 값싼 비용으로 받아들인다.
+#
+# 종료 코드: 0=mem0 사용, 3=mem0 미사용, 2=판단 불가(설정 파일 없음/파싱 실패/
+# 순환 참조 등). 2는 "쓰지 않는다"고 조용히 넘어가면 안 되는 경우이므로 호출부가
+# fail-fast로 처리한다 - 존재하지 않는 설정 파일에 대해 "찾을 수 없습니다" 경고를
+# 찍고 나서 바로 "mem0_memory를 쓰지 않습니다"라고 단정하는 것은 이 스크립트가
+# 방금 확인 불가하다고 말한 사실을 스스로 뒤집는 것이었다.
+#
+# "미사용"에 1이 아니라 3을 쓰는 이유: 1은 `uv run` 자체가 실패했을 때도 나오는
+# 종료 코드다(예: 오프라인 상태의 콜드 캐시에서 `litellm==1.83.0` 다운로드 실패,
+# 또는 -c 스크립트 안의 미처리 예외). 예전에는 그 1이 그대로 "mem0 미사용"으로
+# 해석돼, 네트워크 문제나 리졸버 실패가 "이 설정은 mem0를 안 쓴다"는 확신에 찬
+# 오판으로 둔갑했다 - issue #65가 없애려던 바로 그 silent-skip 부류다. 그래서
+# "미사용"은 이 스크립트가 명시적으로 고르는 흔치 않은 코드(3)로 옮기고, 0/2/3
+# 이외의 모든 값(1 포함)은 게이트 자체가 실패한 것으로 간주해 무조건 fatal
+# 처리한다. `os.environ["CONFIG_FILE_FOR_PY"]`의 KeyError나 `_contains_mem0`
+# 안의 RecursionError 같은 미처리 예외도 이제 이 catch-all(2)로 떨어진다.
+_config_uses_mem0() {
+  local file="${1}"
+  CONFIG_FILE_FOR_PY="${file}" uv run --project "${FE_PKG}" python -c '
+import os
+import sys
+
+try:
+    from nat.utils.io.yaml_tools import yaml_load
+except Exception as exc:
+    print(f"경고: nat.utils.io.yaml_tools를 불러오지 못했습니다: {exc}", file=sys.stderr)
+    sys.exit(2)
+
+
+def _contains_mem0(value) -> bool:
+    if isinstance(value, dict):
+        # 키도 재귀한다: `mem0_memory:`처럼 값 없이 키 이름만으로 memory를
+        # 정의하는 config는 값(.values())만 보면 놓친다. 지금 router.yml은
+        # `router_mem0_memory:` 키에 `_type: mem0_memory` 값을 짝지어 쓰므로
+        # 값 검사만으로도 걸리지만, 그 짝을 강제하는 스키마는 없다.
+        return any(_contains_mem0(k) or _contains_mem0(v) for k, v in value.items())
+    if isinstance(value, list):
+        return any(_contains_mem0(v) for v in value)
+    return isinstance(value, str) and "mem0_memory" in value
+
+
+try:
+    path = os.environ["CONFIG_FILE_FOR_PY"]
+    config = yaml_load(path)
+    uses_mem0 = _contains_mem0(config)
+except Exception as exc:
+    print(f"경고: mem0 사용 여부를 판단하지 못했습니다({exc.__class__.__name__}): {exc}", file=sys.stderr)
+    sys.exit(2)
+
+sys.exit(0 if uses_mem0 else 3)
+'
+}
+
+_mem0_rc=0
+_config_uses_mem0 "${_CONFIG_FILE}" || _mem0_rc=$?
+case "${_mem0_rc}" in
+  0)
+    if ! uv run --project "${FE_PKG}" python "${FE_PKG}/scripts/patch_vendor.py" \
+      --venv "${FE_PKG_ABS}/.venv"; then
+      echo "오류: 벤더 패치를 적용하지 못했습니다. ${_CONFIG_FILE}이(가) mem0_memory를 쓰는데 패치가 없으면 Mem0 경로가 런타임에 원인 불명으로 실패합니다." >&2
+      echo "      NAT/mem0 버전을 올렸다면 ${FE_PKG}/scripts/patch_vendor.py 의 원본 문자열을 갱신하세요." >&2
+      exit 1
+    fi
+    ;;
+  3)
+    echo "벤더 패치 건너뜀: ${_CONFIG_FILE}이(가) mem0_memory를 쓰지 않습니다." >&2
+    ;;
+  2)
+    echo "오류: ${_CONFIG_FILE}의 mem0 사용 여부를 판단할 수 없습니다(위 경고 참고). 원인 불명 실패로 이어지느니 여기서 멈춘다." >&2
+    exit 1
+    ;;
+  *)
+    echo "오류: mem0 게이트(_config_uses_mem0)가 예상 밖 종료 코드(${_mem0_rc})로 끝났습니다. uv run 자체가 실패했을 수 있습니다(오프라인/의존성 다운로드 실패 등). 원인 불명 실패로 이어지느니 여기서 멈춘다." >&2
+    exit 1
+    ;;
+esac
 
 if [[ "${_run_mode}" == "chat" ]]; then
   _own_serve=0
