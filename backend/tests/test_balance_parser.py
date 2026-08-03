@@ -1,3 +1,8 @@
+"""이슈 #153 관련 테스트들의 픽스처는 mcp-trading/data/stocks.json 마스터의 실제
+종목 행을 사용한다(예: 종목코드 00104K, F70102B96). 특정 종목코드나 종목명이
+마스터에 있는지는 이 저장소에서 `git grep '"code": "<코드>"'
+mcp-trading/data/stocks.json`으로 직접 확인할 수 있다.
+"""
 
 import unittest
 from backend.scheduler import extract_stocks_from_balance
@@ -102,14 +107,9 @@ class TestBalanceExtraction(unittest.TestCase):
         self.assertEqual(result, expected)
 
     def test_extract_stocks_paren_in_name_uses_last_paren_group(self):
-        """이슈 #153: 종목명 자체에 괄호가 있으면 종목코드는 항상 마지막 "(코드)"
-        그룹에 있다. rsplit("(", 1)을 쓰면 마지막 "(" 에서 잘려 종목명의 괄호가
-        보존되지만, split("(")[0]을 쓰면 첫 "(" 에서 잘려 종목명이 손상된다.
-
-        "CJ4우(전환)" / 코드 00104K는 실제로 mcp-trading/data/stocks.json에 있는
-        행이다(git grep '"code": "00104K"' mcp-trading/data/stocks.json으로 확인
-        가능). 이 테스트는 split("(")[0]으로 되돌리면(mutation) "CJ4우"만 남아
-        실패하므로, 첫 괄호가 아니라 마지막 괄호를 기준으로 자르는지를 검증한다.
+        """종목명 자체에 괄호가 있어도(코드 00104K, CJ4우(전환)) 마지막 "(코드)"
+        그룹만 잘라내는지 고정한다. split("(")[0]으로 되돌리면(mutation) 첫
+        괄호에서 잘려 "CJ4우"만 남아 실패한다.
         """
         balance_text = """[보유 종목 리스트]
 - CJ4우(전환) (00104K) · 1주
@@ -119,14 +119,10 @@ class TestBalanceExtraction(unittest.TestCase):
         self.assertEqual(result, ["CJ4우(전환)"])
 
     def test_extract_stocks_two_paren_groups_in_name(self):
-        """이슈 #153 수용 기준의 핵심 케이스: 종목명 자체가 괄호 그룹을 두 개
-        가지고 있어도(코드 괄호까지 합치면 줄 안에 괄호가 세 개) rsplit("(", 1)은
-        항상 마지막(=코드) 괄호에서만 잘라야 한다. split("(")[0]은 첫 괄호에서
-        잘려 "룩셈부르크코어오피스"만 남기므로 이 테스트를 죽인다.
-
-        "룩셈부르크코어오피스(파생형)(A)" / 코드 F70102B96은 실제로
-        mcp-trading/data/stocks.json에 있는 행이다(git grep
-        '"code": "F70102B96"' mcp-trading/data/stocks.json으로 확인 가능).
+        """종목명에 괄호가 두 개 있어도(코드 F70102B96,
+        룩셈부르크코어오피스(파생형)(A)) 줄 안의 세 괄호 중 마지막(=코드) 괄호
+        에서만 잘라내는지 고정한다. split("(")[0]은 첫 괄호에서 잘려
+        "룩셈부르크코어오피스"만 남기므로 이 테스트를 죽인다.
         """
         balance_text = """[보유 종목 리스트]
 - 룩셈부르크코어오피스(파생형)(A) (F70102B96) · 1주
@@ -136,12 +132,9 @@ class TestBalanceExtraction(unittest.TestCase):
         self.assertEqual(result, ["룩셈부르크코어오피스(파생형)(A)"])
 
     def test_extract_stocks_paren_free_name_unchanged(self):
-        """이슈 #153 수용 기준: 괄호가 없는 기존 종목명("삼성전자")의 동작은
-        rsplit("(", 1) 도입 후에도 split("(")[0]과 결과가 같아야 한다(줄 안에
-        괄호가 하나뿐이므로 첫 괄호와 마지막 괄호가 같은 지점). 이 테스트는
-        rsplit 관련 회귀뿐 아니라 replace("- ", "", 1) count=1 도입으로 접두사
-        "- " 제거가 깨지는 회귀도 함께 잡는다(count=1을 빼먹고 "- "를 통째로
-        남기면 "- 삼성전자"가 되어 실패한다).
+        """괄호 없는 기존 종목명("삼성전자")은 rsplit 도입 후에도 동작이 그대로
+        임을 고정한다. rsplit 회귀뿐 아니라 replace("- ", "", 1)의 count=1 누락
+        (접두사 "- "가 통째로 남아 "- 삼성전자"가 됨)도 함께 잡는다.
         """
         balance_text = """[보유 종목 리스트]
 - 삼성전자 (005930) · 3주
@@ -151,20 +144,13 @@ class TestBalanceExtraction(unittest.TestCase):
         self.assertEqual(result, ["삼성전자"])
 
     def test_extract_stocks_interior_dash_space_preserved(self):
-        """이슈 #153 "함께 볼 것": replace("- ", "")에 count가 없으면 전역
-        치환되어 종목명 중간의 "- "까지 지워진다("한국 - 전력" → "한국 전력").
-        count=1로 좁히면 맨 앞 접두사 "- "만 지워지고 중간의 "- "는 보존되어야
-        한다. mcp-trading/data/stocks.json 마스터에는 "- "를 포함하는 종목명이
-        0건이지만(git grep로 확인), prdt_name은 마스터가 아니라 KIS output1
-        응답에서 오므로 이 입력 형태를 배제할 수 없다.
+        """count=1로 맨 앞 접두사 "- "만 지우고 종목명 중간의 "- "는 보존되는지
+        고정한다. count를 빼면(mutation) 전역 치환되어 "한국 - 전력"이 "한국
+        전력"이 되어 실패한다.
 
-        이 테스트는 replace("- ", "")로 되돌리면(count 제거, mutation) "한국
-        전력"이 되어 실패하므로 count=1이 실제로 적용되고 있는지를 검증한다.
-
-        stocks.json 마스터에 이 이름을 가진 실제 종목이 없으므로(0건, git grep로
-        확인) 코드는 임의값(999999)을 쓴다 — prdt_name이 마스터가 아니라 KIS
-        output1에서 온다는 이슈 본문의 지적대로, 이 테스트는 마스터에 없는
-        가상의 이론적 입력을 재현한다.
+        이 이름(코드 999999)은 stocks.json 마스터에 없는 합성 픽스처다 — 마스터에
+        "- "를 포함하는 종목명은 0건이지만, prdt_name은 마스터가 아니라 KIS
+        output1 응답에서 오므로 이 입력 형태를 배제할 수 없다.
         """
         balance_text = """[보유 종목 리스트]
 - 한국 - 전력 (999999) · 1주
