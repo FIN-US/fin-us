@@ -6,6 +6,7 @@ import test, { after } from "node:test";
 import {
   DEFAULT_ORDER_DEDUP_TTL_MS,
   DuplicateOrderError,
+  LedgerUnreadableError,
   OrderDedupStore,
   createOrderDedupKey,
 } from "../order-dedup.js";
@@ -349,40 +350,68 @@ test("OrderDedupStore.reserve's thrown message contains the ledger path and reme
 });
 
 // 원장 내용(CANO 포함)이 던지는 메시지에도, console.error 로그에도 절대
-// 섞이지 않아야 한다. 형태 불일치 원장에 CANO 평문을 심어 확인한다. 잡는
-// 뮤테이션: #ledgerReadError나 catch 분기가 error.message/원본 텍스트를
-// 그대로 메시지나 로그에 이어붙이면 실패해야 한다.
-test("OrderDedupStore.reserve never leaks ledger contents (CANO) into the thrown error or logs", (t) => {
-  const filePath = tempLedgerPath(t);
-  const leakedCano = "1234567890";
-  // 형태는 유효하지만(object, non-array) JSON.parse 자체는 성공하는 손상
-  // 케이스가 아니라, 파싱이 실패하되 그 원문에 CANO가 들어있는 케이스로
-  // "메시지에 원문 일부가 새어나가는지"를 검증한다.
-  fs.writeFileSync(filePath, `{"CANO": "${leakedCano}", broken`);
-  const store = new OrderDedupStore({ filePath, ttlMs: 60_000, now: () => 1_000 });
+// 섞이지 않아야 한다. 잡는 뮤테이션: #ledgerReadError나 catch 분기가
+// error.message/원본 텍스트를 그대로 메시지나 로그에 이어붙이면 실패해야
+// 한다.
+//
+// 페이로드 선택 주의: `{"CANO": "...", broken`처럼 유효한 JSON 토큰(따옴표로
+// 감싼 값) 뒤에서 깨지는 페이로드는 Node 24(V8)의 JSON.parse 에러 메시지가
+// "Expected double-quoted property name in JSON at position N"처럼 위치만
+// 보고하고 원문을 에코하지 않는다 - 그 페이로드로는 실제로 원문을 그대로
+// 메시지에 이어붙이는 구현이어도 이 테스트가 통과해버려 검증이 공허해진다.
+// 반면 유효하지 않은 토큰으로 시작하는 페이로드("notjson...", "CANO=...")는
+// V8이 `Unexpected token 'x', "<원문 일부>" is not valid JSON` 형태로 원문을
+// 그대로 에코한다(Node v24.18.1, backend/Dockerfile의 setup_24.x로 실측
+// 확인). 그래야 "메시지를 그대로 이어붙이는" 뮤테이션이 실제로 걸린다.
+for (const [label, buildPayload] of [
+  ["notjson prefix", (cano) => `notjson${cano}`],
+  ["CANO= prefix", (cano) => `CANO=${cano}`],
+]) {
+  test(`OrderDedupStore.reserve never leaks ledger contents (CANO) into the thrown error or logs (${label})`, (t) => {
+    const filePath = tempLedgerPath(t);
+    const leakedCano = "1234567890";
+    const payload = buildPayload(leakedCano);
+    fs.writeFileSync(filePath, payload);
 
-  const consoleError = t.mock.method(console, "error", () => {});
-
-  assert.throws(
-    () => store.reserve("k", { stockCode: "005930" }),
-    (error) => {
-      assert.ok(
-        !error.message.includes(leakedCano),
-        `던지는 메시지에 원장 내용(CANO)이 섞이면 안 됩니다: ${error.message}`,
-      );
-      return true;
-    },
-  );
-
-  for (const call of consoleError.mock.calls) {
-    for (const arg of call.arguments) {
-      assert.ok(
-        !String(arg).includes(leakedCano),
-        `console.error 로그에 원장 내용(CANO)이 섞이면 안 됩니다: ${arg}`,
-      );
+    // 이 페이로드가 실제로 V8의 SyntaxError 메시지에 leakedCano를 에코하는지
+    // 먼저 확인한다 - 이 전제가 깨지면(예: 엔진이 바뀌어 더 이상 에코하지
+    // 않으면) 아래 assert.ok(!...)가 항상 참이 되어 테스트가 다시 공허해질
+    // 수 있으므로, 전제 자체를 함께 고정한다.
+    let parseEchoesPayload = false;
+    try {
+      JSON.parse(payload);
+    } catch (error) {
+      parseEchoesPayload = error.message.includes(leakedCano);
     }
-  }
-});
+    assert.ok(
+      parseEchoesPayload,
+      `이 테스트의 전제(JSON.parse 에러 메시지가 원문을 에코함)가 깨졌습니다. 페이로드를 갱신하세요: ${payload}`,
+    );
+
+    const store = new OrderDedupStore({ filePath, ttlMs: 60_000, now: () => 1_000 });
+    const consoleError = t.mock.method(console, "error", () => {});
+
+    assert.throws(
+      () => store.reserve("k", { stockCode: "005930" }),
+      (error) => {
+        assert.ok(
+          !error.message.includes(leakedCano),
+          `던지는 메시지에 원장 내용(CANO)이 섞이면 안 됩니다: ${error.message}`,
+        );
+        return true;
+      },
+    );
+
+    for (const call of consoleError.mock.calls) {
+      for (const arg of call.arguments) {
+        assert.ok(
+          !String(arg).includes(leakedCano),
+          `console.error 로그에 원장 내용(CANO)이 섞이면 안 됩니다: ${arg}`,
+        );
+      }
+    }
+  });
+}
 
 // 쓰기 실패는 주문을 차단해야 한다(수용 기준). #writeLedger가 fs.renameSync를
 // 쓰므로, rename 실패를 몽키패치로 재현한다. 잡는 뮤테이션: #writeLedger가
@@ -429,6 +458,154 @@ test("OrderDedupStore.reserve writes the ledger via a same-directory temp file +
   assert.equal(path.dirname(src), dir, "임시 파일은 원장과 같은 디렉터리에 있어야 합니다");
   assert.notEqual(src, filePath, "임시 파일 경로는 최종 경로와 달라야 합니다");
   assert.equal(fs.existsSync(filePath), true);
+});
+
+// 읽기 실패 시 던지는 에러의 타입을 호출자가 instanceof로 구분할 수 있어야
+// 한다(DuplicateOrderError와 동일한 관례). 잡는 뮤테이션: #ledgerReadError가
+// LedgerUnreadableError 대신 평범한 Error를 던지면 실패해야 한다.
+test("OrderDedupStore.reserve throws a LedgerUnreadableError instance on a corrupted ledger", (t) => {
+  const filePath = tempLedgerPath(t);
+  fs.writeFileSync(filePath, "not json");
+  const store = new OrderDedupStore({ filePath, ttlMs: 60_000, now: () => 1_000 });
+
+  assert.throws(() => store.reserve("k", { stockCode: "005930" }), LedgerUnreadableError);
+});
+
+// 고아 임시 파일 정리는 rename 실패뿐 아니라 write/fsync 실패에서도 대칭이어야
+// 한다. 잡는 뮤테이션: #writeLedger의 catch가 rename 실패만 잡고 write/fsync
+// 실패는 그냥 던지던(정리 없이) 원래 형태로 되돌아가면 이 두 테스트가
+// 실패해야 한다. tmpPath는 무작위 접미사를 갖지만 항상 `.tmp`로 끝나므로,
+// 원장 디렉터리에서 `.tmp`로 끝나는 파일이 하나도 없어야 한다고 검증한다.
+test("OrderDedupStore.reserve cleans up the temp file when fsync fails", (t) => {
+  const filePath = tempLedgerPath(t);
+  const dir = path.dirname(filePath);
+  const store = new OrderDedupStore({ filePath, ttlMs: 60_000, now: () => 1_000 });
+
+  t.mock.method(fs, "fsyncSync", () => {
+    const error = new Error("simulated fsync failure");
+    error.code = "EIO";
+    throw error;
+  });
+
+  assert.throws(() => store.reserve("k", { stockCode: "005930" }));
+
+  const leftoverTmp = fs.readdirSync(dir).filter((name) => name.endsWith(".tmp"));
+  assert.deepEqual(leftoverTmp, [], `임시 파일이 정리되지 않고 남았습니다: ${leftoverTmp}`);
+});
+
+test("OrderDedupStore.reserve cleans up the temp file when the write fails", (t) => {
+  const filePath = tempLedgerPath(t);
+  const dir = path.dirname(filePath);
+  const store = new OrderDedupStore({ filePath, ttlMs: 60_000, now: () => 1_000 });
+
+  const originalWriteFileSync = fs.writeFileSync;
+  t.mock.method(fs, "writeFileSync", (fdOrPath, ...rest) => {
+    if (typeof fdOrPath === "number") {
+      const error = new Error("simulated write failure");
+      error.code = "ENOSPC";
+      throw error;
+    }
+    return originalWriteFileSync(fdOrPath, ...rest);
+  });
+
+  assert.throws(() => store.reserve("k", { stockCode: "005930" }));
+
+  const leftoverTmp = fs.readdirSync(dir).filter((name) => name.endsWith(".tmp"));
+  assert.deepEqual(leftoverTmp, [], `임시 파일이 정리되지 않고 남았습니다: ${leftoverTmp}`);
+});
+
+// #writeLedger가 fd에 fs.writeSync(반환값 무시)가 아니라 fs.writeFileSync(전체
+// 데이터가 쓰일 때까지 내부 반복)를 쓰는지 확인한다. 짧은 쓰기를 OS 수준에서
+// 직접 재현하기는 플랫폼 의존적이라, 대신 우리 코드가 실제로 fs.writeFileSync를
+// 호출하고 그 한 번의 호출에 완전한 JSON을 통째로 넘기는지를 관찰한다. 잡는
+// 뮤테이션: #writeLedger가 fs.writeSync(fd, data)로 되돌아가면(원래 구현)
+// fs.writeFileSync가 전혀 호출되지 않아 이 테스트가 실패해야 한다.
+test("OrderDedupStore.reserve writes the ledger via fs.writeFileSync on the temp fd, not a bare fs.writeSync", (t) => {
+  const filePath = tempLedgerPath(t);
+  const store = new OrderDedupStore({ filePath, ttlMs: 60_000, now: () => 1_000 });
+
+  const originalWriteFileSync = fs.writeFileSync;
+  const fdWriteCalls = [];
+  t.mock.method(fs, "writeFileSync", (fdOrPath, ...rest) => {
+    if (typeof fdOrPath === "number") {
+      fdWriteCalls.push({ fd: fdOrPath, data: rest[0] });
+    }
+    return originalWriteFileSync(fdOrPath, ...rest);
+  });
+
+  store.reserve("k", { stockCode: "005930" });
+
+  assert.equal(fdWriteCalls.length, 1, "fd 기반 fs.writeFileSync가 정확히 한 번 호출돼야 합니다");
+  const parsed = JSON.parse(fdWriteCalls[0].data);
+  assert.ok(parsed.k, "한 번의 호출에 완전한 JSON 원장이 통째로 전달돼야 합니다");
+
+  const onDisk = JSON.parse(fs.readFileSync(filePath, "utf8"));
+  assert.ok(onDisk.k, "디스크에 기록된 원장이 완전해야 합니다(짧은 쓰기로 잘리지 않음)");
+});
+
+// rename의 EPERM/EACCES/EBUSY는 외부 보유자(백신 등)로 인한 일시적 실패일 수
+// 있어 재시도해야 한다(권장 사항). 잡는 뮤테이션: #renameLedgerAtomic이
+// 재시도 없이 첫 실패에서 바로 던지면 이 테스트가 실패해야 한다 - 세 번째
+// 시도에서만 성공하도록 몽키패치했으므로 재시도가 없으면 절대 성공하지 못한다.
+test("OrderDedupStore.reserve retries a transient EPERM rename failure and eventually succeeds", (t) => {
+  const filePath = tempLedgerPath(t);
+  const store = new OrderDedupStore({ filePath, ttlMs: 60_000, now: () => 1_000 });
+
+  const originalRenameSync = fs.renameSync;
+  let calls = 0;
+  t.mock.method(fs, "renameSync", (src, dest) => {
+    calls += 1;
+    if (dest === filePath && calls < 3) {
+      const error = new Error("simulated transient lock");
+      error.code = "EPERM";
+      throw error;
+    }
+    return originalRenameSync(src, dest);
+  });
+
+  assert.doesNotThrow(() => store.reserve("k", { stockCode: "005930" }));
+  assert.equal(calls, 3, "세 번째 시도에서 성공해야 합니다");
+});
+
+// 재시도에도 한계가 있어야 한다 - 영구적인 실패까지 무한정 재시도하면 주문
+// 경로가 멈춘다. 잡는 뮤테이션: RENAME_MAX_ATTEMPTS 상한 없이 무한 재시도하면
+// (또는 반대로 재시도를 아예 하지 않아 위 테스트가 실패로 이미 잡지만, 이
+// 테스트는 "결국은 던진다"는 상한 쪽을 잡는다) 이 테스트가 타임아웃되거나
+// 실패해야 한다.
+test("OrderDedupStore.reserve gives up and throws after exhausting rename retries on persistent EBUSY", (t) => {
+  const filePath = tempLedgerPath(t);
+  const store = new OrderDedupStore({ filePath, ttlMs: 60_000, now: () => 1_000 });
+
+  let calls = 0;
+  t.mock.method(fs, "renameSync", () => {
+    calls += 1;
+    const error = new Error("simulated persistent lock");
+    error.code = "EBUSY";
+    throw error;
+  });
+
+  assert.throws(() => store.reserve("k", { stockCode: "005930" }));
+  assert.ok(calls >= 2, `재시도가 이뤄져야 합니다 (calls=${calls})`);
+});
+
+// ENOSPC 같은 비일시적 에러코드는 재시도 대상이 아니다 - 디스크가 가득 찬
+// 상태는 몇 번을 더 시도해도 나아지지 않으므로 즉시 실패해 빠르게 신호를
+// 줘야 한다. 잡는 뮤테이션: RENAME_RETRY_CODES 판별 없이 모든 에러코드를
+// 재시도하면(과도한 재시도) calls가 1을 초과해 실패해야 한다.
+test("OrderDedupStore.reserve does not retry rename failures with non-transient error codes", (t) => {
+  const filePath = tempLedgerPath(t);
+  const store = new OrderDedupStore({ filePath, ttlMs: 60_000, now: () => 1_000 });
+
+  let calls = 0;
+  t.mock.method(fs, "renameSync", () => {
+    calls += 1;
+    const error = new Error("simulated disk full");
+    error.code = "ENOSPC";
+    throw error;
+  });
+
+  assert.throws(() => store.reserve("k", { stockCode: "005930" }));
+  assert.equal(calls, 1, "재시도 대상이 아닌 에러코드는 한 번만 시도해야 합니다");
 });
 
 test("OrderDedupStore stays silent when KIS_ORDER_DEDUP_TTL_MS is set but blank", (t) => {

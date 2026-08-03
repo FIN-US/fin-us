@@ -14,6 +14,24 @@ export class DuplicateOrderError extends Error {
   }
 }
 
+// reserve()·markSucceeded()·release() 모두 내부적으로 원장을 읽으므로, 이
+// 에러는 "새 주문이 차단됨"만을 뜻하지 않는다 - markSucceeded/release에서
+// 발생하면 KIS 주문 자체는 이미 끝난 뒤일 수 있다. 그래서 메시지는 호출
+// 맥락과 무관하게 참인 사실(경로, 손상 가능성, 삭제하면 복구된다는 것)만
+// 담는다. DuplicateOrderError와 마찬가지로 타입을 노출해 호출자가
+// instanceof로 구분할 수 있게 한다.
+export class LedgerUnreadableError extends Error {
+  constructor(filePath, reason) {
+    super(
+      `KIS 주문 중복 방지 원장을 읽을 수 없습니다: ${filePath}\n` +
+        "원장이 손상되었을 수 있습니다. 이 파일을 삭제하면 정상 상태로 복구됩니다.",
+    );
+    this.name = "LedgerUnreadableError";
+    this.filePath = filePath;
+    this.reason = reason;
+  }
+}
+
 export function createOrderDedupKey({
   accountNo,
   orderEnv,
@@ -35,6 +53,23 @@ export function createOrderDedupKey({
   };
 
   return crypto.createHash("sha256").update(JSON.stringify(payload)).digest("hex");
+}
+
+// rename 실패 중 이 코드들만 재시도한다. 이 코드로 실패해도 원장은 멀쩡하고
+// 임시 파일에는 완성된 내용이 그대로 있으므로(rename은 이름표만 바꾸는
+// 연산), 재시도는 멱등하고 중복 주문 위험이 없다. Docker Compose에서는
+// `.:/app` 바인드 마운트로 원장이 Windows 호스트 경로(`.state\`)에 놓이므로
+// Defender·검색 인덱서 같은 외부 보유자가 붙잡고 있을 가능성이 실질적이다.
+// 읽기 경로·형태 가드는 재시도하지 않는다 - 그쪽은 fail-closed가 맞는 자세다.
+const RENAME_RETRY_CODES = new Set(["EPERM", "EACCES", "EBUSY"]);
+const RENAME_MAX_ATTEMPTS = 5;
+const RENAME_RETRY_BACKOFF_MS = [10, 15, 20, 30];
+
+// Atomics.wait로 현재 스레드를 동기적으로 재운다. 이 모듈의 쓰기 경로는
+// 전부 동기 API(fs.*Sync)라, 비동기 setTimeout으로는 재시도 사이 간격을 줄
+// 수 없다.
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
 function parsePositiveInteger(value, fallback, name = "값") {
@@ -147,10 +182,7 @@ export class OrderDedupStore {
   // 조치 방법만 담는다.
   #ledgerReadError(reason) {
     console.error(`KIS order dedup ledger read failed (${reason}): ${this.filePath}`);
-    return new Error(
-      `KIS 주문 중복 방지 원장을 읽을 수 없습니다: ${this.filePath}\n` +
-        "원장이 손상되었을 수 있어 주문을 차단합니다. 이 파일을 삭제하면 주문이 재개됩니다.",
-    );
+    return new LedgerUnreadableError(this.filePath, reason);
   }
 
   // 같은 디렉터리에 임시 파일을 만들고 fsync한 뒤 rename으로 경로만
@@ -161,6 +193,12 @@ export class OrderDedupStore {
   // 읽기 fail-closed 없이 이것만 넣으면 새로운 fail-open이 생긴다: rename은
   // 파일이 아니라 디렉터리 쓰기 권한만 있으면 되므로, 읽을 수 없는 손상된
   // 원장이 조용히 빈 원장으로 교체될 수 있다. 그래서 두 수정은 함께 간다.
+  //
+  // open→write→fsync→rename 전체를 하나의 try로 감싼다. 어느 단계에서
+  // 실패하든(rename뿐 아니라 write·fsync도) 임시 파일이 남아서는 안 된다 -
+  // 원장과 같은 내용(CANO 포함)을 담은 파일이 남으면 그 자체로 유출 표면이고,
+  // ENOSPC처럼 디스크가 가득 찬 상황에서는 실패한 시도마다 고아 파일이 쌓여
+  // 원인을 더 악화시킨다.
   #writeLedger(ledger) {
     const dir = path.dirname(this.filePath);
     fs.mkdirSync(dir, { recursive: true });
@@ -169,23 +207,53 @@ export class OrderDedupStore {
       dir,
       `.${path.basename(this.filePath)}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`,
     );
-    const fd = fs.openSync(tmpPath, "w", 0o600);
-    try {
-      fs.writeSync(fd, JSON.stringify(ledger));
-      fs.fsyncSync(fd);
-    } finally {
-      fs.closeSync(fd);
-    }
 
     try {
-      fs.renameSync(tmpPath, this.filePath);
+      const fd = fs.openSync(tmpPath, "w", 0o600);
+      try {
+        // writeSync는 시스템 콜 한 번이라 반환값(실제로 쓰인 바이트 수)을
+        // 무시하면 짧은 쓰기가 조용히 잘린 원장을 남길 수 있다. writeFileSync는
+        // fd를 받아도 전체 데이터가 쓰일 때까지 내부적으로 반복한다. 짧은
+        // 쓰기로 잘린 원장은 이 변경의 fail-closed 읽기와 만나 사람이 지울
+        // 때까지 모든 주문을 막아버리므로, 여기서 확실히 막는다.
+        fs.writeFileSync(fd, JSON.stringify(ledger));
+        fs.fsyncSync(fd);
+      } finally {
+        fs.closeSync(fd);
+      }
+      this.#renameLedgerAtomic(tmpPath);
     } catch (error) {
       try {
         fs.unlinkSync(tmpPath);
       } catch {
-        // 정리 실패는 무시한다 - rename 실패라는 원래 원인을 가리면 안 된다.
+        // 정리 실패는 무시한다 - openSync 자체가 실패했다면 tmpPath가 애초에
+        // 없어 ENOENT가 나는 정상 경로이고, 그 외의 경우에도 정리 실패로
+        // 원래 실패 원인을 가리면 안 된다.
       }
       throw error;
+    }
+  }
+
+  // EPERM/EACCES/EBUSY는 대상을 붙잡고 있는 외부 프로세스(백신, 검색
+  // 인덱서 등)가 원인일 가능성이 크고, 이 코드는 대상 파일을 열어둔 채로 두지
+  // 않는다(#readLedger는 매번 새로 열고 닫는다) - 그래서 짧은 재시도가
+  // 안전하다. rename은 이름표만 바꾸는 연산이라 실패해도 tmpPath에는 완성된
+  // 내용이 그대로 남아 재시도는 멱등하고, 원장 자체는 손상되지 않는다(그
+  // 다음 항상 성공하는 것도 아니지만, 실패 시 tmpPath 정리는 호출자
+  // (#writeLedger)의 catch가 맡는다). 읽기·형태 가드는 재시도하지 않는다 -
+  // 그쪽은 fail-closed가 맞는 자세다.
+  #renameLedgerAtomic(tmpPath) {
+    for (let attempt = 1; attempt <= RENAME_MAX_ATTEMPTS; attempt += 1) {
+      try {
+        fs.renameSync(tmpPath, this.filePath);
+        return;
+      } catch (error) {
+        const isLastAttempt = attempt === RENAME_MAX_ATTEMPTS;
+        if (!RENAME_RETRY_CODES.has(error.code) || isLastAttempt) {
+          throw error;
+        }
+        sleepSync(RENAME_RETRY_BACKOFF_MS[attempt - 1] ?? 50);
+      }
     }
   }
 }
