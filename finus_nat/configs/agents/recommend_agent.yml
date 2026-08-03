@@ -37,9 +37,9 @@ functions:
       Thought: (짧게, 한국어 가능)
       Action: 여기에는 위 도구 이름 중 하나만 그대로 적습니다(대괄호나 "중 하나" 문구를 넣지 마세요).
 
-      Action Input (Kis Trading MCP 전용 — ``kis-trading-mcp-tool``):
-      {{"tool_name":"domestic_stock","api_type":"inquire_balance","params":{{...}}}}
-      오류 시 ``find_api_detail``로 스키마 확인 후 재시도.
+      Action Input:
+      - Kis Trading MCP(``kis-trading-mcp-tool``): {{"tool_name":"domestic_stock","api_type":"inquire_balance","params":{{...}}}} (오류 시 ``find_api_detail``로 스키마 확인 후 재시도)
+      - ``mcp-news-get-market-news``: {{"stock_name":"삼성전자"}}
 
       그 다음 줄부터는 Observation이 옵니다(모델이 직접 쓰지 않음).
 
