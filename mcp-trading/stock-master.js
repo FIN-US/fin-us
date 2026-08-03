@@ -29,7 +29,7 @@ export function normalizeStockInput(value) {
   return String(value ?? "").trim();
 }
 
-const CODE_SHAPE_PATTERN = /^[A-Z0-9]{6,7}$/i;
+export const CODE_SHAPE_PATTERN = /^[A-Z0-9]{6,7}$/i;
 const NUMERIC_CODE_PATTERN = /^[0-9]{6,7}$/;
 
 export function resolveStock(stockName, stocks) {

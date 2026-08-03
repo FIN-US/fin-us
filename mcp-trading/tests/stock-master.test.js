@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import test from "node:test";
-import { clearStocksCache, DEFAULT_STOCKS_PATH, getDefaultStocks, resolveStock } from "../stock-master.js";
+import { CODE_SHAPE_PATTERN, clearStocksCache, DEFAULT_STOCKS_PATH, getDefaultStocks, resolveStock } from "../stock-master.js";
 
 test("resolveStock resolves names from the expanded domestic stock master", () => {
   assert.deepEqual(resolveStock("카카오"), {
@@ -202,11 +202,14 @@ test("resolveStock does not throw when a caller-supplied stock entry is missing 
 test("exactly 3 master stock names match the code-shaped pattern, and 0 aliases do", () => {
   // This is the issue's own acceptance query, turned into a regression test.
   // If a future stocks.json update adds or removes a name/alias matching
-  // /^[A-Za-z0-9]{6,7}$/, this test documents the change and forces a
+  // CODE_SHAPE_PATTERN, this test documents the change and forces a
   // conscious re-check of the shortcut-ordering fix rather than a silent
   // reintroduction of the shadowing bug for a new listing.
+  // Uses the implementation's own exported pattern (rather than a hardcoded
+  // copy) so this guard can never drift out of sync with what resolveStock
+  // actually treats as code-shaped.
   const stocks = getDefaultStocks();
-  const codeShapePattern = /^[A-Za-z0-9]{6,7}$/;
+  const codeShapePattern = CODE_SHAPE_PATTERN;
 
   const nameMatches = stocks.filter((stock) => codeShapePattern.test(stock.name));
   assert.deepEqual(
