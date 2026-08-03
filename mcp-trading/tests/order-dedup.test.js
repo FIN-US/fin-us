@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test, { after } from "node:test";
 import {
+  DEFAULT_ORDER_DEDUP_TTL_MS,
   DuplicateOrderError,
   OrderDedupStore,
   createOrderDedupKey,
@@ -154,14 +155,13 @@ test("OrderDedupStore resolves ttlMs from KIS_ORDER_DEDUP_TTL_MS env var, warnin
 
   const consoleError = t.mock.method(console, "error", () => {});
 
-  const DEFAULT_TTL_MS = 120_000;
   const validCase = ["600000", 600_000]; // 유효한 값은 그대로 사용되고 경고가 없다
   const invalidCases = [
-    ["600_000", DEFAULT_TTL_MS], // JS 숫자 구분자(_) 습관 - Number()는 이를 파싱하지 못함
-    ["10m", DEFAULT_TTL_MS], // 단위 접미사 오타
-    ["0", DEFAULT_TTL_MS], // <= 0 분기
-    ["-1", DEFAULT_TTL_MS], // <= 0 분기, 음수
-    ["60.5", DEFAULT_TTL_MS], // !Number.isInteger 분기
+    ["600_000", DEFAULT_ORDER_DEDUP_TTL_MS], // JS 숫자 구분자(_) 습관 - Number()는 이를 파싱하지 못함
+    ["10m", DEFAULT_ORDER_DEDUP_TTL_MS], // 단위 접미사 오타
+    ["0", DEFAULT_ORDER_DEDUP_TTL_MS], // <= 0 분기
+    ["-1", DEFAULT_ORDER_DEDUP_TTL_MS], // <= 0 분기, 음수
+    ["60.5", DEFAULT_ORDER_DEDUP_TTL_MS], // !Number.isInteger 분기
   ];
 
   // 유효한 값: 파싱된 값을 그대로 쓰고, 경고가 없어야 한다.
@@ -198,12 +198,16 @@ test("OrderDedupStore resolves ttlMs from KIS_ORDER_DEDUP_TTL_MS env var, warnin
       message.includes(`="${envValue}"`),
       `경고 메시지에서 값의 경계가 따옴표로 표시되어야 합니다: ${message}`,
     );
+    assert.ok(
+      message.includes(String(DEFAULT_ORDER_DEDUP_TTL_MS)),
+      `경고 메시지에 실제 적용되는 기본값이 포함되어야 합니다: ${message}`,
+    );
   }
 
   // 값이 아예 없는 경우(정상적인 기본값 사용)는 조용해야 한다.
   consoleError.mock.resetCalls();
   delete process.env.KIS_ORDER_DEDUP_TTL_MS;
-  assert.equal(new OrderDedupStore().ttlMs, DEFAULT_TTL_MS, "env=unset");
+  assert.equal(new OrderDedupStore().ttlMs, DEFAULT_ORDER_DEDUP_TTL_MS, "env=unset");
   assert.equal(
     consoleError.mock.callCount(),
     0,

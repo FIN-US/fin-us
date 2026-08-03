@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-const DEFAULT_ORDER_DEDUP_TTL_MS = 120_000;
+export const DEFAULT_ORDER_DEDUP_TTL_MS = 120_000;
 const DEFAULT_ORDER_DEDUP_PATH = path.join(os.tmpdir(), "finus-kis-order-dedup.json");
 
 export class DuplicateOrderError extends Error {
