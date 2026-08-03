@@ -39,14 +39,22 @@ class AgentReport(SQLModel, table=True):
     decision: str = Field(description="투자 결정 (BUY/SELL/HOLD)")
     confidence_score: float = Field(description="신뢰도 점수 (0.0~1.0)")
     reason: str = Field(description="투자 결정 근거")
-    tool_verified: bool = Field(
+    provider_supports_tools: bool = Field(
         default=False,
         description=(
-            "MCP/KIS/뉴스 등 실제 도구를 호출해 만든 분석인지 여부. "
-            "services.provider_is_tool_backed()가 provider 분기에서 파생하며 호출부가 "
-            "직접 True/False를 넘기지 않는다 (현재는 provider=nat만 True). "
+            "이 리포트를 만든 provider가 도구(MCP/KIS/뉴스)를 호출할 수 있는 경로로 "
+            "구성돼 있는지 여부. services.provider_supports_tools()가 provider 자체에서 "
+            "파생하며 호출부가 직접 True/False를 넘기지 않는다. "
+            "주의: 이것은 provider 차원의 '능력' 신호이지, 이 리포트를 만들 때 실제로 "
+            "도구가 호출됐다는 관측이 아니다. openai/anthropic/ollama는 tools 파라미터 "
+            "없이 모델을 그대로 호출하므로 False는 코드로 증명 가능하다. 반면 nat=True는 "
+            "NAT 멀티에이전트로 라우팅됐다는 뜻일 뿐이며, 그 안에서 실제로 도구가 실행됐는지는 "
+            "이 필드가 보장하지 않는다 — NAT ReAct 에이전트가 도구 없이도 답을 낼 수 있는 "
+            "문제(#152, finus_nat/configs/agents/*.yml 전부 raise_on_parsing_failure: false)가 "
+            "열려 있는 한, false negative는 구조적으로 불가능해도 false positive는 가능하다. "
+            "실제 도구 호출 이력(ledger)은 #152에서 다룰 몫이며 이 필드는 그것을 대신하지 않는다. "
             "이 컬럼이 없던 스키마에서 만들어진 기존 행은 database._run_schema_migrations()가 "
-            "ALTER TABLE ... DEFAULT 0으로 채운다 — 즉 False는 '도구 미사용'과 "
+            "ALTER TABLE ... DEFAULT 0으로 채운다 — False는 '도구 미지원'과 "
             "'과거 행이라 확인 불가'를 모두 의미하며, 절대 True로 소급되지 않는다."
         ),
     )

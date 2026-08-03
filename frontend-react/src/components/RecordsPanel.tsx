@@ -79,7 +79,23 @@ const RecordsPanel: React.FC<RecordsPanelProps> = ({ resources, loading, onSubmi
             <div key={item.id ?? `${item.stock_name}-${item.created_at}`} className="rounded-lg bg-slate-50 p-4">
               <div className="flex justify-between gap-3">
                 <div className="font-black text-slate-800">{item.stock_name}</div>
-                <span className="text-xs font-black text-slate-500">{item.decision}</span>
+                <div className="flex items-center gap-2">
+                  <span
+                    className={`text-[10px] font-black uppercase px-2 py-0.5 rounded-full ${
+                      item.provider_supports_tools
+                        ? 'bg-emerald-100 text-emerald-700'
+                        : 'bg-slate-200 text-slate-500'
+                    }`}
+                    title={
+                      item.provider_supports_tools
+                        ? `provider(${item.provider})가 도구 호출 경로로 구성되어 있음 — 실제 호출 여부는 확인되지 않았습니다.`
+                        : `provider(${item.provider})는 도구 없이 생성된 리포트입니다.`
+                    }
+                  >
+                    {item.provider_supports_tools ? 'TOOL-CAPABLE' : 'NO TOOLS'}
+                  </span>
+                  <span className="text-xs font-black text-slate-500">{item.decision}</span>
+                </div>
               </div>
               <p className="mt-2 line-clamp-3 text-xs leading-relaxed text-slate-500">{item.summary}</p>
             </div>

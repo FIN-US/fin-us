@@ -17,7 +17,21 @@ const ReportSidebar: React.FC<ReportSidebarProps> = ({ report, currentNews }) =>
           'bg-gradient-to-br from-slate-500 to-slate-600 text-white'
         }`}>
           <div className="flex justify-between items-center mb-6">
-            <span className="text-xs font-black uppercase tracking-widest opacity-80">AI STRATEGY</span>
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-black uppercase tracking-widest opacity-80">AI STRATEGY</span>
+              <span
+                className={`text-[10px] font-black uppercase tracking-wide px-2 py-0.5 rounded-full ${
+                  report.provider_supports_tools ? 'bg-white/25' : 'bg-black/20 opacity-80'
+                }`}
+                title={
+                  report.provider_supports_tools
+                    ? `provider(${report.provider})가 도구(MCP/KIS/뉴스) 호출 경로로 구성되어 있다는 뜻입니다. 이번 응답에서 실제로 도구가 호출되었다는 관측은 아닙니다.`
+                    : `provider(${report.provider})는 도구(MCP/KIS/뉴스) 없이 모델이 직접 답을 생성했습니다. 수치가 지어낸 값일 수 있습니다.`
+                }
+              >
+                {report.provider_supports_tools ? 'Tool-capable (unconfirmed)' : 'No tool access'}
+              </span>
+            </div>
             {report.details.decision === 'BUY' ? <TrendingUp className="w-8 h-8 opacity-50" /> :
              report.details.decision === 'SELL' ? <TrendingDown className="w-8 h-8 opacity-50" /> : <Minus className="w-8 h-8 opacity-50" />}
           </div>

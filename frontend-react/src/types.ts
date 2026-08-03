@@ -11,6 +11,11 @@ export interface AnalysisReport {
   source_news: string[];
   source_signals?: string[];
   trading_trend: string | null;
+  // provider가 도구(MCP/KIS/뉴스)를 호출할 수 있는 경로로 구성돼 있는지 여부.
+  // provider 자체에서 파생된 "능력" 신호일 뿐, 이 응답에서 실제로 도구가
+  // 호출됐다는 관측은 아니다 (백엔드 #152 참고).
+  provider: string;
+  provider_supports_tools: boolean;
 }
 
 export interface TrendItem {
@@ -64,6 +69,10 @@ export interface AgentReportItem {
   decision: string;
   confidence_score: number;
   reason: string;
+  // provider가 도구(MCP/KIS/뉴스)를 호출할 수 있는 경로로 구성돼 있는지 여부.
+  // provider 자체에서 파생된 "능력" 신호일 뿐, 이 리포트에서 실제로 도구가
+  // 호출됐다는 관측은 아니다 (백엔드 #152 참고).
+  provider_supports_tools: boolean;
   created_at: string;
 }
 
