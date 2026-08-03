@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import axios from "axios";
@@ -322,6 +322,39 @@ async function getBalance() {
   );
 }
 
+// KIS 제출과 dedup 원장 기록을 분리한다: 주문 결과는 오직 KIS 응답으로만 결정되고,
+// 원장 기록(성공 표시/거절 시 해제)의 실패는 이미 확정된 주문 결과를 절대 뒤집지 않는다.
+export async function submitOrder({ orderDedupStore, dedupKey, submit }) {
+  let data;
+  try {
+    data = await submit();
+  } catch (error) {
+    // 명시적 허용 목록: KIS가 거절했다고 확인된 경우에만 해제한다(nothing was submitted).
+    // axios 전송 실패(제출 여부 불명)나 그 밖의 어떤 예외도 기본은 해제하지 않는다(fail-closed).
+    if (error.kisOrderRejected === true) {
+      try {
+        orderDedupStore.release(dedupKey);
+      } catch (releaseError) {
+        // release()도 원장 파일을 거쳐 던질 수 있다. 여기서 던지면 원래 KIS 거절 사유가
+        // 사라지므로, 로그만 남기고 원래 예외를 그대로 전파한다. 항목은 in_flight로 남아
+        // TTL까지 중복을 계속 막으므로 fail-closed 성질은 유지된다.
+        console.error(`주문 거절 후 원장 정리 실패(항목은 in_flight로 유지): ${releaseError.message}`);
+      }
+    }
+    throw error;
+  }
+
+  try {
+    orderDedupStore.markSucceeded(dedupKey, data);
+  } catch (error) {
+    // 주문은 이미 KIS에 체결됐다. 기록 실패로 가드를 지우면 재시도가 통과해 중복 주문이
+    // 나간다. 항목을 in_flight로 남겨두면 TTL 만료까지 중복을 계속 막는 안전한 저하다.
+    console.error(`주문 성공 후 원장 기록 실패(항목은 in_flight로 유지): ${error.message}`);
+  }
+
+  return data;
+}
+
 async function placeOrder(args) {
   requireKisCredentials({ accountRequired: true });
 
@@ -359,16 +392,11 @@ async function placeOrder(args) {
     body: request.body,
   });
 
-  let data;
-  try {
-    data = await kisPost(request.pathname, request.trId, request.body, { useHashKey: true });
-    orderDedupStore.markSucceeded(dedupKey, data);
-  } catch (error) {
-    if (!error.kisOrderSubmittedMaybe || error.kisOrderRejected) {
-      orderDedupStore.release(dedupKey);
-    }
-    throw error;
-  }
+  const data = await submitOrder({
+    orderDedupStore,
+    dedupKey,
+    submit: () => kisPost(request.pathname, request.trId, request.body, { useHashKey: true }),
+  });
   return formatOrderResult({
     stockName,
     stockCode,
@@ -714,7 +742,15 @@ server.registerTool(
   async (args) => callTradingTool("get_balance_rlz_pl", args),
 );
 
-const transport = new StdioServerTransport();
-await server.connect(transport);
+// 이 파일을 `node index.js`로 직접 실행할 때만 stdio transport를 연결한다.
+// 테스트가 submitOrder 등을 import할 때 실제 MCP 서버가 stdin/stdout을 점유하지
+// 않도록 막는 진입점 가드다(index.js는 그 외엔 export가 없어 이 가드가 유일한 테스트 seam).
+const isMainModule =
+  process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href;
 
-console.error("Trading MCP Server is running...");
+if (isMainModule) {
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+
+  console.error("Trading MCP Server is running...");
+}
