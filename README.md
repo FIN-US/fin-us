@@ -104,13 +104,7 @@ Fin-Us는 단일 모델이 모든 일을 처리하지 않고, 역할이 분리�
 4. 브라우저에서 `https://api.telegram.org/bot<토큰>/getUpdates` 를 엽니다.
 5. 응답의 `"chat":{"id":...}` 값이 `TELEGRAM_CHAT_ID` 입니다.
 
-> 이 봇은 `TELEGRAM_CHAT_ID` 와 일치하는 대화에서만 명령을 받습니다. 다른 사람이 봇을 찾아 명령해도 무시됩니다.
-
-`TELEGRAM_CHAT_ID`는 형식 검증을 받지 않습니다. 초기 설정 CLI(`backend/scripts/setup_env.py`)의 `URL_KEYS`·`BOOLEAN_KEYS`에도 포함되어 있지 않고, `validate_settings`도 이 값을 들여다보지 않습니다. `.env`를 직접 손으로 고쳐도 마찬가지입니다.
-
-`is_placeholder_secret`(`backend/config.py`)은 값이 비어 있거나 `your_`로 시작하거나 `_here`로 끝날 때만 "설정 안 됨"으로 취급합니다. 즉 값을 아예 채우지 않은 상태는 안전합니다. 하지만 그 외의 문자열이라면 형식이 맞든 안 맞든 봇은 스스로를 "켜졌다"고 판단해(`TelegramNotifier.enabled`) 폴링을 시작하며, 초기 설정 CLI도 "Telegram 알림"이 설정된 것으로 안내합니다.
-
-이 상태에서 실제 채팅 ID와 다른 값이 들어 있으면, 봇은 들어오는 메시지를 조용히 무시하면서도 읽음 오프셋은 그대로 전진시킵니다(`TelegramCommandPoller.run`). 그래서 브라우저로 `getUpdates`를 다시 열어 봐도 이미 읽은 것으로 처리되어 빈 결과만 돌아옵니다.
+> `TELEGRAM_CHAT_ID`가 틀리면 봇이 오류 없이 조용히 명령을 무시합니다. 반응이 없다면 [텔레그램 봇이 반응이 없어요](#troubleshooting)를 참고하세요.
 
 <a id="nat-config" name="nat-config"></a>
 
@@ -375,6 +369,14 @@ python3 mcp-trading/scripts/update_stock_master.py
 3. 브라우저에서 `https://api.telegram.org/bot<토큰>/getUpdates` 를 열어 `"chat":{"id":...}` 값을 확인합니다.
 4. `.env`의 `TELEGRAM_CHAT_ID`를 그 값으로 고칩니다.
 5. `docker compose start backend`로 백엔드를 되살립니다.
+
+이 봇은 `TELEGRAM_CHAT_ID`와 일치하는 대화에서만 명령을 받습니다. 다른 사람이 봇을 찾아 명령해도 무시됩니다.
+
+`TELEGRAM_CHAT_ID`는 형식 검증을 받지 않습니다. 초기 설정 CLI(`backend/scripts/setup_env.py`)의 `URL_KEYS`·`BOOLEAN_KEYS`에도 포함되어 있지 않고, `validate_settings`도 이 값을 들여다보지 않습니다. `.env`를 직접 손으로 고쳐도 마찬가지입니다.
+
+`is_placeholder_secret`(`backend/config.py`)은 값이 비어 있거나 `your_`로 시작하거나 `_here`로 끝날 때만 "설정 안 됨"으로 취급합니다. 즉 값을 아예 채우지 않은 상태는 안전합니다. 하지만 그 외의 문자열이라면 형식이 맞든 안 맞든 봇은 스스로를 "켜졌다"고 판단해(`TelegramNotifier.enabled`) 폴링을 시작하며, 초기 설정 CLI도 "Telegram 알림"이 설정된 것으로 안내합니다.
+
+이 상태에서 실제 채팅 ID와 다른 값이 들어 있으면, 봇은 들어오는 메시지를 조용히 무시하면서도 읽음 오프셋은 그대로 전진시킵니다(`TelegramCommandPoller.run`). 그래서 브라우저로 `getUpdates`를 다시 열어 봐도 이미 읽은 것으로 처리되어 빈 결과만 돌아옵니다.
 
 **분석 알림이 안 와요**
 
