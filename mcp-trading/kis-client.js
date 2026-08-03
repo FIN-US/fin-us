@@ -26,6 +26,32 @@ async function createKisHashKey({ kisAxios, kisUrl, appKey, appSecret, body }) {
   return hashKey;
 }
 
+// index.js는 이 아홉 개(kisAxios, kisUrl, appKey, appSecret, pathname, trId, body, useHashKey,
+// getAccessToken)를 명시적으로 배선한다 — 분리 전에는 전부 index.js 모듈 스코프 변수를 암묵적으로
+// 읽었다. 배선을 빠뜨리면(예: getAccessToken 인자를 통째로 빼먹으면) 그 자리에서
+// "getAccessToken is not a function" 같은 일반 TypeError가 나서 어디가 문제인지 알기 어렵고,
+// 실제 프로덕션 배선(index.js의 단일 호출부)을 그대로 재현하는 테스트가 아니면 잡히지도
+// 않는다. 필수 의존성이 비어 있으면 어떤 것이 빠졌는지 이름으로 지목하는 에러를 즉시 던져서,
+// 이 함수를 부르는 어떤 호출부에서든(지금은 index.js 하나지만) 실수를 빨리, 시끄럽게 드러낸다.
+const KIS_ORDER_POST_REQUIRED_DEPENDENCIES = [
+  "kisAxios",
+  "kisUrl",
+  "appKey",
+  "appSecret",
+  "pathname",
+  "trId",
+  "body",
+  "getAccessToken",
+];
+
+function requireKisOrderPostDependencies(deps) {
+  for (const name of KIS_ORDER_POST_REQUIRED_DEPENDENCIES) {
+    if (deps[name] === undefined) {
+      throw new Error(`kisOrderPost: 필수 인자 '${name}'이(가) 주입되지 않았습니다. 호출부의 배선을 확인하세요.`);
+    }
+  }
+}
+
 // 주문 제출 전용 POST. 호출자는 정확히 하나(index.js의 place_order 경로)이고 플래그를 읽는
 // 곳도 order-submit.js 하나뿐이다. 읽기 전용 도구는 전부 kisGet/kisApiGet을 쓰므로, 다음에
 // 읽기 전용 POST 도구(예: 주문 정정·취소 조회가 아닌 별도 POST)를 추가할 사람이 범용 이름에
@@ -42,6 +68,8 @@ export async function kisOrderPost({
   useHashKey = false,
   getAccessToken,
 }) {
+  requireKisOrderPostDependencies({ kisAxios, kisUrl, appKey, appSecret, pathname, trId, body, getAccessToken });
+
   // 이 블록(토큰 발급, 필요 시 해시키 발급)이 던지는 오류는 아래 실제 주문 POST가 아직
   // 나가기 전에 발생한 것이므로, 주문이 KIS에 제출되지 않았음이 확실하다.
   let token;

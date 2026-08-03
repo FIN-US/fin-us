@@ -888,7 +888,7 @@ test("createCashOrderRequest builds market order body", () => {
 // separates "did KIS accept the order" from "did we finish recording it" so a ledger
 // write failure can never undo an accepted order.
 //
-// The release() allowlist recognizes three flags kisPost (index.js) can attach to a
+// The release() allowlist recognizes three flags kisOrderPost (kis-client.js) can attach to a
 // thrown error: kisOrderRejected (KIS said rt_cd !== "0" — nothing was submitted),
 // kisOrderNotSubmitted (token/hashkey pre-flight failed before the order POST ever went
 // out — also nothing was submitted), and kisOrderSubmittedMaybe (the order POST itself
@@ -992,7 +992,7 @@ test("submitOrder: releases the dedup guard when KIS rejects the order (rt_cd !=
 
 // Mutation this catches: dropping the `error.kisOrderNotSubmitted === true` allowlist
 // entry added after review of #161. getAccessToken() and createKisHashKey() both run
-// before the order POST in kisPost (index.js); a failure there — expired credentials,
+// before the order POST in kisOrderPost (kis-client.js); a failure there — expired credentials,
 // a rate-limited token endpoint, a cold token cache after a container restart — means
 // the order was never sent. Without this class, that dedup key sits reserved for the
 // full TTL and DuplicateOrderError tells the user to "check the order shortly" for an
