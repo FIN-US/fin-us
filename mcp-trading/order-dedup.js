@@ -37,7 +37,7 @@ export function createOrderDedupKey({
   return crypto.createHash("sha256").update(JSON.stringify(payload)).digest("hex");
 }
 
-function parsePositiveInteger(value, fallback, name) {
+function parsePositiveInteger(value, fallback, name = "값") {
   const parsed = Number(value);
   if (!Number.isInteger(parsed) || parsed <= 0) {
     // 공백만 있는 값도 빈 문자열과 마찬가지로 "설정하지 않음"으로 취급한다.
