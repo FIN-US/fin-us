@@ -305,11 +305,13 @@ async def test_perform_stock_analysis_extraction_failure_not_cached(monkeypatch)
 async def test_perform_stock_analysis_rejects_digitless_extracted_code(monkeypatch, caplog):
     """SIMPAC(009160)은 실제 KOSPI 상장 종목명이 숫자 없는 6자 영문이다.
 
-    stock-master.js의 지름길(6~7자 영숫자 입력을 그대로 코드로 되돌림)이 정확한 명칭
-    매칭보다 먼저 실행되므로, resolveStock("SIMPAC")은 "SIMPAC (SIMPAC, UNKNOWN)"을
-    돌려준다. `_STOCK_CODE_EXTRACT_RE`는 이 값을 코드처럼 추출하지만 숫자가 없으므로
-    `_has_code_digit`이 걸러내야 한다. 종목마스터에서 같은 형태인 이름은
-    INVENI(015360), WISCOM(024070) 두 개뿐이다.
+    #150 이후 resolveStock은 이름·별칭 매칭을 코드 지름길보다 먼저 시도하므로
+    "SIMPAC (SIMPAC, UNKNOWN)"이 실제 마스터 데이터로 나오는 경로는 더 이상
+    없다. 이 테스트는 그 경로를 가정하지 않는다 — MCP가 어떤 이유로든(마스터
+    갱신 지연, 다른 소스 등) 숫자 없는 코드를 돌려줬을 때 `_STOCK_CODE_EXTRACT_RE`가
+    그 값을 코드처럼 추출하더라도 `_has_code_digit`이 걸러내는지를 직접
+    검증한다. 종목마스터에서 같은 형태인 이름은 INVENI(015360), WISCOM(024070)
+    두 개뿐이다.
     """
 
     async def fake_llm_chat(provider, prompt, *, conversation_id=None):
