@@ -46,6 +46,11 @@ export function resolveStock(stockName, stocks) {
   }
 
   const isCodeShaped = CODE_SHAPE_PATTERN.test(input);
+  // Hoisted out of the filter loop below (recomputing per-entry cost 4,353
+  // calls on the default master) and reused by the direct-code fallback
+  // further down, since both need the same uppercased value once isCodeShaped
+  // is true.
+  const upperInput = isCodeShaped ? input.toUpperCase() : input;
 
   const stockList = stocks ?? getDefaultStocks();
   const matches = stockList.filter((stock) => {
@@ -53,19 +58,17 @@ export function resolveStock(stockName, stocks) {
     if (stock.name === input || aliases.includes(input)) {
       return true;
     }
+    if (!isCodeShaped) {
+      return false;
+    }
     // A code-shaped input (e.g. a ticker-like company name such as SIMPAC)
     // may be typed in any case, mirroring the case-insensitivity the code
-    // shortcut below already provides for direct codes.
-    if (isCodeShaped) {
-      const upperInput = input.toUpperCase();
-      if (stock.name.toUpperCase() === upperInput) {
-        return true;
-      }
-      if (aliases.some((alias) => alias.toUpperCase() === upperInput)) {
-        return true;
-      }
-    }
-    return false;
+    // shortcut below already provides for direct codes. `name`/`aliases`
+    // entries may be missing on a caller-supplied stock list (resolveStock's
+    // `stocks` parameter is public), so default to "" before upper-casing
+    // instead of letting a bare `undefined`/`null` throw.
+    return String(stock.name ?? "").toUpperCase() === upperInput
+      || aliases.some((alias) => String(alias ?? "").toUpperCase() === upperInput);
   });
 
   if (matches.length > 1) {
@@ -85,8 +88,7 @@ export function resolveStock(stockName, stocks) {
   // Nothing in the master matches by name or alias: only now treat a
   // code-shaped input (e.g. an alphanumeric ETN/fund code) as a direct code.
   if (isCodeShaped) {
-    const code = input.toUpperCase();
-    return { code, name: code, market: "UNKNOWN", aliases: [] };
+    return { code: upperInput, name: upperInput, market: "UNKNOWN", aliases: [] };
   }
 
   throw new Error(

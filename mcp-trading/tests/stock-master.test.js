@@ -183,6 +183,22 @@ test("resolveStock resolves a fund's Korean name to its real 9 char code, unaffe
   });
 });
 
+test("resolveStock does not throw when a caller-supplied stock entry is missing a name", () => {
+  // resolveStock(stockName, stocks) accepts a caller-supplied array, so a
+  // stock entry without a `name` property is reachable even though the
+  // bundled master never omits one. The old `stock.name.toUpperCase()` (no
+  // `aliases`-style Array.isArray guard) threw a TypeError here; this pins
+  // that a missing `name` is defended the same way a missing/non-array
+  // `aliases` already is.
+  const stocks = [{ code: "999999", aliases: ["009160"] }];
+  assert.deepEqual(resolveStock("SIMPAC", stocks), {
+    code: "SIMPAC",
+    name: "SIMPAC",
+    market: "UNKNOWN",
+    aliases: [],
+  });
+});
+
 test("exactly 3 master stock names match the code-shaped pattern, and 0 aliases do", () => {
   // This is the issue's own acceptance query, turned into a regression test.
   // If a future stocks.json update adds or removes a name/alias matching
