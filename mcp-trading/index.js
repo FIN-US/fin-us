@@ -24,6 +24,7 @@ import {
   createCashOrderRequest,
   formatOrderResult,
 } from "./order.js";
+import { submitOrder } from "./order-submit.js";
 import { resolveStock } from "./stock-master.js";
 
 // Redirect console.log to console.error to prevent breaking MCP JSON-RPC on stdout
@@ -223,7 +224,20 @@ async function createKisHashKey(body) {
 }
 
 async function kisPost(pathname, trId, body, { useHashKey = false } = {}) {
-  const token = await getAccessToken();
+  // 이 블록(토큰 발급, 필요 시 해시키 발급)이 던지는 오류는 아래 실제 주문 POST가 아직
+  // 나가기 전에 발생한 것이므로, 주문이 KIS에 제출되지 않았음이 확실하다.
+  let token;
+  let hashKey;
+  try {
+    token = await getAccessToken();
+    if (useHashKey) {
+      hashKey = await createKisHashKey(body);
+    }
+  } catch (error) {
+    error.kisOrderNotSubmitted = true;
+    throw error;
+  }
+
   const headers = {
     "Content-Type": "application/json",
     authorization: `Bearer ${token}`,
@@ -233,7 +247,7 @@ async function kisPost(pathname, trId, body, { useHashKey = false } = {}) {
     custtype: "P",
   };
   if (useHashKey) {
-    headers.hashkey = await createKisHashKey(body);
+    headers.hashkey = hashKey;
   }
 
   let response;
@@ -359,16 +373,11 @@ async function placeOrder(args) {
     body: request.body,
   });
 
-  let data;
-  try {
-    data = await kisPost(request.pathname, request.trId, request.body, { useHashKey: true });
-    orderDedupStore.markSucceeded(dedupKey, data);
-  } catch (error) {
-    if (!error.kisOrderSubmittedMaybe || error.kisOrderRejected) {
-      orderDedupStore.release(dedupKey);
-    }
-    throw error;
-  }
+  const data = await submitOrder({
+    dedupStore: orderDedupStore,
+    dedupKey,
+    submit: () => kisPost(request.pathname, request.trId, request.body, { useHashKey: true }),
+  });
   return formatOrderResult({
     stockName,
     stockCode,
