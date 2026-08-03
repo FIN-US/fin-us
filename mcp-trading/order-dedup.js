@@ -61,9 +61,33 @@ export function createOrderDedupKey({
 // `.:/app` 바인드 마운트로 원장이 Windows 호스트 경로(`.state\`)에 놓이므로
 // Defender·검색 인덱서 같은 외부 보유자가 붙잡고 있을 가능성이 실질적이다.
 // 읽기 경로·형태 가드는 재시도하지 않는다 - 그쪽은 fail-closed가 맞는 자세다.
-const RENAME_RETRY_CODES = new Set(["EPERM", "EACCES", "EBUSY"]);
+//
+// EPERM/EBUSY는 어느 플랫폼에서든 외부 보유자로 인한 일시적 실패일 수 있다.
+// EACCES는 다르다 - POSIX에서 rename의 EACCES는 "대상 디렉터리에 쓰기 권한
+// 없음"이라 결정론적이고, 몇 번을 더 시도해도 나아지지 않는다. README가 직접
+// 적어둔 시나리오(backend/Dockerfile에 USER 지시자가 추가되는 순간)가 바로
+// 이 경우라, 그 상황에서 재시도하면 모든 주문마다 이벤트 루프를 ~75ms 헛되이
+// 블로킹하고 어차피 실패할 신호만 늦춘다 - ENOSPC를 재시도 대상에서 뺀 것과
+// 같은 논리다. Windows에서는 MoveFileEx가 보유자 충돌에도 EACCES를 내므로
+// 그때만 재시도한다.
+//
+// 순수 함수로 뽑아둔다: 모듈 상수(RENAME_RETRY_CODES)는 로드 시점의
+// process.platform으로 딱 한 번 계산되므로, 실제 OS를 바꾸거나 모듈을 다시
+// 불러오지 않고도 이 분기 자체를 직접 테스트할 수 있게 하기 위해서다.
+export function renameRetryCodesForPlatform(platform) {
+  return new Set(platform === "win32" ? ["EPERM", "EACCES", "EBUSY"] : ["EPERM", "EBUSY"]);
+}
+
+const RENAME_RETRY_CODES = renameRetryCodesForPlatform(process.platform);
 const RENAME_MAX_ATTEMPTS = 5;
 const RENAME_RETRY_BACKOFF_MS = [10, 15, 20, 30];
+// 마지막 시도 뒤에는 자지 않으므로 백오프 배열은 시도 수보다 정확히 하나
+// 적어야 한다. 어긋나면 #renameLedgerAtomic의 인덱싱이 조용히 틀어지므로
+// 여기서 바로 드러낸다.
+console.assert(
+  RENAME_RETRY_BACKOFF_MS.length === RENAME_MAX_ATTEMPTS - 1,
+  `RENAME_RETRY_BACKOFF_MS 길이(${RENAME_RETRY_BACKOFF_MS.length})는 RENAME_MAX_ATTEMPTS-1(${RENAME_MAX_ATTEMPTS - 1})과 같아야 합니다.`,
+);
 
 // Atomics.wait로 현재 스레드를 동기적으로 재운다. 이 모듈의 쓰기 경로는
 // 전부 동기 API(fs.*Sync)라, 비동기 setTimeout으로는 재시도 사이 간격을 줄
@@ -252,8 +276,14 @@ export class OrderDedupStore {
         if (!RENAME_RETRY_CODES.has(error.code) || isLastAttempt) {
           throw error;
         }
-        sleepSync(RENAME_RETRY_BACKOFF_MS[attempt - 1] ?? 50);
+        sleepSync(RENAME_RETRY_BACKOFF_MS[attempt - 1]);
       }
     }
+
+    // 루프는 항상 위의 return이나 throw로 끝난다. 여기 도달했다면
+    // RENAME_MAX_ATTEMPTS가 1 미만으로 잘못 바뀐 것이다. 조용히 undefined를
+    // 반환하면 #writeLedger가 이를 "쓰기 성공"으로 오인해, fail-closed가
+    // 존재 이유인 모듈에서 유일하게 조용히 통과하는 경로가 생긴다.
+    throw new Error(`RENAME_MAX_ATTEMPTS(${RENAME_MAX_ATTEMPTS})가 1 이상이어야 합니다.`);
   }
 }

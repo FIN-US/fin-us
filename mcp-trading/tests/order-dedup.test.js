@@ -9,7 +9,26 @@ import {
   LedgerUnreadableError,
   OrderDedupStore,
   createOrderDedupKey,
+  renameRetryCodesForPlatform,
 } from "../order-dedup.js";
+
+// RENAME_RETRY_CODES는 모듈 로드 시점의 process.platform으로 한 번만
+// 계산되므로, 실제 OS를 바꾸지 않고 그 배선 자체를 검증하려면 process.platform을
+// Object.defineProperty로 잠깐 바꾼 뒤 캐시 우회용 쿼리스트링으로 모듈을 새로
+// 평가시켜야 한다(order-dedup.js의 top-level 코드가 그 platform 값으로 다시
+// 실행된다). import 직후 바로 원래 값으로 되돌리므로, 이후 store 생성·호출은
+// 실제 호스트 플랫폼에 영향받지 않는다.
+async function importOrderDedupModuleForPlatform(platform) {
+  const originalPlatform = process.platform;
+  Object.defineProperty(process, "platform", { value: platform, configurable: true });
+  try {
+    return await import(
+      new URL(`../order-dedup.js?platform-test=${platform}-${Date.now()}-${Math.random()}`, import.meta.url)
+    );
+  } finally {
+    Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true });
+  }
+}
 
 const createdDirs = [];
 
@@ -471,6 +490,35 @@ test("OrderDedupStore.reserve throws a LedgerUnreadableError instance on a corru
   assert.throws(() => store.reserve("k", { stockCode: "005930" }), LedgerUnreadableError);
 });
 
+// markSucceeded()·release()도 reserve()와 같은 #readLedger를 거치므로, 손상된
+// 원장에서는 이 둘도 똑같이 LedgerUnreadableError를 던져야 한다. 이 계약은
+// #readLedger가 private이라 공개 메서드를 통한 테스트로만 고정할 수 있는데,
+// 지금까지는 reserve()만 다뤄왔다 - 이 계약이 실제로 지켜지는지 아무 테스트도
+// 확인하지 않았다.
+//
+// order-submit.js의 submitOrder()는 이 예외가 던져진다는 것을 전제로
+// 설계됐다: markSucceeded 실패는 삼키고 로그만 남겨 항목을 in_flight로 유지하고
+// (주문은 이미 KIS에 체결됐으므로 가드를 지우면 재시도가 중복 주문으로
+// 이어진다), release는 kisOrderRejected/kisOrderNotSubmitted로 확인된 경우에만
+// 부르고 그 실패도 삼켜 항목을 in_flight로 유지한다. 누군가 markSucceeded나
+// release 안에 "기록 실패는 무해하니 삼키자"는 try/catch를 추가해 이 예외를
+// 여기서 막아버리면, submitOrder의 그 방어가 통째로 무력화되는데도 reserve()만
+// 두드리는 기존 테스트는 전부 초록으로 남는다. 잡는 뮤테이션: markSucceeded나
+// release가 #readLedger의 예외를 삼키면(또는 손상 여부와 무관하게 조용히
+// 반환하면) 해당 테스트가 실패해야 한다.
+for (const [label, invoke] of [
+  ["markSucceeded", (store) => store.markSucceeded("k", { ODNO: "1" })],
+  ["release", (store) => store.release("k")],
+]) {
+  test(`OrderDedupStore.${label} throws a LedgerUnreadableError on a corrupted ledger`, (t) => {
+    const filePath = tempLedgerPath(t);
+    fs.writeFileSync(filePath, "not json");
+    const store = new OrderDedupStore({ filePath, ttlMs: 60_000, now: () => 1_000 });
+
+    assert.throws(() => invoke(store), LedgerUnreadableError);
+  });
+}
+
 // 고아 임시 파일 정리는 rename 실패뿐 아니라 write/fsync 실패에서도 대칭이어야
 // 한다. 잡는 뮤테이션: #writeLedger의 catch가 rename 실패만 잡고 write/fsync
 // 실패는 그냥 던지던(정리 없이) 원래 형태로 되돌아가면 이 두 테스트가
@@ -606,6 +654,80 @@ test("OrderDedupStore.reserve does not retry rename failures with non-transient 
 
   assert.throws(() => store.reserve("k", { stockCode: "005930" }));
   assert.equal(calls, 1, "재시도 대상이 아닌 에러코드는 한 번만 시도해야 합니다");
+});
+
+// POSIX에서 rename의 EACCES는 "대상 디렉터리에 쓰기 권한 없음"으로
+// 결정론적이라 재시도 대상이 아니어야 하고(ENOSPC와 같은 논리), Windows에서는
+// MoveFileEx가 보유자 충돌에도 EACCES를 내므로 재시도 대상에 남아 있어야
+// 한다. 이 분기를 순수 함수로 뽑아 실제 OS와 무관하게 직접 고정한다. 잡는
+// 뮤테이션: renameRetryCodesForPlatform이 플랫폼과 무관하게 항상 같은 집합을
+// 돌려주면(예: 예전처럼 EACCES를 모든 플랫폼에 포함) 이 테스트가 실패해야
+// 한다.
+test("renameRetryCodesForPlatform includes EACCES only on win32", () => {
+  assert.deepEqual(
+    [...renameRetryCodesForPlatform("win32")].sort(),
+    ["EACCES", "EBUSY", "EPERM"],
+    "win32은 EACCES도 재시도 대상이어야 합니다",
+  );
+
+  for (const posixPlatform of ["linux", "darwin", "freebsd"]) {
+    assert.deepEqual(
+      [...renameRetryCodesForPlatform(posixPlatform)].sort(),
+      ["EBUSY", "EPERM"],
+      `${posixPlatform}은 EACCES를 재시도하면 안 됩니다`,
+    );
+  }
+});
+
+// 위 순수 함수 테스트는 분기 자체는 고정하지만, 모듈 최상단의
+// RENAME_RETRY_CODES가 실제로 그 함수 결과를 쓰는지, 그리고
+// #renameLedgerAtomic이 그 집합을 실제로 참조하는지는 별도로 확인해야 한다 -
+// 그래서 process.platform을 바꾼 채로 모듈을 새로 불러와 실제 쓰기 경로를
+// 끝까지 태운다. 잡는 뮤테이션: EACCES를 모든 플랫폼에서 재시도하도록
+// 되돌리면(원래 구현) "linux" 케이스에서 calls가 1을 넘어야 할 이 assert가
+// 깨져야 한다.
+test("OrderDedupStore.reserve does not retry a rename EACCES on a POSIX platform (simulated linux)", async (t) => {
+  const filePath = tempLedgerPath(t);
+  const mod = await importOrderDedupModuleForPlatform("linux");
+  const store = new mod.OrderDedupStore({ filePath, ttlMs: 60_000, now: () => 1_000 });
+
+  let calls = 0;
+  t.mock.method(fs, "renameSync", () => {
+    calls += 1;
+    const error = new Error("simulated EACCES on target directory");
+    error.code = "EACCES";
+    throw error;
+  });
+
+  // rename 실패는 (읽기 실패와 달리) LedgerUnreadableError로 감싸지 않고
+  // fs.renameSync가 던진 원본 에러를 그대로 전파한다 - 여기서는 그 사실이
+  // 아니라 "재시도 여부"만 확인한다.
+  assert.throws(() => store.reserve("k", { stockCode: "005930" }));
+  assert.equal(calls, 1, "linux에서는 rename EACCES를 재시도하면 안 됩니다");
+});
+
+// win32에서는 EACCES도 여전히 재시도돼야 한다(회귀 방지) - 실제 호스트가
+// win32가 아니어도(예: CI가 Linux 러너라도) 이 테스트가 항상 같은 결과를
+// 내도록 process.platform을 명시적으로 고정해서 검증한다.
+test("OrderDedupStore.reserve retries a rename EACCES on win32 and eventually succeeds", async (t) => {
+  const filePath = tempLedgerPath(t);
+  const mod = await importOrderDedupModuleForPlatform("win32");
+  const store = new mod.OrderDedupStore({ filePath, ttlMs: 60_000, now: () => 1_000 });
+
+  const originalRenameSync = fs.renameSync;
+  let calls = 0;
+  t.mock.method(fs, "renameSync", (src, dest) => {
+    calls += 1;
+    if (dest === filePath && calls < 2) {
+      const error = new Error("simulated transient EACCES (e.g. AV lock)");
+      error.code = "EACCES";
+      throw error;
+    }
+    return originalRenameSync(src, dest);
+  });
+
+  assert.doesNotThrow(() => store.reserve("k", { stockCode: "005930" }));
+  assert.equal(calls, 2, "win32에서는 rename EACCES가 재시도돼 두 번째 시도에서 성공해야 합니다");
 });
 
 test("OrderDedupStore stays silent when KIS_ORDER_DEDUP_TTL_MS is set but blank", (t) => {
