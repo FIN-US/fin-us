@@ -87,11 +87,15 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 VISUALIZATION_URL = os.getenv("VISUALIZATION_URL", "").strip()
 KIS_ORDER_ENV = os.environ.get("KIS_ORDER_ENV", "demo").strip().lower()
 
-_TRUTHY_FLAG_VALUES = {"1", "true", "yes", "y"}
-
-
 def _is_truthy_flag(value: str) -> bool:
-    return value.strip().lower() in _TRUTHY_FLAG_VALUES
+    # mcp-trading/index.js는 KIS_REAL_ORDER_ENABLED를 `=== "true"`로 비교한다 —
+    # 대소문자·다른 철자(1/yes/y/TRUE 등)를 인정하지 않는다. backend가 여기서
+    # 더 관대하게 받으면 backend 게이트는 통과하고 자식에서만 막히는 진단
+    # 트랩이 된다(#129와 같은 증상이 철자 차이로 재발). 그래서 자식과 정확히
+    # 같은 기준만 인정한다 — 이 값이 True가 되는 유일한 원본 문자열은
+    # 정확히 "true"이므로, 자식에 넘길 때 다시 쓸 필요가 없다
+    # (_mcp_child_env는 원본 문자열을 그대로 전달한다).
+    return value.strip() == "true"
 
 
 KIS_REAL_ORDER_ENABLED = _is_truthy_flag(os.environ.get("KIS_REAL_ORDER_ENABLED", ""))
@@ -110,28 +114,11 @@ ALLOW_ORIGINS = [origin.strip() for origin in _ALLOW_ORIGINS_RAW.split(",") if o
 
 
 def _mcp_child_env() -> dict[str, str]:
-    env = {
+    return {
         key: value
         for key, value in os.environ.items()
         if key in _MCP_ENV_ALLOWED_KEYS or key.startswith(_MCP_ENV_ALLOWED_PREFIXES)
     }
-    # backend는 KIS_REAL_ORDER_ENABLED를 1/true/yes/y(대소문자 무관)로 넓게
-    # 받지만(_is_truthy_flag), mcp-trading/index.js는 `=== "true"` 엄격 비교라
-    # 정규화하지 않으면 backend 게이트는 통과하고 자식에서만 막히는 진단 트랩이
-    # 된다(#129와 같은 증상). 자식에는 항상 정확히 "true"/"false"만 넘긴다.
-    #
-    # 아래 시점의 env[...]를 다시 파싱하는 대신 위쪽 모듈 스코프의
-    # KIS_REAL_ORDER_ENABLED(bool) 상수를 직접 쓰고 싶어질 수 있는데, 그러면
-    # 안 된다: 그 상수는 import 시점 os.environ 스냅샷으로 한 번만 계산되고,
-    # env 딕셔너리는 매 호출 os.environ.items()를 다시 읽는다. 테스트가
-    # monkeypatch.setenv로 import 이후 값을 바꾸므로(reload 없이), 모듈 상수를
-    # 쓰면 그 시점에는 여전히 옛 값이라 여기서만 값이 갈린다. 운영에서는
-    # os.environ이 프로세스 수명 동안 바뀌지 않아 둘이 항상 같지만, 이 재파싱
-    # 방식이 테스트가 이미 전제하는 "매 호출 os.environ을 다시 읽는다"는
-    # 동작과 일치해 더 안전하다.
-    if "KIS_REAL_ORDER_ENABLED" in env:
-        env["KIS_REAL_ORDER_ENABLED"] = "true" if _is_truthy_flag(env["KIS_REAL_ORDER_ENABLED"]) else "false"
-    return env
 
 
 def _stdio_server_params(mcp_dir: Path) -> StdioServerParameters:

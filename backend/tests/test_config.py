@@ -47,10 +47,9 @@ def test_mcp_stdio_params_pass_order_dedup_ledger_settings(monkeypatch):
 
 
 def test_mcp_stdio_params_pass_kis_token_cache_and_tr_id_overrides(monkeypatch):
-    # #130 — mcp-trading/index.js:60의 토큰 캐시 경로, index.js:46,54의 TR ID
-    # 오버라이드. 이 값들이 전달되지 않으면 컨테이너가 재생성될 때마다 KIS
-    # OAuth 토큰을 새로 발급받거나(#124와 동일한 결함) TR ID 오버라이드가
-    # 무시된다.
+    # #130 — mcp-trading의 토큰 캐시 경로(index.js), TR ID 오버라이드(index.js).
+    # 이 값들이 전달되지 않으면 컨테이너가 재생성될 때마다 KIS OAuth 토큰을
+    # 새로 발급받거나(#124와 동일한 결함) TR ID 오버라이드가 무시된다.
     monkeypatch.setenv("KIS_TOKEN_CACHE_PATH", "/var/lib/finus/kis-token-cache.json")
     monkeypatch.setenv("KIS_TR_ID_DAILY_CCLD", "TTTC0081R")
     monkeypatch.setenv("KIS_TR_ID_BALANCE_RLZ_PL", "TTTC8494R")
@@ -63,8 +62,8 @@ def test_mcp_stdio_params_pass_kis_token_cache_and_tr_id_overrides(monkeypatch):
 
 
 def test_mcp_stdio_params_pass_real_order_enabled_and_fail_closed_when_unset(monkeypatch):
-    # #129 — mcp-trading/index.js:41,344와 order.js:56-61의 실계좌 주문 가드는
-    # 자식 프로세스의 process.env.KIS_REAL_ORDER_ENABLED를 직접 읽는다. 설정
+    # #129 — mcp-trading/index.js와 order.js의 validateRealOrderGuard는 자식
+    # 프로세스의 process.env.KIS_REAL_ORDER_ENABLED를 직접 읽는다. 설정
     # 시에는 반드시 통과해야 하고(그렇지 않으면 .env=true여도 Docker에서 항상
     # 차단된다), 미설정 시에는 os.environ에 키 자체가 없으므로 자식에도
     # 전달되지 않아 fail-closed(주문 차단)가 유지되어야 한다.
@@ -79,7 +78,7 @@ def test_mcp_stdio_params_pass_real_order_enabled_and_fail_closed_when_unset(mon
 
 def test_mcp_stdio_params_pass_finus_kis_tr_id_overrides_but_not_other_finus_vars(monkeypatch):
     # #130 — backend/config.py의 접두사는 기존 FIN_US_(밑줄 포함)와 겹치지
-    # 않는 FINUS_KIS_TR_ID_* 오버라이드(mcp-trading/index.js:46,54)를 놓치고
+    # 않는 FINUS_KIS_TR_ID_* 오버라이드(mcp-trading/index.js)를 놓치고
     # 있었다. FINUS_KIS_ 접두사로 이 변수들만 통과시키고, KIS_와 무관한 다른
     # FINUS_* 변수(backend/NAT 전용, mcp-trading이 읽지 않음)는 여전히
     # 차단되어야 접두사 경계가 필요 이상으로 넓어지지 않는다.
@@ -110,32 +109,55 @@ def test_mcp_stdio_params_forward_any_kis_prefixed_variable_by_mechanism(monkeyp
     assert params.env["KIS_FUTURE_VARIABLE_NOT_YET_INVENTED"] == "future-value"
 
 
-@pytest.mark.parametrize("raw_value", ["1", "yes", "TRUE", "Y"])
-def test_mcp_stdio_params_normalize_non_true_truthy_real_order_enabled(monkeypatch, raw_value):
-    # #129 재발 방지 — backend는 KIS_REAL_ORDER_ENABLED를 1/yes/y/true(대소문자
-    # 무관)로 넓게 허용하지만(config.py의 _is_truthy_flag), mcp-trading/index.js는
-    # `=== "true"` 엄격 비교다. 정규화가 없으면 이 값들은 backend 게이트를
-    # 통과한 뒤 자식에서만 막혀 "KIS_REAL_ORDER_ENABLED=true 설정이
-    # 필요합니다" 오진단을 낸다. _mcp_child_env()의 정규화 블록을 지우면 이
-    # 테스트는 자식이 받는 원본 문자열("1"/"yes"/"TRUE"/"Y")이 "true"와 달라
-    # 즉시 실패한다.
-    monkeypatch.setenv("KIS_REAL_ORDER_ENABLED", raw_value)
+@pytest.mark.parametrize(
+    "raw_value,expected",
+    [
+        ("true", True),
+        (" true ", True),
+        ("TRUE", False),
+        ("True", False),
+        ("1", False),
+        ("yes", False),
+        ("y", False),
+        ("0", False),
+        ("", False),
+    ],
+)
+def test_is_truthy_flag_requires_exact_lowercase_true(raw_value, expected):
+    # HIGH2 재발 방지 — mcp-trading/index.js는 KIS_REAL_ORDER_ENABLED를
+    # `=== "true"`로만 비교한다(대소문자·다른 철자 불허). backend가 여기서
+    # 조금이라도 더 관대하면(예: "TRUE"·"1"·"yes"도 인정) backend 게이트는
+    # 통과하고 자식은 거부하는 진단 트랩이 재발한다(#129 최초 증상이 정규화로
+    # 한 번 덮였다가, 이번엔 정규화 자체를 없애는 대신 두 기준을 완전히
+    # 일치시켜 근본적으로 막는다). _is_truthy_flag가 .lower()나 다른 철자를
+    # 다시 허용하도록 바뀌면 이 단언들이 즉시 실패한다.
+    assert config._is_truthy_flag(raw_value) is expected
+
+
+def test_mcp_stdio_params_forward_kis_real_order_enabled_raw_value_unchanged(monkeypatch):
+    # backend 게이트(_is_truthy_flag)와 자식 가드가 이제 정확히 같은 기준
+    # ("true" 리터럴)이므로, 자식에 넘기는 값은 원본 문자열을 다시 쓸 필요가
+    # 없다(정규화 블록 제거). 이 테스트는 정규화를 다시 끼워 넣는 회귀 —
+    # 원본과 다른 문자열로 rewrite하는 변경 — 을 잡는다.
+    monkeypatch.setenv("KIS_REAL_ORDER_ENABLED", "true")
 
     params = _stdio_server_params(Path("/opt/mcp-trading"))
 
     assert params.env["KIS_REAL_ORDER_ENABLED"] == "true"
 
 
-def test_mcp_stdio_params_normalize_falsy_real_order_enabled_to_canonical_false(monkeypatch):
-    # 정규화 정책이 대칭적인지 확인한다: "0"은 backend·mcp-trading 양쪽에서
-    # 이미 거부되는 값이지만(fail-closed라 자금 위험은 없다), 정규화가 값을
-    # 그대로 통과시키면(원본 "0") 이 단언이 실패해 정규화 블록이 truthy 쪽만
-    # 처리하고 falsy 쪽을 빠뜨리는 뮤테이션을 잡아낸다.
-    monkeypatch.setenv("KIS_REAL_ORDER_ENABLED", "0")
+def test_mcp_stdio_params_forward_non_true_spelling_unchanged_and_blocked_on_both_sides(monkeypatch):
+    # backend 게이트와 자식 가드가 이제 동일 기준을 쓰므로, "true"가 아닌
+    # 철자("yes" 등)는 두 쪽 모두에서 막혀야 한다 — 자식에는 원본 문자열이
+    # 그대로 전달되고("yes" != "true"이므로 자식도 거부), backend 게이트도
+    # 같은 이유로 거부한다. 어느 한쪽만 넓히는 뮤테이션(예: _is_truthy_flag를
+    # 다시 광범위한 집합으로 되돌리는 것)이 있으면 이 테스트가 잡는다.
+    monkeypatch.setenv("KIS_REAL_ORDER_ENABLED", "yes")
 
     params = _stdio_server_params(Path("/opt/mcp-trading"))
 
-    assert params.env["KIS_REAL_ORDER_ENABLED"] == "false"
+    assert params.env["KIS_REAL_ORDER_ENABLED"] == "yes"
+    assert config._is_truthy_flag("yes") is False
 
 
 def test_visualization_url_is_trimmed_and_trailing_slash_preserved(monkeypatch):
