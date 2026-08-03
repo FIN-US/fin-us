@@ -5,7 +5,6 @@ import path from "node:path";
 import test from "node:test";
 import util from "node:util";
 import { buildBalanceParams, fetchAllBalance, formatBalanceReport, formatPercent } from "../balance.js";
-import { submitOrder } from "../index.js";
 import { DuplicateOrderError, OrderDedupStore } from "../order-dedup.js";
 import {
   buildCashOrderBody,
@@ -14,6 +13,7 @@ import {
   selectCashOrderTrId,
   validateOrderEnvMatchesUrl,
 } from "../order.js";
+import { submitOrder } from "../order-submit.js";
 
 test("selectCashOrderTrId maps demo buy and sell to paper TR IDs", () => {
   assert.equal(selectCashOrderTrId({ orderEnv: "demo", side: "BUY" }), "VTTC0012U");
@@ -884,9 +884,16 @@ test("createCashOrderRequest builds market order body", () => {
 
 // #161: markSucceeded (ledger bookkeeping) sitting inside the same try as the KIS call
 // used to make a filesystem write failure look identical to an order failure, deleting
-// the duplicate guard for an order KIS had already accepted. submitOrder() (index.js)
+// the duplicate guard for an order KIS had already accepted. submitOrder() (order-submit.js)
 // separates "did KIS accept the order" from "did we finish recording it" so a ledger
 // write failure can never undo an accepted order.
+//
+// The release() allowlist recognizes three flags kisPost (index.js) can attach to a
+// thrown error: kisOrderRejected (KIS said rt_cd !== "0" — nothing was submitted),
+// kisOrderNotSubmitted (token/hashkey pre-flight failed before the order POST ever went
+// out — also nothing was submitted), and kisOrderSubmittedMaybe (the order POST itself
+// failed — submission status unknown). Only the first two release; the third, and any
+// unrecognized error, hold the guard (fail-closed).
 
 function tempDedupLedgerPath(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "finus-submit-order-test-"));
@@ -915,7 +922,7 @@ test("submitOrder: a markSucceeded (ledger write) failure after a successful KIS
 
   const kisResponse = { rt_cd: "0", output: { ODNO: "0000001234" } };
   const data = await submitOrder({
-    orderDedupStore: store,
+    dedupStore: store,
     dedupKey,
     submit: async () => kisResponse,
   });
@@ -929,7 +936,12 @@ test("submitOrder: a markSucceeded (ledger write) failure after a successful KIS
 // swallowing the error by writing an empty/succeeded-but-then-cleared entry). If the
 // entry disappeared, this reserve() would succeed instead of throwing, and a retried
 // order would go through — reproducing the duplicate-order bug from #161.
-test("submitOrder: after a markSucceeded failure, the ledger entry stays in place (in_flight) so a retried reserve() is still blocked as a duplicate", async (t) => {
+//
+// Caveat noted for the PR body, not fixed here: markSucceeded failing leaves the
+// original reservedAt/expiresAt untouched, so this only blocks a retry for whatever
+// remains of the original TTL window (order-dedup.js:80). A retry after the window
+// fully elapses still duplicates — that is pre-existing dedup design, not new here.
+test("submitOrder: after a markSucceeded failure, the ledger entry stays in place (in_flight) so a retried reserve() is still blocked as a duplicate within the TTL window", async (t) => {
   const store = new OrderDedupStore({ filePath: tempDedupLedgerPath(t), ttlMs: 60_000, now: () => 1_000 });
   const dedupKey = "order-key-retry-blocked";
   const request = { pathname: "/uapi/domestic-stock/v1/trading/order-cash", trId: "TTTC0012U", body: {} };
@@ -941,7 +953,7 @@ test("submitOrder: after a markSucceeded failure, the ledger entry stays in plac
   t.mock.method(console, "error", () => {});
 
   await submitOrder({
-    orderDedupStore: store,
+    dedupStore: store,
     dedupKey,
     submit: async () => ({ rt_cd: "0", output: { ODNO: "0000005678" } }),
   });
@@ -972,10 +984,38 @@ test("submitOrder: releases the dedup guard when KIS rejects the order (rt_cd !=
   rejected.kisOrderRejected = true;
 
   await assert.rejects(
-    () => submitOrder({ orderDedupStore: store, dedupKey: "order-key-rejected", submit: async () => { throw rejected; } }),
+    () => submitOrder({ dedupStore: store, dedupKey: "order-key-rejected", submit: async () => { throw rejected; } }),
     (err) => err === rejected,
   );
   assert.deepEqual(releaseCalls, ["order-key-rejected"]);
+});
+
+// Mutation this catches: dropping the `error.kisOrderNotSubmitted === true` allowlist
+// entry added after review of #161. getAccessToken() and createKisHashKey() both run
+// before the order POST in kisPost (index.js); a failure there — expired credentials,
+// a rate-limited token endpoint, a cold token cache after a container restart — means
+// the order was never sent. Without this class, that dedup key sits reserved for the
+// full TTL and DuplicateOrderError tells the user to "check the order shortly" for an
+// order that provably never existed, with no escape except changing quantity/price.
+test("submitOrder: releases the dedup guard when the KIS POST never went out (kisOrderNotSubmitted, e.g. token/hashkey pre-flight failure)", async (t) => {
+  const releaseCalls = [];
+  const store = {
+    release(key) {
+      releaseCalls.push(key);
+    },
+    markSucceeded() {
+      throw new Error("markSucceeded should not run when submit() throws");
+    },
+  };
+
+  const notSubmitted = new Error("Access Token 발급 실패: EGW00133 초당 거래건수를 초과하였습니다.");
+  notSubmitted.kisOrderNotSubmitted = true;
+
+  await assert.rejects(
+    () => submitOrder({ dedupStore: store, dedupKey: "order-key-not-submitted", submit: async () => { throw notSubmitted; } }),
+    (err) => err === notSubmitted,
+  );
+  assert.deepEqual(releaseCalls, ["order-key-not-submitted"]);
 });
 
 // Mutation this catches: releasing whenever `kisOrderSubmittedMaybe` is absent, which
@@ -995,18 +1035,18 @@ test("submitOrder: does not release the dedup guard when the axios POST fails an
   submitFailure.kisOrderSubmittedMaybe = true;
 
   await assert.rejects(
-    () => submitOrder({ orderDedupStore: store, dedupKey: "order-key-submit-unknown", submit: async () => { throw submitFailure; } }),
+    () => submitOrder({ dedupStore: store, dedupKey: "order-key-submit-unknown", submit: async () => { throw submitFailure; } }),
     (err) => err === submitFailure,
   );
   assert.deepEqual(releaseCalls, [], "an unknown submission outcome must not release the guard");
 });
 
-// Mutation this catches: reverting the allowlist inversion. Old code released whenever
-// `kisOrderSubmittedMaybe` was falsy, so ANY exception without that flag (including one
-// with neither flag, e.g. a getAccessToken()/hashkey failure before the KIS POST even
-// ran) fell through to release(). This is the deliberate behavior flip from #161: an
-// unrecognized error must now default to NOT releasing.
-test("submitOrder: does not release the dedup guard for an error with neither kisOrderRejected nor kisOrderSubmittedMaybe (inversion of pre-#161 behavior, which released here)", async (t) => {
+// Mutation this catches: reverting the allowlist inversion, or widening it beyond the
+// two named flags. This is the deliberate behavior flip from #161: an error carrying
+// none of kisOrderRejected/kisOrderNotSubmitted/kisOrderSubmittedMaybe (e.g. a bug in
+// application code unrelated to the KIS call) must default to NOT releasing — the old
+// code's `!error.kisOrderSubmittedMaybe` fell through to release() here instead.
+test("submitOrder: does not release the dedup guard for an error with none of the three recognized flags (inversion of pre-#161 behavior, which released here)", async (t) => {
   const releaseCalls = [];
   const store = {
     release(key) {
@@ -1014,10 +1054,10 @@ test("submitOrder: does not release the dedup guard for an error with neither ki
     },
   };
 
-  const unrecognizedError = new Error("Access Token 발급 실패: EGW00133");
+  const unrecognizedError = new TypeError("Cannot read properties of undefined (reading 'output')");
 
   await assert.rejects(
-    () => submitOrder({ orderDedupStore: store, dedupKey: "order-key-unrecognized", submit: async () => { throw unrecognizedError; } }),
+    () => submitOrder({ dedupStore: store, dedupKey: "order-key-unrecognized", submit: async () => { throw unrecognizedError; } }),
     (err) => err === unrecognizedError,
   );
   assert.deepEqual(releaseCalls, [], "an unrecognized error must default to fail-closed (no release)");
@@ -1038,10 +1078,49 @@ test("submitOrder: a release() failure during a KIS rejection does not replace t
   rejected.kisOrderRejected = true;
 
   await assert.rejects(
-    () => submitOrder({ orderDedupStore: store, dedupKey: "order-key-release-fails", submit: async () => { throw rejected; } }),
+    () => submitOrder({ dedupStore: store, dedupKey: "order-key-release-fails", submit: async () => { throw rejected; } }),
     (err) => err === rejected,
     "the original KIS rejection must still be the thrown error, not release()'s fs error",
   );
   const logged = consoleError.mock.calls.map((call) => util.format(...call.arguments)).join("\n");
   assert.match(logged, /EIO: i\/o error, write/);
+});
+
+// Mutation this catches: dereferencing `error.message` unguarded in the markSucceeded
+// catch block. A ledger write path could reject with a non-Error value (e.g. a plain
+// string thrown by some intermediary); `error.message` on a string is undefined, and on
+// null/undefined it throws a TypeError from inside the one block whose whole contract
+// is "must never throw", which would destroy the already-accepted order result.
+test("submitOrder: a non-Error thrown by markSucceeded (e.g. a plain string) does not crash, and the order result still reaches the caller", async (t) => {
+  const consoleError = t.mock.method(console, "error", () => {});
+  const store = {
+    markSucceeded() {
+      throw "disk full"; // eslint-disable-line no-throw-literal -- simulating a non-Error rejection
+    },
+  };
+
+  const kisResponse = { rt_cd: "0", output: { ODNO: "0000009999" } };
+  const data = await submitOrder({ dedupStore: store, dedupKey: "order-key-non-error-mark", submit: async () => kisResponse });
+
+  assert.equal(data, kisResponse, "the KIS success response must still reach the caller");
+  const logged = consoleError.mock.calls.map((call) => util.format(...call.arguments)).join("\n");
+  assert.match(logged, /disk full/);
+});
+
+// Mutation this catches: dereferencing `error.kisOrderRejected` or `releaseError.message`
+// unguarded when submit() itself rejects with a non-Error value (e.g. `throw null`,
+// which real code should never do, but a defensive guard must still not crash on it).
+test("submitOrder: a non-Error value thrown by submit() (e.g. null) does not crash and defaults to not releasing", async (t) => {
+  const releaseCalls = [];
+  const store = {
+    release(key) {
+      releaseCalls.push(key);
+    },
+  };
+
+  await assert.rejects(
+    () => submitOrder({ dedupStore: store, dedupKey: "order-key-null-throw", submit: async () => { throw null; } }), // eslint-disable-line no-throw-literal
+    (err) => err === null,
+  );
+  assert.deepEqual(releaseCalls, [], "a non-Error rejection must default to fail-closed (no release)");
 });
