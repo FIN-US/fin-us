@@ -46,7 +46,11 @@ _MCP_ENV_ALLOWED_KEYS = frozenset({
     "NAVER_CLIENT_SECRET",
     "DART_API_KEY",
 })
-_MCP_ENV_ALLOWED_PREFIXES = ("FIN_US_", "FINUS_")
+# backend/config.py의 _MCP_ENV_ALLOWED_PREFIXES와 같은 규칙. 한쪽만 바꾸면
+# 같은 .env로 backend 경로와 NAT 경로의 동작이 갈린다(#130). FINUS_는 이미
+# 넓게 열려 있어 FINUS_KIS_*는 그대로 통과하므로, KIS_만 추가하면 양쪽이
+# 일치한다.
+_MCP_ENV_ALLOWED_PREFIXES = ("FIN_US_", "FINUS_", "KIS_")
 
 McpCallArguments: TypeAlias = dict[str, Any]
 
