@@ -174,17 +174,11 @@ class TestBalanceExtraction(unittest.TestCase):
         self.assertEqual(result, ["한국 - 전력"])
 
     def test_extract_stocks_crlf_after_section_marker(self):
-        """.strip() 프로브(이슈 #153 "함께 볼 것"): [보유 종목 리스트] 섹션
-        마커 뒤에 CRLF가 온 입력(예: mcp-trading/balance.js가 core.autocrlf=true
-        환경에서 CRLF로 체크아웃되어 raw 템플릿 리터럴 개행이 "\\r\\n"이 되는
-        경우 — git config core.autocrlf 및 mcp-trading/balance.js가 실제로
-        CRLF로 체크아웃되어 있음을 확인함)에서도 정상 추출되는지 확인한다.
+        """CRLF 입력(core.autocrlf=true 환경에서 balance.js가 CRLF로 체크아웃되는
+        경우)에서도 종목이 정상 추출되는지 고정한다.
 
-        .strip()을 제거해도(mutation) 이 테스트는 여전히 통과한다: "\\r\\n"을
-        "\\n"으로만 split하면 첫 줄이 "\\r" 하나만 남는 줄이 되는데, 이 줄은
-        "- "로 시작하지 않으므로 line.startswith("- ") 가드에서 걸러진다.
-        즉 이 테스트는 .strip()이 죽지 않는다는 것, 다시 말해 .strip()이
-        이 입력 형태에 대해서도 vestigial(죽은 코드)임을 보여준다.
+        참고: 이 입력 형태에서 .strip()은 결과에 영향을 주지 않는다. "\\r"만 남은
+        첫 줄은 startswith("- ") 가드에서 어차피 걸러지기 때문이다.
         """
         balance_text = "[보유 종목 리스트]\r\n- 삼성전자 (005930) · 3주\r\n  평단가 67,000원 → 평가금액 210,000원\r\n  손익 +9,000원 · 수익률 🔴 ▲ +4.48%"
         result = extract_stocks_from_balance(balance_text)
