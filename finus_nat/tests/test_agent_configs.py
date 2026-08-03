@@ -126,3 +126,29 @@ def test_system_prompt_only_names_real_tools(config_path: Path, function_name: s
     tools = {str(t) for t in fn_config.tool_names}
     quoted = set(re.findall(r"``([\w.-]+)``", fn_config.system_prompt)) - KNOWN_NON_TOOL_TOKENS
     assert quoted <= tools, f"프롬프트가 보유하지 않은 도구를 안내함: {sorted(quoted - tools)}"
+
+
+# monitoring/strategy/trading은 tool_names가 완전히 같아(kis-trading-mcp-tool,
+# mcp-news-get-market-news, mcp-dart-get-disclosure-signal, add_user_memory, get_user_memory)
+# system_prompt를 의도적으로 바이트 단위로 동일하게 유지한다. recommend_agent는 DART 도구가
+# 없는 다른 tool_names를 가지고 있어(#152 리뷰 Improvement 2로 Action Input에 mcp-news 안내를
+# 추가하면서) 더 이상 나머지 셋과 동일하지 않다 - 그래서 이 셋만 비교한다. 파일이 나뉘어 있어
+# YAML 앵커로 공유할 수 없으니 복제 자체는 불가피하지만, 한 파일만 고치고 나머지를 빠뜨리는
+# 드리프트는 이 테스트가 잡는다.
+_IDENTICAL_SYSTEM_PROMPT_AGENTS = [
+    ("monitoring_agent.yml", "monitoring_agent"),
+    ("strategy_agent.yml", "strategy_agent"),
+    ("trading_agent.yml", "trading_agent_react"),
+]
+
+
+def test_kis_agents_share_identical_system_prompt():
+    """monitoring/strategy/trading 프롬프트는 의도적으로 동일하다 - 한 곳만 수정되는 드리프트를 막는다."""
+    import nat_finus_nat.register  # noqa: F401 - 등록 트리거만 필요
+    from nat.runtime.loader import load_config
+
+    prompts = {
+        function_name: load_config(AGENTS_DIR / file_name).functions[function_name].system_prompt
+        for file_name, function_name in _IDENTICAL_SYSTEM_PROMPT_AGENTS
+    }
+    assert len(set(prompts.values())) == 1, f"프롬프트가 분기함: {list(prompts)}"
