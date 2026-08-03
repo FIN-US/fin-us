@@ -56,34 +56,22 @@ _MCP_ENV_ALLOWED_KEYS = {
     "NAVER_CLIENT_SECRET",
     "DART_API_KEY",
 }
-# mcp-trading이 읽는 KIS_* 변수 집합(index.js, order-dedup.js)을 하나씩 나열하면
-# 새 변수가 추가될 때마다 화이트리스트가 누락되는 드리프트가 반복된다
-# (#124 → #127에서 KIS_ORDER_DEDUP_*를 놓쳤고, #130에서 KIS_TOKEN_CACHE_PATH·
-# KIS_TR_ID_*·FINUS_KIS_TR_ID_*를, #129에서 KIS_REAL_ORDER_ENABLED를 놓쳤다).
-# 그래서 개별 KIS_* 키 나열을 접두사 규칙으로 대체해 mcp-trading 쪽 소스가
-# 유일한 진실 공급원이 되게 한다 — 새 KIS_* 변수를 mcp-trading이 추가로 읽게 되면
-# 이 파일을 고치지 않아도 자동으로 전달된다.
+# mcp-trading이 읽는 KIS_* 변수를 하나씩 나열하면 새 변수가 추가될 때마다
+# 화이트리스트가 누락되는 드리프트가 반복된다(#124, #127, #129, #130이 각각
+# 다른 키를 놓쳤다). 개별 키 나열 대신 접두사 규칙을 써서 mcp-trading 쪽
+# 소스가 유일한 진실 공급원이 되게 한다.
 #
-# 통과: KIS_로 시작하는 모든 변수(KIS_API_KEY, KIS_API_SECRET, KIS_ACCOUNT_NO,
-#       KIS_URL, KIS_ORDER_ENV, KIS_REAL_ORDER_ENABLED, KIS_ORDER_DEDUP_PATH,
-#       KIS_ORDER_DEDUP_TTL_MS, KIS_TOKEN_CACHE_PATH, KIS_TR_ID_* 등)과
-#       FINUS_KIS_로 시작하는 변수(FINUS_KIS_TR_ID_DAILY_CCLD,
-#       FINUS_KIS_TR_ID_BALANCE_RLZ_PL 등 — mcp-trading/index.js:46,54의
-#       TR ID 오버라이드)만 자식 프로세스로 전달한다.
-# 차단: KIS_로 시작하지 않는 나머지 모든 비밀값(DATABASE_URL, OPENAI_API_KEY,
-#       ANTHROPIC_API_KEY, TELEGRAM_BOT_TOKEN 등)과, KIS_ 접두사가 아닌 다른
-#       FINUS_* 변수(FINUS_BACKEND_URL, FINUS_MEM0_* 등 — backend/NAT 전용,
-#       mcp-trading이 읽지 않음)는 접두사 매칭 대상이 아니므로 여전히 차단된다.
+# 통과: KIS_로 시작하는 모든 변수(자식 프로세스 전용 네임스페이스)와
+#       FINUS_KIS_로 시작하는 변수(TR ID 오버라이드 포함 trading 에이전트
+#       설정 전반). 그 외 비밀값(DATABASE_URL 등)과 다른 FINUS_* 변수
+#       (FINUS_BACKEND_URL 등 — backend/NAT 전용)는 차단된다.
 #
-# KIS_REAL_ORDER_ENABLED는 이 접두사 규칙으로 함께 통과한다(#129). 주문 멱등
-# 원장 경로 전달(#127, 위 KIS_ORDER_DEDUP_* 통과 확인)이 선행 조건이었고 이미
-# 충족되어 있다. 미설정 시에는 os.environ에 키 자체가 없으므로 자식에도 전달되지
-# 않고, mcp-trading/index.js:344·order.js:56-61 가드는 `undefined === "true"`가
-# false이므로 fail-closed(실계좌 주문 차단)를 유지한다.
+# KIS_REAL_ORDER_ENABLED도 함께 통과한다(#129, 의도한 동작). 미설정 시
+# 키 자체가 자식에 전달되지 않으므로 mcp-trading/order.js의
+# validateRealOrderGuard는 fail-closed를 유지한다.
 #
-# finus_nat/src/nat_finus_nat/finus_api.py:28-49 에 같은 목적의 화이트리스트가
-# 별도로 존재한다(자식 프로세스로 mcp-trading 등을 직접 실행하는 경로). 이
-# 접두사 목록을 바꿀 때는 그쪽도 함께 갱신할 것.
+# finus_nat/src/nat_finus_nat/finus_api.py에 동일 목적의 화이트리스트가
+# 별도 존재한다(NAT 자식 프로세스 경로) — 접두사를 바꿀 때 함께 갱신할 것.
 _MCP_ENV_ALLOWED_PREFIXES = ("FIN_US_", "FINUS_KIS_", "KIS_")
 
 # SQLite 데이터베이스 파일 경로 설정 (backend 디렉토리 내 finus.db 생성)
