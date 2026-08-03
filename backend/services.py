@@ -92,9 +92,14 @@ def _has_code_digit(value: str) -> bool:
 def _looks_like_stock_code(stock: str) -> bool:
     """이미 종목코드 형태여서 MCP 조회를 생략해도 되는지 판정합니다.
 
-    mcp-trading/stock-master.js가 입력을 코드로 인정하는 범위(6~7자 영숫자)를 따르되,
-    실제 코드는 항상 숫자를 포함하므로 숫자 포함을 함께 요구합니다.
-    이 조건이 없으면 6~7자 영문 종목명이 코드로 오인됩니다.
+    주의(#150 이후): stock-master.js의 resolveStock은 코드 형태 입력이라도 이름·별칭
+    매칭을 먼저 시도하고 실패했을 때만 코드로 인정한다. 이 함수는 마스터를 볼 수 없어
+    그 확인 없이 코드로 확정하므로, JS보다 더 공격적이다.
+    지금은 _has_code_digit이 안전망 역할을 한다 — 코드 형태 이름 3종(SIMPAC/INVENI/
+    WISCOM)이 모두 숫자를 포함하지 않아 여기서 걸러지고 MCP로 넘어간다.
+    숫자를 포함한 6~7자 이름이 신규 상장되면 이 안전망이 뚫린다. mcp-trading/tests/
+    stock-master.test.js의 "exactly 3 master stock names..." 테스트가 그 신호이며,
+    그 테스트가 깨지면 이 함수도 함께 재검토해야 한다.
     """
     value = stock.strip().upper()
     return bool(_STOCK_CODE_RE.match(value)) and _has_code_digit(value)
@@ -132,6 +137,9 @@ async def _resolve_stock_code(stock: str) -> str:
             return ""
         # 지름길 에코("SIMPAC (SIMPAC, UNKNOWN)")는 숫자가 없어 위 _has_code_digit
         # 가드에서 이미 걸러진다.
+        # #150 이후 resolveStock이 이름·별칭 매칭을 코드 지름길보다 먼저 시도하므로,
+        # 실제 마스터 데이터로는 이 에코가 더 이상 발생하지 않는다. 지금은 사용자가
+        # 코드 형태 입력을 직접 준 경우에 대한 방어로만 남아 있다.
         # 상한 도달은 정상 조건이 아니다 — 종목마스터 4,353종 규모에서는 일어나지
         # 않아야 하며, 발생했다면 입력 정규화가 stock-master.js와 다시 어긋났다는
         # 신호다. dict는 자동으로 비우지 않으므로 침묵한 채 자라기만 하면 상한을
