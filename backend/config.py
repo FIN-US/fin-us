@@ -98,12 +98,15 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 VISUALIZATION_URL = os.getenv("VISUALIZATION_URL", "").strip()
 KIS_ORDER_ENV = os.environ.get("KIS_ORDER_ENV", "demo").strip().lower()
-KIS_REAL_ORDER_ENABLED = os.environ.get("KIS_REAL_ORDER_ENABLED", "").strip().lower() in {
-    "1",
-    "true",
-    "yes",
-    "y",
-}
+
+_TRUTHY_FLAG_VALUES = {"1", "true", "yes", "y"}
+
+
+def _is_truthy_flag(value: str) -> bool:
+    return value.strip().lower() in _TRUTHY_FLAG_VALUES
+
+
+KIS_REAL_ORDER_ENABLED = _is_truthy_flag(os.environ.get("KIS_REAL_ORDER_ENABLED", ""))
 
 
 def is_placeholder_secret(value: str | None) -> bool:
@@ -119,11 +122,18 @@ ALLOW_ORIGINS = [origin.strip() for origin in _ALLOW_ORIGINS_RAW.split(",") if o
 
 
 def _mcp_child_env() -> dict[str, str]:
-    return {
+    env = {
         key: value
         for key, value in os.environ.items()
         if key in _MCP_ENV_ALLOWED_KEYS or key.startswith(_MCP_ENV_ALLOWED_PREFIXES)
     }
+    # backend는 KIS_REAL_ORDER_ENABLED를 1/true/yes/y(대소문자 무관)로 넓게
+    # 받지만(_is_truthy_flag), mcp-trading/index.js는 `=== "true"` 엄격 비교라
+    # 정규화하지 않으면 backend 게이트는 통과하고 자식에서만 막히는 진단 트랩이
+    # 된다(#129와 같은 증상). 자식에는 항상 정확히 "true"/"false"만 넘긴다.
+    if "KIS_REAL_ORDER_ENABLED" in env:
+        env["KIS_REAL_ORDER_ENABLED"] = "true" if _is_truthy_flag(env["KIS_REAL_ORDER_ENABLED"]) else "false"
+    return env
 
 
 def _stdio_server_params(mcp_dir: Path) -> StdioServerParameters:

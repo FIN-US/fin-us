@@ -1,6 +1,8 @@
 import importlib
 from pathlib import Path
 
+import pytest
+
 import backend.config as config
 from backend.config import DART_MCP_PARAMS, NEWS_MCP_PARAMS, TRADING_MCP_PARAMS, _stdio_server_params
 
@@ -106,6 +108,34 @@ def test_mcp_stdio_params_forward_any_kis_prefixed_variable_by_mechanism(monkeyp
     params = _stdio_server_params(Path("/opt/mcp-trading"))
 
     assert params.env["KIS_FUTURE_VARIABLE_NOT_YET_INVENTED"] == "future-value"
+
+
+@pytest.mark.parametrize("raw_value", ["1", "yes", "TRUE", "Y"])
+def test_mcp_stdio_params_normalize_non_true_truthy_real_order_enabled(monkeypatch, raw_value):
+    # #129 재발 방지 — backend는 KIS_REAL_ORDER_ENABLED를 1/yes/y/true(대소문자
+    # 무관)로 넓게 허용하지만(config.py의 _is_truthy_flag), mcp-trading/index.js는
+    # `=== "true"` 엄격 비교다. 정규화가 없으면 이 값들은 backend 게이트를
+    # 통과한 뒤 자식에서만 막혀 "KIS_REAL_ORDER_ENABLED=true 설정이
+    # 필요합니다" 오진단을 낸다. _mcp_child_env()의 정규화 블록을 지우면 이
+    # 테스트는 자식이 받는 원본 문자열("1"/"yes"/"TRUE"/"Y")이 "true"와 달라
+    # 즉시 실패한다.
+    monkeypatch.setenv("KIS_REAL_ORDER_ENABLED", raw_value)
+
+    params = _stdio_server_params(Path("/opt/mcp-trading"))
+
+    assert params.env["KIS_REAL_ORDER_ENABLED"] == "true"
+
+
+def test_mcp_stdio_params_normalize_falsy_real_order_enabled_to_canonical_false(monkeypatch):
+    # 정규화 정책이 대칭적인지 확인한다: "0"은 backend·mcp-trading 양쪽에서
+    # 이미 거부되는 값이지만(fail-closed라 자금 위험은 없다), 정규화가 값을
+    # 그대로 통과시키면(원본 "0") 이 단언이 실패해 정규화 블록이 truthy 쪽만
+    # 처리하고 falsy 쪽을 빠뜨리는 뮤테이션을 잡아낸다.
+    monkeypatch.setenv("KIS_REAL_ORDER_ENABLED", "0")
+
+    params = _stdio_server_params(Path("/opt/mcp-trading"))
+
+    assert params.env["KIS_REAL_ORDER_ENABLED"] == "false"
 
 
 def test_visualization_url_is_trimmed_and_trailing_slash_preserved(monkeypatch):
