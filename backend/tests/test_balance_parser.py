@@ -5,7 +5,7 @@ mcp-trading/data/stocks.json`으로 직접 확인할 수 있다.
 """
 
 import unittest
-from backend.scheduler import extract_stocks_from_balance
+from backend.scheduler import extract_stocks_from_balance, is_balance_truncated
 
 # 아래 픽스처는 mcp-trading/balance.js의 formatBalanceReport()가 실제로 생성하는
 # 문자열을 그대로 재현한 것입니다. 근거(줄 번호 대신 심볼/테스트명으로 고정 — 이 저장소
@@ -169,6 +169,77 @@ class TestBalanceExtraction(unittest.TestCase):
         balance_text = "[보유 종목 리스트]\r\n- 삼성전자 (005930) · 3주\r\n  평단가 67,000원 → 평가금액 210,000원\r\n  손익 +9,000원 · 수익률 🔴 ▲ +4.48%"
         result = extract_stocks_from_balance(balance_text)
         self.assertEqual(result, ["삼성전자"])
+
+# 아래 픽스처는 mcp-trading/balance.js의 formatTruncationNote()가 실제로 만드는 문구를
+# 그대로 재현한 것입니다(이슈 #136). 근거:
+#   - 생성부: mcp-trading/balance.js 의 formatTruncationNote() — 사유별 reasons 맵과
+#     고정 접두/접미 리터럴("[안내] " / " 조회가 중단되어 일부 보유 종목이 위 목록에서
+#     누락되었을 수 있습니다. 실제 잔고는 별도로 확인하세요.")
+#   - 검증부: mcp-trading/tests/order.test.js 의 truncation note 관련 테스트들
+# formatTruncationNote()의 reasons 맵이나 고정 리터럴을 바꾸면 이 픽스처들과
+# is_balance_truncated()의 매칭 대상 문자열(backend/scheduler.py의
+# _BALANCE_TRUNCATION_MARKER/_BALANCE_TRUNCATION_SUFFIX) 양쪽을 함께 검토해야 합니다.
+TRUNCATION_NOTES_BY_REASON = {
+    "max_pages": "\n\n[안내] 페이지 상한(20회)에 도달하여 조회가 중단되어 일부 보유 종목이 위 목록에서 누락되었을 수 있습니다. 실제 잔고는 별도로 확인하세요.",
+    "time_budget": "\n\n[안내] 조회 시간 예산을 초과하여 조회가 중단되어 일부 보유 종목이 위 목록에서 누락되었을 수 있습니다. 실제 잔고는 별도로 확인하세요.",
+    "no_cursor": "\n\n[안내] 연속조회 커서가 오지 않아 조회가 중단되어 일부 보유 종목이 위 목록에서 누락되었을 수 있습니다. 실제 잔고는 별도로 확인하세요.",
+    "repeated_cursor": "\n\n[안내] 동일한 연속조회 커서가 반복되어 조회가 중단되어 일부 보유 종목이 위 목록에서 누락되었을 수 있습니다. 실제 잔고는 별도로 확인하세요.",
+    "error": "\n\n[안내] 연속조회 중 오류가 발생하여 조회가 중단되어 일부 보유 종목이 위 목록에서 누락되었을 수 있습니다. 실제 잔고는 별도로 확인하세요.",
+    # reasons 맵에 없는 사유(향후 추가될 수 있는 값)에 대한 fallback 문구.
+    "__unknown__": "\n\n[안내] 연속조회가 완료되지 않아 조회가 중단되어 일부 보유 종목이 위 목록에서 누락되었을 수 있습니다. 실제 잔고는 별도로 확인하세요.",
+}
+
+
+class TestBalanceTruncationDetection(unittest.TestCase):
+    """이슈 #136: 스케줄러가 잔고 연속조회 잘림을 감지하는 is_balance_truncated()를 검증합니다."""
+
+    def test_detects_every_known_truncation_reason(self):
+        """balance.js의 모든 truncated 사유(및 목록에 없는 사유의 fallback)에서
+        True를 반환하는지 확인합니다. 사유별 reason 문구가 아니라 고정 접두/접미
+        리터럴만 매칭하므로, 새 사유가 reasons 맵에 추가되어도 이 테스트는
+        코드 변경 없이 계속 통과해야 합니다.
+        """
+        for reason, note in TRUNCATION_NOTES_BY_REASON.items():
+            balance_text = (
+                "[보유 종목 리스트]\n"
+                "- 삼성전자 (005930) · 3주\n"
+                "  평단가 67,000원 → 평가금액 210,000원\n"
+                "  손익 +9,000원 · 수익률 🔴 ▲ +4.48%" + note
+            )
+            with self.subTest(reason=reason):
+                self.assertTrue(is_balance_truncated(balance_text))
+
+    def test_returns_false_for_untruncated_response(self):
+        """잘리지 않은 정상 응답(REAL_BALANCE_TEXT)에서는 False를 반환해, 매 주기마다
+        불필요한 경고가 울리지 않는지("늑대가 왔다" 오탐 방지) 확인합니다.
+        """
+        self.assertFalse(is_balance_truncated(REAL_BALANCE_TEXT))
+
+    def test_returns_false_for_text_without_notice(self):
+        balance_text = "일반 텍스트"
+        self.assertFalse(is_balance_truncated(balance_text))
+
+    def test_truncation_notice_is_not_extracted_as_a_stock(self):
+        """실제 스케줄러 흐름을 재현합니다: 잘림이 발생하면 balance_text 하나에 보유
+        종목 목록과 [안내] 잘림 문구가 함께 들어옵니다. is_balance_truncated()가
+        True를 반환하는 동시에, extract_stocks_from_balance()는 그 문구를 절대
+        종목명으로 추출하면 안 됩니다(둘 다 확인해야 [안내] 문구가 종목 목록에
+        섞여 들어가는 회귀를 잡을 수 있습니다).
+        """
+        balance_text = (
+            "[보유 종목 리스트]\n"
+            "- 삼성전자 (005930) · 3주\n"
+            "  평단가 67,000원 → 평가금액 210,000원\n"
+            "  손익 +9,000원 · 수익률 🔴 ▲ +4.48%"
+            + TRUNCATION_NOTES_BY_REASON["max_pages"]
+        )
+
+        self.assertTrue(is_balance_truncated(balance_text))
+        stocks = extract_stocks_from_balance(balance_text)
+        self.assertEqual(stocks, ["삼성전자"])
+        self.assertNotIn("[안내]", stocks)
+        self.assertTrue(all("[안내]" not in s for s in stocks))
+
 
 if __name__ == "__main__":
     unittest.main()
