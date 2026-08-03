@@ -38,7 +38,7 @@ functions:
 
       등록된 도구 이름(정확한 철자): [{tool_names}]
 
-      ReAct 출력 규칙 (파서가 영문 키워드 `Thought:` / `Action:` / `Action Input:` 를 찾습니다. 한 응답 안에 세 줄을 빠짐없이 쓰세요):
+      ReAct 출력 규칙 (파서가 영문 키워드 `Thought:` / `Action:` / `Action Input:` 를 찾습니다. 도구를 호출할 때는 한 응답 안에 세 줄을 빠짐없이 쓰세요):
 
       Thought: (짧게, 한국어 가능)
       Action: 여기에는 위 도구 이름 중 하나만 그대로 적습니다(대괄호나 "중 하나" 문구를 넣지 마세요).
@@ -50,7 +50,7 @@ functions:
       그 다음 줄부터는 Observation이 옵니다(모델이 직접 쓰지 않음).
 
       절대 하지 마세요:
-      - `Thought:` 만 쓰고 `Action:` / `Action Input:` 없이 응답을 끝내기
+      - 도구를 호출할 때 `Thought:` 만 쓰고 `Action:` / `Action Input:` 없이 응답을 끝내기
       - 응답 본문을 비우기.
 
       최종 답변을 할 때는 반드시 아래 형식을 쓰세요:

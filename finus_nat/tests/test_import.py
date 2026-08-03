@@ -30,11 +30,26 @@ def test_react_agent_graph_init_is_unpatched_vendor_code():
     `__code__`는 원본 그대로 남는다), `exec(compile(...))`로 재작성한 소스는 애초에
     다른 filename(예: 옛 `_patch_react_agent_node_plain_final_after_tool`이 쓰던
     `"<finus_react_agent_node_plain_final_patch>"`)으로 컴파일된다. 즉 패치가 속성 이름을
-    무엇으로 바꾸든 이 값은 위장할 수 없다. 누군가 소스 재작성 패치를 다시 들여오면
+    무엇으로 바꾸든 이 값은 위장할 수 없다. `endswith("agent.py")`가 아니라 벤더 모듈
+    자신의 `__file__`과 정확히 같은지 비교한다 - `endswith`는 `react_agent.py`나
+    `supervisor_agent.py`처럼 이름만 비슷한 다른 파일도 통과시킨다.
+
+    옛 `_wrapped`의 실제 페이로드는 소스 재작성이 아니라
+    `ra_mod.SYSTEM_PROMPT = picker(tools)`라는 모듈 전역 재바인딩이었다 - 속성 마커도
+    없고 `co_filename`도 안 바뀌는, 탐지하기 가장 쉬운데 지금까지 아무 테스트도
+    보지 않던 경로다. `ra_mod.SYSTEM_PROMPT is prompt_mod.SYSTEM_PROMPT`로 그 재바인딩이
+    없는지 직접 확인한다.
+
+    누군가 소스 재작성 패치나 SYSTEM_PROMPT 런타임 재바인딩을 다시 들여오면
     (마커 이름과 무관하게) 이 테스트가 실패한다.
     """
     import nat_finus_nat.register  # noqa: F401 - 등록 트리거만 필요
+    import nat.plugins.langchain.agent.react_agent.agent as ra_mod
+    import nat.plugins.langchain.agent.react_agent.prompt as prompt_mod
     from nat.plugins.langchain.agent.react_agent.agent import ReActAgentGraph
 
-    assert ReActAgentGraph.agent_node.__code__.co_filename.endswith("agent.py")
-    assert ReActAgentGraph.__init__.__code__.co_filename.endswith("agent.py")
+    assert ReActAgentGraph.agent_node.__code__.co_filename == ra_mod.__file__
+    assert ReActAgentGraph.__init__.__code__.co_filename == ra_mod.__file__
+
+    # 옛 패치의 실제 페이로드: 소스 재작성이 아니라 모듈 전역 SYSTEM_PROMPT 재바인딩.
+    assert ra_mod.SYSTEM_PROMPT is prompt_mod.SYSTEM_PROMPT

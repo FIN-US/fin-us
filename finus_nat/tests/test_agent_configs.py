@@ -9,9 +9,13 @@ Config 파싱과 프롬프트 조립만으로 그 검증을 통과하는지 확�
 
 `configs/agents/*.yml`을 단독으로 로드하는 것 외에, 프로덕션이 실제로 로드하는
 `configs/router.yml` / `configs/router_nomemory.yml`도 포함한다. `base:` 상속 체인 때문에
-두 라우터 모두 결과적으로 여섯 react_agent 함수를 전부 포함하므로, 라우터 레벨에서
-`system_prompt`나 `tool_names`를 덮어쓰는 미래의 변경도(지금은 그런 오버라이드가 없다)
-이 파라미터화가 놓치지 않는다.
+두 라우터 모두 결과적으로 여섯 react_agent 함수를 전부 포함한다. 라우터로 로드했을 때의
+`system_prompt`/`tool_names`를 같은 함수를 `configs/agents/*.yml`에서 단독으로 로드했을
+때와 정확히 비교한다(아래 `_assert_router_config_matches_direct_agent_config`) - 그래서
+라우터 레벨에서 `system_prompt`를 다른(하지만 그 자체로는 유효한) 값으로 덮어쓰거나
+`tool_names`를 바꾸는 미래의 변경도 잡는다. 참고로 `validate_system_prompt`와
+`ChatPromptTemplate.input_variables` 비교만으로는 이걸 못 잡는다 - 유효하고 플레이스홀더가
+멀쩡한 다른 프롬프트는 두 검사 모두 통과하기 때문이다.
 """
 
 from pathlib import Path
@@ -39,6 +43,10 @@ DIRECT_AGENT_CONFIGS = [
     (AGENTS_DIR / "strategy_agent.yml", "strategy_agent"),
     (AGENTS_DIR / "trading_agent.yml", "trading_agent_react"),
 ]
+
+# function_name -> 그 함수가 정의된 agents/*.yml 파일명. 라우터로 로드한 함수를
+# 같은 함수의 단독 로드 결과와 비교할 때 어느 파일을 direct 기준으로 쓸지 찾는 데 쓴다.
+AGENT_YAML = {function_name: path.name for path, function_name in DIRECT_AGENT_CONFIGS}
 
 # 프로덕션이 실제로 로드하는 두 라우터 - 각각 여섯 함수 전부를 상속 체인으로 포함한다.
 ROUTER_CONFIGS = [
@@ -78,3 +86,8 @@ def test_agent_config_builds_with_valid_system_prompt(config_path: Path, functio
     # additional_instructions까지 합친 최종 프롬프트가 기대한 입력 변수로만 빌드되는지 확인한다.
     prompt = create_react_agent_prompt(fn_config)
     assert set(prompt.input_variables) == EXPECTED_PROMPT_INPUT_VARIABLES
+
+    if config_path.parent == CONFIGS_ROOT:  # router.yml / router_nomemory.yml
+        direct = load_config(AGENTS_DIR / AGENT_YAML[function_name]).functions[function_name]
+        assert fn_config.system_prompt == direct.system_prompt
+        assert [str(t) for t in fn_config.tool_names] == [str(t) for t in direct.tool_names]
