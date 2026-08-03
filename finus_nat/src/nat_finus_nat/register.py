@@ -1,10 +1,7 @@
 # agents, finus_api 모듈을 import하여 `@register_function` 등록을 로드한다.
-import logging
 from pathlib import Path
 
 from dotenv import load_dotenv
-
-logger = logging.getLogger(__name__)
 
 # finus_nat 패키지 루트의 .env 파일을 찾아 환경 변수에 로드한다.
 # register.py -> nat_finus_nat/ -> src/ -> finus_nat/
