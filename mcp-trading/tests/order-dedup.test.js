@@ -194,6 +194,10 @@ test("OrderDedupStore resolves ttlMs from KIS_ORDER_DEDUP_TTL_MS env var, warnin
       message.includes(envValue),
       `경고 메시지에 잘못된 값이 포함되어야 합니다: ${message}`,
     );
+    assert.ok(
+      message.includes(`="${envValue}"`),
+      `경고 메시지에서 값의 경계가 따옴표로 표시되어야 합니다: ${message}`,
+    );
   }
 
   // 값이 아예 없는 경우(정상적인 기본값 사용)는 조용해야 한다.
@@ -228,5 +232,17 @@ test("OrderDedupStore stays silent when KIS_ORDER_DEDUP_TTL_MS is set but blank"
     consoleError.mock.callCount(),
     0,
     "빈 문자열은 미설정과 동일하게 조용히 처리되어야 합니다",
+  );
+
+  // 공백만 있는 값(docker-compose.yml의 environment: 블록이나 셸 export로
+  // 전달될 수 있다 - dotenv는 트림하지만 이 경로들은 그대로 전달한다)도
+  // 빈 문자열과 같은 의도이므로 조용히 처리되어야 한다.
+  consoleError.mock.resetCalls();
+  process.env.KIS_ORDER_DEDUP_TTL_MS = "   ";
+  assert.equal(new OrderDedupStore().ttlMs, 120_000, "env=whitespace-only");
+  assert.equal(
+    consoleError.mock.callCount(),
+    0,
+    "공백만 있는 값은 미설정과 동일하게 조용히 처리되어야 합니다",
   );
 });

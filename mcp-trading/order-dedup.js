@@ -40,9 +40,10 @@ export function createOrderDedupKey({
 function parsePositiveInteger(value, fallback, name) {
   const parsed = Number(value);
   if (!Number.isInteger(parsed) || parsed <= 0) {
-    if (value !== undefined && value !== "") {
+    // 공백만 있는 값도 빈 문자열과 마찬가지로 "설정하지 않음"으로 취급한다.
+    if (value !== undefined && String(value).trim() !== "") {
       console.error(
-        `${name}=${value} 는 양의 정수(ms)가 아니어서 기본값 ${fallback}ms를 사용합니다.`,
+        `${name}="${value}"는 양의 정수(ms)가 아니어서 기본값 ${fallback}ms를 사용합니다.`,
       );
     }
     return fallback;
