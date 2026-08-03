@@ -1,3 +1,8 @@
+"""이슈 #153 관련 테스트들의 픽스처는 mcp-trading/data/stocks.json 마스터의 실제
+종목 행을 사용한다(예: 종목코드 00104K, F70102B96). 특정 종목코드나 종목명이
+마스터에 있는지는 이 저장소에서 `git grep '"code": "<코드>"'
+mcp-trading/data/stocks.json`으로 직접 확인할 수 있다.
+"""
 
 import unittest
 from backend.scheduler import extract_stocks_from_balance
@@ -100,6 +105,70 @@ class TestBalanceExtraction(unittest.TestCase):
         expected = []
         result = extract_stocks_from_balance(balance_text)
         self.assertEqual(result, expected)
+
+    def test_extract_stocks_paren_in_name_uses_last_paren_group(self):
+        """종목명 자체에 괄호가 있어도(코드 00104K, CJ4우(전환)) 마지막 "(코드)"
+        그룹만 잘라내는지 고정한다. split("(")[0]으로 되돌리면(mutation) 첫
+        괄호에서 잘려 "CJ4우"만 남아 실패한다.
+        """
+        balance_text = """[보유 종목 리스트]
+- CJ4우(전환) (00104K) · 1주
+  평단가 10,000원 → 평가금액 10,000원
+  손익 +0원 · 수익률 🔴 ▲ +0.00%"""
+        result = extract_stocks_from_balance(balance_text)
+        self.assertEqual(result, ["CJ4우(전환)"])
+
+    def test_extract_stocks_two_paren_groups_in_name(self):
+        """종목명에 괄호가 두 개 있어도(코드 F70102B96,
+        룩셈부르크코어오피스(파생형)(A)) 줄 안의 세 괄호 중 마지막(=코드) 괄호
+        에서만 잘라내는지 고정한다. split("(")[0]은 첫 괄호에서 잘려
+        "룩셈부르크코어오피스"만 남기므로 이 테스트를 죽인다.
+        """
+        balance_text = """[보유 종목 리스트]
+- 룩셈부르크코어오피스(파생형)(A) (F70102B96) · 1주
+  평단가 10,000원 → 평가금액 10,000원
+  손익 +0원 · 수익률 🔴 ▲ +0.00%"""
+        result = extract_stocks_from_balance(balance_text)
+        self.assertEqual(result, ["룩셈부르크코어오피스(파생형)(A)"])
+
+    def test_extract_stocks_paren_free_name_unchanged(self):
+        """괄호 없는 기존 종목명("삼성전자")은 rsplit 도입 후에도 동작이 그대로
+        임을 고정한다. rsplit 회귀뿐 아니라 replace("- ", "", 1)의 count=1 누락
+        (접두사 "- "가 통째로 남아 "- 삼성전자"가 됨)도 함께 잡는다.
+        """
+        balance_text = """[보유 종목 리스트]
+- 삼성전자 (005930) · 3주
+  평단가 67,000원 → 평가금액 210,000원
+  손익 +9,000원 · 수익률 🔴 ▲ +4.48%"""
+        result = extract_stocks_from_balance(balance_text)
+        self.assertEqual(result, ["삼성전자"])
+
+    def test_extract_stocks_interior_dash_space_preserved(self):
+        """count=1로 맨 앞 접두사 "- "만 지우고 종목명 중간의 "- "는 보존되는지
+        고정한다. count를 빼면(mutation) 전역 치환되어 "한국 - 전력"이 "한국
+        전력"이 되어 실패한다.
+
+        이 이름(코드 999999)은 stocks.json 마스터에 없는 합성 픽스처다 — 마스터에
+        "- "를 포함하는 종목명은 0건이지만, prdt_name은 마스터가 아니라 KIS
+        output1 응답에서 오므로 이 입력 형태를 배제할 수 없다.
+        """
+        balance_text = """[보유 종목 리스트]
+- 한국 - 전력 (999999) · 1주
+  평단가 10,000원 → 평가금액 10,000원
+  손익 +0원 · 수익률 🔴 ▲ +0.00%"""
+        result = extract_stocks_from_balance(balance_text)
+        self.assertEqual(result, ["한국 - 전력"])
+
+    def test_extract_stocks_crlf_after_section_marker(self):
+        """CRLF 입력(core.autocrlf=true 환경에서 balance.js가 CRLF로 체크아웃되는
+        경우)에서도 종목이 정상 추출되는지 고정한다.
+
+        참고: 이 입력 형태에서 .strip()은 결과에 영향을 주지 않는다. "\\r"만 남은
+        첫 줄은 startswith("- ") 가드에서 어차피 걸러지기 때문이다.
+        """
+        balance_text = "[보유 종목 리스트]\r\n- 삼성전자 (005930) · 3주\r\n  평단가 67,000원 → 평가금액 210,000원\r\n  손익 +9,000원 · 수익률 🔴 ▲ +4.48%"
+        result = extract_stocks_from_balance(balance_text)
+        self.assertEqual(result, ["삼성전자"])
 
 if __name__ == "__main__":
     unittest.main()
