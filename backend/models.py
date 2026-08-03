@@ -39,6 +39,17 @@ class AgentReport(SQLModel, table=True):
     decision: str = Field(description="투자 결정 (BUY/SELL/HOLD)")
     confidence_score: float = Field(description="신뢰도 점수 (0.0~1.0)")
     reason: str = Field(description="투자 결정 근거")
+    tool_verified: bool = Field(
+        default=False,
+        description=(
+            "MCP/KIS/뉴스 등 실제 도구를 호출해 만든 분석인지 여부. "
+            "services.provider_is_tool_backed()가 provider 분기에서 파생하며 호출부가 "
+            "직접 True/False를 넘기지 않는다 (현재는 provider=nat만 True). "
+            "이 컬럼이 없던 스키마에서 만들어진 기존 행은 database._run_schema_migrations()가 "
+            "ALTER TABLE ... DEFAULT 0으로 채운다 — 즉 False는 '도구 미사용'과 "
+            "'과거 행이라 확인 불가'를 모두 의미하며, 절대 True로 소급되지 않는다."
+        ),
+    )
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="생성 일시")
 
 class Diary(SQLModel, table=True):

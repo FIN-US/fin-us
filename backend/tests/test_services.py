@@ -143,6 +143,61 @@ async def test_perform_stock_analysis_includes_trigger_signal(monkeypatch):
     assert '"source_signals"' in prompts[0][1]
 
 
+def test_provider_is_tool_backed_matches_llm_chat_dispatch():
+    """provider_is_tool_backed()는 llm_chat의 provider 분기와 반드시 일치해야 한다.
+    (#162) tools 없이 모델을 그대로 호출하는 openai/anthropic/ollama는 False,
+    실제 MCP/KIS/뉴스를 거치는 nat만 True. 새 provider가 도구를 갖추게 되면 이
+    테스트도 갱신해야 한다는 신호가 된다.
+    """
+    assert services.provider_is_tool_backed("openai") is False
+    assert services.provider_is_tool_backed("anthropic") is False
+    assert services.provider_is_tool_backed("ollama") is False
+    assert services.provider_is_tool_backed("nat") is True
+
+
+@pytest.mark.asyncio
+async def test_perform_stock_analysis_marks_toolless_provider_report_unverified(monkeypatch):
+    """도구 없이 호출되는 provider(openai/anthropic/ollama)로 만든 AgentReport는
+    tool_verified=False로 저장되어야 한다. provider_is_tool_backed가 항상 True를
+    반환하도록 뒤집으면(또는 perform_stock_analysis가 이 값을 무시하면) 이 테스트가
+    깨진다.
+    """
+    async def fake_llm_chat(provider, prompt, *, conversation_id=None):
+        return "plain analysis"
+
+    async def fake_run_mcp_tool(params, tool_name, arguments):
+        return "삼성전자 (005930, KOSPI)"
+
+    monkeypatch.setattr(services, "llm_chat", fake_llm_chat)
+    monkeypatch.setattr(services, "run_mcp_tool", fake_run_mcp_tool)
+
+    session = FakeSession()
+    await services.perform_stock_analysis("삼성전자", "openai", session)
+
+    assert session.report.tool_verified is False
+
+
+@pytest.mark.asyncio
+async def test_perform_stock_analysis_marks_nat_report_tool_verified(monkeypatch):
+    """provider=nat으로 만든 AgentReport는 tool_verified=True로 저장되어야 한다.
+    (#162 수용 기준: provider=nat 경로의 동작은 불변). _TOOL_BACKED_PROVIDERS에서
+    "nat"이 빠지면 이 테스트가 깨진다.
+    """
+    async def fake_llm_chat(provider, prompt, *, conversation_id=None):
+        return "plain analysis"
+
+    async def fake_run_mcp_tool(params, tool_name, arguments):
+        return "삼성전자 (005930, KOSPI)"
+
+    monkeypatch.setattr(services, "llm_chat", fake_llm_chat)
+    monkeypatch.setattr(services, "run_mcp_tool", fake_run_mcp_tool)
+
+    session = FakeSession()
+    await services.perform_stock_analysis("삼성전자", "nat", session)
+
+    assert session.report.tool_verified is True
+
+
 @pytest.mark.asyncio
 async def test_perform_stock_analysis_resolves_stock_code_via_mcp(monkeypatch):
     async def fake_llm_chat(provider, prompt, *, conversation_id=None):

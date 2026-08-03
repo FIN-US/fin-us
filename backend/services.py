@@ -251,6 +251,7 @@ async def perform_stock_analysis(
             decision=details.get("decision", "HOLD"),
             confidence_score=details.get("confidence_score", 0.0),
             reason=details.get("reason", ""),
+            tool_verified=provider_is_tool_backed(key),
         )
         session.add(report)
         session.commit()
@@ -679,3 +680,22 @@ async def llm_chat(
     if provider_key == "ollama":
         return await _llm_ollama_chat(user_msg)
     return await _llm_nat_chat(user_msg, conversation_id=conversation_id)
+
+
+# llm_chat의 분기와 함께 유지한다: 실제로 MCP/KIS/뉴스 도구를 호출하는 provider만 여기
+# 나열한다. _llm_openai_chat/_llm_anthropic_chat/_llm_ollama_chat은 tools 파라미터 없이
+# 모델을 그대로 호출하므로 도구 근거가 없다 (#162). nat만 NAT 멀티에이전트를 거쳐
+# 실제 시장 데이터를 조회한다. 새 provider가 도구를 갖추게 되면 이 집합 한 곳만 갱신하면
+# provider_is_tool_backed()를 쓰는 모든 호출부(AgentReport.tool_verified 등)에 반영된다.
+_TOOL_BACKED_PROVIDERS: frozenset[str] = frozenset({"nat"})
+
+
+def provider_is_tool_backed(
+    provider_key: Literal["openai", "anthropic", "nat", "ollama"],
+) -> bool:
+    """provider_key가 실제 도구(MCP/KIS/뉴스)를 호출해 응답을 생성하는지 여부.
+
+    AgentReport.tool_verified는 항상 이 함수로 파생시킨다 — 호출부가 True/False를
+    손으로 넘기면 언젠가 어긋난다.
+    """
+    return provider_key in _TOOL_BACKED_PROVIDERS
