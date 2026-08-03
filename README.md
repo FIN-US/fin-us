@@ -194,7 +194,7 @@ bash scripts/run_stack.sh
 - `backend`는 `finus-nat`과 `redis`가 정상(healthy)이 된 뒤에 뜹니다. `finus-nat`은 준비되는 대로 healthy가 되며, 처음 90초 동안은 헬스체크가 실패해도 재시도로 세지 않습니다(`docker-compose.yml`의 `start_period`). 90초가 지난 뒤에도 응답이 없으면 15초 간격으로 10번 더 확인한 뒤 unhealthy로 판정하므로, 최악의 경우 약 4분 뒤에 `backend` 기동이 중단됩니다.
 - 로컬에서 `uvicorn --reload`만 쓰고 싶다면 볼륨 마운트된 소스로 호스트에서 실행하면 됩니다.
 
-전부 지우고 처음부터 다시 하려면 아래를 실행합니다. 컨테이너·볼륨·로컬 이미지와 `node_modules`/`venv`/`__pycache__`를 지우며 되돌릴 수 없습니다.
+전부 지우고 처음부터 다시 하려면 아래를 실행합니다. 컨테이너·볼륨·로컬 이미지와 `node_modules`/`venv`/`__pycache__`를 지우며 되돌릴 수 없습니다. 실행 시 확인을 한 번 묻고, `-y`를 붙이면 묻지 않고 진행합니다.
 
 ```bash
 bash scripts/reset_clean.sh
