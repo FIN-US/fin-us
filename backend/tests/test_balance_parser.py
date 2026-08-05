@@ -170,6 +170,60 @@ class TestBalanceExtraction(unittest.TestCase):
         result = extract_stocks_from_balance(balance_text)
         self.assertEqual(result, ["삼성전자"])
 
+    def test_extract_stocks_missing_code_paren_is_rejected_with_warning(self):
+        """코드 괄호가 없는 줄("- 삼성전자 · 3주")은 STOCK_LINE_RE에 매치되지 않아
+        종목으로 추출되지 않고, 경고 로그가 기록되어야 합니다(이슈 #157).
+
+        이 줄이 조용히 통과되면 종목명 자리에 "삼성전자 · 3주" 전체가 들어가
+        뉴스·DART 조회 질의가 오염됩니다.
+        """
+        balance_text = """[보유 종목 리스트]
+- 삼성전자 · 3주
+  평단가 67,000원 → 평가금액 210,000원
+  손익 +9,000원 · 수익률 🔴 ▲ +4.48%"""
+        with self.assertLogs("backend.scheduler", level="WARNING") as log_ctx:
+            result = extract_stocks_from_balance(balance_text)
+        self.assertEqual(result, [])
+        self.assertTrue(
+            any("예상치 못한 잔고 종목 줄 형식" in msg for msg in log_ctx.output),
+            "경고 로그에 '예상치 못한 잔고 종목 줄 형식'이 포함되어야 합니다.",
+        )
+
+    def test_extract_stocks_malformed_line_skipped_but_valid_line_extracted(self):
+        """형식이 깨진 줄과 정상 줄이 섞여 있을 때, 깨진 줄만 건너뛰고 정상 줄은
+        추출되어야 합니다. 경고 로그도 깨진 줄에 대해서만 기록됩니다.
+        """
+        balance_text = """[보유 종목 리스트]
+- 삼성전자 · 3주
+  평단가 67,000원 → 평가금액 210,000원
+  손익 +9,000원 · 수익률 🔴 ▲ +4.48%
+
+- NAVER (035420) · 1주
+  평단가 201,000원 → 평가금액 200,500원
+  손익 -500원 · 수익률 🔵 ▼ -0.25%"""
+        with self.assertLogs("backend.scheduler", level="WARNING") as log_ctx:
+            result = extract_stocks_from_balance(balance_text)
+        self.assertEqual(result, ["NAVER"])
+        self.assertTrue(
+            any("예상치 못한 잔고 종목 줄 형식" in msg for msg in log_ctx.output),
+        )
+
+    def test_extract_stocks_notice_line_not_extracted_as_stock(self):
+        """[안내] 잘림 문구("- "로 시작하지 않음)는 startswith("- ") 가드로 걸러지므로
+        종목으로 추출되지 않습니다. STOCK_LINE_RE 도입 후에도 이 동작이 유지되는지
+        회귀 방지로 확인합니다.
+        """
+        balance_text = (
+            "[보유 종목 리스트]\n"
+            "- 삼성전자 (005930) · 3주\n"
+            "  평단가 67,000원 → 평가금액 210,000원\n"
+            "  손익 +9,000원 · 수익률 🔴 ▲ +4.48%\n"
+            "\n"
+            "[안내] 페이지 상한(20회)에 도달하여 조회가 중단되어 일부 보유 종목이 위 목록에서 누락되었을 수 있습니다."
+        )
+        result = extract_stocks_from_balance(balance_text)
+        self.assertEqual(result, ["삼성전자"])
+
 # 아래 픽스처는 mcp-trading/balance.js의 formatTruncationNote()가 실제로 만드는 문구를
 # 그대로 재현한 것입니다(이슈 #136). 근거:
 #   - 생성부: mcp-trading/balance.js 의 formatTruncationNote() — 사유별 reasons 맵과
