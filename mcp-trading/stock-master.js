@@ -30,7 +30,6 @@ export function normalizeStockInput(value) {
 }
 
 export const CODE_SHAPE_PATTERN = /^[A-Z0-9]{6,7}$/i;
-const NUMERIC_CODE_PATTERN = /^[0-9]{6,7}$/;
 
 export function resolveStock(stockName, stocks) {
   const input = normalizeStockInput(stockName);
@@ -38,21 +37,25 @@ export function resolveStock(stockName, stocks) {
     throw new Error("stock_name 파라미터가 누락되었습니다.");
   }
 
-  // Pure numeric input can never be a registered stock name (Korean/English
-  // company names always contain at least one non-digit character), so it is
-  // safe to treat it as a direct code without paying for a master lookup.
-  if (NUMERIC_CODE_PATTERN.test(input)) {
-    return { code: input, name: input, market: "UNKNOWN", aliases: [] };
+  const upperInput = input.toUpperCase();
+  const stockList = stocks ?? getDefaultStocks();
+
+  // Step 1: Try exact code match first (length-agnostic, case-insensitive).
+  // This short-circuits before name/alias filtering so that:
+  //   - numeric codes (e.g. 005930) return the real name/market from the master
+  //   - 9-char fund codes (e.g. F70100026) are handled without a special pattern
+  //   - alphanumeric codes (e.g. Q570121) are resolved correctly
+  //   - a code that happens to equal another entry's name is unambiguous
+  // Codes are unique in the master, so there is no ambiguity risk.
+  const codeHit = stockList.find((s) => String(s.code ?? "").toUpperCase() === upperInput);
+  if (codeHit) {
+    return { aliases: [], ...codeHit };
   }
 
+  // Step 2: Name / alias matching (case-sensitive for Korean names; case-
+  // insensitive for code-shaped inputs that may be company names like SIMPAC).
   const isCodeShaped = CODE_SHAPE_PATTERN.test(input);
-  // Hoisted out of the filter loop below (recomputing per-entry cost 4,353
-  // calls on the default master) and reused by the direct-code fallback
-  // further down, since both need the same uppercased value once isCodeShaped
-  // is true.
-  const upperInput = isCodeShaped ? input.toUpperCase() : input;
 
-  const stockList = stocks ?? getDefaultStocks();
   const matches = stockList.filter((stock) => {
     const aliases = Array.isArray(stock.aliases) ? stock.aliases : [];
     if (stock.name === input || aliases.includes(input)) {
@@ -61,14 +64,10 @@ export function resolveStock(stockName, stocks) {
     if (!isCodeShaped) {
       return false;
     }
-    // A code-shaped input (e.g. a ticker-like company name such as SIMPAC)
-    // may be typed in any case, mirroring the case-insensitivity the code
-    // shortcut below already provides for direct codes. `name`/`aliases`
-    // entries may be missing on a caller-supplied stock list (resolveStock's
-    // `stocks` parameter is public), so default to "" before upper-casing
-    // instead of letting a bare `undefined`/`null` throw.
+    // A code-shaped input may be a ticker-like company name (e.g. SIMPAC).
+    // Match case-insensitively against name and aliases only — stock.code
+    // matching is already handled by the short-circuit above.
     return String(stock.name ?? "").toUpperCase() === upperInput
-      || String(stock.code ?? "").toUpperCase() === upperInput
       || aliases.some((alias) => String(alias ?? "").toUpperCase() === upperInput);
   });
 
@@ -76,7 +75,7 @@ export function resolveStock(stockName, stocks) {
     const candidates = matches
       .map((stock) => `${stock.name}(${stock.code}, ${stock.market})`)
       .join(", ");
-    throw new Error(`'${input}'의 종목 매칭이 모호합니다: ${candidates}. 6자리 종목코드를 직접 입력하세요.`);
+    throw new Error(`'${input}'의 종목 매칭이 모호합니다: ${candidates}. 6~7자리 종목코드를 직접 입력하세요.`);
   }
 
   if (matches.length === 1) {
@@ -86,14 +85,19 @@ export function resolveStock(stockName, stocks) {
     };
   }
 
-  // Nothing in the master matches by name or alias: only now treat a
-  // code-shaped input (e.g. an alphanumeric ETN/fund code) as a direct code.
+  // Step 3: Nothing matched by name or alias.
+  // A code-shaped input (6-7 alphanumeric chars) that is absent from the
+  // master is echoed back as an UNKNOWN direct code.
   if (isCodeShaped) {
     return { code: upperInput, name: upperInput, market: "UNKNOWN", aliases: [] };
   }
 
+  // A numeric-only code that is not in the master also reaches here (the old
+  // NUMERIC_CODE_PATTERN early-return is gone; the code short-circuit above
+  // handles found entries; the isCodeShaped echo handles the not-found case).
+
   throw new Error(
     `'${input}'의 종목 코드를 찾을 수 없습니다. ` +
-      "6자리 종목코드로 직접 입력하거나 mcp-trading/data/stocks.json을 갱신하세요.",
+      "6~7자리 종목코드로 직접 입력하거나 mcp-trading/data/stocks.json을 갱신하세요.",
   );
 }
