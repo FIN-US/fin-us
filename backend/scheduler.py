@@ -87,7 +87,16 @@ def _default_catalyst_repo() -> SqliteCatalystEventRepo:
 # 처리한다. ^- 가 "- " 접두사를 소비하므로 종목명 중간의 "- "(한국 - 전력)는
 # 보존된다. "(코드)" 뒤의 구분자(· 또는 :)는 매칭 대상에 포함하지 않아 포맷 변형에
 # 유연하게 대응한다.
-STOCK_LINE_RE = re.compile(r"^- (?P<name>.+) \((?P<code>[^()]*)\)")
+#
+# 코드 클래스를 [0-9A-Z]{6,}으로 한정하는 이유:
+#   - services.py의 _STOCK_CODE_EXTRACT_RE, telegram_commands.py와 동일한 컨벤션.
+#   - 하한 6: KIS 표준 6자리 코드(005930 등). 상한 없음({6,}): ETN 7자리(389종목),
+#     펀드 9자리(75종목 예: F70102B96)까지 포함.
+#   - [^()]*를 쓰면 두 가지 문제가 생긴다:
+#     1) 빈 코드 통과 — "-  () · 1주"의 빈 괄호가 매치돼 무효 줄이 살아남는다.
+#     2) KODEX 오염 — "- KODEX 200 (합성) · 3주"에서 "(합성)"이 코드 자리에 들어가
+#        이름이 "KODEX 200"으로 잘려 이슈 #157이 막으려던 오염이 재현된다.
+STOCK_LINE_RE = re.compile(r"^- (?P<name>.+) \((?P<code>[0-9A-Z]{6,})\)")
 
 
 def extract_stocks_from_balance(balance_text: str) -> list[str]:
@@ -95,13 +104,15 @@ def extract_stocks_from_balance(balance_text: str) -> list[str]:
 
     [보유 종목 리스트] 섹션 이후 "- "로 시작하는 줄 중 STOCK_LINE_RE에 매치되는
     줄에서만 종목명을 추출합니다. 매치되지 않는 줄(코드 괄호 누락 등 계약 위반)은
-    경고 로그를 남기고 건너뜁니다.
+    호출당 1회 집계 경고 로그를 남기고 건너뜁니다(줄마다 로그를 남기면 템플릿
+    변경 시 종목 수만큼 WARNING이 반복 발생한다).
 
     mcp-trading/balance.js의 formatTruncationNote가 그 섹션 뒤에 덧붙이는 잘림
-    안내 문구는 "- "로 시작해서는 안 되므로, 정규식 매치 이전에 startswith("- ")
-    가드로 먼저 걸러집니다.
+    안내 문구는 "- "로 시작하지 않으므로, 정규식 매치 이전에 startswith("- ")
+    가드와 정규식 거부 중 어느 쪽이든 걸러집니다.
     """
-    stocks = []
+    stocks: list[str] = []
+    malformed: list[str] = []
     if "[보유 종목 리스트]" in balance_text:
         lines = balance_text.split("[보유 종목 리스트]")[1].strip().split("\n")
         for line in lines:
@@ -124,14 +135,20 @@ def extract_stocks_from_balance(balance_text: str) -> list[str]:
                 #    종목명이 0건이지만, prdt_name은 마스터가 아닌 KIS output1 응답에서
                 #    오므로 완전히 배제할 수는 없다.
                 #
-                # 매치 실패(코드 괄호 누락 등 계약 위반 줄)는 경고 로그를 남기고 건너뛴다.
+                # 매치 실패(코드 괄호 누락 등 계약 위반 줄)는 malformed에 모아 호출 후
+                # 1회 집계 경고로 남긴다.
                 match = STOCK_LINE_RE.match(line)
                 if match is None:
-                    logger.warning("예상치 못한 잔고 종목 줄 형식입니다: %r", line)
+                    malformed.append(line)
                     continue
                 name = match.group("name").strip()
                 if name:
                     stocks.append(name)
+    if malformed:
+        logger.warning(
+            "예상치 못한 잔고 종목 줄 형식 %d건을 건너뛰었습니다(예시 최대 3건): %r",
+            len(malformed), malformed[:3],
+        )
     return stocks
 
 

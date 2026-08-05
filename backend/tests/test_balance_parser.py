@@ -73,9 +73,10 @@ class TestBalanceExtraction(unittest.TestCase):
         """mcp-trading/balance.js의 종목 줄 템플릿
         (`- ${h.prdt_name} (${h.pdno}) · ${formatQuantity(h.hldg_qty)}주\\n`)은
         prdt_name이 빈 문자열이면 "-  (035420) · 1주"처럼 대시-공백 접두사 뒤에
-        공백이 하나 더 남는 줄을 만듭니다("(" 앞의 고정 공백 때문). 이 줄 옆에 정상
-        종목이 있을 때, extract_stocks_from_balance의 `if name:` 가드가 빈 이름
-        줄만 건너뛰고 정상 종목은 그대로 추출하는지 확인합니다.
+        공백이 하나 더 남는 줄을 만듭니다("(" 앞의 고정 공백 때문). 이 줄은
+        코드 클래스 [0-9A-Z]{6,}를 쓰는 신규 STOCK_LINE_RE에서 매치되지 않아
+        정규식 단계에서 거부됩니다(`if name:` 가드에 도달하지 않음). 정상
+        종목("삼성전자")은 그대로 추출되어야 합니다.
         """
         balance_text = """[보유 종목 리스트]
 - 삼성전자 (005930) · 3주
@@ -208,10 +209,38 @@ class TestBalanceExtraction(unittest.TestCase):
             any("예상치 못한 잔고 종목 줄 형식" in msg for msg in log_ctx.output),
         )
 
+    def test_extract_stocks_non_code_paren_group_is_rejected(self):
+        """종목명 안 " (…)"를 코드로 오인하면 이름이 잘린다("KODEX 200"). 코드 문자
+        클래스를 [^()]*로 되돌리면 이 테스트가 죽는다.
+
+        "- KODEX 200 (합성) · 3주"에서 greedy .+가 "KODEX 200 (합성)"까지 잡으려다
+        backtrack 시 "(합성)"이 코드 자리에 들어가 name="KODEX 200"으로 잘린다.
+        [0-9A-Z]{6,} 코드 클래스는 한글/영소문자를 허용하지 않으므로 "(합성)"이
+        코드 자리에 매치되지 않고 줄 전체가 거부된다.
+        """
+        balance_text = "[보유 종목 리스트]\n- KODEX 200 (합성) · 3주"
+        with self.assertLogs("backend.scheduler", level="WARNING"):
+            self.assertEqual(extract_stocks_from_balance(balance_text), [])
+
+    def test_extract_stocks_skips_whitespace_only_name(self):
+        """prdt_name이 공백만이면 "-    (035420) · 1주"는 STOCK_LINE_RE에 매치되지만
+        (name 그룹 = "   ") strip 후 빈 문자열이라 `if name:` 가드가 걸러낸다. 이 가드를
+        지우면 빈 종목명이 run_mcp_tool 질의로 흘러가므로 여기서 고정한다.
+        """
+        balance_text = (
+            "[보유 종목 리스트]\n"
+            "- 삼성전자 (005930) · 3주\n"
+            "  ...\n\n"
+            "-    (035420) · 1주\n"
+            "  ..."
+        )
+        result = extract_stocks_from_balance(balance_text)
+        self.assertEqual(result, ["삼성전자"])
+
     def test_extract_stocks_notice_line_not_extracted_as_stock(self):
-        """[안내] 잘림 문구("- "로 시작하지 않음)는 startswith("- ") 가드로 걸러지므로
-        종목으로 추출되지 않습니다. STOCK_LINE_RE 도입 후에도 이 동작이 유지되는지
-        회귀 방지로 확인합니다.
+        """[안내] 잘림 문구("- "로 시작하지 않음)는 정규식과 startswith("- ") 가드
+        중 어느 쪽이든 거부되므로 종목으로 추출되지 않습니다。STOCK_LINE_RE 도입
+        후에도 이 동작이 유지되는지 회귀 방지로 확인합니다.
         """
         balance_text = (
             "[보유 종목 리스트]\n"
