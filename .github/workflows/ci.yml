@@ -143,6 +143,28 @@ jobs:
       - name: 타입 체크
         run: npx tsc --noEmit
 
+  frontend-test:
+    name: Frontend vitest
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend-react
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Node 24 설치 (npm 캐시 활성화)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+          cache-dependency-path: frontend-react/package-lock.json
+
+      - name: npm 의존성 설치
+        run: npm ci
+
+      - name: 프론트엔드 테스트 실행
+        run: npm test
+
   docker-lint:
     name: Dockerfile hadolint
     runs-on: ubuntu-latest
