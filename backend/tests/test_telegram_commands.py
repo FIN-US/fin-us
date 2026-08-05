@@ -1329,6 +1329,46 @@ async def test_cancel_without_pending_order_replies():
     assert notifier.messages[-1] == "취소할 대기 주문이 없습니다."
 
 
+def test_format_order_prompt_shows_warning_when_stock_name_equals_stock_code():
+    """미해석 코드(name == code)일 때 확인 메시지에 경고 문구가 포함된다."""
+    from backend.trading_orders import PendingOrder
+
+    handler = TelegramCommandHandler(notifier=FakeNotifier())
+    order = PendingOrder(
+        chat_id="123",
+        stock_code="123456",
+        stock_name="123456",
+        side="BUY",
+        quantity=10,
+        price=0,
+        order_type="MARKET",
+        callback_token="tok",
+        created_at=datetime(2026, 5, 20, 10, 0, tzinfo=KST),
+    )
+    message = handler._format_order_prompt(order, "", "")
+    assert "⚠️ 종목명을 확인하지 못했습니다. 입력한 코드가 맞는지 다시 확인하세요." in message
+
+
+def test_format_order_prompt_no_warning_when_stock_name_differs_from_stock_code():
+    """정상 종목(name != code)일 때 경고 문구가 없다."""
+    from backend.trading_orders import PendingOrder
+
+    handler = TelegramCommandHandler(notifier=FakeNotifier())
+    order = PendingOrder(
+        chat_id="123",
+        stock_code="005930",
+        stock_name="삼성전자",
+        side="BUY",
+        quantity=10,
+        price=0,
+        order_type="MARKET",
+        callback_token="tok",
+        created_at=datetime(2026, 5, 20, 10, 0, tzinfo=KST),
+    )
+    message = handler._format_order_prompt(order, "", "")
+    assert "⚠️ 종목명을 확인하지 못했습니다." not in message
+
+
 @pytest.mark.asyncio
 async def test_confirm_executes_gateway_and_records_trade():
     async def mcp_runner(server_params, tool_name, arguments):
