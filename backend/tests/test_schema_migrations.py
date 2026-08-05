@@ -196,3 +196,50 @@ def test_init_db_concurrent_migration_does_not_abort_startup(tmp_path, monkeypat
     conn.close()
     assert columns.count("provider_supports_tools") == 1
     assert row_count == 1  # 기존 행이 중복 삽입되지 않았는지도 함께 확인
+
+
+def test_init_db_concurrent_on_empty_db_does_not_abort_startup(tmp_path, monkeypatch):
+    """🟡2: 빈 DB(사전 스키마 없음)에서 여러 워커가 동시에 init_db()를 호출해도
+    startup이 abort되지 않아야 한다.
+
+    test_init_db_concurrent_migration_does_not_abort_startup는 구버전 스키마가
+    이미 존재하는 경우(ALTER TABLE 경합)를 검증한다. 이 테스트는 그것과 달리
+    _create_old_schema_agentreport()로 사전 스키마를 만들지 않고, 완전히 빈 DB에서
+    create_all() 자체가 "table already exists" 경합을 일으키는 경로를 고정한다.
+    수정 전에는 init_db()의 create_all()이 OperationalError를 흡수하지 않아
+    늦게 도착한 워커가 startup을 abort시킬 수 있었다.
+    """
+    db_path = tmp_path / "empty_concurrent.db"
+    # 빈 DB: 사전 스키마 생성 없이 바로 동시 호출
+    test_engine = create_engine(
+        f"sqlite:///{db_path}",
+        connect_args={"check_same_thread": False, "timeout": 30},
+    )
+    monkeypatch.setattr(database, "engine", test_engine)
+
+    errors: list[BaseException] = []
+    errors_lock = threading.Lock()
+    thread_count = 6
+    barrier = threading.Barrier(thread_count)
+
+    def worker() -> None:
+        barrier.wait()
+        try:
+            database.init_db()
+        except BaseException as exc:  # noqa: BLE001 - 테스트가 모든 실패를 관찰해야 함
+            with errors_lock:
+                errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(thread_count)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert errors == [], f"빈 DB에서 동시 init_db()가 예외를 던졌다: {errors!r}"
+
+    import sqlite3
+    conn = sqlite3.connect(str(db_path))
+    columns = [row[1] for row in conn.execute("PRAGMA table_info(agentreport)")]
+    conn.close()
+    assert "provider_supports_tools" in columns

@@ -34,7 +34,15 @@ def _run_schema_migrations() -> None:
     이유가 아니다 — 그래서 이 경우만 흡수하고, 그 외의 OperationalError(예:
     디스크 권한 문제로 인한 진짜 실패)는 그대로 올려 startup이 조용히 절반만
     마이그레이션된 스키마로 계속되지 않게 한다.
+
+    주의: BOOLEAN NOT NULL DEFAULT 0 구문과 "duplicate column name" 문자열 매칭은
+    SQLite 전용이다. 다른 방언이면 조용히 오동작할 수 있으므로 가드를 둔다.
     """
+    if engine.dialect.name != "sqlite":
+        raise RuntimeError(
+            f"스키마 마이그레이션은 SQLite 전용입니다 (현재: {engine.dialect.name}). "
+            "다른 DB로 옮기려면 alembic을 도입하세요."
+        )
     for table_name, column_name, alter_sql in _PENDING_COLUMN_MIGRATIONS:
         inspector = inspect(engine)
         if table_name not in inspector.get_table_names():
@@ -62,7 +70,11 @@ def init_db():
     """
     데이터베이스 테이블을 초기화합니다.
     """
-    SQLModel.metadata.create_all(engine)
+    try:
+        SQLModel.metadata.create_all(engine)
+    except OperationalError as exc:
+        if "already exists" not in str(exc).lower():
+            raise
     _run_schema_migrations()
 
 def get_session():

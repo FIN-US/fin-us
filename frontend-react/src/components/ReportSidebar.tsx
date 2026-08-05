@@ -25,8 +25,8 @@ const ReportSidebar: React.FC<ReportSidebarProps> = ({ report, currentNews }) =>
                 }`}
                 title={
                   report.provider_supports_tools
-                    ? `provider(${report.provider})가 도구(MCP/KIS/뉴스) 호출 경로로 구성되어 있다는 뜻입니다. 이번 응답에서 실제로 도구가 호출되었다는 관측은 아닙니다.`
-                    : `provider(${report.provider})는 도구(MCP/KIS/뉴스) 없이 모델이 직접 답을 생성했습니다. 수치가 지어낸 값일 수 있습니다.`
+                    ? `provider(${report.provider ?? '알 수 없음'})가 도구(MCP/KIS/뉴스) 호출 경로로 구성되어 있다는 뜻입니다. 이번 응답에서 실제로 도구가 호출되었다는 관측은 아닙니다.`
+                    : `provider(${report.provider ?? '알 수 없음'})는 도구(MCP/KIS/뉴스) 없이 모델이 직접 답을 생성했습니다. 수치가 지어낸 값일 수 있습니다.`
                 }
               >
                 {report.provider_supports_tools ? 'Tool-capable (unconfirmed)' : 'No tool access'}

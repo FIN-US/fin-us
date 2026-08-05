@@ -25,6 +25,12 @@ from .models import AgentReport
 logger = logging.getLogger(__name__)
 _NAT_RESPONSE_LOG_PREVIEW_CHARS = 800
 
+# LLM 출력이 절대 정할 수 없는, 서버가 provider에서만 파생하는 필드.
+# analysis_from_nat_text가 모델의 raw JSON을 그대로 AnalysisReport에 넘기면
+# 악의적이거나 비정상적인 LLM 출력이 이 값들을 주입할 수 있으므로 파싱 단계에서
+# 걷어낸다. 실제 값은 perform_stock_analysis가 provider_supports_tools()로 채운다.
+_DERIVED_PROVENANCE_FIELDS = frozenset({"provider", "provider_supports_tools"})
+
 # 입력이 이미 종목코드 형태인지 판정하는 범위. mcp-trading/stock-master.js의
 # resolveStock() 지름길(6~7자 영숫자를 그대로 코드로 인정)과 상한을 맞춘다.
 # KIS 국내 종목코드는 6자리 숫자(005930)만이 아니다. 코스닥 스팩·리츠 등 약 18%가
@@ -614,7 +620,9 @@ def analysis_from_nat_text(raw: str, stock: str) -> dict[str, Any]:
     text = (raw or "").strip()
     for data in _json_objects_from_text(text):
         try:
-            report = AnalysisReport(**data)
+            report = AnalysisReport(
+                **{k: v for k, v in data.items() if k not in _DERIVED_PROVENANCE_FIELDS}
+            )
             dumped = report.model_dump()
             if dumped.get("source_signals") is None:
                 dumped["source_signals"] = dumped.get("source_news", [])

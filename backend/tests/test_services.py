@@ -157,7 +157,8 @@ async def test_provider_supports_tools_matches_llm_chat_dispatch(monkeypatch):
 
     typing.get_args로 llm_chat의 provider_key Literal을 그대로 열거하므로,
     다섯 번째 provider가 Literal과 dispatch에는 추가됐는데 tool_dispatch_targets에는
-    반영되지 않으면 KeyError로 실패한다 - 하드코딩된 목록이 아니라 실제 시그니처를
+    반영되지 않으면 provider_supports_tools()의 반환값과 expected가 어긋나
+    마지막 assert에서 실패한다 - 하드코딩된 목록이 아니라 실제 시그니처를
     따라간다.
     """
     invoked: list[str] = []
@@ -202,6 +203,32 @@ async def test_provider_supports_tools_matches_llm_chat_dispatch(monkeypatch):
             f"provider_supports_tools({key!r})={services.provider_supports_tools(key)}은 "
             f"{expected}와 어긋난다"
         )
+
+
+@pytest.mark.asyncio
+async def test_toolless_providers_pass_no_tools_to_the_model(monkeypatch):
+    """provider_supports_tools()가 False인 provider는 실제로 tools 없이 모델을 호출해야 한다."""
+    captured = {}
+
+    class FakeCompletions:
+        async def create(self, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))]
+            )
+
+    monkeypatch.setattr(
+        services,
+        "AsyncOpenAI",
+        lambda api_key: SimpleNamespace(
+            chat=SimpleNamespace(completions=FakeCompletions())
+        ),
+    )
+    monkeypatch.setattr(services, "OPENAI_API_KEY", "test-key")
+    await services._llm_openai_chat("hi")
+    assert "tools" not in captured, (
+        "openai가 tools를 넘기면 provider_supports_tools(False)가 거짓이 된다"
+    )
 
 
 @pytest.mark.asyncio
