@@ -2,22 +2,24 @@ import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { apiErrorMessage, finUsApi } from '../api';
 import type { AnalysisReport, ChatMessage, DashboardResources } from '../types';
 
+export type EndpointStatus = 'unknown' | 'ok' | 'fail';
+
 export interface EndpointOk {
-  health: boolean;
-  balance: boolean;
-  portfolio: boolean;
-  trades: boolean;
-  reports: boolean;
-  diaries: boolean;
+  health: EndpointStatus;
+  balance: EndpointStatus;
+  portfolio: EndpointStatus;
+  trades: EndpointStatus;
+  reports: EndpointStatus;
+  diaries: EndpointStatus;
 }
 
 const initialEndpointOk: EndpointOk = {
-  health: false,
-  balance: false,
-  portfolio: false,
-  trades: false,
-  reports: false,
-  diaries: false,
+  health: 'unknown',
+  balance: 'unknown',
+  portfolio: 'unknown',
+  trades: 'unknown',
+  reports: 'unknown',
+  diaries: 'unknown',
 };
 
 const initialResources: DashboardResources = {
@@ -89,12 +91,12 @@ export function useFinUsDashboard() {
     });
 
     setEndpointOk({
-      health: health.status === 'fulfilled',
-      balance: balance.status === 'fulfilled',
-      portfolio: portfolio.status === 'fulfilled',
-      trades: trades.status === 'fulfilled',
-      reports: reports.status === 'fulfilled',
-      diaries: diaries.status === 'fulfilled',
+      health: health.status === 'fulfilled' ? 'ok' : 'fail',
+      balance: balance.status === 'fulfilled' ? 'ok' : 'fail',
+      portfolio: portfolio.status === 'fulfilled' ? 'ok' : 'fail',
+      trades: trades.status === 'fulfilled' ? 'ok' : 'fail',
+      reports: reports.status === 'fulfilled' ? 'ok' : 'fail',
+      diaries: diaries.status === 'fulfilled' ? 'ok' : 'fail',
     });
 
     const failed = [health, balance, portfolio, trades, reports, diaries].some((item) => item.status === 'rejected');

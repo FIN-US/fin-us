@@ -1,7 +1,7 @@
 import React from 'react';
 import { Activity, RefreshCw, Server, WalletCards } from 'lucide-react';
 import type { DashboardResources } from '../types';
-import type { EndpointOk } from '../hooks/useFinUsDashboard';
+import type { EndpointOk, EndpointStatus } from '../hooks/useFinUsDashboard';
 
 interface BackendPanelProps {
   resources: DashboardResources;
@@ -10,14 +10,20 @@ interface BackendPanelProps {
   onRefresh: () => void;
 }
 
+const DOT_CLASS: Record<EndpointStatus, string> = {
+  ok: 'bg-emerald-500',
+  fail: 'bg-rose-500',
+  unknown: 'bg-slate-300',
+};
+
 const BackendPanel: React.FC<BackendPanelProps> = ({ resources, endpointOk, loading, onRefresh }) => {
   const endpoints = [
-    { label: 'Health', ok: endpointOk.health, path: '/health' },
-    { label: 'Balance', ok: endpointOk.balance, path: '/api/v1/trading/balance' },
-    { label: 'Portfolio', ok: endpointOk.portfolio, path: '/api/v1/db/portfolio' },
-    { label: 'Trades', ok: endpointOk.trades, path: '/api/v1/db/trades' },
-    { label: 'Reports', ok: endpointOk.reports, path: '/api/v1/db/reports' },
-    { label: 'Diary', ok: endpointOk.diaries, path: '/api/v1/db/diary' },
+    { label: 'Health', status: endpointOk.health, path: '/health' },
+    { label: 'Balance', status: endpointOk.balance, path: '/api/v1/trading/balance' },
+    { label: 'Portfolio', status: endpointOk.portfolio, path: '/api/v1/db/portfolio' },
+    { label: 'Trades', status: endpointOk.trades, path: '/api/v1/db/trades' },
+    { label: 'Reports', status: endpointOk.reports, path: '/api/v1/db/reports' },
+    { label: 'Diary', status: endpointOk.diaries, path: '/api/v1/db/diary' },
   ];
 
   return (
@@ -55,7 +61,7 @@ const BackendPanel: React.FC<BackendPanelProps> = ({ resources, endpointOk, load
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
           {endpoints.map((endpoint) => (
             <div key={endpoint.path} className="flex items-center gap-2 rounded-lg bg-slate-50 px-3 py-2">
-              <span className={`w-2.5 h-2.5 rounded-full ${endpoint.ok ? 'bg-emerald-500' : 'bg-rose-500'}`} />
+              <span className={`w-2.5 h-2.5 rounded-full ${DOT_CLASS[endpoint.status]}`} />
               <div className="min-w-0">
                 <div className="text-xs font-black text-slate-700">{endpoint.label}</div>
                 <div className="text-[11px] text-slate-400 truncate">{endpoint.path}</div>
