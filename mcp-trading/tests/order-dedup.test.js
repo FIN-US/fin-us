@@ -730,6 +730,92 @@ test("OrderDedupStore.reserve retries a rename EACCES on win32 and eventually su
   assert.equal(calls, 2, "win32에서는 rename EACCES가 재시도돼 두 번째 시도에서 성공해야 합니다");
 });
 
+// 고아 임시 파일 스윕 테스트 (#168)
+// #writeLedger 진입 시 낡은(mtime 60초 초과) 고아 tmp 파일을 지워야 한다.
+// 잡는 뮤테이션: 스윕 코드를 지우면 고아 파일이 그대로 남아 실패해야 한다.
+test("OrderDedupStore sweeps stale orphan tmp files on the next write", (t) => {
+  const filePath = tempLedgerPath(t);
+  const dir = path.dirname(filePath);
+
+  // 낡은 고아 tmp 파일 생성: 실제 명명 규칙에 맞게 `.ledger.json.*.tmp` 형식
+  const orphanPath = path.join(dir, `.ledger.json.99999.deadbeef.tmp`);
+  fs.writeFileSync(orphanPath, "orphan");
+
+  // now를 61초 뒤로 주입해 mtime 임계(60초)를 넘기게 만든다
+  const baseTime = Date.now();
+  const store = new OrderDedupStore({
+    filePath,
+    ttlMs: 60_000,
+    now: () => baseTime + 61_000,
+  });
+
+  store.reserve("k", { stockCode: "005930" });
+
+  assert.equal(
+    fs.existsSync(orphanPath),
+    false,
+    "낡은 고아 tmp 파일이 스윕으로 삭제되어야 합니다",
+  );
+});
+
+// mtime이 최근(60초 이내)인 tmp 파일은 다른 쓰기가 진행 중일 수 있으므로
+// 건드리지 않아야 한다. 잡는 뮤테이션: 임계 없이 모든 tmp를 지우면
+// 최근 파일도 삭제되어 실패해야 한다.
+test("OrderDedupStore does not sweep a recent tmp file within 60 seconds", (t) => {
+  const filePath = tempLedgerPath(t);
+  const dir = path.dirname(filePath);
+
+  // 최근 tmp 파일 생성
+  const recentPath = path.join(dir, `.ledger.json.88888.cafebabe.tmp`);
+  fs.writeFileSync(recentPath, "recent");
+
+  // now를 59초 뒤로 설정해 임계(60초) 이내로 만든다
+  const baseTime = Date.now();
+  const store = new OrderDedupStore({
+    filePath,
+    ttlMs: 60_000,
+    now: () => baseTime + 59_000,
+  });
+
+  store.reserve("k", { stockCode: "005930" });
+
+  assert.equal(
+    fs.existsSync(recentPath),
+    true,
+    "60초 이내의 최근 tmp 파일은 삭제하면 안 됩니다",
+  );
+
+  // 정리: 테스트 후 남은 파일 수동 삭제
+  fs.unlinkSync(recentPath);
+});
+
+// 스윕 경로가 실패해도 #writeLedger는 정상 완료되어야 한다 — 스윕 실패가
+// 주문을 차단하면 안 된다(fail-closed 오염 방지). 잡는 뮤테이션: 스윕
+// try/catch 없이 던지면 reserve()가 예외를 내 실패해야 한다.
+test("OrderDedupStore completes the write even when the sweep (readdirSync) throws", (t) => {
+  const filePath = tempLedgerPath(t);
+  const store = new OrderDedupStore({
+    filePath,
+    ttlMs: 60_000,
+    now: () => 1_000,
+  });
+
+  const originalReaddirSync = fs.readdirSync;
+  t.mock.method(fs, "readdirSync", (targetPath, ...args) => {
+    if (targetPath === path.dirname(filePath)) {
+      throw new Error("simulated readdirSync failure");
+    }
+    return originalReaddirSync(targetPath, ...args);
+  });
+
+  // 스윕이 던져도 쓰기는 성공해야 한다
+  assert.doesNotThrow(() => store.reserve("k", { stockCode: "005930" }));
+
+  // 원장이 실제로 기록됐는지 확인
+  const onDisk = JSON.parse(fs.readFileSync(filePath, "utf8"));
+  assert.ok(onDisk.k, "스윕 실패에도 원장이 정상적으로 기록되어야 합니다");
+});
+
 test("OrderDedupStore stays silent when KIS_ORDER_DEDUP_TTL_MS is set but blank", (t) => {
   const originalEnvValue = process.env.KIS_ORDER_DEDUP_TTL_MS;
   t.after(() => {

@@ -232,6 +232,21 @@ export class OrderDedupStore {
       `.${path.basename(this.filePath)}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`,
     );
 
+    // 이전 프로세스가 SIGKILL·OOM·전원차단으로 죽어 남긴 고아 임시 파일을
+    // 정리한다. 스윕 실패(readdir 실패 포함)는 전부 삼킨다 — 여기서 던지면
+    // 청소 실패가 fail-closed를 오염시켜 정상 주문이 차단된다.
+    const tmpPrefix = `.${path.basename(this.filePath)}.`;
+    try {
+      for (const name of fs.readdirSync(dir)) {
+        if (!name.startsWith(tmpPrefix) || !name.endsWith(".tmp")) continue;
+        const stale = path.join(dir, name);
+        if (stale === tmpPath) continue;
+        try {
+          if (this.now() - fs.statSync(stale).mtimeMs > 60_000) fs.unlinkSync(stale);
+        } catch { /* 개별 파일 정리 실패는 무시한다 */ }
+      }
+    } catch { /* readdir 실패도 무시한다 */ }
+
     try {
       const fd = fs.openSync(tmpPath, "w", 0o600);
       try {
