@@ -22,7 +22,9 @@ test("resolveStock keeps 6 digit stock codes available without master entries", 
 });
 
 test("resolveStock keeps alphanumeric KIS stock codes available without master entries", () => {
-  assert.deepEqual(resolveStock("0001a0"), {
+  // Pass an empty stocks array to simulate a master that contains no entry for
+  // this code, so the test does not depend on the bundled stocks.json content.
+  assert.deepEqual(resolveStock("0001a0", []), {
     code: "0001A0",
     name: "0001A0",
     market: "UNKNOWN",
@@ -158,11 +160,12 @@ test("resolveStock still resolves a direct 6 digit stock code that matches no ma
 });
 
 test("resolveStock still resolves a direct alphanumeric ETN code that matches no master name", () => {
-  // "Q570121" is a real ETN's own code, distinct from resolving it by name
-  // (covered above). It must still fall through to the code shortcut once
-  // name/alias matching finds nothing, proving the reorder didn't remove the
-  // fallback entirely.
-  assert.deepEqual(resolveStock("Q570121"), {
+  // "Q570121" is a real ETN's own code in the bundled master, so passing the
+  // default stocks would now return the real entry (the #158 fix). Pass an
+  // empty array to isolate the fallback path: when no master entry exists for
+  // a code-shaped input, resolveStock must still echo the code back as UNKNOWN
+  // rather than throwing, proving the code-echo fallback was not removed.
+  assert.deepEqual(resolveStock("Q570121", []), {
     code: "Q570121",
     name: "Q570121",
     market: "UNKNOWN",
@@ -194,6 +197,47 @@ test("resolveStock does not throw when a caller-supplied stock entry is missing 
   assert.deepEqual(resolveStock("SIMPAC", stocks), {
     code: "SIMPAC",
     name: "SIMPAC",
+    market: "UNKNOWN",
+    aliases: [],
+  });
+});
+
+test("resolveStock resolves alphanumeric ETN code directly to its master name and market", () => {
+  // Issue #158: code-shaped input that matches stock.code (not stock.name) must
+  // return the real name and market from the master, not echo back as UNKNOWN.
+  const stocks = [
+    { code: "Q570121", name: "신한 레버리지 금선물 ETN(H)", market: "KOSDAQ", aliases: [] },
+  ];
+  assert.deepEqual(resolveStock("Q570121", stocks), {
+    code: "Q570121",
+    name: "신한 레버리지 금선물 ETN(H)",
+    market: "KOSDAQ",
+    aliases: [],
+  });
+});
+
+test("resolveStock resolves alphanumeric ETN code case-insensitively via stock.code match", () => {
+  // Lowercase input must match the master entry's code field case-insensitively.
+  const stocks = [
+    { code: "Q570121", name: "신한 레버리지 금선물 ETN(H)", market: "KOSDAQ", aliases: [] },
+  ];
+  assert.deepEqual(resolveStock("q570121", stocks), {
+    code: "Q570121",
+    name: "신한 레버리지 금선물 ETN(H)",
+    market: "KOSDAQ",
+    aliases: [],
+  });
+});
+
+test("resolveStock echoes back alphanumeric code as UNKNOWN when it is absent from the master", () => {
+  // Regression guard: a code-shaped input not present in the caller-supplied
+  // stocks array must still fall through to the echo path, returning UNKNOWN.
+  const stocks = [
+    { code: "Q570121", name: "신한 레버리지 금선물 ETN(H)", market: "KOSDAQ", aliases: [] },
+  ];
+  assert.deepEqual(resolveStock("Z999999", stocks), {
+    code: "Z999999",
+    name: "Z999999",
     market: "UNKNOWN",
     aliases: [],
   });

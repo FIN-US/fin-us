@@ -68,6 +68,7 @@ export function resolveStock(stockName, stocks) {
     // `stocks` parameter is public), so default to "" before upper-casing
     // instead of letting a bare `undefined`/`null` throw.
     return String(stock.name ?? "").toUpperCase() === upperInput
+      || String(stock.code ?? "").toUpperCase() === upperInput
       || aliases.some((alias) => String(alias ?? "").toUpperCase() === upperInput);
   });
 
