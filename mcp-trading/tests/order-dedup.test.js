@@ -730,6 +730,126 @@ test("OrderDedupStore.reserve retries a rename EACCES on win32 and eventually su
   assert.equal(calls, 2, "win32에서는 rename EACCES가 재시도돼 두 번째 시도에서 성공해야 합니다");
 });
 
+// 고아 임시 파일 스윕 테스트 (#168)
+// #writeLedger 진입 시 낡은(mtime 60초 초과) 고아 tmp 파일을 지워야 한다.
+// 잡는 뮤테이션: 스윕 코드를 지우면 고아 파일이 그대로 남아 실패해야 한다.
+test("OrderDedupStore sweeps stale orphan tmp files on the next write", (t) => {
+  const filePath = tempLedgerPath(t);
+  const dir = path.dirname(filePath);
+
+  // 낡은 고아 tmp 파일 생성: 실제 명명 규칙에 맞게 파일명을 구현에서 파생한다.
+  const orphanPath = path.join(dir, `.${path.basename(filePath)}.99999.deadbeef.tmp`);
+  fs.writeFileSync(orphanPath, "orphan");
+
+  // mtime을 61초 과거로 밀어 Date.now() 비교에서 낡은 파일로 판정되게 한다.
+  // now 주입과 무관하게 프로덕션 경로(Date.now vs mtime)를 그대로 탄다.
+  const past = (Date.now() - 61_000) / 1000; // utimesSync는 초 단위
+  fs.utimesSync(orphanPath, past, past);
+
+  const store = new OrderDedupStore({ filePath, ttlMs: 60_000 });
+
+  store.reserve("k", { stockCode: "005930" });
+
+  assert.equal(
+    fs.existsSync(orphanPath),
+    false,
+    "낡은 고아 tmp 파일이 스윕으로 삭제되어야 합니다",
+  );
+});
+
+// mtime이 최근(60초 이내)인 tmp 파일은 다른 쓰기가 진행 중일 수 있으므로
+// 건드리지 않아야 한다. 잡는 뮤테이션: 임계 없이 모든 tmp를 지우면
+// 최근 파일도 삭제되어 실패해야 한다.
+test("OrderDedupStore does not sweep a recent tmp file within 60 seconds", (t) => {
+  const filePath = tempLedgerPath(t);
+  const dir = path.dirname(filePath);
+
+  // 최근 tmp 파일 생성: 파일명을 구현에서 파생해 접두사 불일치를 방지한다.
+  const recentPath = path.join(dir, `.${path.basename(filePath)}.88888.cafebabe.tmp`);
+  fs.writeFileSync(recentPath, "recent");
+  // mtime은 기본값(현재 시각)이므로 별도 utimesSync 불필요.
+  // Date.now() - mtime ≈ 0 < 60_000 → 스윕 대상이 아님.
+
+  const store = new OrderDedupStore({ filePath, ttlMs: 60_000 });
+
+  store.reserve("k", { stockCode: "005930" });
+
+  assert.equal(
+    fs.existsSync(recentPath),
+    true,
+    "60초 이내의 최근 tmp 파일은 삭제하면 안 됩니다",
+  );
+  // t.after의 rmSync(recursive)가 dir 전체를 정리하므로 수동 unlink 불필요.
+});
+
+// 스윕 경로가 실패해도 #writeLedger는 정상 완료되어야 한다 — 스윕 실패가
+// 주문을 차단하면 안 된다(fail-closed 오염 방지). 잡는 뮤테이션: 스윕
+// try/catch 없이 던지면 reserve()가 예외를 내 실패해야 한다.
+test("OrderDedupStore completes the write even when the sweep (readdirSync) throws", (t) => {
+  const filePath = tempLedgerPath(t);
+  const store = new OrderDedupStore({
+    filePath,
+    ttlMs: 60_000,
+    now: () => 1_000,
+  });
+
+  const originalReaddirSync = fs.readdirSync;
+  t.mock.method(fs, "readdirSync", (targetPath, ...args) => {
+    if (targetPath === path.dirname(filePath)) {
+      throw new Error("simulated readdirSync failure");
+    }
+    return originalReaddirSync(targetPath, ...args);
+  });
+
+  // 스윕이 던져도 쓰기는 성공해야 한다
+  assert.doesNotThrow(() => store.reserve("k", { stockCode: "005930" }));
+
+  // 원장이 실제로 기록됐는지 확인
+  const onDisk = JSON.parse(fs.readFileSync(filePath, "utf8"));
+  assert.ok(onDisk.k, "스윕 실패에도 원장이 정상적으로 기록되어야 합니다");
+});
+
+// 잡는 뮤테이션: 개별 파일 try/catch를 지우면 첫 unlink 실패가 루프를 끊어
+// second가 남아야 한다.
+test("OrderDedupStore keeps sweeping after one orphan fails to unlink", (t) => {
+  const filePath = tempLedgerPath(t);
+  const dir = path.dirname(filePath);
+
+  // 낡은(mtime 61초 과거) 고아 2개 생성
+  const orphan1 = path.join(dir, `.${path.basename(filePath)}.11111.aaaaaa.tmp`);
+  const orphan2 = path.join(dir, `.${path.basename(filePath)}.22222.bbbbbb.tmp`);
+  fs.writeFileSync(orphan1, "orphan1");
+  fs.writeFileSync(orphan2, "orphan2");
+  const past = (Date.now() - 61_000) / 1000;
+  fs.utimesSync(orphan1, past, past);
+  fs.utimesSync(orphan2, past, past);
+
+  // 첫 번째 unlinkSync 호출만 EPERM으로 던지게 한다
+  const originalUnlinkSync = fs.unlinkSync;
+  let unlinkCalls = 0;
+  t.mock.method(fs, "unlinkSync", (p, ...args) => {
+    unlinkCalls += 1;
+    if (unlinkCalls === 1) {
+      const error = new Error("simulated EPERM on first unlink");
+      error.code = "EPERM";
+      throw error;
+    }
+    return originalUnlinkSync(p, ...args);
+  });
+
+  const store = new OrderDedupStore({ filePath, ttlMs: 60_000 });
+  store.reserve("k", { stockCode: "005930" });
+
+  // 첫 고아는 실패했고 두 번째 고아는 삭제되어야 한다.
+  // readdirSync는 이름순 정렬을 보장하지 않으므로, 두 고아 중 하나만 남아야 함을 검증한다.
+  const remainingOrphans = [orphan1, orphan2].filter((p) => fs.existsSync(p));
+  assert.equal(
+    remainingOrphans.length,
+    1,
+    "한 고아 unlink가 실패해도 나머지 고아는 스윕되어야 합니다",
+  );
+});
+
 test("OrderDedupStore stays silent when KIS_ORDER_DEDUP_TTL_MS is set but blank", (t) => {
   const originalEnvValue = process.env.KIS_ORDER_DEDUP_TTL_MS;
   t.after(() => {
