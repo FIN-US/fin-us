@@ -80,40 +80,78 @@ def _default_watchlist_repo() -> SqliteWatchlistRepo:
 def _default_catalyst_repo() -> SqliteCatalystEventRepo:
     return SqliteCatalystEventRepo(lambda: Session(engine))
 
+# "- 종목명 (코드) ..." 형식의 잔고 종목 줄을 검증하는 정규식.
+# 줄에 "(코드)" 그룹이 없는 경우(예: "- 삼성전자 · 3주")를 계약 위반으로 거부한다.
+# greedy .+가 마지막 " (코드)" 직전까지를 이름으로 잡으므로 이전의 rsplit("(", 1)과
+# 동일하게 다중 괄호 이름(CJ4우(전환), 룩셈부르크코어오피스(파생형)(A))을 올바르게
+# 처리한다. 단, 코드 자리 검증은 아래 문자 클래스로 rsplit보다 엄격해 "(합성)" 같은
+# 비코드 괄호를 코드로 인정하지 않는 점에서 rsplit과 의도적으로 다르다(아래 설명 참고).
+# ^- 가 "- " 접두사를 소비하므로 종목명 중간의 "- "(한국 - 전력)는 보존된다.
+# "(코드)" 뒤의 구분자(· 또는 :)는 매칭 대상에 포함하지 않아 포맷 변형에 유연하게
+# 대응한다.
+#
+# 코드 클래스를 [0-9A-Z]{6,}으로 한정하는 이유:
+#   - services.py의 _STOCK_CODE_EXTRACT_RE, telegram_commands.py와 동일한 컨벤션.
+#   - 하한 6: KIS 표준 6자리 코드(005930 등). 상한 없음({6,}): ETN 7자리(389종목),
+#     펀드 9자리(75종목 예: F70102B96)까지 포함.
+#   - [^()]*를 쓰면 두 가지 문제가 생긴다:
+#     1) 빈 코드 통과 — "- 삼성전자 () · 3주"의 빈 괄호가 코드 자리에 매치돼
+#        (name="삼성전자", code="") 무효 줄이 살아남는다.
+#     2) KODEX 오염 — "- KODEX 200 (합성) · 3주"에서 "(합성)"이 코드 자리에 들어가
+#        이름이 "KODEX 200"으로 잘려 이슈 #157이 막으려던 오염이 재현된다.
+STOCK_LINE_RE = re.compile(r"^- (?P<name>.+) \((?P<code>[0-9A-Z]{6,})\)")
+
+
 def extract_stocks_from_balance(balance_text: str) -> list[str]:
     """mcp-trading의 get_balance 결과에서 종목명 리스트를 추출합니다.
 
-    [보유 종목 리스트] 섹션 이후 "- "로 시작하는 모든 줄을 종목으로 해석하므로,
+    [보유 종목 리스트] 섹션 이후 "- "로 시작하는 줄 중 STOCK_LINE_RE에 매치되는
+    줄에서만 종목명을 추출합니다. 매치되지 않는 줄(코드 괄호 누락 등 계약 위반)은
+    호출당 1회 집계 경고 로그를 남기고 건너뜁니다(줄마다 로그를 남기면 템플릿
+    변경 시 종목 수만큼 WARNING이 반복 발생한다).
+
     mcp-trading/balance.js의 formatTruncationNote가 그 섹션 뒤에 덧붙이는 잘림
-    안내 문구는 "- "로 시작해서는 안 된다.
+    안내 문구는 "- "로 시작하지 않으므로, 정규식 매치 이전에 startswith("- ")
+    가드와 정규식 거부 중 어느 쪽이든 걸러집니다.
     """
-    stocks = []
+    stocks: list[str] = []
+    malformed: list[str] = []
     if "[보유 종목 리스트]" in balance_text:
         lines = balance_text.split("[보유 종목 리스트]")[1].strip().split("\n")
         for line in lines:
             if line.startswith("- "):
-                # "- 종목명 (코드) · 수량주" 형식(첫 줄만)에서 종목명 추출.
+                # "- 종목명 (코드) · 수량주" 형식을 정규식으로 앵커링해 검증한다.
                 # 이 파서는 mcp-trading/balance.js 의 formatBalanceReport() 출력 형식에 의존한다.
                 # 종목 한 건은 3줄 블록(헤더 줄 + 공백 2칸 들여쓰기 2줄)이며, 들여쓴 줄은
                 # "- " 로 시작하지 않으므로 이 조건에 걸리지 않는다.
                 #
-                # 아래 한 줄은 다음 두 가지를 의도적으로 처리한다.
-                # 1) 종목코드는 항상 줄의 마지막 "(코드)" 그룹에 있으므로 rsplit("(", 1)로
-                #    마지막 "(" 를 기준으로 자른다. split("(")[0]을 쓰면 종목명 자체에
-                #    괄호가 있을 때 첫 "(" 에서 잘려 다른 종목으로 오인식한다.
-                #    예: "CJ4우(전환) (00104K) · 1주" → rsplit 결과 "CJ4우(전환)"
+                # STOCK_LINE_RE의 greedy .+는 다음 두 가지를 의도적으로 처리한다.
+                # 1) 종목코드는 항상 줄의 마지막 "(코드)" 그룹에 있으므로 greedy 매칭으로
+                #    마지막 " (코드) · " 직전까지를 이름으로 잡는다. split("(")[0]을 쓰면
+                #    종목명 자체에 괄호가 있을 때 첫 "(" 에서 잘려 오인식한다.
+                #    예: "CJ4우(전환) (00104K) · 1주" → name 그룹 "CJ4우(전환)"
                 #    (split만 쓰면 "CJ4우"로 잘못 잘림). mcp-trading/data/stocks.json 기준
                 #    종목명 4,353개 중 348개가 "(" 를 포함하므로 드문 경우가 아니다.
-                # 2) replace("- ", "", 1)로 count=1을 명시해, 종목명 중간에 "- " 가 있어도
-                #    맨 앞의 "- " 접두사만 지운다. count 없이 전역 치환하면 이름 중간의
-                #    "- " 까지 함께 사라진다. 예: "- 한국 - 전력 (015760) · 1주"는
-                #    count=1이면 "한국 - 전력"(정상), count 없이 전역이면 "한국 전력"
-                #    (오류). 같은 stocks.json 기준으로는 종목명에 "- " 를 포함하는
-                #    경우가 0건이라 아직 관측된 적은 없지만, prdt_name은 stocks.json
-                #    마스터가 아니라 KIS output1 응답에서 오므로 완전히 배제할 수는 없다.
-                name = line.rsplit("(", 1)[0].replace("- ", "", 1).strip()
+                # 2) ^- 가 "- " 접두사를 소비하므로 종목명 중간의 "- " 가 있어도
+                #    name 그룹에 그대로 보존된다. 예: "- 한국 - 전력 (015760) · 1주"는
+                #    name "한국 - 전력"(정상). stocks.json 기준으로는 "- "를 포함하는
+                #    종목명이 0건이지만, prdt_name은 마스터가 아닌 KIS output1 응답에서
+                #    오므로 완전히 배제할 수는 없다.
+                #
+                # 매치 실패(코드 괄호 누락 등 계약 위반 줄)는 malformed에 모아 호출 후
+                # 1회 집계 경고로 남긴다.
+                match = STOCK_LINE_RE.match(line)
+                if match is None:
+                    malformed.append(line)
+                    continue
+                name = match.group("name").strip()
                 if name:
                     stocks.append(name)
+    if malformed:
+        logger.warning(
+            "예상치 못한 잔고 종목 줄 형식 %d건을 건너뛰었습니다(예시 최대 3건): %r",
+            len(malformed), malformed[:3],
+        )
     return stocks
 
 
