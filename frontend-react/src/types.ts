@@ -7,7 +7,7 @@ export interface TradingSignal {
 
 export interface AnalysisReport {
   summary: string;
-  details: TradingSignal;
+  details?: TradingSignal | null;
   source_news: string[];
   source_signals?: string[];
   trading_trend: string | null;

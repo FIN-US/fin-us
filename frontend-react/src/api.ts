@@ -19,9 +19,15 @@ export function apiErrorMessage(err: unknown): string {
   return '서버와 통신 중 오류가 발생했습니다.';
 }
 
-async function getData<T>(url: string, params?: Record<string, string>) {
+async function getData<T>(url: string, params?: Record<string, string>): Promise<T> {
   const response = await axios.get<ApiResponse<T>>(url, { params });
-  return response.data.data;
+  const { status, data, message } = response.data;
+  if (status !== 'success' || data == null) {
+    throw new Error(
+      `API 오류: status="${status}"${message ? `, message="${message}"` : ''} (url=${url})`
+    );
+  }
+  return data;
 }
 
 async function postData<T>(url: string, body: unknown) {

@@ -11,6 +11,12 @@ const ReportSidebar: React.FC<ReportSidebarProps> = ({ report, currentNews }) =>
   return (
     <div className="xl:col-span-1 space-y-6">
       {report && (
+        report.details == null ? (
+          <div className="p-8 rounded-[2rem] border-none shadow-2xl bg-gradient-to-br from-slate-400 to-slate-500 text-white">
+            <span className="text-xs font-black uppercase tracking-widest opacity-80">AI STRATEGY</span>
+            <p className="mt-4 text-sm font-bold opacity-80">분석 결과 없음</p>
+          </div>
+        ) : (
         <div className={`p-8 rounded-[2rem] border-none shadow-2xl relative overflow-hidden ${
           report.details.decision === 'BUY' ? 'bg-gradient-to-br from-rose-500 to-rose-600 text-white' :
           report.details.decision === 'SELL' ? 'bg-gradient-to-br from-indigo-500 to-indigo-600 text-white' :
@@ -49,6 +55,7 @@ const ReportSidebar: React.FC<ReportSidebarProps> = ({ report, currentNews }) =>
             {report.details.reason}
           </p>
         </div>
+        )
       )}
 
       <div className="bg-white p-6 rounded-[2rem] shadow-xl border border-slate-50">
