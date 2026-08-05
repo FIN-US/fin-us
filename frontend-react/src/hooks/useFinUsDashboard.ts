@@ -2,6 +2,26 @@ import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { apiErrorMessage, finUsApi } from '../api';
 import type { AnalysisReport, ChatMessage, DashboardResources } from '../types';
 
+export type EndpointStatus = 'unknown' | 'ok' | 'fail';
+
+export interface EndpointOk {
+  health: EndpointStatus;
+  balance: EndpointStatus;
+  portfolio: EndpointStatus;
+  trades: EndpointStatus;
+  reports: EndpointStatus;
+  diaries: EndpointStatus;
+}
+
+const initialEndpointOk: EndpointOk = {
+  health: 'unknown',
+  balance: 'unknown',
+  portfolio: 'unknown',
+  trades: 'unknown',
+  reports: 'unknown',
+  diaries: 'unknown',
+};
+
 const initialResources: DashboardResources = {
   health: null,
   balance: null,
@@ -34,6 +54,7 @@ export function useFinUsDashboard() {
   const [rawNews, setRawNews] = useState<string[]>([]);
   const [rawTrend, setRawTrend] = useState<string | null>(null);
   const [resources, setResources] = useState<DashboardResources>(initialResources);
+  const [endpointOk, setEndpointOk] = useState<EndpointOk>(initialEndpointOk);
   const [error, setError] = useState('');
   const [chatStatus, setChatStatus] = useState<'connecting' | 'open' | 'closed'>('connecting');
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([
@@ -67,6 +88,15 @@ export function useFinUsDashboard() {
       trades: trades.status === 'fulfilled' ? trades.value : [],
       reports: reports.status === 'fulfilled' ? reports.value : [],
       diaries: diaries.status === 'fulfilled' ? diaries.value : [],
+    });
+
+    setEndpointOk({
+      health: health.status === 'fulfilled' ? 'ok' : 'fail',
+      balance: balance.status === 'fulfilled' ? 'ok' : 'fail',
+      portfolio: portfolio.status === 'fulfilled' ? 'ok' : 'fail',
+      trades: trades.status === 'fulfilled' ? 'ok' : 'fail',
+      reports: reports.status === 'fulfilled' ? 'ok' : 'fail',
+      diaries: diaries.status === 'fulfilled' ? 'ok' : 'fail',
     });
 
     const failed = [health, balance, portfolio, trades, reports, diaries].some((item) => item.status === 'rejected');
@@ -191,6 +221,7 @@ export function useFinUsDashboard() {
     rawNews,
     rawTrend,
     resources,
+    endpointOk,
     error,
     chatStatus,
     chatMessages,
