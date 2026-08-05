@@ -285,7 +285,7 @@ test("kisOrderPost: throws a named error identifying the missing dependency when
     getAccessToken: async () => "test-token",
   };
 
-  for (const missing of ["kisAxios", "kisUrl", "appKey", "appSecret", "pathname", "trId", "body", "getAccessToken"]) {
+  for (const missing of ["kisAxios", "kisUrl", "appKey", "appSecret", "pathname", "trId", "body", "useHashKey", "getAccessToken"]) {
     const args = { ...validArgs, [missing]: undefined };
     await assert.rejects(
       () => kisOrderPost(args),

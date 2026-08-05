@@ -41,6 +41,10 @@ const KIS_ORDER_POST_REQUIRED_DEPENDENCIES = [
   "pathname",
   "trId",
   "body",
+  // 기본값 false는 "hashkey 없이 주문 POST를 보낸다"는 뜻이라 조용히 틀릴 수 있다.
+  // 누락 시 KIS 거절 -> kisOrderRejected -> 중복 방지 가드 해제 경로를 타므로,
+  // 이 주문 제출 전용 함수에서는 명시 배선을 강제한다(위 주석의 "아홉 개"와도 일치).
+  "useHashKey",
   "getAccessToken",
 ];
 
@@ -65,10 +69,10 @@ export async function kisOrderPost({
   pathname,
   trId,
   body,
-  useHashKey = false,
+  useHashKey,
   getAccessToken,
 }) {
-  requireKisOrderPostDependencies({ kisAxios, kisUrl, appKey, appSecret, pathname, trId, body, getAccessToken });
+  requireKisOrderPostDependencies({ kisAxios, kisUrl, appKey, appSecret, pathname, trId, body, useHashKey, getAccessToken });
 
   // 이 블록(토큰 발급, 필요 시 해시키 발급)이 던지는 오류는 아래 실제 주문 POST가 아직
   // 나가기 전에 발생한 것이므로, 주문이 KIS에 제출되지 않았음이 확실하다.
