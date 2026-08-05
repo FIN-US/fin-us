@@ -1,21 +1,23 @@
 import React from 'react';
 import { Activity, RefreshCw, Server, WalletCards } from 'lucide-react';
 import type { DashboardResources } from '../types';
+import type { EndpointOk } from '../hooks/useFinUsDashboard';
 
 interface BackendPanelProps {
   resources: DashboardResources;
+  endpointOk: EndpointOk;
   loading: boolean;
   onRefresh: () => void;
 }
 
-const BackendPanel: React.FC<BackendPanelProps> = ({ resources, loading, onRefresh }) => {
+const BackendPanel: React.FC<BackendPanelProps> = ({ resources, endpointOk, loading, onRefresh }) => {
   const endpoints = [
-    { label: 'Health', ok: Boolean(resources.health), path: '/health' },
-    { label: 'Balance', ok: Boolean(resources.balance), path: '/api/v1/trading/balance' },
-    { label: 'Portfolio', ok: resources.portfolio.length >= 0, path: '/api/v1/db/portfolio' },
-    { label: 'Trades', ok: resources.trades.length >= 0, path: '/api/v1/db/trades' },
-    { label: 'Reports', ok: resources.reports.length >= 0, path: '/api/v1/db/reports' },
-    { label: 'Diary', ok: resources.diaries.length >= 0, path: '/api/v1/db/diary' },
+    { label: 'Health', ok: endpointOk.health, path: '/health' },
+    { label: 'Balance', ok: endpointOk.balance, path: '/api/v1/trading/balance' },
+    { label: 'Portfolio', ok: endpointOk.portfolio, path: '/api/v1/db/portfolio' },
+    { label: 'Trades', ok: endpointOk.trades, path: '/api/v1/db/trades' },
+    { label: 'Reports', ok: endpointOk.reports, path: '/api/v1/db/reports' },
+    { label: 'Diary', ok: endpointOk.diaries, path: '/api/v1/db/diary' },
   ];
 
   return (

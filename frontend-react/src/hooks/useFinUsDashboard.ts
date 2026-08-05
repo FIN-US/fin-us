@@ -2,6 +2,24 @@ import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { apiErrorMessage, finUsApi } from '../api';
 import type { AnalysisReport, ChatMessage, DashboardResources } from '../types';
 
+export interface EndpointOk {
+  health: boolean;
+  balance: boolean;
+  portfolio: boolean;
+  trades: boolean;
+  reports: boolean;
+  diaries: boolean;
+}
+
+const initialEndpointOk: EndpointOk = {
+  health: false,
+  balance: false,
+  portfolio: false,
+  trades: false,
+  reports: false,
+  diaries: false,
+};
+
 const initialResources: DashboardResources = {
   health: null,
   balance: null,
@@ -34,6 +52,7 @@ export function useFinUsDashboard() {
   const [rawNews, setRawNews] = useState<string[]>([]);
   const [rawTrend, setRawTrend] = useState<string | null>(null);
   const [resources, setResources] = useState<DashboardResources>(initialResources);
+  const [endpointOk, setEndpointOk] = useState<EndpointOk>(initialEndpointOk);
   const [error, setError] = useState('');
   const [chatStatus, setChatStatus] = useState<'connecting' | 'open' | 'closed'>('connecting');
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([
@@ -67,6 +86,15 @@ export function useFinUsDashboard() {
       trades: trades.status === 'fulfilled' ? trades.value : [],
       reports: reports.status === 'fulfilled' ? reports.value : [],
       diaries: diaries.status === 'fulfilled' ? diaries.value : [],
+    });
+
+    setEndpointOk({
+      health: health.status === 'fulfilled',
+      balance: balance.status === 'fulfilled',
+      portfolio: portfolio.status === 'fulfilled',
+      trades: trades.status === 'fulfilled',
+      reports: reports.status === 'fulfilled',
+      diaries: diaries.status === 'fulfilled',
     });
 
     const failed = [health, balance, portfolio, trades, reports, diaries].some((item) => item.status === 'rejected');
@@ -191,6 +219,7 @@ export function useFinUsDashboard() {
     rawNews,
     rawTrend,
     resources,
+    endpointOk,
     error,
     chatStatus,
     chatMessages,
