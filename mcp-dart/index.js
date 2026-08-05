@@ -7,6 +7,7 @@ import { XMLParser } from "fast-xml-parser";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import { cleanText, resolveCorp } from "./corp-resolver.js";
 
 console.log = console.error;
 
@@ -104,10 +105,6 @@ function requireDartApiKey() {
 function asArray(value) {
   if (!value) return [];
   return Array.isArray(value) ? value : [value];
-}
-
-function cleanText(value) {
-  return String(value ?? "").replace(/\s+/g, " ").trim();
 }
 
 function formatDate(date) {
@@ -248,28 +245,6 @@ async function downloadCorpCodes(apiKey) {
 
 async function getCorpCodes(apiKey) {
   return (await readFreshCorpCodeCache()) || (await downloadCorpCodes(apiKey));
-}
-
-function resolveCorp(items, input) {
-  const query = cleanText(input);
-  if (!query) throw new Error("stock_name 파라미터가 비어 있습니다.");
-
-  const matches = /^\d{6}$/.test(query)
-    ? items.filter((item) => item.stock_code === query)
-    : items.filter((item) => item.corp_name === query);
-
-  if (matches.length === 0) {
-    throw new Error(`'${query}'와 정확히 일치하는 DART 상장회사 정보를 찾지 못했습니다.`);
-  }
-  if (matches.length > 1) {
-    const names = matches
-      .slice(0, 5)
-      .map((item) => `${item.corp_name}(${item.stock_code}, ${item.corp_code})`)
-      .join(", ");
-    throw new Error(`'${query}'가 여러 회사와 일치합니다: ${names}`);
-  }
-
-  return matches[0];
 }
 
 async function fetchDisclosureList(apiKey, corp, window) {

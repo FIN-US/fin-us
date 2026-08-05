@@ -99,6 +99,28 @@ jobs:
       - name: mcp-trading 테스트 실행
         run: npm test
 
+  mcp-dart-test:
+    name: mcp-dart npm test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mcp-dart
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Node 24 설치 (npm 캐시 활성화)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+          cache-dependency-path: mcp-dart/package-lock.json
+
+      - name: npm 의존성 설치
+        run: npm ci
+
+      - name: mcp-dart 테스트 실행
+        run: npm test
+
   frontend-typecheck:
     name: Frontend tsc --noEmit
     runs-on: ubuntu-latest
