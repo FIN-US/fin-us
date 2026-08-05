@@ -81,6 +81,9 @@ export function renameRetryCodesForPlatform(platform) {
 const RENAME_RETRY_CODES = renameRetryCodesForPlatform(process.platform);
 const RENAME_MAX_ATTEMPTS = 5;
 const RENAME_RETRY_BACKOFF_MS = [10, 15, 20, 30];
+// 살아 있는 writer의 open→write→fsync→rename은 최악에도 rename 재시도 총합(~75ms)을
+// 크게 넘지 않는다. 60초는 그 위로 충분한 여유를 둬 스윕이 진행 중인 tmp를 안 건드리게 한다.
+const STALE_TMP_MS = 60_000;
 // 마지막 시도 뒤에는 자지 않으므로 백오프 배열은 시도 수보다 정확히 하나
 // 적어야 한다. 어긋나면 #renameLedgerAtomic의 인덱싱이 조용히 틀어지므로
 // 여기서 바로 드러낸다.
@@ -242,7 +245,7 @@ export class OrderDedupStore {
         const stale = path.join(dir, name);
         if (stale === tmpPath) continue;
         try {
-          if (this.now() - fs.statSync(stale).mtimeMs > 60_000) fs.unlinkSync(stale);
+          if (Date.now() - fs.statSync(stale).mtimeMs > STALE_TMP_MS) fs.unlinkSync(stale);
         } catch { /* 개별 파일 정리 실패는 무시한다 */ }
       }
     } catch { /* readdir 실패도 무시한다 */ }
