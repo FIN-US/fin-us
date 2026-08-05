@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { resolveCorp } from "../corp-resolver.js";
+import { resolveCorp, stripPreferredStockSuffix } from "../corp-resolver.js";
 
 // 합성 items 배열 — 외부 의존성 없이 순수 단위 테스트
 const items = [
@@ -10,6 +10,7 @@ const items = [
   { corp_name: "LG화학", stock_code: "051910", corp_code: "00000004" },
   // 우선주가 실제로 corp_name으로 등록된 경우(완전일치 우선 검증용)
   { corp_name: "삼성전자우", stock_code: "005935", corp_code: "00000005" },
+  { corp_name: "CJ제일제당", stock_code: "097950", corp_code: "00000006" },
 ];
 
 // 우선주·전환주 접미사 정규화 폴백 케이스
@@ -81,4 +82,36 @@ test("삼성전자(접미사 없음) → 완전일치로 반환", () => {
   const result = resolveCorp(items, "삼성전자");
   assert.equal(result.corp_name, "삼성전자");
   assert.equal(result.stock_code, "005930");
+});
+
+// 🔴1: KRX 종목명에 접미사 앞 공백이 있는 경우 ("CJ제일제당 우")
+test("CJ제일제당 우 → 접미사 앞 공백 제거 후 corp_name CJ제일제당 반환", () => {
+  const result = resolveCorp(items, "CJ제일제당 우");
+  assert.equal(result.corp_name, "CJ제일제당");
+  assert.equal(result.stock_code, "097950");
+});
+
+// 🔵2: stripPreferredStockSuffix 경계값 직접 테스트
+test("stripPreferredStockSuffix: 삼성전자우 → 삼성전자", () => {
+  assert.equal(stripPreferredStockSuffix("삼성전자우"), "삼성전자");
+});
+
+test("stripPreferredStockSuffix: 우 → undefined (빈 문자열 방지)", () => {
+  assert.equal(stripPreferredStockSuffix("우"), undefined);
+});
+
+test("stripPreferredStockSuffix: 삼성전자 → undefined (제거된 것 없음)", () => {
+  assert.equal(stripPreferredStockSuffix("삼성전자"), undefined);
+});
+
+// 🟡3: 폴백 다중 매칭 에러에 baseName이 포함됨
+test("폴백 다중 매칭 시 에러 메시지에 기본 법인명이 포함됨", () => {
+  const dupItems = [
+    { corp_name: "CJ", stock_code: "001040", corp_code: "00000001" },
+    { corp_name: "CJ", stock_code: "001041", corp_code: "00000009" },
+  ];
+  assert.throws(
+    () => resolveCorp(dupItems, "CJ4우(전환)"),
+    /기본 법인명 'CJ'/,
+  );
 });

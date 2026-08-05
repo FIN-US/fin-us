@@ -27,8 +27,21 @@ export function cleanText(value) {
  * @returns {string | undefined}
  */
 export function stripPreferredStockSuffix(name) {
-  const base = name.replace(/\d*우B?(\(전환\))?$/, "");
-  return base.length > 0 ? base : undefined;
+  // `\s*`: "CJ제일제당 우"처럼 접미사 앞에 공백이 들어간 KRX 종목명 대응.
+  // `\d*`: "해성산업1우"·"현대차2우B" 같은 신형우선주 회차 번호.
+  const base = name.replace(/\s*\d*우B?(\(전환\))?$/, "").trim();
+  if (base.length === 0 || base === name) return undefined; // 제거된 게 없으면 폴백 불필요
+  return base;
+}
+
+const MAX_LISTED_MATCHES = 5;
+
+function ambiguousMatchError(query, matches) {
+  const names = matches
+    .slice(0, MAX_LISTED_MATCHES)
+    .map((item) => `${item.corp_name}(${item.stock_code}, ${item.corp_code})`)
+    .join(", ");
+  return new Error(`'${query}'가 여러 회사와 일치합니다: ${names}`);
 }
 
 /**
@@ -54,26 +67,14 @@ export function resolveCorp(items, input) {
     if (matches.length === 0) {
       throw new Error(`'${query}'와 정확히 일치하는 DART 상장회사 정보를 찾지 못했습니다.`);
     }
-    if (matches.length > 1) {
-      const names = matches
-        .slice(0, 5)
-        .map((item) => `${item.corp_name}(${item.stock_code}, ${item.corp_code})`)
-        .join(", ");
-      throw new Error(`'${query}'가 여러 회사와 일치합니다: ${names}`);
-    }
+    if (matches.length > 1) throw ambiguousMatchError(query, matches);
     return matches[0];
   }
 
   // 법인명 완전일치 (항상 우선)
   const exactMatches = items.filter((item) => item.corp_name === query);
   if (exactMatches.length === 1) return exactMatches[0];
-  if (exactMatches.length > 1) {
-    const names = exactMatches
-      .slice(0, 5)
-      .map((item) => `${item.corp_name}(${item.stock_code}, ${item.corp_code})`)
-      .join(", ");
-    throw new Error(`'${query}'가 여러 회사와 일치합니다: ${names}`);
-  }
+  if (exactMatches.length > 1) throw ambiguousMatchError(query, exactMatches);
 
   // 완전일치 0건 → 우선주·전환주 접미사 제거 후 폴백
   const baseName = stripPreferredStockSuffix(query);
@@ -82,10 +83,12 @@ export function resolveCorp(items, input) {
     if (fallbackMatches.length === 1) return fallbackMatches[0];
     if (fallbackMatches.length > 1) {
       const names = fallbackMatches
-        .slice(0, 5)
+        .slice(0, MAX_LISTED_MATCHES)
         .map((item) => `${item.corp_name}(${item.stock_code}, ${item.corp_code})`)
         .join(", ");
-      throw new Error(`'${query}'가 여러 회사와 일치합니다: ${names}`);
+      throw new Error(
+        `'${query}'의 기본 법인명 '${baseName}'이 여러 회사와 일치합니다: ${names}`,
+      );
     }
   }
 
