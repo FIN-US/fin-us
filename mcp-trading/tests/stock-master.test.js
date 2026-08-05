@@ -192,10 +192,12 @@ test("resolveStock still resolves a direct alphanumeric ETN code that matches no
 });
 
 test("resolveStock resolves a fund's Korean name to its real 9 char code, unaffected by the shortcut reorder", () => {
-  // 9 char fund codes (e.g. F70100026) fall outside the shortcut's {6,7}
-  // pattern entirely and can only be reached via name/alias matching. This
-  // pins that the reordering did not disturb matching for names containing
-  // parentheses or codes longer than the shortcut's range.
+  // This resolves the fund by its Korean NAME, so Step 1's code short-circuit
+  // misses and Step 2 (name/alias matching) answers. It pins that the
+  // reordering did not disturb matching for names containing parentheses.
+  // The 9-char CODE input itself is NOT name/alias-only: since #174 Step 1 is
+  // length-agnostic, "F70100026" resolves directly — see the
+  // "9 char fund code ... present in master" test below.
   assert.deepEqual(resolveStock("한투글로벌넥스트웨이브1(A)"), {
     code: "F70100026",
     name: "한투글로벌넥스트웨이브1(A)",
