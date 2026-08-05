@@ -239,7 +239,7 @@ class TestBalanceExtraction(unittest.TestCase):
 
     def test_extract_stocks_notice_line_not_extracted_as_stock(self):
         """[안내] 잘림 문구("- "로 시작하지 않음)는 정규식과 startswith("- ") 가드
-        중 어느 쪽이든 거부되므로 종목으로 추출되지 않습니다。STOCK_LINE_RE 도입
+        중 어느 쪽이든 거부되므로 종목으로 추출되지 않습니다. STOCK_LINE_RE 도입
         후에도 이 동작이 유지되는지 회귀 방지로 확인합니다.
         """
         balance_text = (
