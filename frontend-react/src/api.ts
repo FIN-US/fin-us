@@ -1,4 +1,4 @@
-import axios from 'axios';
+import axios, { type AxiosResponse } from 'axios';
 import type {
   AccountBalance,
   AgentReportItem,
@@ -10,29 +10,43 @@ import type {
   TradeHistoryItem,
 } from './types';
 
+// status가 success가 아니거나 data가 없는 API 응답을 나타낸다. 사용자에게는
+// 백엔드 message/url을 그대로 노출하지 않고(내부 경로 유출 방지), 진단 정보는
+// message/console.error 쪽으로만 보낸다.
+export class ApiStatusError extends Error {
+  constructor(readonly status: string, readonly detail: string | null, readonly url: string) {
+    super(`API 오류: status="${status}"${detail ? `, message="${detail}"` : ''} (url=${url})`);
+    this.name = 'ApiStatusError';
+  }
+}
+
 export function apiErrorMessage(err: unknown): string {
   if (axios.isAxiosError(err)) {
     const detail = err.response?.data?.detail || err.response?.data?.message;
     if (detail) return typeof detail === 'string' ? detail : JSON.stringify(detail);
     if (err.message) return err.message;
   }
+  if (err instanceof ApiStatusError) {
+    console.error(err.message);
+    return err.detail ?? '서버가 오류 응답을 반환했습니다.';
+  }
   return '서버와 통신 중 오류가 발생했습니다.';
 }
 
-async function getData<T>(url: string, params?: Record<string, string>): Promise<T> {
-  const response = await axios.get<ApiResponse<T>>(url, { params });
+function unwrap<T>(response: AxiosResponse<ApiResponse<T>>, url: string): T {
   const { status, data, message } = response.data;
   if (status !== 'success' || data == null) {
-    throw new Error(
-      `API 오류: status="${status}"${message ? `, message="${message}"` : ''} (url=${url})`
-    );
+    throw new ApiStatusError(status, message ?? null, url);
   }
   return data;
 }
 
-async function postData<T>(url: string, body: unknown) {
-  const response = await axios.post<ApiResponse<T>>(url, body);
-  return response.data.data;
+async function getData<T>(url: string, params?: Record<string, string>): Promise<T> {
+  return unwrap(await axios.get<ApiResponse<T>>(url, { params }), url);
+}
+
+async function postData<T>(url: string, body: unknown): Promise<T> {
+  return unwrap(await axios.post<ApiResponse<T>>(url, body), url);
 }
 
 export const finUsApi = {

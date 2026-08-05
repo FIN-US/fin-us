@@ -7,7 +7,10 @@ export interface TradingSignal {
 
 export interface AnalysisReport {
   summary: string;
-  details?: TradingSignal | null;
+  // 백엔드 schemas.py는 details: TradingSignal(필수)이지만, /api/v1/analyze의
+  // response_model이 CommonResponse(data: Any | None)라 이 필드가 스키마 검증을
+  // 거치지 않는다. 방어적으로 nullable로 선언한다 (#70).
+  details: TradingSignal | null;
   source_news: string[];
   source_signals?: string[];
   trading_trend: string | null;
