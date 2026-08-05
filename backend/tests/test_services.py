@@ -1,4 +1,6 @@
+import inspect
 import logging
+import typing
 from datetime import date
 from urllib.parse import quote
 from types import SimpleNamespace
@@ -141,6 +143,140 @@ async def test_perform_stock_analysis_includes_trigger_signal(monkeypatch):
     assert "분석 트리거 데이터 출처: sns" in prompts[0][1]
     assert "SNS mentions spiked after earnings guidance" in prompts[0][1]
     assert '"source_signals"' in prompts[0][1]
+
+
+@pytest.mark.asyncio
+async def test_provider_supports_tools_matches_llm_chat_dispatch(monkeypatch):
+    """provider_supports_tools()가 llm_chat의 실제 라우팅과 어긋나지 않는지 확인한다.
+
+    이전 버전은 provider_is_tool_backed의 출력을 하드코딩된 기대값 4개와만
+    비교했다 - llm_chat 자체의 라우팅이 깨져도(예: openai를 실수로 _llm_nat_chat에
+    연결해도) 통과했다. 여기서는 각 provider_key로 실제 services.llm_chat()을
+    호출해 내부적으로 어떤 _llm_*_chat 구현이 실행됐는지 관측하고, 그 관측치와
+    provider_supports_tools()의 답을 대조한다.
+
+    typing.get_args로 llm_chat의 provider_key Literal을 그대로 열거하므로,
+    다섯 번째 provider가 Literal과 dispatch에는 추가됐는데 tool_dispatch_targets에는
+    반영되지 않으면 provider_supports_tools()의 반환값과 expected가 어긋나
+    마지막 assert에서 실패한다 - 하드코딩된 목록이 아니라 실제 시그니처를
+    따라간다.
+    """
+    invoked: list[str] = []
+
+    async def fake_openai(user_msg):
+        invoked.append("openai")
+        return "ok"
+
+    async def fake_anthropic(user_msg):
+        invoked.append("anthropic")
+        return "ok"
+
+    async def fake_ollama(user_msg):
+        invoked.append("ollama")
+        return "ok"
+
+    async def fake_nat(user_msg, *, conversation_id=None):
+        invoked.append("nat")
+        return "ok"
+
+    monkeypatch.setattr(services, "_llm_openai_chat", fake_openai)
+    monkeypatch.setattr(services, "_llm_anthropic_chat", fake_anthropic)
+    monkeypatch.setattr(services, "_llm_ollama_chat", fake_ollama)
+    monkeypatch.setattr(services, "_llm_nat_chat", fake_nat)
+
+    annotation = inspect.signature(services.llm_chat).parameters["provider_key"].annotation
+    provider_keys = typing.get_args(annotation)
+    assert provider_keys, "llm_chat의 provider_key가 Literal이 아니게 되면 이 전제부터 깨진다"
+
+    # llm_chat이 실제로 도구를 쓰는 핸들러로 보내는 내부 구현 이름.
+    # provider_key 자체가 아니라 "어디로 라우팅됐는가"로 판정한다.
+    tool_dispatch_targets = {"nat"}
+
+    for key in provider_keys:
+        invoked.clear()
+        await services.llm_chat(key, "테스트")
+        assert len(invoked) == 1, f"{key}가 정확히 하나의 _llm_*_chat 구현으로 라우팅되어야 한다"
+        dispatched_to = invoked[0]
+        expected = dispatched_to in tool_dispatch_targets
+        assert services.provider_supports_tools(key) is expected, (
+            f"provider_key={key!r}가 실제로는 {dispatched_to!r}로 라우팅되는데 "
+            f"provider_supports_tools({key!r})={services.provider_supports_tools(key)}은 "
+            f"{expected}와 어긋난다"
+        )
+
+
+@pytest.mark.asyncio
+async def test_toolless_providers_pass_no_tools_to_the_model(monkeypatch):
+    """provider_supports_tools()가 False인 provider는 실제로 tools 없이 모델을 호출해야 한다."""
+    captured = {}
+
+    class FakeCompletions:
+        async def create(self, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))]
+            )
+
+    monkeypatch.setattr(
+        services,
+        "AsyncOpenAI",
+        lambda api_key: SimpleNamespace(
+            chat=SimpleNamespace(completions=FakeCompletions())
+        ),
+    )
+    monkeypatch.setattr(services, "OPENAI_API_KEY", "test-key")
+    await services._llm_openai_chat("hi")
+    assert "tools" not in captured, (
+        "openai가 tools를 넘기면 provider_supports_tools(False)가 거짓이 된다"
+    )
+
+
+@pytest.mark.asyncio
+async def test_perform_stock_analysis_marks_toolless_provider_report_unverified(monkeypatch):
+    """도구 없이 호출되는 provider(openai/anthropic/ollama)로 만든 AgentReport는
+    provider_supports_tools=False로 저장되고, API 응답 payload에도 같은 값이
+    실려야 한다. provider_supports_tools가 항상 True를 반환하도록 뒤집으면(또는
+    perform_stock_analysis가 이 값을 무시하면) 이 테스트가 깨진다.
+    """
+    async def fake_llm_chat(provider, prompt, *, conversation_id=None):
+        return "plain analysis"
+
+    async def fake_run_mcp_tool(params, tool_name, arguments):
+        return "삼성전자 (005930, KOSPI)"
+
+    monkeypatch.setattr(services, "llm_chat", fake_llm_chat)
+    monkeypatch.setattr(services, "run_mcp_tool", fake_run_mcp_tool)
+
+    session = FakeSession()
+    result = await services.perform_stock_analysis("삼성전자", "openai", session)
+
+    assert session.report.provider_supports_tools is False
+    assert result["provider"] == "openai"
+    assert result["provider_supports_tools"] is False
+
+
+@pytest.mark.asyncio
+async def test_perform_stock_analysis_marks_nat_report_tool_supporting(monkeypatch):
+    """provider=nat으로 만든 AgentReport는 provider_supports_tools=True로 저장되고,
+    API 응답 payload에도 같은 값이 실려야 한다. (#162 수용 기준: provider=nat
+    경로의 동작은 불변). _TOOL_CAPABLE_PROVIDERS에서 "nat"이 빠지면 이 테스트가
+    깨진다.
+    """
+    async def fake_llm_chat(provider, prompt, *, conversation_id=None):
+        return "plain analysis"
+
+    async def fake_run_mcp_tool(params, tool_name, arguments):
+        return "삼성전자 (005930, KOSPI)"
+
+    monkeypatch.setattr(services, "llm_chat", fake_llm_chat)
+    monkeypatch.setattr(services, "run_mcp_tool", fake_run_mcp_tool)
+
+    session = FakeSession()
+    result = await services.perform_stock_analysis("삼성전자", "nat", session)
+
+    assert session.report.provider_supports_tools is True
+    assert result["provider"] == "nat"
+    assert result["provider_supports_tools"] is True
 
 
 @pytest.mark.asyncio

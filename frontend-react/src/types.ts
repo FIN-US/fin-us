@@ -11,6 +11,12 @@ export interface AnalysisReport {
   source_news: string[];
   source_signals?: string[];
   trading_trend: string | null;
+  // provider가 도구(MCP/KIS/뉴스)를 호출할 수 있는 경로로 구성돼 있는지 여부.
+  // provider 자체에서 파생된 "능력" 신호일 뿐, 이 응답에서 실제로 도구가
+  // 호출됐다는 관측은 아니다 (백엔드 #152 참고).
+  // 백엔드 schemas.py의 provider: str | None = None과 일치시킨다.
+  provider: string | null;
+  provider_supports_tools: boolean;
 }
 
 export interface TrendItem {
@@ -59,11 +65,17 @@ export interface AgentReportItem {
   id?: number;
   stock_code: string;
   stock_name: string;
-  provider: string;
+  // 백엔드 models.py의 provider: str과 실제 API 직렬화 상 null 가능성에 맞춰
+  // string | null로 선언한다. UI 보간 시 ?? 폴백을 사용한다.
+  provider: string | null;
   summary: string;
   decision: string;
   confidence_score: number;
   reason: string;
+  // provider가 도구(MCP/KIS/뉴스)를 호출할 수 있는 경로로 구성돼 있는지 여부.
+  // provider 자체에서 파생된 "능력" 신호일 뿐, 이 리포트에서 실제로 도구가
+  // 호출됐다는 관측은 아니다 (백엔드 #152 참고).
+  provider_supports_tools: boolean;
   created_at: string;
 }
 

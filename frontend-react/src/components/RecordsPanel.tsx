@@ -75,15 +75,41 @@ const RecordsPanel: React.FC<RecordsPanelProps> = ({ resources, loading, onSubmi
         </div>
         <div className="space-y-3 max-h-72 overflow-auto">
           {resources.reports.length === 0 && <p className="text-sm text-slate-400">저장된 리포트가 없습니다.</p>}
-          {resources.reports.map((item) => (
-            <div key={item.id ?? `${item.stock_name}-${item.created_at}`} className="rounded-lg bg-slate-50 p-4">
-              <div className="flex justify-between gap-3">
-                <div className="font-black text-slate-800">{item.stock_name}</div>
-                <span className="text-xs font-black text-slate-500">{item.decision}</span>
+          {resources.reports.map((item) => {
+            // provider_supports_tools=False && provider==='nat'은 이 컬럼이 추가되기 전에
+            // 저장된 legacy 행을 의미한다. 새 코드는 nat이면 반드시 True를 쓰므로,
+            // nat && !supports_tools 조합은 legacy 과거 행에서만 나온다.
+            const providerLabel = item.provider ?? '알 수 없음';
+            const legacyUnknown = !item.provider_supports_tools && item.provider === 'nat';
+            const badgeLabel = item.provider_supports_tools
+              ? 'TOOL-CAPABLE'
+              : legacyUnknown ? 'UNKNOWN' : 'NO TOOLS';
+            const badgeTitle = item.provider_supports_tools
+              ? `provider(${providerLabel})가 도구 호출 경로로 구성되어 있음 — 실제 호출 여부는 확인되지 않았습니다.`
+              : legacyUnknown
+                ? `이 컬럼이 추가되기 전에 저장된 리포트입니다. 도구 사용 여부를 확인할 수 없습니다.`
+                : `provider(${providerLabel})는 도구 없이 생성된 리포트입니다.`;
+            const badgeClass = item.provider_supports_tools
+              ? 'bg-emerald-100 text-emerald-700'
+              : legacyUnknown ? 'bg-amber-100 text-amber-600' : 'bg-slate-200 text-slate-500';
+            return (
+              <div key={item.id ?? `${item.stock_name}-${item.created_at}`} className="rounded-lg bg-slate-50 p-4">
+                <div className="flex justify-between gap-3">
+                  <div className="font-black text-slate-800">{item.stock_name}</div>
+                  <div className="flex items-center gap-2">
+                    <span
+                      className={`text-[10px] font-black uppercase px-2 py-0.5 rounded-full ${badgeClass}`}
+                      title={badgeTitle}
+                    >
+                      {badgeLabel}
+                    </span>
+                    <span className="text-xs font-black text-slate-500">{item.decision}</span>
+                  </div>
+                </div>
+                <p className="mt-2 line-clamp-3 text-xs leading-relaxed text-slate-500">{item.summary}</p>
               </div>
-              <p className="mt-2 line-clamp-3 text-xs leading-relaxed text-slate-500">{item.summary}</p>
-            </div>
-          ))}
+            );
+          })}
         </div>
       </div>
 

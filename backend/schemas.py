@@ -17,6 +17,13 @@ class AnalysisReport(BaseModel):
     urgency: Literal["low", "normal", "high", "critical"] = "normal"
     urgency_reason: str | None = None
     telegram_alert: bool = False
+    # #162: LLM 원문 JSON에는 없는 필드. services.perform_stock_analysis가
+    # analysis_from_nat_text 호출 이후 provider_supports_tools()로 파생한 값을
+    # 덮어써 채운다. 기본값(None/False)은 이 스키마가 (드물게) LLM 응답 파싱
+    # 경로에서 직접 쓰일 때를 위한 안전값일 뿐, /api/v1/analyze 응답에서는 항상
+    # perform_stock_analysis가 실제 provider 값으로 덮어쓴다.
+    provider: str | None = None
+    provider_supports_tools: bool = False
 
 
 class CommonResponse(BaseModel):

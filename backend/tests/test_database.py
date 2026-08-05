@@ -202,6 +202,12 @@ async def test_analyze_stock_saves_report(client: TestClient, session: Session, 
     response = client.get("/api/v1/analyze?stock=삼성전자")
     assert response.status_code == 200
     assert response.json()["status"] == "success"
+    payload = response.json()["data"]
+    # /api/v1/analyze 응답 payload 자체에도 provider/provider_supports_tools가
+    # 실려야 한다 (#162 HIGH2) - AnalysisReport만 반환하고 저장된 값을 붙이지
+    # 않으면 이 두 줄이 깨진다.
+    assert payload["provider"] == "openai"
+    assert payload["provider_supports_tools"] is False
 
     # Verify DB save
     reports = session.query(AgentReport).all()
@@ -210,3 +216,87 @@ async def test_analyze_stock_saves_report(client: TestClient, session: Session, 
     assert reports[0].decision == "BUY"
     assert reports[0].confidence_score == 0.85
     assert reports[0].stock_code == "005930"
+    # /api/v1/analyze의 기본 provider(openai)는 tools 없이 모델을 그대로 호출하므로
+    # (#162) 저장되는 리포트는 도구를 쓸 수 없는 provider로 표시되어야 한다.
+    assert reports[0].provider_supports_tools is False
+
+
+@pytest.mark.asyncio
+async def test_analyze_stock_via_nat_marks_report_tool_supporting(client: TestClient, session: Session, monkeypatch):
+    """provider=nat 경로는 도구를 호출할 수 있는 경로로 라우팅되므로
+    provider_supports_tools=True로 저장되고 응답 payload에도 실려야 한다.
+    (#162 수용 기준: provider=nat 경로의 동작은 불변이어야 한다.) True는 이번
+    호출에서 실제로 도구가 호출됐다는 관측이 아니라 provider 능력 신호일 뿐이다
+    (#152가 열려 있는 한 그렇다) - 그래도 provider=nat이면 반드시 True로
+    기록되어야 한다는 점은 이 테스트가 고정한다.
+    """
+    async def mock_llm_chat(*args, **kwargs):
+        return "mocked raw response"
+
+    def mock_analysis_from_nat_text(raw_text, stock):
+        return {
+            "summary": f"Summary for {stock}",
+            "details": {
+                "decision": "HOLD",
+                "confidence_score": 0.5,
+                "reason": "no strong signal",
+            },
+        }
+
+    async def mock_run_mcp_tool(*args, **kwargs):
+        return "삼성전자 (005930, KOSPI)"
+
+    monkeypatch.setattr("backend.services.llm_chat", mock_llm_chat)
+    monkeypatch.setattr("backend.services.analysis_from_nat_text", mock_analysis_from_nat_text)
+    monkeypatch.setattr("backend.services.run_mcp_tool", mock_run_mcp_tool)
+
+    response = client.get("/api/v1/analyze?stock=삼성전자&provider=nat")
+    assert response.status_code == 200
+    payload = response.json()["data"]
+    assert payload["provider"] == "nat"
+    assert payload["provider_supports_tools"] is True
+
+    reports = session.query(AgentReport).all()
+    assert len(reports) == 1
+    assert reports[0].provider == "nat"
+    assert reports[0].provider_supports_tools is True
+
+
+@pytest.mark.asyncio
+async def test_db_reports_round_trips_provider_supports_tools_field(client: TestClient, session: Session, monkeypatch):
+    """GET /api/v1/db/reports 응답 JSON에 provider_supports_tools 필드가 실제 값
+    그대로 포함되어야 한다. AgentReport에 필드를 추가했지만 API 응답 스키마에서
+    빠뜨리면 이 테스트가 깨진다.
+    """
+    async def mock_llm_chat(*args, **kwargs):
+        return "mocked raw response"
+
+    def mock_analysis_from_nat_text(raw_text, stock):
+        return {
+            "summary": f"Summary for {stock}",
+            "details": {
+                "decision": "SELL",
+                "confidence_score": 0.3,
+                "reason": "약세 신호",
+            },
+        }
+
+    async def mock_run_mcp_tool(*args, **kwargs):
+        return "삼성전자 (005930, KOSPI)"
+
+    monkeypatch.setattr("backend.services.llm_chat", mock_llm_chat)
+    monkeypatch.setattr("backend.services.analysis_from_nat_text", mock_analysis_from_nat_text)
+    monkeypatch.setattr("backend.services.run_mcp_tool", mock_run_mcp_tool)
+
+    # openai(기본값, 도구 미지원)와 nat(도구 경로) 둘 다 저장
+    assert client.get("/api/v1/analyze?stock=삼성전자").status_code == 200
+    assert client.get("/api/v1/analyze?stock=삼성전자&provider=nat").status_code == 200
+
+    response = client.get("/api/v1/db/reports")
+    assert response.status_code == 200
+    reports = response.json()["data"]
+    assert len(reports) == 2
+
+    by_provider = {r["provider"]: r for r in reports}
+    assert by_provider["openai"]["provider_supports_tools"] is False
+    assert by_provider["nat"]["provider_supports_tools"] is True

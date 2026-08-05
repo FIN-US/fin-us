@@ -25,6 +25,12 @@ from .models import AgentReport
 logger = logging.getLogger(__name__)
 _NAT_RESPONSE_LOG_PREVIEW_CHARS = 800
 
+# LLM 출력이 절대 정할 수 없는, 서버가 provider에서만 파생하는 필드.
+# analysis_from_nat_text가 모델의 raw JSON을 그대로 AnalysisReport에 넘기면
+# 악의적이거나 비정상적인 LLM 출력이 이 값들을 주입할 수 있으므로 파싱 단계에서
+# 걷어낸다. 실제 값은 perform_stock_analysis가 provider_supports_tools()로 채운다.
+_DERIVED_PROVENANCE_FIELDS = frozenset({"provider", "provider_supports_tools"})
+
 # 입력이 이미 종목코드 형태인지 판정하는 범위. mcp-trading/stock-master.js의
 # resolveStock() 지름길(6~7자 영숫자를 그대로 코드로 인정)과 상한을 맞춘다.
 # KIS 국내 종목코드는 6자리 숫자(005930)만이 아니다. 코스닥 스팩·리츠 등 약 18%가
@@ -239,6 +245,12 @@ async def perform_stock_analysis(
     raw = await llm_chat(key, user_msg, conversation_id=nat_cid)
     data = analysis_from_nat_text(str(raw), stock)
 
+    # #162: 이 값을 API 응답(data)과 DB 저장(report) 양쪽에 동일하게 붙인다 —
+    # 소비자가 provider 문자열만 보고 도구 사용 여부를 스스로 추론하지 않게 한다.
+    supports_tools = provider_supports_tools(key)
+    data["provider"] = key
+    data["provider_supports_tools"] = supports_tools
+
     # 분석 리포트를 데이터베이스에 자동으로 저장
     try:
         details = data.get("details", {})
@@ -251,6 +263,7 @@ async def perform_stock_analysis(
             decision=details.get("decision", "HOLD"),
             confidence_score=details.get("confidence_score", 0.0),
             reason=details.get("reason", ""),
+            provider_supports_tools=supports_tools,
         )
         session.add(report)
         session.commit()
@@ -607,7 +620,9 @@ def analysis_from_nat_text(raw: str, stock: str) -> dict[str, Any]:
     text = (raw or "").strip()
     for data in _json_objects_from_text(text):
         try:
-            report = AnalysisReport(**data)
+            report = AnalysisReport(
+                **{k: v for k, v in data.items() if k not in _DERIVED_PROVENANCE_FIELDS}
+            )
             dumped = report.model_dump()
             if dumped.get("source_signals") is None:
                 dumped["source_signals"] = dumped.get("source_news", [])
@@ -679,3 +694,30 @@ async def llm_chat(
     if provider_key == "ollama":
         return await _llm_ollama_chat(user_msg)
     return await _llm_nat_chat(user_msg, conversation_id=conversation_id)
+
+
+# llm_chat의 분기와 함께 유지한다: NAT처럼 도구(MCP/KIS/뉴스)를 호출할 수 있는 경로로
+# 라우팅되는 provider만 여기 나열한다. _llm_openai_chat/_llm_anthropic_chat/
+# _llm_ollama_chat은 tools 파라미터 없이 모델을 그대로 호출하므로, 이 셋에 대해
+# False라는 것은 코드로 증명 가능하다 (#162). 반대로 "nat"은 NAT 멀티에이전트로
+# 라우팅된다는 provider 차원의 능력만 의미할 뿐, 그 호출에서 실제로 도구가 실행됐다는
+# 관측이 아니다 — NAT ReAct 에이전트가 도구 없이도 답을 낼 수 있는 문제(#152, 여섯
+# finus_nat/configs/agents/*.yml 모두 raise_on_parsing_failure: false)가 열려 있는
+# 한, 이 필드는 false negative는 구조적으로 불가능해도 false positive는 가능한
+# 비대칭적인 신호다. 실제 도구 호출 이력(ledger)은 #152의 몫이며 여기서 만들지 않는다.
+# 새 provider가 도구를 갖추게 되면 이 집합 한 곳만 갱신하면 provider_supports_tools()를
+# 쓰는 모든 호출부(AgentReport.provider_supports_tools 등)에 반영된다.
+_TOOL_CAPABLE_PROVIDERS: frozenset[str] = frozenset({"nat"})
+
+
+def provider_supports_tools(
+    provider_key: Literal["openai", "anthropic", "nat", "ollama"],
+) -> bool:
+    """provider_key가 도구(MCP/KIS/뉴스)를 호출할 수 있는 경로로 라우팅되는지 여부.
+
+    이것은 provider 자체에서 파생한 "능력" 신호다 — 이번 호출에서 실제로 도구가
+    호출됐다는 관측이 아니다 (#152 참고). AgentReport.provider_supports_tools와
+    /api/v1/analyze 응답의 provider_supports_tools는 항상 이 함수로 파생시킨다 —
+    호출부가 True/False를 손으로 넘기면 언젠가 어긋난다.
+    """
+    return provider_key in _TOOL_CAPABLE_PROVIDERS
