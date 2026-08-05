@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 from unittest.mock import MagicMock
 from ..main import app
 from ..redis_state import RedisSchedulerState
+from .test_balance_parser import TRUNCATION_NOTES_BY_REASON
 
 
 class FakeWatchlistRepo:
@@ -998,15 +999,14 @@ def test_start_scheduler_registers_catalyst_calendar_job(monkeypatch):
     assert "catalyst_calendar" in job_ids
 
 
-# mcp-trading/balance.js의 formatTruncationNote()가 truncated="max_pages"일 때
-# 실제로 만드는 문구(reasons.max_pages + 고정 접미사)를 그대로 재현한 것입니다.
-# (이슈 #136) 이 문구가 [보유 종목 리스트] 뒤에 그대로 붙어 오는 것이 스케줄러가
-# 실제로 받는 balance_text 형태입니다.
+# mcp-trading/balance.js의 잘림 안내 문구는 test_balance_parser.py가 이미 사유별로
+# 재현해 두었으므로(TRUNCATION_NOTES_BY_REASON), 여기서 다시 베끼지 않고 재사용한다.
+# 같은 JS 리터럴이 Python 두 곳에 복사되면 한쪽만 갱신되는 드리프트가 생긴다(이슈 #136).
+# 이 문구가 [보유 종목 리스트] 뒤에 그대로 붙어 오는 것이 스케줄러가 받는 형태다.
 TRUNCATED_BALANCE_TEXT = (
     "[보유 종목 리스트]\n"
-    "- 삼성전자 (005930): 10주\n\n"
-    "[안내] 페이지 상한(20회)에 도달하여 조회가 중단되어 일부 보유 종목이 위 목록에서"
-    " 누락되었을 수 있습니다. 실제 잔고는 별도로 확인하세요."
+    "- 삼성전자 (005930): 10주"
+    + TRUNCATION_NOTES_BY_REASON["max_pages"]
 )
 
 
@@ -1068,9 +1068,12 @@ async def test_monitor_market_task_no_warning_when_balance_not_truncated(monkeyp
     async def fake_redis_state():
         yield state
 
+    monitored_stocks = []
+
     async def mock_run_mcp_tool(params, name, args):
         if name == "get_balance":
             return "[보유 종목 리스트]\n- 삼성전자 (005930): 10주"
+        monitored_stocks.append(args["stock_name"])
         return "news"
 
     async def mock_check_significance(stock, current, last, *, source, provider):
@@ -1089,6 +1092,7 @@ async def test_monitor_market_task_no_warning_when_balance_not_truncated(monkeyp
         await monitor_market_task(watchlist_repo=FakeWatchlistRepo())
 
     assert "잔고 연속조회가 잘려" not in caplog.text
+    assert monitored_stocks == ["삼성전자"]  # 정상 경로를 끝까지 지났음을 함께 고정
 
 
 @pytest.mark.asyncio

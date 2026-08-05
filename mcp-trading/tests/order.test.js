@@ -526,6 +526,10 @@ test("formatBalanceReport's truncation note stays outside the holdings section s
   );
 
   assert.match(text, /\[안내\] 페이지 상한\(20회\)에 도달하여/);
+  // backend/scheduler.py의 is_balance_truncated()가 이 "조회가 중단되어" 리터럴을
+  // 문자열 매칭해 잘림을 감지한다. balance.js 문구를 다듬으면 backend 감지가 조용히
+  // 무력화되므로(양쪽 테스트가 통과한 채 프로덕션만 회귀), 여기서 함께 깨지도록 고정한다.
+  assert.match(text, /조회가 중단되어/);
 
   // Mirror backend/scheduler.py's extract_stocks_from_balance(): everything after
   // "[보유 종목 리스트]", split into lines, keep only lines starting with "- ".
@@ -557,6 +561,7 @@ test("formatBalanceReport's no_cursor, error, and repeated_cursor truncation not
     );
 
     assert.match(text, /\[안내\]/);
+    assert.match(text, /조회가 중단되어/);
 
     // Mirror backend/scheduler.py's extract_stocks_from_balance(): everything after
     // "[보유 종목 리스트]", split into lines, keep only lines starting with "- ".
