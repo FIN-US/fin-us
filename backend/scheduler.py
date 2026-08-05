@@ -117,6 +117,37 @@ def extract_stocks_from_balance(balance_text: str) -> list[str]:
     return stocks
 
 
+# mcp-trading/balance.js의 formatTruncationNote()가 잘림 시 항상 덧붙이는 문구 중,
+# truncated 사유(max_pages/time_budget/no_cursor/repeated_cursor/error, 그리고
+# 목록에 없는 사유의 fallback "연속조회가 완료되지 않아")에 관계없이 고정으로 남는
+# 부분만 매칭한다:
+#   `\n\n[안내] ${reason} 조회가 중단되어 일부 보유 종목이 위 목록에서 ...`
+# ${reason}만 사유별로 바뀌고 앞뒤 리터럴은 고정이므로, 사유 문구 자체(예: "페이지
+# 상한")를 매칭 대상에 넣지 않아도 모든 현재·미래 사유를 잡는다. 사유별 문구까지
+# 매칭하면 새 사유가 추가될 때마다 이 목록도 함께 고쳐야 해서 더 잘 깨진다.
+#
+# 판별은 "조회가 중단되어" 하나로만 한다. "[안내]"는 mcp-trading/index.js:570의
+# 모의투자 실현손익 안내와도 공유하는 표지라 get_balance 밖에서도 등장할 수 있어
+# 판별력이 없고, 실제 discriminator는 잘림 문구에만 존재하는 이 접미사다. 고정할
+# 리터럴이 하나로 줄어 아래 결합 테스트도 이 한 줄만 지키면 된다.
+#
+# get_balance는 MCP 텍스트 응답만 backend로 넘어오고 truncated 값 자체(구조화된
+# 필드)는 MCP 경계를 넘어오지 않으므로, 이 함수는 문자열 매칭에 의존할 수밖에
+# 없다. mcp-trading/balance.js의 리터럴이 바뀌면 이 매칭도 함께 깨진다 — 그
+# 결합을 mcp-trading/tests/order.test.js의 잘림 노트 테스트가 `조회가 중단되어`를
+# 직접 단언해 고정하고, backend/tests/test_balance_parser.py가 픽스처로 재현한다.
+_BALANCE_TRUNCATION_MARKER = "조회가 중단되어"
+
+
+def is_balance_truncated(balance_text: str) -> bool:
+    """get_balance 응답에 mcp-trading/balance.js의 잘림 안내 문구가 포함되어 있는지 확인합니다.
+
+    extract_stocks_from_balance()는 이 문구를 의도적으로 무시하므로(안내 문구가
+    종목명으로 오인식되지 않도록), 잘림 여부는 이 함수로 별도 확인해야 한다.
+    """
+    return _BALANCE_TRUNCATION_MARKER in balance_text
+
+
 def _infer_catalyst_event_type(description: str) -> str:
     text = description.lower()
     if any(keyword in description for keyword in ("실적", "분기보고서", "반기보고서", "사업보고서")):
@@ -330,6 +361,24 @@ async def _monitor_market_task(
         # 1. 실시간 잔고 조회 및 모니터링 대상 확정
         balance_text = await run_mcp_tool(TRADING_MCP_PARAMS, "get_balance", {})
         owned_stocks = extract_stocks_from_balance(balance_text)
+
+        if is_balance_truncated(balance_text):
+            # 잘림 사유(max_pages/time_budget/error/...)마다 운영 대응이 다르므로,
+            # 안내 문구 줄을 그대로 실어 사유가 로그에 남게 한다. 사유 문자열을 따로
+            # 파싱하지 않으므로 balance.js에 새 사유가 추가돼도 자동으로 따라간다.
+            notice = next(
+                (
+                    line
+                    for line in balance_text.splitlines()
+                    if _BALANCE_TRUNCATION_MARKER in line
+                ),
+                "",
+            )
+            logger.warning(
+                "잔고 연속조회가 잘려 감시 대상이 불완전할 수 있습니다: 보유 종목 %d건만 확보 — %s",
+                len(owned_stocks),
+                notice.strip(),
+            )
 
         if watchlist_repo is None:
             watchlist_repo = SqliteWatchlistRepo(lambda: Session(engine))

@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 from unittest.mock import MagicMock
 from ..main import app
 from ..redis_state import RedisSchedulerState
+from .test_balance_parser import TRUNCATION_NOTES_BY_REASON
 
 
 class FakeWatchlistRepo:
@@ -996,3 +997,140 @@ def test_start_scheduler_registers_catalyst_calendar_job(monkeypatch):
 
     job_ids = [kwargs["id"] for _args, kwargs in added_jobs]
     assert "catalyst_calendar" in job_ids
+
+
+# mcp-trading/balance.js의 잘림 안내 문구는 test_balance_parser.py가 이미 사유별로
+# 재현해 두었으므로(TRUNCATION_NOTES_BY_REASON), 여기서 다시 베끼지 않고 재사용한다.
+# 같은 JS 리터럴이 Python 두 곳에 복사되면 한쪽만 갱신되는 드리프트가 생긴다(이슈 #136).
+# 이 문구가 [보유 종목 리스트] 뒤에 그대로 붙어 오는 것이 스케줄러가 받는 형태다.
+TRUNCATED_BALANCE_TEXT = (
+    "[보유 종목 리스트]\n"
+    "- 삼성전자 (005930): 10주"
+    + TRUNCATION_NOTES_BY_REASON["max_pages"]
+)
+
+
+@pytest.mark.asyncio
+async def test_monitor_market_task_logs_warning_when_balance_truncated(monkeypatch, caplog):
+    """잔고 연속조회가 잘리면 스케줄러가 경고 로그를 남깁니다 (이슈 #136).
+
+    이 테스트가 잡는 mutation: _monitor_market_task에서 is_balance_truncated() 호출과
+    logger.warning()을 통째로 빠뜨리거나, 조건을 뒤집는(예: `if not is_balance_truncated(...)`)
+    변경. origin/main에는 이 경고 자체가 없으므로 origin/main 기준으로는 반드시 실패한다.
+    """
+    import logging
+    from .. import scheduler as scheduler_module
+    from ..scheduler import SignalSource, monitor_market_task
+
+    state = RedisSchedulerState(FakeRedis())
+
+    @asynccontextmanager
+    async def fake_redis_state():
+        yield state
+
+    async def mock_run_mcp_tool(params, name, args):
+        if name == "get_balance":
+            return TRUNCATED_BALANCE_TEXT
+        return "news"
+
+    async def mock_check_significance(stock, current, last, *, source, provider):
+        return False
+
+    monkeypatch.setattr("backend.scheduler.redis_state", fake_redis_state)
+    monkeypatch.setattr(
+        "backend.scheduler.SIGNAL_SOURCES",
+        [SignalSource(name="news", mcp_params=object(), tool_name="get_market_news")],
+    )
+    monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
+    monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
+    monkeypatch.setattr("backend.scheduler.manager.broadcast", MagicMock(return_value=asyncio.Future()))
+
+    with caplog.at_level(logging.WARNING, logger=scheduler_module.logger.name):
+        await monitor_market_task(watchlist_repo=FakeWatchlistRepo())
+
+    assert "잔고 연속조회가 잘려" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_monitor_market_task_no_warning_when_balance_not_truncated(monkeypatch, caplog):
+    """정상(잘리지 않은) 잔고 응답에서는 매 10분 주기마다 경고가 울리지 않습니다 (이슈 #136).
+
+    이 테스트가 잡는 mutation: is_balance_truncated()가 항상 True를 반환하도록 뒤집히거나,
+    logger.warning()이 조건 없이 항상 호출되는 회귀("늑대가 왔다" 오탐/알림 피로).
+    """
+    import logging
+    from .. import scheduler as scheduler_module
+    from ..scheduler import SignalSource, monitor_market_task
+
+    state = RedisSchedulerState(FakeRedis())
+
+    @asynccontextmanager
+    async def fake_redis_state():
+        yield state
+
+    monitored_stocks = []
+
+    async def mock_run_mcp_tool(params, name, args):
+        if name == "get_balance":
+            return "[보유 종목 리스트]\n- 삼성전자 (005930): 10주"
+        monitored_stocks.append(args["stock_name"])
+        return "news"
+
+    async def mock_check_significance(stock, current, last, *, source, provider):
+        return False
+
+    monkeypatch.setattr("backend.scheduler.redis_state", fake_redis_state)
+    monkeypatch.setattr(
+        "backend.scheduler.SIGNAL_SOURCES",
+        [SignalSource(name="news", mcp_params=object(), tool_name="get_market_news")],
+    )
+    monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
+    monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
+    monkeypatch.setattr("backend.scheduler.manager.broadcast", MagicMock(return_value=asyncio.Future()))
+
+    with caplog.at_level(logging.WARNING, logger=scheduler_module.logger.name):
+        await monitor_market_task(watchlist_repo=FakeWatchlistRepo())
+
+    assert "잔고 연속조회가 잘려" not in caplog.text
+    assert monitored_stocks == ["삼성전자"]  # 정상 경로를 끝까지 지났음을 함께 고정
+
+
+@pytest.mark.asyncio
+async def test_monitor_market_task_still_watches_stocks_returned_despite_truncation(monkeypatch):
+    """잔고 연속조회가 잘려도, 잘리기 전에 이미 확보한 보유 종목은 계속 감시합니다 (이슈 #136).
+
+    잘림은 감시를 "성능 저하(degrade)"시켜야지 "중단(disable)"시켜서는 안 된다는
+    수용 기준을 고정한다. 이 테스트가 잡는 mutation: 잘림 감지 시 owned_stocks를
+    비우거나 stocks_to_monitor 조립을 통째로 건너뛰는 회귀.
+    """
+    from ..scheduler import SignalSource, monitor_market_task
+
+    state = RedisSchedulerState(FakeRedis())
+
+    @asynccontextmanager
+    async def fake_redis_state():
+        yield state
+
+    monitored_stocks = []
+
+    async def mock_run_mcp_tool(params, name, args):
+        if name == "get_balance":
+            return TRUNCATED_BALANCE_TEXT
+        monitored_stocks.append(args["stock_name"])
+        return "news"
+
+    async def mock_check_significance(stock, current, last, *, source, provider):
+        return False
+
+    monkeypatch.setattr("backend.scheduler.redis_state", fake_redis_state)
+    monkeypatch.setattr(
+        "backend.scheduler.SIGNAL_SOURCES",
+        [SignalSource(name="news", mcp_params=object(), tool_name="get_market_news")],
+    )
+    monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
+    monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
+    monkeypatch.setattr("backend.scheduler.manager.broadcast", MagicMock(return_value=asyncio.Future()))
+
+    await monitor_market_task(watchlist_repo=FakeWatchlistRepo())
+
+    assert monitored_stocks == ["삼성전자"]

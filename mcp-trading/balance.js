@@ -226,6 +226,10 @@ function calculateAccountReturnRate(summary, holdings) {
 // 잘림 안내 문구. 주의: "- "로 시작하면 backend/scheduler.py의 extract_stocks_from_balance()가
 // [보유 종목 리스트] 섹션의 "- "로 시작하는 줄을 종목명으로 오인식한다. 이 문구는 반드시
 // "- " 없이, [보유 종목 리스트] 섹션이 끝난 뒤 별도 문단으로만 붙여야 한다.
+//
+// 또한 backend/scheduler.py의 is_balance_truncated()가 아래 "조회가 중단되어" 리터럴을
+// 문자열 매칭해 잘림을 감지한다. 이 문구를 바꾸면 backend 감지가 조용히 무력화되므로,
+// 같은 파일 tests/order.test.js의 잘림 노트 테스트가 이 리터럴을 직접 단언해 고정한다.
 function formatTruncationNote(truncated, pages) {
   if (!truncated) return "";
   const reasons = {
