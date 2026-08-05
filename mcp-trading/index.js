@@ -16,6 +16,7 @@ import {
   formatWon,
   isPaperTradingKisUrl,
 } from "./formatters.js";
+import { kisOrderPost } from "./kis-client.js";
 import {
   OrderDedupStore,
   createOrderDedupKey,
@@ -208,65 +209,6 @@ function formatOrderTime(value) {
   return `${text.slice(0, 2)}:${text.slice(2, 4)}:${text.slice(4, 6)}`;
 }
 
-async function createKisHashKey(body) {
-  const response = await kisAxios.post(`${KIS_URL}/uapi/hashkey`, body, {
-    headers: {
-      "Content-Type": "application/json",
-      appkey: KIS_API_KEY,
-      appsecret: KIS_API_SECRET,
-    },
-  });
-  const hashKey = response.data?.HASH;
-  if (!hashKey) {
-    throw new Error("KIS hashkey 발급 실패");
-  }
-  return hashKey;
-}
-
-async function kisPost(pathname, trId, body, { useHashKey = false } = {}) {
-  // 이 블록(토큰 발급, 필요 시 해시키 발급)이 던지는 오류는 아래 실제 주문 POST가 아직
-  // 나가기 전에 발생한 것이므로, 주문이 KIS에 제출되지 않았음이 확실하다.
-  let token;
-  let hashKey;
-  try {
-    token = await getAccessToken();
-    if (useHashKey) {
-      hashKey = await createKisHashKey(body);
-    }
-  } catch (error) {
-    error.kisOrderNotSubmitted = true;
-    throw error;
-  }
-
-  const headers = {
-    "Content-Type": "application/json",
-    authorization: `Bearer ${token}`,
-    appkey: KIS_API_KEY,
-    appsecret: KIS_API_SECRET,
-    tr_id: trId,
-    custtype: "P",
-  };
-  if (useHashKey) {
-    headers.hashkey = hashKey;
-  }
-
-  let response;
-  try {
-    response = await kisAxios.post(`${KIS_URL}${pathname}`, body, { headers });
-  } catch (error) {
-    error.kisOrderSubmittedMaybe = true;
-    throw error;
-  }
-
-  const data = response.data;
-  if (data.rt_cd !== "0") {
-    const error = new Error(`KIS API 오류: ${data.msg1 || data.msg_cd || "알 수 없는 오류"}`);
-    error.kisOrderRejected = true;
-    throw error;
-  }
-  return data;
-}
-
 async function getStockQuote(stockName) {
   const stock = resolveStock(stockName);
   const data = await kisGet(
@@ -376,7 +318,17 @@ async function placeOrder(args) {
   const data = await submitOrder({
     dedupStore: orderDedupStore,
     dedupKey,
-    submit: () => kisPost(request.pathname, request.trId, request.body, { useHashKey: true }),
+    submit: () => kisOrderPost({
+      kisAxios,
+      kisUrl: KIS_URL,
+      appKey: KIS_API_KEY,
+      appSecret: KIS_API_SECRET,
+      pathname: request.pathname,
+      trId: request.trId,
+      body: request.body,
+      useHashKey: true,
+      getAccessToken,
+    }),
   });
   return formatOrderResult({
     stockName,
