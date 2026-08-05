@@ -37,16 +37,17 @@ _MCP_ENV_ALLOWED_KEYS = frozenset({
     "http_proxy",
     "https_proxy",
     "no_proxy",
-    "KIS_API_KEY",
-    "KIS_API_SECRET",
-    "KIS_ACCOUNT_NO",
-    "KIS_URL",
-    "KIS_TOKEN_CACHE_PATH",
     "NAVER_CLIENT_ID",
     "NAVER_CLIENT_SECRET",
     "DART_API_KEY",
 })
-_MCP_ENV_ALLOWED_PREFIXES = ("FIN_US_", "FINUS_")
+# backend/config.py의 _MCP_ENV_ALLOWED_PREFIXES와 같은 규칙. 한쪽만 바꾸면
+# 같은 .env로 backend 경로와 NAT 경로의 동작이 갈린다(#130). KIS_API_KEY 등
+# 개별 KIS_* 키 나열은 이제 KIS_ 접두사에 포함되므로 위 목록에서 제거했다.
+# KIS_만 추가하면 자식 네임스페이스(KIS_)가 양쪽에서 일치한다. FINUS_ 범위는
+# 의도적으로 다르다 — backend는 FINUS_KIS_로 좁히고, NAT의 FINUS_는 이 PR
+# 이전부터 있던 기존 범위라 이번 변경의 대상이 아니다.
+_MCP_ENV_ALLOWED_PREFIXES = ("FIN_US_", "FINUS_", "KIS_")
 
 McpCallArguments: TypeAlias = dict[str, Any]
 

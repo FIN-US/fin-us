@@ -336,7 +336,9 @@ Backend 스케줄러는 매 거래일 오전 8시 30분에 Telegram 모닝 브�
 >
 > 대기 중인 주문이 있으면 새 주문을 낼 수 없습니다. 먼저 확정하거나 취소해야 합니다.
 >
-> 실계좌 주문은 `KIS_ORDER_ENV=real`과 `KIS_REAL_ORDER_ENABLED=true`가 모두 설정되어야 실행됩니다. 기본값은 모의투자(`demo`)입니다.
+> 실계좌 주문은 `KIS_ORDER_ENV=real`과 `KIS_REAL_ORDER_ENABLED=true`가 모두 설정되어야 실행됩니다. 기본값은 모의투자(`demo`)입니다. `KIS_REAL_ORDER_ENABLED`는 **정확히 `true`** 여야 하며 `TRUE`·`1`·`yes`는 인정되지 않습니다.
+>
+> **업그레이드 시 확인하세요.** 이전 버전은 Docker 배포에서 이 값을 `mcp-trading` 자식 프로세스에 전달하지 않아, `.env`에 `true`를 넣어 두었어도 실계좌 주문이 항상 차단됐습니다(#129). 이제 전달되므로 같은 `.env`로 실제 자금이 움직입니다. Docker를 쓰지 않는 로컬 실행에서는 `mcp-trading`이 `.env`를 직접 읽어 이전에도 적용됐습니다.
 
 `mcp-trading/data/stocks.json`은 KIS 공개 코스피/코스닥 종목 마스터 기반의 종목명 해석 캐시입니다. 신규 상장 등으로 종목명이 잡히지 않으면 6자리 종목코드를 직접 입력하거나 아래 명령으로 캐시를 갱신합니다.
 
@@ -361,6 +363,8 @@ python3 mcp-trading/scripts/update_stock_master.py
 **"실계좌 주문은 KIS_REAL_ORDER_ENABLED=true 설정이 필요합니다"**
 
 의도한 것이면 `.env`에 해당 값을 넣고 스택을 재기동하세요. 의도하지 않았다면 실계좌 모드로 잘못 설정된 것입니다.
+
+값을 이미 넣었는데도 이 메시지가 나온다면 철자를 확인하세요. `true` 외의 표기(`TRUE`·`True`·`1`·`yes`·`y`)는 인정되지 않으며, 백엔드와 `mcp-trading` 양쪽이 같은 기준으로 판정합니다.
 
 **텔레그램 봇이 반응이 없어요**
 
