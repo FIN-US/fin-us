@@ -3,6 +3,12 @@ import fs from "node:fs";
 import test from "node:test";
 import { CODE_SHAPE_PATTERN, clearStocksCache, DEFAULT_STOCKS_PATH, getDefaultStocks, resolveStock } from "../stock-master.js";
 
+// Fixture shared by the three alphanumeric-code tests below (🔵3: extracted
+// to avoid duplicating the same array literal three times).
+const STOCKS_WITH_Q570121 = [
+  { code: "Q570121", name: "신한 레버리지 금선물 ETN(H)", market: "KOSDAQ", aliases: [] },
+];
+
 test("resolveStock resolves names from the expanded domestic stock master", () => {
   assert.deepEqual(resolveStock("카카오"), {
     code: "035720",
@@ -12,8 +18,14 @@ test("resolveStock resolves names from the expanded domestic stock master", () =
   });
 });
 
+// 🟡1 / updated: numeric codes now go through the master lookup (code
+// short-circuit). When the master has NO entry for the code, the isCodeShaped
+// echo path must still return UNKNOWN — but we must pass an explicit empty
+// array so the test does not accidentally hit the bundled stocks.json (which
+// may or may not contain "123456"). Mirrors the pattern used in the
+// alphanumeric test below.
 test("resolveStock keeps 6 digit stock codes available without master entries", () => {
-  assert.deepEqual(resolveStock("123456"), {
+  assert.deepEqual(resolveStock("123456", []), {
     code: "123456",
     name: "123456",
     market: "UNKNOWN",
@@ -22,7 +34,9 @@ test("resolveStock keeps 6 digit stock codes available without master entries", 
 });
 
 test("resolveStock keeps alphanumeric KIS stock codes available without master entries", () => {
-  assert.deepEqual(resolveStock("0001a0"), {
+  // Pass an empty stocks array to simulate a master that contains no entry for
+  // this code, so the test does not depend on the bundled stocks.json content.
+  assert.deepEqual(resolveStock("0001a0", []), {
     code: "0001A0",
     name: "0001A0",
     market: "UNKNOWN",
@@ -30,10 +44,10 @@ test("resolveStock keeps alphanumeric KIS stock codes available without master e
   });
 });
 
-test("resolveStock guides users to 6 digit stock codes when a name is missing", () => {
+test("resolveStock guides users to 6~7 digit stock codes when a name is missing", () => {
   assert.throws(
     () => resolveStock("없는종목"),
-    /6자리 종목코드로 직접 입력/,
+    /6~7자리 종목코드로 직접 입력/,
   );
 });
 
@@ -60,7 +74,12 @@ test("resolveStock reads the default stock master once per process cache", () =>
   assert.equal(readCount, 1);
 });
 
-test("resolveStock does not read the default stock master for direct stock codes", () => {
+// Updated from "does not read the default stock master for direct stock codes":
+// numeric codes now go through the master (code short-circuit), so the old
+// premise ("read count == 0") is no longer correct. The new invariant is that
+// the master is loaded at most once per cache lifetime regardless of how many
+// resolveStock calls are made — whether the inputs are names or codes.
+test("resolveStock loads the default stock master at most once across multiple calls including numeric codes", () => {
   clearStocksCache();
   const originalReadFileSync = fs.readFileSync;
   let readCount = 0;
@@ -73,18 +92,17 @@ test("resolveStock does not read the default stock master for direct stock codes
   };
 
   try {
-    assert.deepEqual(resolveStock("123456"), {
-      code: "123456",
-      name: "123456",
-      market: "UNKNOWN",
-      aliases: [],
-    });
+    // First call loads the cache; subsequent calls (including a numeric code
+    // that hits the master's code short-circuit) must reuse it.
+    resolveStock("카카오");
+    resolveStock("005930"); // numeric code — now goes through master
+    resolveStock("삼성전자");
   } finally {
     fs.readFileSync = originalReadFileSync;
     clearStocksCache();
   }
 
-  assert.equal(readCount, 0);
+  assert.equal(readCount, 1);
 });
 
 test("resolveStock resolves deduplicated ETN names without ambiguity", () => {
@@ -145,11 +163,13 @@ test("resolveStock resolves a lowercase code-shaped name case-insensitively, not
   });
 });
 
-test("resolveStock still resolves a direct 6 digit stock code that matches no master name", () => {
-  // Guards the shortcut's real purpose: numeric codes must keep working
-  // without ever touching the master (see the read-count test below), even
-  // after reordering the checks.
-  assert.deepEqual(resolveStock("005930"), {
+// Updated from "still resolves a direct 6 digit stock code that matches no
+// master name": 005930 IS in the bundled master (삼성전자), so using the
+// default stocks would now return the real entry. Pass an empty array to
+// isolate the "not in master" echo path — the same isolation pattern used for
+// the alphanumeric test.
+test("resolveStock still resolves a direct 6 digit stock code that matches no master entry", () => {
+  assert.deepEqual(resolveStock("005930", []), {
     code: "005930",
     name: "005930",
     market: "UNKNOWN",
@@ -158,11 +178,12 @@ test("resolveStock still resolves a direct 6 digit stock code that matches no ma
 });
 
 test("resolveStock still resolves a direct alphanumeric ETN code that matches no master name", () => {
-  // "Q570121" is a real ETN's own code, distinct from resolving it by name
-  // (covered above). It must still fall through to the code shortcut once
-  // name/alias matching finds nothing, proving the reorder didn't remove the
-  // fallback entirely.
-  assert.deepEqual(resolveStock("Q570121"), {
+  // "Q570121" is a real ETN's own code in the bundled master, so passing the
+  // default stocks would now return the real entry (the #158 fix). Pass an
+  // empty array to isolate the fallback path: when no master entry exists for
+  // a code-shaped input, resolveStock must still echo the code back as UNKNOWN
+  // rather than throwing, proving the code-echo fallback was not removed.
+  assert.deepEqual(resolveStock("Q570121", []), {
     code: "Q570121",
     name: "Q570121",
     market: "UNKNOWN",
@@ -197,6 +218,80 @@ test("resolveStock does not throw when a caller-supplied stock entry is missing 
     market: "UNKNOWN",
     aliases: [],
   });
+});
+
+test("resolveStock resolves alphanumeric ETN code directly to its master name and market", () => {
+  // Issue #158: code-shaped input that matches stock.code (not stock.name) must
+  // return the real name and market from the master, not echo back as UNKNOWN.
+  assert.deepEqual(resolveStock("Q570121", STOCKS_WITH_Q570121), {
+    code: "Q570121",
+    name: "신한 레버리지 금선물 ETN(H)",
+    market: "KOSDAQ",
+    aliases: [],
+  });
+});
+
+test("resolveStock resolves alphanumeric ETN code case-insensitively via stock.code match", () => {
+  // Lowercase input must match the master entry's code field case-insensitively.
+  assert.deepEqual(resolveStock("q570121", STOCKS_WITH_Q570121), {
+    code: "Q570121",
+    name: "신한 레버리지 금선물 ETN(H)",
+    market: "KOSDAQ",
+    aliases: [],
+  });
+});
+
+test("resolveStock echoes back alphanumeric code as UNKNOWN when it is absent from the master", () => {
+  // Regression guard: a code-shaped input not present in the caller-supplied
+  // stocks array must still fall through to the echo path, returning UNKNOWN.
+  assert.deepEqual(resolveStock("Z999999", STOCKS_WITH_Q570121), {
+    code: "Z999999",
+    name: "Z999999",
+    market: "UNKNOWN",
+    aliases: [],
+  });
+});
+
+// 🟡1: numeric codes now return the real name/market when found in the master.
+test("resolveStock resolves a numeric stock code to its real name and market when present in master", () => {
+  assert.deepEqual(
+    resolveStock("005930", [{ code: "005930", name: "삼성전자", market: "KOSPI", aliases: [] }]),
+    { code: "005930", name: "삼성전자", market: "KOSPI", aliases: [] },
+  );
+});
+
+// 🔵2: 9-char fund codes are handled by the code short-circuit (no special
+// pattern needed), and the real name/market is returned.
+test("resolveStock resolves a 9 char fund code to its real name and market when present in master", () => {
+  assert.deepEqual(
+    resolveStock("F70100026", [{ code: "F70100026", name: "한투글로벌넥스트웨이브1(A)", market: "KOSPI", aliases: [] }]),
+    { code: "F70100026", name: "한투글로벌넥스트웨이브1(A)", market: "KOSPI", aliases: [] },
+  );
+});
+
+// 🟡2: when a code equals another entry's name, code short-circuit fires
+// first so the lookup is unambiguous — no "모호합니다" error is thrown.
+test("resolveStock resolves by code first when the input matches both a code and a different entry's name", () => {
+  // "AAA111" is both the code of entry A and the name of entry B.
+  // The code short-circuit must return entry A without throwing ambiguity.
+  const stocks = [
+    { code: "AAA111", name: "Entry A", market: "KOSPI", aliases: [] },
+    { code: "BBB222", name: "AAA111", market: "KOSDAQ", aliases: [] },
+  ];
+  assert.deepEqual(resolveStock("AAA111", stocks), {
+    code: "AAA111",
+    name: "Entry A",
+    market: "KOSPI",
+    aliases: [],
+  });
+});
+
+// Case-insensitive code matching: lowercase input matches uppercase code.
+test("resolveStock matches numeric code case-insensitively (lowercase input)", () => {
+  assert.deepEqual(
+    resolveStock("f70100026", [{ code: "F70100026", name: "한투글로벌넥스트웨이브1(A)", market: "KOSPI", aliases: [] }]),
+    { code: "F70100026", name: "한투글로벌넥스트웨이브1(A)", market: "KOSPI", aliases: [] },
+  );
 });
 
 test("exactly 3 master stock names match the code-shaped pattern, and 0 aliases do", () => {
