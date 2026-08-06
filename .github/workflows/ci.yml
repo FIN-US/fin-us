@@ -121,8 +121,15 @@ jobs:
       - name: mcp-dart 테스트 실행
         run: npm test
 
-  frontend-typecheck:
-    name: Frontend tsc --noEmit
+  # 타입 체크·테스트·빌드는 같은 워킹디렉터리와 같은 lockfile을 쓰므로 한 잡으로 묶어
+  # checkout + setup-node + npm ci 중복을 없앤다. 스텝이 순차 실행되므로 실패 지점은
+  # 스텝 이름으로 그대로 구분된다.
+  #
+  # 빌드 스텝이 필요한 이유: tsc --noEmit은 타입만 본다. 번들러 설정·에셋 처리와
+  # vite.config.ts 자체의 오류(테스트 인프라 도입으로 test 블록이 추가됐다)는
+  # 실제로 vite build를 돌려야만 드러난다.
+  frontend-check:
+    name: Frontend tsc + vitest + build
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -143,27 +150,11 @@ jobs:
       - name: 타입 체크
         run: npx tsc --noEmit
 
-  frontend-test:
-    name: Frontend vitest
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: frontend-react
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Node 24 설치 (npm 캐시 활성화)
-        uses: actions/setup-node@v4
-        with:
-          node-version: '24'
-          cache: 'npm'
-          cache-dependency-path: frontend-react/package-lock.json
-
-      - name: npm 의존성 설치
-        run: npm ci
-
       - name: 프론트엔드 테스트 실행
         run: npm test
+
+      - name: 프로덕션 빌드
+        run: npm run build
 
   docker-lint:
     name: Dockerfile hadolint
