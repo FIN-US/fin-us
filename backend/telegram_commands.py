@@ -43,6 +43,11 @@ WATCH_COMMAND_HELP = "사용법: /watch add <종목명> | remove <종목명> | l
 CATALYST_COMMAND_HELP = "사용법: /catalysts <종목명>"
 EARNINGS_COMMAND_HELP = "사용법: /earnings <종목명> [기간]  예: /earnings 삼성전자 2025Q1"
 NATURAL_ORDER_HELP = "자연어 주문을 해석할 수 없습니다. /buy 또는 /sell 형식으로 입력하세요."
+# 미등록 코드는 mcp-trading/stock-master.js가 {code: X, name: X, market: "UNKNOWN"}을
+# echo하므로 종목명 == 종목코드가 곧 미해석 신호다.
+UNRESOLVED_STOCK_WARNING = (
+    "⚠️ 종목명을 확인하지 못했습니다. 입력한 코드가 맞는지 다시 확인하세요."
+)
 # resolve_stock_code 응답 형식: "종목명 (코드, 시장)" — mcp-trading/index.js
 # 종목명에 괄호가 들어가고 닫히지 않는 종목이 있어(예: "KIWOOM 엔비디아미국30년국채혼합액티브(H")
 # 단순 괄호 매칭 대신 코드+쉼표 조합에 앵커한다. 종목명에 쉼표가 들어가는 종목은 없다.
@@ -683,6 +688,9 @@ class TelegramCommandHandler:
                 {"stock_name": stock_name},
             )
             stock_code = self._extract_stock_code(str(resolved))
+            # 사용자가 코드를 직접 입력해도 해석된 종목명을 쓴다. 원문(stock_name)을 그대로
+            # 넣으면 name == code가 되어 정상 종목에도 미해석 경고가 뜬다(#139 리뷰).
+            resolved_name = self._extract_stock_name(str(resolved)) or stock_name
             if stock_code is None:
                 await self._send_text_or_raise("주문 준비 실패: 종목코드를 확인할 수 없습니다.")
                 return
@@ -713,7 +721,7 @@ class TelegramCommandHandler:
 
         order = PendingOrder(
             chat_id=chat_id,
-            stock_name=stock_name,
+            stock_name=resolved_name,
             stock_code=stock_code,
             side=side,
             quantity=quantity,
@@ -865,6 +873,13 @@ class TelegramCommandHandler:
     def _extract_stock_code(self, text: str) -> str | None:
         match = _STOCK_CODE_EXTRACT_RE.search(text)
         return match.group(1) if match else None
+
+    def _extract_stock_name(self, text: str) -> str | None:
+        # resolve_stock_code 응답 "종목명 (코드, 시장)"에서 코드 앵커 앞부분이 종목명이다.
+        match = _STOCK_CODE_EXTRACT_RE.search(text)
+        if match is None:
+            return None
+        return text[: match.start()].strip() or None
 
     def _extract_order_callback_token(self, data: str) -> str | None:
         if data in {ORDER_CONFIRM_CALLBACK, ORDER_CANCEL_CALLBACK}:
@@ -1046,6 +1061,9 @@ class TelegramCommandHandler:
         )
         if balance:
             lines.append(balance)
+
+        if order.stock_name == order.stock_code:
+            lines.append(UNRESOLVED_STOCK_WARNING)
 
         lines.extend(
             [

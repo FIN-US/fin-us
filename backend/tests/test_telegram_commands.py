@@ -18,6 +18,7 @@ from backend.telegram_commands import (
     TELEGRAM_MESSAGE_LIMIT,
     TELEGRAM_TRUNCATION_SUFFIX,
     TREND_COMMAND_HELP,
+    UNRESOLVED_STOCK_WARNING,
     TelegramCommandHandler,
     TelegramCommandPoller,
 )
@@ -1327,6 +1328,65 @@ async def test_cancel_without_pending_order_replies():
     await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/cancel"}})
 
     assert notifier.messages[-1] == "취소할 대기 주문이 없습니다."
+
+
+@pytest.mark.asyncio
+async def test_buy_with_stock_code_resolves_name_and_shows_no_warning():
+    """코드를 직접 입력해도 해석된 종목명을 쓰므로 미해석 경고가 없다."""
+
+    async def mcp_runner(server_params, tool_name, arguments):
+        if tool_name == "resolve_stock_code":
+            return "삼성전자 (005930, KOSPI)"
+        if tool_name == "get_stock_quote":
+            return "현재가: 74,500원"
+        if tool_name == "get_balance":
+            return "주문가능금액: 1,000,000원"
+        raise AssertionError(f"unexpected tool: {tool_name}")
+
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        mcp_runner=mcp_runner,
+        now_factory=lambda: datetime(2026, 5, 20, 10, 0, tzinfo=KST),
+    )
+
+    await handler.handle_update(
+        {"message": {"chat": {"id": 123}, "text": "/buy 005930 10"}}
+    )
+
+    assert handler.pending_orders["123"].stock_name == "삼성전자"
+    assert handler.pending_orders["123"].stock_code == "005930"
+    assert "삼성전자 매수 주문 확인" in notifier.messages[-1]
+    assert UNRESOLVED_STOCK_WARNING not in notifier.messages[-1]
+
+
+@pytest.mark.asyncio
+async def test_buy_with_unregistered_code_shows_unresolved_warning():
+    """미등록 코드는 이름=코드로 echo되므로 미해석 경고가 붙는다."""
+
+    async def mcp_runner(server_params, tool_name, arguments):
+        if tool_name == "resolve_stock_code":
+            return "123456 (123456, UNKNOWN)"
+        if tool_name == "get_stock_quote":
+            return "현재가: 0원"
+        if tool_name == "get_balance":
+            return "주문가능금액: 1,000,000원"
+        raise AssertionError(f"unexpected tool: {tool_name}")
+
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        mcp_runner=mcp_runner,
+        now_factory=lambda: datetime(2026, 5, 20, 10, 0, tzinfo=KST),
+    )
+
+    await handler.handle_update(
+        {"message": {"chat": {"id": 123}, "text": "/buy 123456 10"}}
+    )
+
+    assert handler.pending_orders["123"].stock_name == "123456"
+    assert handler.pending_orders["123"].stock_code == "123456"
+    assert UNRESOLVED_STOCK_WARNING in notifier.messages[-1]
 
 
 @pytest.mark.asyncio
