@@ -1,5 +1,5 @@
 import React from 'react';
-import { TrendingUp, TrendingDown, Minus, Newspaper } from 'lucide-react';
+import { TrendingUp, TrendingDown, Minus, Newspaper, HelpCircle } from 'lucide-react';
 import { AnalysisReport, TradingSignal } from '../types';
 
 interface ReportSidebarProps {
@@ -39,9 +39,9 @@ const EmptyStrategyCard: React.FC<EmptyStrategyCardProps> = ({ provider, provide
         <span className="text-xs font-black uppercase tracking-widest opacity-80">AI STRATEGY</span>
         <ProviderBadge provider={provider} providerSupportsTools={providerSupportsTools} />
       </div>
-      <Minus className="w-8 h-8 opacity-50" />
+      <HelpCircle className="w-8 h-8 opacity-50" />
     </div>
-    <p className="mt-4 text-sm font-bold opacity-80">분석 결과 없음</p>
+    <p className="text-sm font-bold opacity-80">분석 결과 없음</p>
   </div>
 );
 

@@ -35,7 +35,10 @@ export interface TrendItem {
 
 export interface ApiResponse<T> {
   status: string;
-  data: T;
+  // 백엔드 schemas.py의 CommonResponse.data: Any | None = None과 일치시킨다.
+  // api.ts의 unwrap()이 런타임에서 null을 걸러 T를 반환하므로, 이 필드를
+  // 우회해 response.data.data를 직접 쓰는 코드는 컴파일 타임에 걸린다 (#70).
+  data: T | null;
   message?: string | null;
 }
 
