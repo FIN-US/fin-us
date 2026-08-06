@@ -1,19 +1,8 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { apiErrorMessage, finUsApi } from '../api';
-import type { AnalysisReport, ChatMessage, DashboardResources } from '../types';
+import type { AnalysisReport, ChatMessage, DashboardResources, EndpointStatuses } from '../types';
 
-export type EndpointStatus = 'unknown' | 'ok' | 'fail';
-
-export interface EndpointOk {
-  health: EndpointStatus;
-  balance: EndpointStatus;
-  portfolio: EndpointStatus;
-  trades: EndpointStatus;
-  reports: EndpointStatus;
-  diaries: EndpointStatus;
-}
-
-const initialEndpointOk: EndpointOk = {
+const initialEndpointStatuses: EndpointStatuses = {
   health: 'unknown',
   balance: 'unknown',
   portfolio: 'unknown',
@@ -54,7 +43,7 @@ export function useFinUsDashboard() {
   const [rawNews, setRawNews] = useState<string[]>([]);
   const [rawTrend, setRawTrend] = useState<string | null>(null);
   const [resources, setResources] = useState<DashboardResources>(initialResources);
-  const [endpointOk, setEndpointOk] = useState<EndpointOk>(initialEndpointOk);
+  const [endpointStatuses, setEndpointStatuses] = useState<EndpointStatuses>(initialEndpointStatuses);
   const [error, setError] = useState('');
   const [chatStatus, setChatStatus] = useState<'connecting' | 'open' | 'closed'>('connecting');
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([
@@ -90,7 +79,7 @@ export function useFinUsDashboard() {
       diaries: diaries.status === 'fulfilled' ? diaries.value : [],
     });
 
-    setEndpointOk({
+    setEndpointStatuses({
       health: health.status === 'fulfilled' ? 'ok' : 'fail',
       balance: balance.status === 'fulfilled' ? 'ok' : 'fail',
       portfolio: portfolio.status === 'fulfilled' ? 'ok' : 'fail',
@@ -221,7 +210,7 @@ export function useFinUsDashboard() {
     rawNews,
     rawTrend,
     resources,
-    endpointOk,
+    endpointStatuses,
     error,
     chatStatus,
     chatMessages,

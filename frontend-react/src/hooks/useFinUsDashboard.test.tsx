@@ -63,12 +63,12 @@ describe('useFinUsDashboard - 엔드포인트 상태 판정', () => {
 
     const { result } = renderHook(() => useFinUsDashboard());
 
-    await waitFor(() => expect(result.current.endpointOk.portfolio).toBe('fail'));
+    await waitFor(() => expect(result.current.endpointStatuses.portfolio).toBe('fail'));
     // 거부됐는데 빈 배열 — 이 조합이 정확히 #71의 조건이다.
     expect(result.current.resources.portfolio).toEqual([]);
     // 성공한 다른 엔드포인트는 영향을 받지 않는다.
-    expect(result.current.endpointOk.trades).toBe('ok');
-    expect(result.current.endpointOk.health).toBe('ok');
+    expect(result.current.endpointStatuses.trades).toBe('ok');
+    expect(result.current.endpointStatuses.health).toBe('ok');
   });
 
   it('#71: 배열 계열 엔드포인트 전부가 거부되면 모두 fail로 판정한다', async () => {
@@ -79,10 +79,10 @@ describe('useFinUsDashboard - 엔드포인트 상태 판정', () => {
 
     const { result } = renderHook(() => useFinUsDashboard());
 
-    await waitFor(() => expect(result.current.endpointOk.portfolio).toBe('fail'));
-    expect(result.current.endpointOk.trades).toBe('fail');
-    expect(result.current.endpointOk.reports).toBe('fail');
-    expect(result.current.endpointOk.diaries).toBe('fail');
+    await waitFor(() => expect(result.current.endpointStatuses.portfolio).toBe('fail'));
+    expect(result.current.endpointStatuses.trades).toBe('fail');
+    expect(result.current.endpointStatuses.reports).toBe('fail');
+    expect(result.current.endpointStatuses.diaries).toBe('fail');
     expect(result.current.resources.trades).toEqual([]);
     expect(result.current.resources.reports).toEqual([]);
     expect(result.current.resources.diaries).toEqual([]);
@@ -92,8 +92,8 @@ describe('useFinUsDashboard - 엔드포인트 상태 판정', () => {
   it('전부 성공하면 모두 ok로 판정하고 에러 메시지를 남기지 않는다', async () => {
     const { result } = renderHook(() => useFinUsDashboard());
 
-    await waitFor(() => expect(result.current.endpointOk.portfolio).toBe('ok'));
-    expect(result.current.endpointOk).toEqual({
+    await waitFor(() => expect(result.current.endpointStatuses.portfolio).toBe('ok'));
+    expect(result.current.endpointStatuses).toEqual({
       health: 'ok',
       balance: 'ok',
       portfolio: 'ok',
@@ -111,7 +111,7 @@ describe('useFinUsDashboard - 엔드포인트 상태 판정', () => {
 
     const { result } = renderHook(() => useFinUsDashboard());
 
-    expect(result.current.endpointOk.portfolio).toBe('unknown');
-    expect(result.current.endpointOk.health).toBe('unknown');
+    expect(result.current.endpointStatuses.portfolio).toBe('unknown');
+    expect(result.current.endpointStatuses.health).toBe('unknown');
   });
 });

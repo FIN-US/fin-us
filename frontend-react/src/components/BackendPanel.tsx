@@ -1,11 +1,10 @@
 import React from 'react';
 import { Activity, RefreshCw, Server, WalletCards } from 'lucide-react';
-import type { DashboardResources } from '../types';
-import type { EndpointOk, EndpointStatus } from '../hooks/useFinUsDashboard';
+import type { DashboardResources, EndpointStatus, EndpointStatuses } from '../types';
 
 interface BackendPanelProps {
   resources: DashboardResources;
-  endpointOk: EndpointOk;
+  endpointStatuses: EndpointStatuses;
   loading: boolean;
   onRefresh: () => void;
 }
@@ -24,14 +23,14 @@ const STATUS_LABEL: Record<EndpointStatus, string> = {
   unknown: '확인 중',
 };
 
-const BackendPanel: React.FC<BackendPanelProps> = ({ resources, endpointOk, loading, onRefresh }) => {
+const BackendPanel: React.FC<BackendPanelProps> = ({ resources, endpointStatuses, loading, onRefresh }) => {
   const endpoints = [
-    { label: 'Health', status: endpointOk.health, path: '/health' },
-    { label: 'Balance', status: endpointOk.balance, path: '/api/v1/trading/balance' },
-    { label: 'Portfolio', status: endpointOk.portfolio, path: '/api/v1/db/portfolio' },
-    { label: 'Trades', status: endpointOk.trades, path: '/api/v1/db/trades' },
-    { label: 'Reports', status: endpointOk.reports, path: '/api/v1/db/reports' },
-    { label: 'Diary', status: endpointOk.diaries, path: '/api/v1/db/diary' },
+    { label: 'Health', status: endpointStatuses.health, path: '/health' },
+    { label: 'Balance', status: endpointStatuses.balance, path: '/api/v1/trading/balance' },
+    { label: 'Portfolio', status: endpointStatuses.portfolio, path: '/api/v1/db/portfolio' },
+    { label: 'Trades', status: endpointStatuses.trades, path: '/api/v1/db/trades' },
+    { label: 'Reports', status: endpointStatuses.reports, path: '/api/v1/db/reports' },
+    { label: 'Diary', status: endpointStatuses.diaries, path: '/api/v1/db/diary' },
   ];
 
   return (
@@ -69,8 +68,16 @@ const BackendPanel: React.FC<BackendPanelProps> = ({ resources, endpointOk, load
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
           {endpoints.map((endpoint) => (
             <div key={endpoint.path} className="flex items-center gap-2 rounded-lg bg-slate-50 px-3 py-2">
+              {/*
+                role="status"는 암묵적으로 aria-live="polite"를 동반해, 엔드포인트마다
+                별도의 라이브 리전을 만든다. 엔드포인트가 6개면 라이브 리전도 6개가 되어
+                새로고침 한 번에 스크린리더가 상태를 6번 연달아 읽는다. 이 점은 "방금
+                바뀌었다고 알리는 공지"가 아니라 "지금 상태를 나타내는 지표"이므로
+                role="img"가 의미에 맞고, 접근 가능한 이름은 아래 aria-label이 그대로
+                제공한다.
+              */}
               <span
-                role="status"
+                role="img"
                 aria-label={`${endpoint.label} ${STATUS_LABEL[endpoint.status]}`}
                 data-status={endpoint.status}
                 className={`w-2.5 h-2.5 rounded-full ${DOT_CLASS[endpoint.status]}`}

@@ -105,6 +105,17 @@ export interface DashboardResources {
   diaries: DiaryItem[];
 }
 
+export type EndpointStatus = 'unknown' | 'ok' | 'fail';
+
+export interface EndpointStatuses {
+  health: EndpointStatus;
+  balance: EndpointStatus;
+  portfolio: EndpointStatus;
+  trades: EndpointStatus;
+  reports: EndpointStatus;
+  diaries: EndpointStatus;
+}
+
 export interface ChatMessage {
   id: string;
   role: 'system' | 'user' | 'server';

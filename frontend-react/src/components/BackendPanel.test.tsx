@@ -1,8 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import BackendPanel from './BackendPanel';
-import type { DashboardResources } from '../types';
-import type { EndpointOk, EndpointStatus } from '../hooks/useFinUsDashboard';
+import type { DashboardResources, EndpointStatus, EndpointStatuses } from '../types';
 
 // 렌더링 매핑 가드: 훅이 판정한 EndpointStatus가 화면의 상태 점에 그대로 반영되는지 본다.
 // 판정 로직 자체의 #71 회귀 가드는 useFinUsDashboard.test.tsx가 담당한다.
@@ -19,7 +18,7 @@ const baseResources: DashboardResources = {
   diaries: [],
 };
 
-const allOk: EndpointOk = {
+const allOk: EndpointStatuses = {
   health: 'ok',
   balance: 'ok',
   portfolio: 'ok',
@@ -44,7 +43,7 @@ describe('BackendPanel', () => {
       render(
         <BackendPanel
           resources={baseResources}
-          endpointOk={{ ...allOk, portfolio: status }}
+          endpointStatuses={{ ...allOk, portfolio: status }}
           loading={false}
           onRefresh={vi.fn()}
         />,
@@ -61,7 +60,7 @@ describe('BackendPanel', () => {
     render(
       <BackendPanel
         resources={baseResources}
-        endpointOk={{ ...allOk, portfolio: 'fail', trades: 'unknown' }}
+        endpointStatuses={{ ...allOk, portfolio: 'fail', trades: 'unknown' }}
         loading={false}
         onRefresh={vi.fn()}
       />,

@@ -23,7 +23,7 @@ export default function App() {
     rawNews,
     rawTrend,
     resources,
-    endpointOk,
+    endpointStatuses,
     error,
     chatStatus,
     chatMessages,
@@ -57,7 +57,7 @@ export default function App() {
 
         <ErrorDisplay error={error} />
 
-        <BackendPanel resources={resources} endpointOk={endpointOk} loading={resourceLoading} onRefresh={loadResources} />
+        <BackendPanel resources={resources} endpointStatuses={endpointStatuses} loading={resourceLoading} onRefresh={loadResources} />
 
         {latest && <StockHeader stock={stock} latest={latest} />}
 
