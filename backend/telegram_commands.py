@@ -1039,7 +1039,6 @@ class TelegramCommandHandler:
             f"수량: {order.quantity:,}주",
             f"주문유형: {'시장가' if order.order_type == 'MARKET' else '지정가'}",
         ]
-
         if order.order_type == "LIMIT":
             amount = order.quantity * order.price
             lines.extend(
