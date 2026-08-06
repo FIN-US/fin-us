@@ -16,6 +16,14 @@ const DOT_CLASS: Record<EndpointStatus, string> = {
   unknown: 'bg-slate-300',
 };
 
+// 상태 점은 색상만으로 정보를 전달하므로 스크린리더에는 아무것도 읽히지 않는다.
+// aria-label로 상태를 텍스트화하고, data-status로 색상과 무관한 검증 지점을 남긴다.
+const STATUS_LABEL: Record<EndpointStatus, string> = {
+  ok: '정상',
+  fail: '실패',
+  unknown: '확인 중',
+};
+
 const BackendPanel: React.FC<BackendPanelProps> = ({ resources, endpointOk, loading, onRefresh }) => {
   const endpoints = [
     { label: 'Health', status: endpointOk.health, path: '/health' },
@@ -61,7 +69,12 @@ const BackendPanel: React.FC<BackendPanelProps> = ({ resources, endpointOk, load
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
           {endpoints.map((endpoint) => (
             <div key={endpoint.path} className="flex items-center gap-2 rounded-lg bg-slate-50 px-3 py-2">
-              <span className={`w-2.5 h-2.5 rounded-full ${DOT_CLASS[endpoint.status]}`} />
+              <span
+                role="status"
+                aria-label={`${endpoint.label} ${STATUS_LABEL[endpoint.status]}`}
+                data-status={endpoint.status}
+                className={`w-2.5 h-2.5 rounded-full ${DOT_CLASS[endpoint.status]}`}
+              />
               <div className="min-w-0">
                 <div className="text-xs font-black text-slate-700">{endpoint.label}</div>
                 <div className="text-[11px] text-slate-400 truncate">{endpoint.path}</div>
