@@ -6,11 +6,29 @@ import path from "node:path";
 export const DEFAULT_ORDER_DEDUP_TTL_MS = 120_000;
 const DEFAULT_ORDER_DEDUP_PATH = path.join(os.tmpdir(), "finus-kis-order-dedup.json");
 
+// 원장 항목에는 request.body.CANO(계좌번호)가 평문으로 들어 있다. message는
+// 깨끗해도 에러 "객체"를 로깅하는 순간(console.error(err)·JSON.stringify(err)·
+// util.inspect(err, {depth: null})) 항목 전체가 그대로 찍히므로, 이 클래스는
+// 항목을 들고 있지 않는다.
+//
+// 항목을 non-enumerable로 숨기는 선택지도 있었지만 받지 않았다. 저장소 전체를
+// 훑어보면 이 에러를 잡는 쪽은 항목의 어느 필드도 읽지 않는다(유일한 `.entry`
+// 참조가 이 대입 자체였다) - 숨겨야 할 만큼의 진단 가치가 애초에 없다.
+// 숨기기만 하면 값은 계속 살아 있어 showHidden 출력·getOwnPropertyNames·커스텀
+// 직렬화로 언제든 다시 새고, LedgerUnreadableError가 같은 파일에서 "내용을
+// 아예 싣지 않는다"는 자세를 이미 세워둔 터라 둘을 어긋나게 둘 이유가 없다.
+//
+// 남기는 것은 만료 시각 하나다. 계좌번호와 무관한 타임스탬프이면서 "차단이
+// 언제 풀리는지"라는 메시지의 '잠시 후'를 실제 값으로 뒷받침한다. 항목이 아니라
+// 이 숫자만 받도록 생성자 자체를 바꿔둔다 - 그래야 원장 내용이 이 클래스로
+// 흘러들어올 경로가 구조적으로 남지 않는다. dedup 키는 일부러 싣지 않는다:
+// sha256이어도 CANO는 10자리 숫자라 나머지 주문 필드를 아는 쪽에는 전수 탐색이
+// 현실적이고, 이 역시 잡는 쪽에서 아무도 쓰지 않는다.
 export class DuplicateOrderError extends Error {
-  constructor(entry) {
+  constructor(expiresAt) {
     super("중복 주문 방지를 위해 동일 주문 재요청을 차단했습니다. 잠시 후 주문 내역을 확인하세요.");
     this.name = "DuplicateOrderError";
-    this.entry = entry;
+    this.expiresAt = expiresAt;
   }
 }
 
@@ -133,7 +151,7 @@ export class OrderDedupStore {
     const ledger = this.#readLedger(now);
     const existing = ledger[key];
     if (existing && Number(existing.expiresAt) > now) {
-      throw new DuplicateOrderError(existing);
+      throw new DuplicateOrderError(Number(existing.expiresAt));
     }
 
     const entry = {
