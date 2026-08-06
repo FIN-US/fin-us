@@ -114,12 +114,14 @@ test("resolveStock resolves deduplicated ETN names without ambiguity", () => {
   });
 });
 
-// Issue #150: the code-shaped shortcut (`/^[A-Z0-9]{6,7}$/i`) used to run
-// before exact name/alias matching, so a listed company whose registered
-// name happens to be a 6-7 char alphanumeric string was shadowed by its own
-// name and echoed back as an UNKNOWN "code". These three tests catch a
-// regression to that ordering: if the shortcut is moved back in front of
-// name/alias matching, each of these would fail by returning
+// Issue #150: the code-shaped echo (`CODE_SHAPE_PATTERN`) used to run before
+// exact name/alias matching, so a listed company whose registered name happens
+// to be a 6-7 char alphanumeric string was shadowed by its own name and echoed
+// back as an UNKNOWN "code".
+// These three still pass after #174 because Step 1 compares stock.code only,
+// so a code-SHAPED NAME misses it and Step 2 answers. What they now pin is
+// the echo path: if the Step 3 code-shape echo (CODE_SHAPE_PATTERN) is ever
+// hoisted in front of name/alias matching, each would fail by returning
 // { code: "SIMPAC"/"INVENI"/"WISCOM", market: "UNKNOWN" } instead of the
 // real master entry.
 
@@ -300,8 +302,11 @@ test("exactly 3 master stock names match the code-shaped pattern, and 0 aliases 
   // This is the issue's own acceptance query, turned into a regression test.
   // If a future stocks.json update adds or removes a name/alias matching
   // CODE_SHAPE_PATTERN, this test documents the change and forces a
-  // conscious re-check of the shortcut-ordering fix rather than a silent
-  // reintroduction of the shadowing bug for a new listing.
+  // conscious re-check of the Step 3 echo's position (it must stay behind
+  // name/alias matching) rather than a silent reintroduction of the
+  // shadowing bug for a new listing. It is also the signal backend/
+  // services.py:_looks_like_stock_code depends on: that helper is safe only
+  // while every code-shaped master name is digit-free.
   // Uses the implementation's own exported pattern (rather than a hardcoded
   // copy) so this guard can never drift out of sync with what resolveStock
   // actually treats as code-shaped.
