@@ -1336,3 +1336,425 @@ async def test_monitor_market_task_reescalates_error_after_six_cycles(monkeypatc
     errors = [r for r in caplog.records if r.levelno == logging.ERROR]
     # streak=1 → error, streak=2~5 → debug, streak=6 (% 6 == 0) → error
     assert len(errors) == 2
+
+
+# ---------------------------------------------------------------------------
+# Portfolio 동기화 테스트 (이슈 #122)
+# ---------------------------------------------------------------------------
+
+def _make_balance_text(*holdings):
+    """(name, code, qty, avg_price) 튜플 목록으로 get_balance 텍스트 픽스처를 합성합니다.
+
+    mcp-trading/balance.js의 formatBalanceReport()가 생성하는 형식을 그대로 재현합니다.
+    formatAmount(pchs_avg_pric) = toLocaleString("ko-KR"): 정수는 "N,NNN원",
+    소수는 "N,NNN.NN원" 형태. avg_price가 정수가 아니면 소수점을 그대로 보존한다.
+    mcp-trading/tests/balance.test.js가 "평단가 66,666.67원"을 단언하므로 소수 케이스도
+    픽스처가 통과시켜야 한다(Critical 1 참고).
+    """
+    lines = []
+    for name, code, qty, avg_price in holdings:
+        # formatAmount(toLocaleString("ko-KR")): 정수면 정수 포맷, 소수면 소수 포맷
+        if avg_price == int(avg_price):
+            avg_str = f"{int(avg_price):,}"
+        else:
+            avg_str = f"{avg_price:,}"
+        evlu = int(avg_price * qty)
+        lines.append(
+            f"- {name} ({code}) · {qty}주\n"
+            f"  평단가 {avg_str}원 → 평가금액 {evlu:,}원\n"
+            f"  손익 +0원 · 수익률 ⚪ 0.00%"
+        )
+    stock_list = "\n\n".join(lines) if lines else "보유 종목이 없습니다."
+    return (
+        "[계좌 잔고 현황]\n"
+        "- 총 평가금액: 0원\n"
+        "\n"
+        f"[보유 종목 리스트]\n{stock_list}"
+    )
+
+
+@pytest.fixture(name="portfolio_session")
+def portfolio_session_fixture():
+    """Portfolio 동기화 단위 테스트용 인메모리 SQLite 세션."""
+    from sqlmodel import SQLModel, create_engine
+    from sqlmodel.pool import StaticPool
+    from sqlmodel import Session as _Session
+    eng = create_engine(
+        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
+    )
+    SQLModel.metadata.create_all(eng)
+    with _Session(eng) as session:
+        yield session
+
+
+def test_parse_balance_holdings_extracts_name_code_qty_avg():
+    """_parse_balance_holdings가 이름·코드·수량·평단가를 올바르게 파싱합니다.
+
+    이 테스트가 잡는 mutation: _QTY_RE 또는 _AVG_PRICE_RE를 제거해
+    quantity=0 또는 avg_price=0.0만 반환하는 회귀.
+    """
+    from ..scheduler import _parse_balance_holdings
+
+    text = _make_balance_text(
+        ("삼성전자", "005930", 10, 70000),
+        ("SK하이닉스", "000660", 5, 200000),
+    )
+    holdings = _parse_balance_holdings(text)
+
+    assert len(holdings) == 2
+    assert holdings[0].name == "삼성전자"
+    assert holdings[0].code == "005930"
+    assert holdings[0].quantity == 10
+    assert holdings[0].avg_price == 70000.0
+    assert holdings[1].name == "SK하이닉스"
+    assert holdings[1].code == "000660"
+    assert holdings[1].quantity == 5
+    assert holdings[1].avg_price == 200000.0
+
+
+def test_parse_balance_holdings_with_real_fixture():
+    """REAL_BALANCE_TEXT(balance.js 실제 출력 픽스처)에서 올바르게 파싱됩니다."""
+    from ..scheduler import _parse_balance_holdings
+    from .test_balance_parser import REAL_BALANCE_TEXT
+
+    holdings = _parse_balance_holdings(REAL_BALANCE_TEXT)
+
+    assert len(holdings) == 2
+    assert holdings[0].name == "삼성전자"
+    assert holdings[0].code == "005930"
+    assert holdings[0].quantity == 3
+    assert holdings[0].avg_price == 67000.0
+    assert holdings[1].name == "NAVER"
+    assert holdings[1].code == "035420"
+    assert holdings[1].quantity == 1
+    assert holdings[1].avg_price == 201000.0
+
+
+def test_parse_balance_holdings_empty_returns_empty_list():
+    from ..scheduler import _parse_balance_holdings
+
+    assert _parse_balance_holdings("보유 종목이 없습니다.") == []
+    assert _parse_balance_holdings(_make_balance_text()) == []
+
+
+def test_sync_portfolio_writes_holdings(portfolio_session):
+    """_sync_portfolio_from_balance가 Portfolio 행을 실제로 씁니다.
+
+    이 테스트가 잡는 mutation: _sync_portfolio_from_balance 호출을 제거하거나
+    session.add() 없이 반환하는 회귀 → rows가 비어 assert len==1이 실패한다.
+    """
+    from sqlmodel import select
+    from ..models import Portfolio
+    from ..scheduler import _sync_portfolio_from_balance
+
+    text = _make_balance_text(("삼성전자", "005930", 10, 70000))
+    _sync_portfolio_from_balance(text, portfolio_session)
+
+    rows = portfolio_session.exec(select(Portfolio)).all()
+    assert len(rows) == 1
+    assert rows[0].stock_code == "005930"
+    assert rows[0].stock_name == "삼성전자"
+    assert rows[0].quantity == 10
+    assert rows[0].avg_price == 70000.0
+    # current_price는 get_balance output1에 현재가 필드가 없어 항상 null(이슈 #122)
+    assert rows[0].current_price is None
+
+
+def test_sync_portfolio_removes_stale_holdings(portfolio_session):
+    """보유하지 않게 된 종목이 동기화 후 제거됩니다.
+
+    이 테스트가 잡는 mutation: delete 없이 add만 하는 회귀 → stale 행이
+    남아 assert len==1이 실패한다.
+    """
+    from sqlmodel import select
+    from ..models import Portfolio
+    from ..scheduler import _sync_portfolio_from_balance
+
+    # 초기: 삼성전자 + SK하이닉스
+    portfolio_session.add(Portfolio(stock_code="005930", stock_name="삼성전자", quantity=10, avg_price=70000))
+    portfolio_session.add(Portfolio(stock_code="000660", stock_name="SK하이닉스", quantity=5, avg_price=200000))
+    portfolio_session.commit()
+
+    # 이후 잔고에 삼성전자만 남음
+    text = _make_balance_text(("삼성전자", "005930", 10, 70000))
+    _sync_portfolio_from_balance(text, portfolio_session)
+
+    rows = portfolio_session.exec(select(Portfolio)).all()
+    assert len(rows) == 1
+    assert rows[0].stock_code == "005930"
+
+
+def test_sync_portfolio_skips_when_balance_truncated(portfolio_session):
+    """잔고 연속조회가 잘리면 기존 Portfolio 데이터를 파괴하지 않습니다.
+
+    이 테스트가 잡는 mutation: is_balance_truncated 가드를 제거하면 잘린 잔고로
+    전량 교체가 일어나 기존 종목이 사라져 assert len==2가 실패한다.
+    """
+    from sqlmodel import select
+    from ..models import Portfolio
+    from ..scheduler import _sync_portfolio_from_balance
+    from .test_balance_parser import TRUNCATION_NOTES_BY_REASON
+
+    # 기존 데이터: 삼성전자 + SK하이닉스
+    portfolio_session.add(Portfolio(stock_code="005930", stock_name="삼성전자", quantity=10, avg_price=70000))
+    portfolio_session.add(Portfolio(stock_code="000660", stock_name="SK하이닉스", quantity=5, avg_price=200000))
+    portfolio_session.commit()
+
+    # 잘린 잔고: 삼성전자만 있는 척
+    truncated_text = (
+        _make_balance_text(("삼성전자", "005930", 10, 70000)).rstrip()
+        + TRUNCATION_NOTES_BY_REASON["max_pages"]
+    )
+    _sync_portfolio_from_balance(truncated_text, portfolio_session)
+
+    rows = portfolio_session.exec(select(Portfolio)).all()
+    # 잘린 잔고 → 동기화 건너뜀 → 기존 2개 유지
+    assert len(rows) == 2
+
+
+@pytest.mark.asyncio
+async def test_monitor_market_task_syncs_portfolio_when_balance_succeeds(monkeypatch):
+    """잔고 조회 성공 시 monitor_market_task가 Portfolio 동기화를 호출합니다.
+
+    이 테스트가 잡는 mutation: _monitor_market_task에서 _sync_portfolio_from_balance
+    호출을 제거하는 회귀 → sync_calls가 비어 assert len==1이 실패한다.
+    """
+    from ..scheduler import SignalSource, monitor_market_task
+
+    state = RedisSchedulerState(FakeRedis())
+    sync_calls = []
+
+    @asynccontextmanager
+    async def fake_redis_state():
+        yield state
+
+    async def mock_run_mcp_tool(params, name, args):
+        if name == "get_balance":
+            return _make_balance_text(("삼성전자", "005930", 10, 70000))
+        return "news"
+
+    def mock_sync_portfolio(balance_text, session, **kwargs):
+        sync_calls.append(balance_text)
+
+    async def mock_check_significance(stock, current, last, *, source, provider):
+        return False
+
+    monkeypatch.setattr("backend.scheduler.redis_state", fake_redis_state)
+    monkeypatch.setattr(
+        "backend.scheduler.SIGNAL_SOURCES",
+        [SignalSource(name="news", mcp_params=object(), tool_name="get_market_news")],
+    )
+    monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
+    monkeypatch.setattr("backend.scheduler._sync_portfolio_from_balance", mock_sync_portfolio)
+    monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
+    monkeypatch.setattr("backend.scheduler.manager.broadcast", MagicMock(return_value=asyncio.Future()))
+
+    await monitor_market_task(watchlist_repo=FakeWatchlistRepo())
+
+    assert len(sync_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_monitor_market_task_does_not_sync_when_balance_fails(monkeypatch):
+    """잔고 조회 실패 시 Portfolio 동기화를 호출하지 않습니다 (기존 데이터 보호).
+
+    이 테스트가 잡는 mutation: balance_ok 가드를 제거해 실패 시에도
+    _sync_portfolio_from_balance가 호출되는 회귀 → sync_calls가 비어야 하는데
+    1개가 들어가 assert sync_calls==[] 가 실패한다.
+    """
+    from ..scheduler import SignalSource, monitor_market_task
+
+    state = RedisSchedulerState(FakeRedis())
+    sync_calls = []
+
+    @asynccontextmanager
+    async def fake_redis_state():
+        yield state
+
+    async def mock_run_mcp_tool(params, name, args):
+        if name == "get_balance":
+            raise RuntimeError("KIS 장애")
+        return "news"
+
+    def mock_sync_portfolio(balance_text, session, **kwargs):
+        sync_calls.append(balance_text)
+
+    async def mock_check_significance(stock, current, last, *, source, provider):
+        return False
+
+    monkeypatch.setattr("backend.scheduler.redis_state", fake_redis_state)
+    monkeypatch.setattr(
+        "backend.scheduler.SIGNAL_SOURCES",
+        [SignalSource(name="news", mcp_params=object(), tool_name="get_market_news")],
+    )
+    monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
+    monkeypatch.setattr("backend.scheduler._sync_portfolio_from_balance", mock_sync_portfolio)
+    monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
+    monkeypatch.setattr("backend.scheduler.manager.broadcast", MagicMock(return_value=asyncio.Future()))
+
+    await monitor_market_task(watchlist_repo=FakeWatchlistRepo(["카카오"]))
+
+    assert sync_calls == []
+
+
+# ---------------------------------------------------------------------------
+# Critical 1: 소수점 평단가 파싱 테스트
+# ---------------------------------------------------------------------------
+
+def test_parse_balance_holdings_accepts_fractional_avg_price():
+    """balance.js formatAmount는 정수가 아닌 평단가에 소수점을 붙인다.
+    mcp-trading/tests/balance.test.js가 "평단가 66,666.67원"을 리터럴로 단언하므로
+    이것은 가정이 아니라 계약이다.
+
+    이 테스트가 잡는 mutation: _AVG_PRICE_RE를 원래 r"평단가\\s+([\\d,]+)원"으로
+    되돌리면 "66,666"까지 먹고 다음 글자가 "."라 매치 실패 → avg_price=0.0으로 red.
+    """
+    from ..scheduler import _parse_balance_holdings
+
+    text = (
+        "[보유 종목 리스트]\n"
+        "- 삼성전자 (005930) · 3주\n"
+        "  평단가 66,666.67원 → 평가금액 190,000원\n"
+        "  손익 -10,000원 · 수익률 🔵 ▼ -5.00%"
+    )
+    holdings = _parse_balance_holdings(text)
+    assert len(holdings) == 1
+    assert holdings[0].avg_price == pytest.approx(66666.67)
+
+
+def test_make_balance_text_fixture_passes_fractional_avg_price():
+    """_make_balance_text 픽스처 자체가 소수 평단가를 올바르게 렌더링하는지 확인합니다.
+    픽스처가 int(avg_price)만 쓰면 "66,666원"이 돼 매치되고 파싱값이 66666.0으로
+    틀린 반올림이 일어납니다.
+
+    이 테스트가 잡는 mutation: _make_balance_text에서 avg_str을 f"{int(avg_price):,}"
+    로 되돌리면 "66,666.67" 대신 "66,666"이 생성 → 파싱값이 66666.0 ≠ approx(66666.67)
+    으로 red.
+    """
+    from ..scheduler import _parse_balance_holdings
+
+    text = _make_balance_text(("삼성전자", "005930", 3, 66666.67))
+    assert "66,666.67원" in text, f"픽스처에 소수 평단가가 없습니다: {text!r}"
+    holdings = _parse_balance_holdings(text)
+    assert len(holdings) == 1
+    assert holdings[0].avg_price == pytest.approx(66666.67)
+
+
+# ---------------------------------------------------------------------------
+# Critical 2: 마커 부재 시 동기화 건너뜀 테스트
+# ---------------------------------------------------------------------------
+
+def test_sync_portfolio_skips_when_marker_absent(portfolio_session):
+    """[보유 종목 리스트] 마커가 없는 응답에서 기존 Portfolio 데이터를 파괴하지 않습니다.
+
+    이 테스트가 잡는 mutation: _BALANCE_HOLDINGS_MARKER 가드를 제거하면 빈 holdings로
+    전량 교체가 일어나 기존 1개 행이 사라져 assert len==1이 실패한다.
+    """
+    from sqlmodel import select
+    from ..models import Portfolio
+    from ..scheduler import _sync_portfolio_from_balance
+
+    portfolio_session.add(Portfolio(stock_code="005930", stock_name="삼성전자", quantity=10, avg_price=70000))
+    portfolio_session.commit()
+
+    # 마커 없는 응답 — "보유 0건"이 아니라 "응답을 읽지 못함"
+    no_marker_text = "응답을 가져왔지만 종목 섹션이 없습니다."
+    _sync_portfolio_from_balance(no_marker_text, portfolio_session)
+
+    rows = portfolio_session.exec(select(Portfolio)).all()
+    assert len(rows) == 1, "마커 부재 시 기존 데이터가 보존되어야 합니다"
+
+
+def test_sync_portfolio_skips_empty_balance_text(portfolio_session):
+    """빈 문자열(run_mcp_tool이 MCP content 없을 때 반환하는 값)에서
+    기존 Portfolio 데이터를 파괴하지 않습니다.
+
+    이 테스트가 잡는 mutation: _BALANCE_HOLDINGS_MARKER 가드를 제거하면 ""를 성공
+    응답으로 처리해 전량 교체 → 기존 데이터 소실 → assert len==1이 실패한다.
+    """
+    from sqlmodel import select
+    from ..models import Portfolio
+    from ..scheduler import _sync_portfolio_from_balance
+
+    portfolio_session.add(Portfolio(stock_code="005930", stock_name="삼성전자", quantity=10, avg_price=70000))
+    portfolio_session.commit()
+
+    _sync_portfolio_from_balance("", portfolio_session)
+
+    rows = portfolio_session.exec(select(Portfolio)).all()
+    assert len(rows) == 1, "빈 응답 시 기존 데이터가 보존되어야 합니다"
+
+
+def test_sync_portfolio_allows_genuinely_empty_holdings(portfolio_session):
+    """마커는 있지만 보유 종목이 없는 응답("보유 종목이 없습니다.")은
+    실제 0건으로 처리해 기존 데이터를 전량 삭제합니다.
+
+    마커 가드가 "실제 0건"을 막아서는 안 됩니다.
+    """
+    from sqlmodel import select
+    from ..models import Portfolio
+    from ..scheduler import _sync_portfolio_from_balance
+
+    portfolio_session.add(Portfolio(stock_code="005930", stock_name="삼성전자", quantity=10, avg_price=70000))
+    portfolio_session.commit()
+
+    # balance.js가 보유 0건일 때 실제로 생성하는 텍스트(balance.js:273-274)
+    empty_holdings_text = (
+        "[계좌 잔고 현황]\n"
+        "- 총 평가금액: 0원\n"
+        "\n"
+        "[보유 종목 리스트]\n"
+        "보유 종목이 없습니다."
+    )
+    _sync_portfolio_from_balance(empty_holdings_text, portfolio_session)
+
+    rows = portfolio_session.exec(select(Portfolio)).all()
+    assert len(rows) == 0, "실제 보유 0건이면 기존 데이터를 삭제해야 합니다"
+
+
+# ---------------------------------------------------------------------------
+# Critical 3: price_known 플래그 테스트
+# ---------------------------------------------------------------------------
+
+def test_portfolio_endpoint_includes_price_known_flag(client):
+    """/api/v1/portfolio 응답의 각 holding에 price_known 플래그가 포함됩니다.
+
+    이 테스트가 잡는 mutation: holdings.append에서 "price_known" 키를 제거하면
+    응답에 없어 assert "price_known" in holding이 실패한다.
+    """
+    from sqlmodel import Session, select
+    from ..database import engine
+    from ..models import Portfolio
+    from datetime import datetime, timezone
+
+    with Session(engine) as session:
+        for row in session.exec(select(Portfolio)).all():
+            session.delete(row)
+        session.add(Portfolio(
+            stock_code="005930",
+            stock_name="삼성전자",
+            quantity=10,
+            avg_price=70000,
+            current_price=None,
+            updated_at=datetime.now(timezone.utc),
+        ))
+        session.commit()
+
+    try:
+        resp = client.get("/api/v1/portfolio")
+        assert resp.status_code == 200
+        data = resp.json()["data"]
+        assert len(data["holdings"]) == 1
+        holding = data["holdings"][0]
+        assert "price_known" in holding, "price_known 플래그가 응답에 없습니다"
+        # current_price가 None이므로 price_known은 False여야 한다
+        assert holding["price_known"] is False
+        assert "total_asset_is_estimate" in data
+        assert data["total_asset_is_estimate"] is True
+        assert "total_return_rate_known" in data
+        assert data["total_return_rate_known"] is False
+    finally:
+        with Session(engine) as session:
+            for row in session.exec(select(Portfolio)).all():
+                session.delete(row)
+            session.commit()

@@ -42,7 +42,9 @@ def test_get_visualization_portfolio_empty(client: TestClient):
         "status": "success",
         "data": {
             "total_asset": 0,
+            "total_asset_is_estimate": False,
             "total_return_rate": 0.0,
+            "total_return_rate_known": True,
             "holdings": [],
         },
         "message": None,
@@ -79,7 +81,9 @@ def test_get_visualization_portfolio_maps_holdings(
     assert response.json()["status"] == "success"
     assert response.json()["data"] == {
         "total_asset": 1720000.0,
+        "total_asset_is_estimate": False,
         "total_return_rate": 1.1765,
+        "total_return_rate_known": True,
         "holdings": [
             {
                 "name": "삼성전자",
@@ -87,6 +91,7 @@ def test_get_visualization_portfolio_maps_holdings(
                 "avg_price": 70000.0,
                 "return_rate": 10.0,
                 "quantity": 10,
+                "price_known": True,
             },
             {
                 "name": "SK하이닉스",
@@ -94,6 +99,7 @@ def test_get_visualization_portfolio_maps_holdings(
                 "avg_price": 200000.0,
                 "return_rate": -5.0,
                 "quantity": 5,
+                "price_known": True,
             },
         ],
     }
@@ -127,25 +133,76 @@ def test_get_visualization_portfolio_handles_missing_prices(
 
     assert response.status_code == 200
     assert response.json()["data"] == {
+        # 카카오 current_price=None → total_asset에 avg_price*qty(126,000)로 포함.
+        # 평단가없음 current_price=1000 → total_asset에 1000*2(2,000)로 포함.
         "total_asset": 128000.0,
-        "total_return_rate": 0.0,
+        # 카카오의 current_price=None으로 인해 total_asset이 추정값이다.
+        "total_asset_is_estimate": True,
+        # 카카오는 current_price 없어 return_rate 미반영.
+        # 평단가없음은 avg_price=0 이라 수익률 계산 불가 → return_rate=None, price_known=False.
+        # 매입가를 모르면 수익률도 모른다 — 0%로 단언하지 않는다(이슈 #122).
+        # → total_cost=0. 보유 종목은 있으므로 "모름"이고 실제 0%가 아니다 → null.
+        "total_return_rate": None,
+        "total_return_rate_known": False,
         "holdings": [
             {
                 "name": "카카오",
-                "current_price": 42000.0,
+                # current_price=None → null. avg_price 대체값 42000을 반환하던
+                # 기존 동작은 "실제 0%" 수익률과 구분이 불가능해 이슈 #122에서 수정됨.
+                "current_price": None,
                 "avg_price": 42000.0,
-                "return_rate": 0.0,
+                "return_rate": None,
                 "quantity": 3,
+                "price_known": False,
             },
             {
                 "name": "평단가없음",
                 "current_price": 1000.0,
                 "avg_price": 0.0,
-                "return_rate": 0.0,
+                # avg_price=0 → _portfolio_return_rate가 None 반환 → price_known=False.
+                # 0.00%로 단언하면 이슈 #122가 해소한 문제가 avg_price 경로에서 재현된다.
+                "return_rate": None,
                 "quantity": 2,
+                "price_known": False,
             },
         ],
     }
+
+
+def test_get_visualization_portfolio_total_return_rate_is_null_when_no_current_price(
+    client: TestClient,
+    session: Session,
+):
+    """보유 종목은 있는데 현재가가 하나도 없으면 총수익률은 0.0이 아니라 null이어야 한다.
+
+    현재 Portfolio 동기화는 current_price를 채울 소스가 없어 항상 null로 저장한다.
+    이때 total_return_rate로 0.0을 돌려주면 소비자는 그것을 실제 수익률 0%로 읽고,
+    종목별 return_rate를 null로 만들어 얻은 구분이 계정 총계에서 그대로 무너진다.
+
+    이 테스트가 잡는 mutation: total_cost == 0 분기에서 None 대신 0.0 반환.
+    """
+    session.add(
+        Portfolio(stock_code="005930", stock_name="삼성전자", quantity=10, avg_price=70000, current_price=None)
+    )
+    session.add(
+        Portfolio(stock_code="035720", stock_name="카카오", quantity=3, avg_price=42000, current_price=None)
+    )
+    session.commit()
+
+    data = client.get("/api/v1/portfolio").json()["data"]
+
+    assert data["total_return_rate"] is None, "현재가를 모르는데 0%로 단언하면 안 됩니다"
+    assert all(h["return_rate"] is None for h in data["holdings"])
+    # 총자산은 매입금액 근사값으로 계산된다: 70000*10 + 42000*3
+    assert data["total_asset"] == 826000.0
+
+
+def test_get_visualization_portfolio_empty_keeps_zero_total_return_rate(client: TestClient):
+    """보유 종목이 아예 없으면 "모른다"고 할 것이 없으므로 기존대로 0.0을 유지한다."""
+    data = client.get("/api/v1/portfolio").json()["data"]
+
+    assert data["holdings"] == []
+    assert data["total_return_rate"] == 0.0
 
 
 def test_create_and_get_diary(client: TestClient):

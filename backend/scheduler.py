@@ -2,11 +2,11 @@ import os
 import logging
 import re
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
 from typing import Any, Callable
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from sqlmodel import Session
+from sqlmodel import Session, select
 from .catalyst_repo import CatalystEventInput, SqliteCatalystEventRepo
 from .ws_manager import manager
 from .database import engine
@@ -18,6 +18,7 @@ from .services import (
     check_signal_significance,
     generate_morning_briefing,
 )
+from .models import Portfolio
 from .watchlist_repo import SqliteWatchlistRepo
 from .telegram_notifier import telegram_notifier
 from .telegram_notifier import should_send_telegram_alert
@@ -114,54 +115,13 @@ STOCK_LINE_RE = re.compile(r"^- (?P<name>.+) \((?P<code>[0-9A-Z]{6,})\)")
 def extract_stocks_from_balance(balance_text: str) -> list[str]:
     """mcp-trading의 get_balance 결과에서 종목명 리스트를 추출합니다.
 
-    [보유 종목 리스트] 섹션 이후 "- "로 시작하는 줄 중 STOCK_LINE_RE에 매치되는
-    줄에서만 종목명을 추출합니다. 매치되지 않는 줄(코드 괄호 누락 등 계약 위반)은
-    호출당 1회 집계 경고 로그를 남기고 건너뜁니다(줄마다 로그를 남기면 템플릿
-    변경 시 종목 수만큼 WARNING이 반복 발생한다).
+    _parse_balance_holdings에 파싱을 위임하고 이름만 모아 반환합니다.
+    형식 위반 줄 경고와 파싱 실패 경고는 _parse_balance_holdings가 담당합니다.
 
-    mcp-trading/balance.js의 formatTruncationNote가 그 섹션 뒤에 덧붙이는 잘림
-    안내 문구는 "- "로 시작하지 않으므로, 정규식 매치 이전에 startswith("- ")
-    가드와 정규식 거부 중 어느 쪽이든 걸러집니다.
+    [보유 종목 리스트] 섹션이 없으면 [] 반환(마커 부재 === 파싱 불가).
+    잘림 안내 문구는 STOCK_LINE_RE에 매치되지 않아 파싱 단계에서 걸러집니다.
     """
-    stocks: list[str] = []
-    malformed: list[str] = []
-    if "[보유 종목 리스트]" in balance_text:
-        lines = balance_text.split("[보유 종목 리스트]")[1].strip().split("\n")
-        for line in lines:
-            if line.startswith("- "):
-                # "- 종목명 (코드) · 수량주" 형식을 정규식으로 앵커링해 검증한다.
-                # 이 파서는 mcp-trading/balance.js 의 formatBalanceReport() 출력 형식에 의존한다.
-                # 종목 한 건은 3줄 블록(헤더 줄 + 공백 2칸 들여쓰기 2줄)이며, 들여쓴 줄은
-                # "- " 로 시작하지 않으므로 이 조건에 걸리지 않는다.
-                #
-                # STOCK_LINE_RE의 greedy .+는 다음 두 가지를 의도적으로 처리한다.
-                # 1) 종목코드는 항상 줄의 마지막 "(코드)" 그룹에 있으므로 greedy 매칭으로
-                #    마지막 " (코드) · " 직전까지를 이름으로 잡는다. split("(")[0]을 쓰면
-                #    종목명 자체에 괄호가 있을 때 첫 "(" 에서 잘려 오인식한다.
-                #    예: "CJ4우(전환) (00104K) · 1주" → name 그룹 "CJ4우(전환)"
-                #    (split만 쓰면 "CJ4우"로 잘못 잘림). mcp-trading/data/stocks.json 기준
-                #    종목명 4,353개 중 348개가 "(" 를 포함하므로 드문 경우가 아니다.
-                # 2) ^- 가 "- " 접두사를 소비하므로 종목명 중간의 "- " 가 있어도
-                #    name 그룹에 그대로 보존된다. 예: "- 한국 - 전력 (015760) · 1주"는
-                #    name "한국 - 전력"(정상). stocks.json 기준으로는 "- "를 포함하는
-                #    종목명이 0건이지만, prdt_name은 마스터가 아닌 KIS output1 응답에서
-                #    오므로 완전히 배제할 수는 없다.
-                #
-                # 매치 실패(코드 괄호 누락 등 계약 위반 줄)는 malformed에 모아 호출 후
-                # 1회 집계 경고로 남긴다.
-                match = STOCK_LINE_RE.match(line)
-                if match is None:
-                    malformed.append(line)
-                    continue
-                name = match.group("name").strip()
-                if name:
-                    stocks.append(name)
-    if malformed:
-        logger.warning(
-            "예상치 못한 잔고 종목 줄 형식 %d건을 건너뛰었습니다(예시 최대 3건): %r",
-            len(malformed), malformed[:3],
-        )
-    return stocks
+    return [h.name for h in _parse_balance_holdings(balance_text)]
 
 
 # mcp-trading/balance.js의 formatTruncationNote()가 잘림 시 항상 덧붙이는 문구 중,
@@ -185,6 +145,14 @@ def extract_stocks_from_balance(balance_text: str) -> list[str]:
 # 직접 단언해 고정하고, backend/tests/test_balance_parser.py가 픽스처로 재현한다.
 _BALANCE_TRUNCATION_MARKER = "조회가 중단되어"
 
+# balance.js formatBalanceReport()가 보유 종목 섹션을 구분하는 헤더 리터럴.
+# balance.js:273-274를 보면, 보유 종목이 0건이어도 이 마커와 "보유 종목이 없습니다."를
+# 항상 출력한다. 따라서 이 마커가 없다는 것은 "보유 0건"이 아니라 "응답을 읽지 못함"이다.
+# run_mcp_tool은 MCP content가 비면 예외 대신 빈 문자열을 반환하므로(services.py),
+# 이 경로는 실재한다. _sync_portfolio_from_balance가 이 마커 부재를 계약 위반으로
+# 처리해 전량 교체를 막는다.
+_BALANCE_HOLDINGS_MARKER = "[보유 종목 리스트]"
+
 
 def is_balance_truncated(balance_text: str) -> bool:
     """get_balance 응답에 mcp-trading/balance.js의 잘림 안내 문구가 포함되어 있는지 확인합니다.
@@ -193,6 +161,184 @@ def is_balance_truncated(balance_text: str) -> bool:
     종목명으로 오인식되지 않도록), 잘림 여부는 이 함수로 별도 확인해야 한다.
     """
     return _BALANCE_TRUNCATION_MARKER in balance_text
+
+
+# balance.js formatBalanceReport()의 종목 줄 형식에서 수량과 평단가를 추출하는 정규식.
+#
+# 수량(hldg_qty): "- 삼성전자 (005930) · 3주" 줄 끝의 "N주" 부분.
+# 코드 닫는 괄호 직후 공백+중점+공백("· ")을 앵커로 사용한다. formatQuantity가
+# toLocaleString("ko-KR")로 쉼표를 삽입하므로 "1,234주" 형태도 허용한다.
+# · 는 U+00B7(MIDDLE DOT)로, balance.js 템플릿 리터럴에서 그대로 쓰는 문자다.
+_QTY_RE = re.compile(r"\)\s*·\s*([\d,]+)주")
+
+# 평단가(pchs_avg_pric): "  평단가 67,000원 → ..." 줄.
+# formatAmount가 toLocaleString("ko-KR")로 쉼표를 삽입하고 "원"을 붙인다.
+# 평단가는 매수 단가의 가중평균이라 정수가 아닌 것이 정상이다(예: "66,666.67원").
+# mcp-trading/tests/balance.test.js가 "평단가 66,666.67원"을 리터럴로 단언하므로
+# 소수점 허용은 가정이 아니라 계약이다. (?:\.\d+)?로 정수·소수 양쪽을 잡는다.
+# "-원" 형태(parseNumber가 null을 반환하는 경우)는 [\d,]+에 매치되지 않아
+# 기본값 0.0이 사용된다.
+# _QTY_RE(수량)는 hldg_qty가 항상 정수이므로 소수점 허용이 필요 없다.
+_AVG_PRICE_RE = re.compile(r"평단가\s+([\d,]+(?:\.\d+)?)원")
+
+
+@dataclass(frozen=True)
+class _BalanceHolding:
+    """_parse_balance_holdings의 파싱 결과 단위."""
+    code: str
+    name: str
+    quantity: int
+    avg_price: float
+
+
+def _parse_balance_holdings(balance_text: str) -> list[_BalanceHolding]:
+    """get_balance 텍스트에서 보유 종목의 코드·이름·수량·평단가를 파싱합니다.
+
+    mcp-trading/balance.js의 formatBalanceReport()가 생성하는 3줄 블록 형식에
+    의존합니다:
+      줄1: "- {prdt_name} ({pdno}) · {hldg_qty}주"
+      줄2: "  평단가 {pchs_avg_pric}원 → 평가금액 {evlu_amt}원"
+      줄3: "  손익 ... · 수익률 ..."
+
+    current_price는 이 포맷에 포함되지 않아 파싱하지 않습니다.
+    inquire-balance(TTTC8434R) output1에 현재가 필드가 없기 때문입니다
+    (이슈 #122 후속 이슈 참고).
+
+    잘림 가드와 마커 부재 가드는 호출처(_sync_portfolio_from_balance)가 담당하므로
+    이 함수는 있는 그대로 파싱합니다. _BALANCE_HOLDINGS_MARKER가 없으면 [] 반환.
+
+    형식 위반 줄(코드 괄호 누락 등)은 모아서 호출당 1회 경고 로그를 남깁니다.
+    수량·평단가 파싱이 실패한 줄도 경고를 남기고 기본값(0)을 사용합니다.
+    extract_stocks_from_balance는 이 함수에 파싱을 위임합니다.
+    """
+    holdings: list[_BalanceHolding] = []
+    if _BALANCE_HOLDINGS_MARKER not in balance_text:
+        return holdings
+
+    section = balance_text.split(_BALANCE_HOLDINGS_MARKER)[1]
+    lines = section.split("\n")
+    malformed: list[str] = []
+
+    for i, line in enumerate(lines):
+        if not line.startswith("- "):
+            continue
+
+        match = STOCK_LINE_RE.match(line)
+        if match is None:
+            malformed.append(line)
+            continue
+
+        name = match.group("name").strip()
+        code = match.group("code")
+        if not name:
+            continue
+
+        # 수량: "- 삼성전자 (005930) · 3주" → 3
+        qty_match = _QTY_RE.search(line)
+        quantity = 0
+        if qty_match:
+            try:
+                quantity = int(qty_match.group(1).replace(",", ""))
+            except ValueError:
+                logger.warning("[%s] 수량 파싱 실패(ValueError). quantity=0으로 저장합니다: %r", name, line)
+        else:
+            logger.warning("[%s] 수량 정규식이 매치되지 않아 quantity=0으로 저장합니다: %r", name, line)
+
+        # 평단가: 다음 줄 "  평단가 67,000원 → ..." → 67000.0 (소수 포함)
+        avg_price = 0.0
+        if i + 1 < len(lines):
+            avg_match = _AVG_PRICE_RE.search(lines[i + 1])
+            if avg_match:
+                try:
+                    avg_price = float(avg_match.group(1).replace(",", ""))
+                except ValueError:
+                    logger.warning(
+                        "[%s] 평단가 파싱 실패(ValueError). avg_price=0으로 저장합니다: %r",
+                        name, lines[i + 1],
+                    )
+            else:
+                logger.warning(
+                    "[%s] 평단가 정규식이 매치되지 않아 avg_price=0으로 저장합니다: %r",
+                    name, lines[i + 1] if i + 1 < len(lines) else "(다음 줄 없음)",
+                )
+
+        holdings.append(_BalanceHolding(code=code, name=name, quantity=quantity, avg_price=avg_price))
+
+    if malformed:
+        logger.warning(
+            "예상치 못한 잔고 종목 줄 형식 %d건을 건너뛰었습니다(예시 최대 3건): %r",
+            len(malformed), malformed[:3],
+        )
+    return holdings
+
+
+def _sync_portfolio_from_balance(
+    balance_text: str,
+    session: Session,
+    *,
+    holdings: list[_BalanceHolding] | None = None,
+) -> None:
+    """get_balance 응답을 바탕으로 Portfolio 테이블을 동기화합니다.
+
+    전략: 전량 교체 (기존 행 전체 삭제 후 신규 삽입). 매 잔고 조회마다 실행되어
+    보유하지 않게 된 종목을 자동으로 제거합니다.
+
+    잔고가 잘린 경우(is_balance_truncated) 전량 교체를 수행하면 아직 파악되지 않은
+    보유 종목이 삭제될 수 있으므로, 동기화를 건너뛰고 기존 데이터를 보존합니다.
+
+    current_price는 get_balance(inquire-balance, TTTC8434R) output1에 현재가 필드가
+    없어 항상 null로 둡니다. null 수익률이 "실제 0%"와 혼동되지 않도록
+    /api/v1/portfolio 응답에서 return_rate: null로 구분됩니다(이슈 #122).
+    current_price 확보 방안은 후속 이슈를 참고하세요.
+
+    holdings: 호출처에서 이미 _parse_balance_holdings를 실행한 경우 그 결과를 전달하면
+    재파싱을 건너뜁니다. None이면 balance_text에서 직접 파싱합니다.
+    잘림·마커 가드는 holdings 인자 유무에 관계없이 항상 balance_text를 검사합니다.
+    """
+    if is_balance_truncated(balance_text):
+        logger.warning(
+            "잔고 연속조회가 잘려 Portfolio 동기화를 건너뜁니다. 기존 데이터를 유지합니다."
+        )
+        return
+
+    # 마커가 없으면 "보유 0건"이 아니라 "응답을 읽지 못함"이다.
+    # balance.js는 보유 종목이 없어도 마커와 "보유 종목이 없습니다."를 항상 출력한다
+    # (balance.js:273-274). run_mcp_tool은 MCP content가 비면 예외 대신 ""를
+    # 반환하므로(services.py) 이 경로는 실재한다. 전량 교체는 되돌릴 수 없으므로
+    # 기존 데이터를 보존하고 error 로그로 운영자에게 알린다.
+    if _BALANCE_HOLDINGS_MARKER not in balance_text:
+        logger.error(
+            "잔고 응답에서 %r 섹션을 찾지 못해 Portfolio 동기화를 건너뜁니다 "
+            "(응답 길이 %d). 기존 데이터를 유지합니다.",
+            _BALANCE_HOLDINGS_MARKER,
+            len(balance_text),
+        )
+        return
+
+    # 호출처에서 이미 파싱한 결과가 있으면 재파싱을 건너뛴다(경고 중복 방지).
+    if holdings is None:
+        holdings = _parse_balance_holdings(balance_text)
+
+    # 전량 교체: 기존 행 전체 삭제
+    existing = session.exec(select(Portfolio)).all()
+    for row in existing:
+        session.delete(row)
+    session.flush()
+
+    # 신규 삽입
+    now = datetime.now(timezone.utc)
+    for h in holdings:
+        session.add(Portfolio(
+            stock_code=h.code,
+            stock_name=h.name,
+            quantity=h.quantity,
+            avg_price=h.avg_price,
+            current_price=None,
+            updated_at=now,
+        ))
+
+    session.commit()
+    logger.info("Portfolio 동기화 완료: %d개 종목", len(holdings))
 
 
 def _infer_catalyst_event_type(description: str) -> str:
@@ -454,7 +600,22 @@ async def _monitor_market_task(
                 _balance_failure_streak = 0
                 _last_balance_error = None
 
-            owned_stocks = extract_stocks_from_balance(balance_text)
+            # 같은 텍스트를 두 번 파싱하지 않도록 먼저 한 번만 파싱합니다.
+            # extract_stocks_from_balance도 내부에서 _parse_balance_holdings를 호출하는데,
+            # _sync_portfolio_from_balance가 같은 텍스트를 또 파싱하면 경고가 두 번씩
+            # 찍히고 "저장합니다"라는 문구가 실제로 저장하지 않는 호출에서도 나옵니다.
+            _holdings = _parse_balance_holdings(balance_text)
+            owned_stocks = [h.name for h in _holdings]
+
+            # Portfolio 테이블 동기화 — 잔고 조회 성공 시에만 실행.
+            # 잘린 잔고에서 전량 교체하면 보유 종목이 사라지므로,
+            # _sync_portfolio_from_balance가 내부에서 잘림을 감지해 건너뜁니다.
+            # 동기화 실패는 감시 루프에 영향을 주지 않아야 하므로 예외를 격리합니다.
+            try:
+                with Session(engine) as sync_session:
+                    _sync_portfolio_from_balance(balance_text, sync_session, holdings=_holdings)
+            except Exception as e:
+                logger.error("Portfolio 동기화 중 오류 (감시는 계속): %s", e, exc_info=True)
 
             if is_balance_truncated(balance_text):
                 # 잘림 사유(max_pages/time_budget/error/...)마다 운영 대응이 다르므로,
