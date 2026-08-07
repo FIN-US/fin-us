@@ -213,7 +213,7 @@ test("submitOrder: a non-Error thrown by markSucceeded (e.g. a plain string) doe
   const consoleError = t.mock.method(console, "error", () => {});
   const store = {
     markSucceeded() {
-      throw "disk full"; // eslint-disable-line no-throw-literal -- simulating a non-Error rejection
+      throw "disk full"; // 의도적으로 문자열을 던져 markSucceeded catch 블록의 error.message 무가드 참조를 잡는다
     },
   };
 
@@ -232,7 +232,7 @@ test("submitOrder: a non-Error value thrown by submit() (e.g. null) does not cra
   const { releaseCalls, store } = stubStore();
 
   await assert.rejects(
-    () => submitOrder({ dedupStore: store, dedupKey: "order-key-null-throw", submit: async () => { throw null; } }), // eslint-disable-line no-throw-literal
+    () => submitOrder({ dedupStore: store, dedupKey: "order-key-null-throw", submit: async () => { throw null; } }), // 의도적으로 null을 던져 submit() 거부 시 error.kisOrderRejected 등 property 접근의 무가드 참조를 잡는다
     (err) => err === null,
   );
   assert.deepEqual(releaseCalls, [], "a non-Error rejection must default to fail-closed (no release)");
