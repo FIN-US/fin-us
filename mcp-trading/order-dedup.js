@@ -150,6 +150,13 @@ export class OrderDedupStore {
     this.filePath = filePath;
     this.ttlMs = ttlMs;
     this.now = now;
+    // 고아 tmp 파일 스윕은 인스턴스당 1회만 수행한다. 고아 파일은 죽은
+    // 프로세스만 남기므로(살아 있는 프로세스의 실패는 #writeLedger의 catch가
+    // 이미 정리한다) 매 쓰기마다 재스캔해도 새 고아가 생기지 않는다. 모듈
+    // 스코프로 두지 않은 이유: 여러 인스턴스를 만드는 테스트에서 상태가
+    // 누수되고, 같은 프로세스 내에서 서로 다른 원장 경로를 쓰는 인스턴스가
+    // 있을 경우 각자 첫 쓰기에 자기 디렉터리를 한 번씩 정리해야 한다.
+    this.sweptOrphans = false;
   }
 
   reserve(key, request) {
@@ -261,19 +268,30 @@ export class OrderDedupStore {
     );
 
     // 이전 프로세스가 SIGKILL·OOM·전원차단으로 죽어 남긴 고아 임시 파일을
-    // 정리한다. 스윕 실패(readdir 실패 포함)는 전부 삼킨다 — 여기서 던지면
+    // 정리한다. 인스턴스당 한 번만 실행한다 — 고아는 죽은 프로세스만 남기므로
+    // 한 번 정리한 뒤에는 이 인스턴스가 살아 있는 동안 새 고아가 나타나지
+    // 않는다(살아 있는 프로세스의 실패는 #writeLedger의 catch가 이미 정리한다).
+    // 매 쓰기마다 동기 readdirSync로 디렉터리를 훑으면 이벤트 루프를 블로킹하고,
+    // 기본 경로(os.tmpdir())에서는 시스템 임시 디렉터리 전체를 주문마다 스캔한다.
+    // 플래그는 스윕 시도 전에 세운다 — readdir이 실패해도 재시도하지 않는다.
+    // 재시도를 허용하면 오류 환경(예: 권한 문제)에서 매 쓰기마다 다시 스캔해
+    // 원래 문제가 재발하고, 스윕 실패는 어차피 삼키므로 재시도 결과도 같다.
+    // 스윕 실패(readdir 실패 포함)는 전부 삼킨다 — 여기서 던지면
     // 청소 실패가 fail-closed를 오염시켜 정상 주문이 차단된다.
     const tmpPrefix = `.${path.basename(this.filePath)}.`;
-    try {
-      for (const name of fs.readdirSync(dir)) {
-        if (!name.startsWith(tmpPrefix) || !name.endsWith(".tmp")) continue;
-        const stale = path.join(dir, name);
-        if (stale === tmpPath) continue;
-        try {
-          if (Date.now() - fs.statSync(stale).mtimeMs > STALE_TMP_MS) fs.unlinkSync(stale);
-        } catch { /* 개별 파일 정리 실패는 무시한다 */ }
-      }
-    } catch { /* readdir 실패도 무시한다 */ }
+    if (!this.sweptOrphans) {
+      this.sweptOrphans = true;
+      try {
+        for (const name of fs.readdirSync(dir)) {
+          if (!name.startsWith(tmpPrefix) || !name.endsWith(".tmp")) continue;
+          const stale = path.join(dir, name);
+          if (stale === tmpPath) continue;
+          try {
+            if (Date.now() - fs.statSync(stale).mtimeMs > STALE_TMP_MS) fs.unlinkSync(stale);
+          } catch { /* 개별 파일 정리 실패는 무시한다 */ }
+        }
+      } catch { /* readdir 실패도 무시한다 */ }
+    }
 
     try {
       const fd = fs.openSync(tmpPath, "w", 0o600);
