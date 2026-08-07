@@ -1265,7 +1265,15 @@ async def test_monitor_market_task_logs_balance_failure_once_per_outage(monkeypa
 
     assert "잔고 조회가 복구되었습니다" in caplog.text
     assert "3회" in caplog.text
-    assert len([r for r in caplog.records if r.levelno == logging.ERROR]) == 2
+
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(errors) == 2
+    # 두 번째 장애의 error가 "1회 연속"이어야 카운터가 실제로 리셋된 것이다.
+    # 개수만 세면 부족하다: 리셋이 사라져도 _last_balance_error 리셋이 원인 변경으로
+    # 오인돼 error가 그대로 2건 남기 때문에, 누적 횟수까지 함께 고정한다.
+    assert "1회 연속" in errors[1].getMessage()
+    # 장애당 몇 건 안 남는 error이므로 스택 트레이스가 함께 실려야 진단이 가능하다.
+    assert all(r.exc_info is not None for r in errors)
 
 
 @pytest.mark.asyncio
