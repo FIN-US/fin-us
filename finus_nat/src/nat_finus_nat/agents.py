@@ -43,11 +43,14 @@ _KNOWN_STOCK_NAMES = ("삼성전자", "NAVER", "네이버")
 
 # ---- Tool enforcement gate (#152) ----
 
-# Matches financial numbers: "5,000,000원", "7만 5300원", "5.3%", "100주", etc.
+# Matches financial numbers: "5,000,000원", "500만원", "1억원", "7만 5300원", "5.3%", "100주".
+# `주` uses a negative lookahead to exclude time expressions like "2주 동안", "1주일", "2주간".
 _FIN_NUM_RE = re.compile(
-    r"[\d,]+(?:\.\d+)?"              # base number with optional decimal
-    r"(?:\s*(?:만|억|조)\s*[\d,]+)?"  # optional Korean large-unit continuation
-    r"\s*(?:원|달러|위안|엔|%|주|좌)",  # required financial unit suffix
+    r"[\d,]+(?:\.\d+)?"                           # base number with optional decimal
+    r"(?:\s*[만억조]\s*(?:[\d,]+(?:\.\d+)?)?)*"   # 만/억/조 chain; trailing digits optional
+    r"\s*(?:원|달러|위안|엔|%"
+    r"|주(?!\s*(?:일|간|동안|가|식|말|중|후|째|만에))"  # 주: exclude time expressions
+    r"|좌)",
     re.UNICODE,
 )
 
@@ -56,26 +59,33 @@ _KO_UNIT_VALUES: dict[str, int] = {
     "억": 100_000_000,
     "조": 1_000_000_000_000,
 }
+# Regex for one numeric term: digits (with optional decimal) + optional Korean unit.
+_NUM_TERM_RE = re.compile(r"(\d+(?:\.\d+)?)\s*([만억조])?")
+# Scale factor: multiply normalised value by 1000 to preserve up to 3 decimal places.
+# This prevents int(float(s)) truncation that would equate 5.3% and 5.7%.
+_NUM_SCALE = 1000
 
 
 def _normalize_number_str(s: str) -> int | None:
-    """Normalize a comma/Korean-unit number string to a plain integer.
+    """Normalize a comma/Korean-unit number to a scaled integer (×_NUM_SCALE=1000).
 
-    Examples: ``"75,300"`` → 75300; ``"7만5300"`` → 75300; ``"5000000"`` → 5000000.
-    Returns None when *s* cannot be parsed.
+    Examples: ``"75,300"`` → 75_300_000; ``"7만5300"`` → 75_300_000;
+              ``"500만"`` → 5_000_000_000; ``"5.3"`` → 5_300 (≠ ``"5.7"`` → 5_700).
+    Returns None when *s* cannot be fully parsed (e.g. trailing non-numeric residue).
     """
     s = s.replace(",", "").strip()
     if not s:
         return None
-    m = re.match(r"^(\d+)(만|억|조)(\d+)?$", s)
-    if m:
-        base = int(m.group(1)) * _KO_UNIT_VALUES[m.group(2)]
-        extra = int(m.group(3)) if m.group(3) else 0
-        return base + extra
-    try:
-        return int(float(s))
-    except (ValueError, TypeError):
+    total, pos, seen = 0.0, 0, False
+    for m in _NUM_TERM_RE.finditer(s):
+        if m.start() != pos:      # gap between matches means unparsed residue
+            return None
+        pos, seen = m.end(), True
+        value = float(m.group(1))
+        total += value * _KO_UNIT_VALUES[m.group(2)] if m.group(2) else value
+    if not seen or pos != len(s):
         return None
+    return int(round(total * _NUM_SCALE))
 
 
 def _extract_financial_numbers(text: str) -> frozenset[int]:
@@ -165,10 +175,26 @@ async def _run_with_gate(
     if not _check_tool_enforcement(answer, ledger, chat_request):
         return answer
 
+    # Gate tripped — log judgment details for post-hoc analysis.
+    transcript_text = "\n".join(message_content_text(m) for m in chat_request.messages)
     logger.warning(
-        "Tool enforcement gate tripped on first attempt (%s) — retrying with corrective input",
+        "Tool enforcement gate tripped on first attempt (%s) — retrying. "
+        "claimed=%s transcript=%s ledger_records=%d",
         inner_name,
+        sorted(_extract_financial_numbers(answer)),
+        sorted(_extract_financial_numbers(transcript_text)),
+        len(ledger.records),
     )
+
+    # Side-effect guard: if a write tool already ran, skip the retry to avoid
+    # duplicate side effects (e.g. duplicate diary entries).
+    if ledger.had_side_effect():
+        logger.error(
+            "Tool enforcement gate tripped on first attempt (%s) but a side-effecting "
+            "tool ran — skipping retry to avoid duplicate writes",
+            inner_name,
+        )
+        return _TOOL_ENFORCEMENT_REJECTION
 
     # --- Second attempt with changed input ---
     corrective_query = _CORRECTIVE_TOOL_PREFIX + query
@@ -367,7 +393,14 @@ async def fe_branch(config: FeBranchConfig, builder: Builder):
     async def run_subagent(chat_request_or_message: ChatRequestOrMessage) -> str:
         chat_request = GlobalTypeConverter.get().convert(chat_request_or_message, to_type=ChatRequest)
         if inner_name == "news_agent":
-            direct = await _holdings_news_answer(builder, chat_request)
+            # Deterministic path: assembles tool output directly without going through
+            # _run_with_gate. A ledger box is still required so that _record_to_ledger
+            # inside the news tool does not log a spurious ERROR on every happy-path call.
+            token = DATA_TOOL_LEDGER.set(DataToolLedger())
+            try:
+                direct = await _holdings_news_answer(builder, chat_request)
+            finally:
+                DATA_TOOL_LEDGER.reset(token)
             if direct is not None:
                 return direct
         inner = await builder.get_function(inner_name)
