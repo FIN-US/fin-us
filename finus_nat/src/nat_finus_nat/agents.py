@@ -49,7 +49,7 @@ _FIN_NUM_RE = re.compile(
     r"[\d,]+(?:\.\d+)?"                           # base number with optional decimal
     r"(?:\s*[만억조]\s*(?:[\d,]+(?:\.\d+)?)?)*"   # 만/억/조 chain; trailing digits optional
     r"\s*(?:원|달러|위안|엔|%"
-    r"|주(?!\s*(?:일|간|동안|가|식|말|중|후|째|만에))"  # 주: exclude time expressions
+    r"|주(?!\s*(?:일|간|동안|가\s*(?:가|는|를|에|의|상승|하락|올|내)|식|말|중|후|째|만에))"  # 주: exclude time/price(주가+조사) expressions
     r"|좌)",
     re.UNICODE,
 )

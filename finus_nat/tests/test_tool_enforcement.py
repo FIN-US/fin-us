@@ -404,3 +404,92 @@ async def test_side_effect_guard_skips_retry_on_write_tool():
     assert call_count == 1, (
         f"부작용 가드로 재시도 없이 1회만 호출해야 합니다. 실제: {call_count}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Critical (신규) — 일지 저장 성공은 데이터 조회 성공이 아니다
+# ---------------------------------------------------------------------------
+
+def test_successful_save_diary_does_not_count_as_data_success():
+    """일지 저장 성공은 데이터 조회 성공이 아니다 — 게이트를 풀어서는 안 된다.
+
+    finus_save_diary 성공 응답({id: 12, ...})이 any_success()=True가 되면,
+    "일지 저장 + 잔고 수치 지어내기" 패턴이 게이트를 우회한다(이슈 #152 재현 경로).
+    produced_rows=ok and tool_name not in _SIDE_EFFECT_TOOLS 수정으로 차단된다.
+    """
+    ledger = DataToolLedger()
+    token = DATA_TOOL_LEDGER.set(ledger)
+    try:
+        _record_to_ledger("finus_save_diary", '{"id": 12, "title": "매매일지"}')
+    finally:
+        DATA_TOOL_LEDGER.reset(token)
+
+    assert ledger.had_side_effect() is True
+    assert ledger.any_success() is False
+    answer = "Final Answer: 잔고는 500만원입니다."
+    assert _check_tool_enforcement(answer, ledger, _simple_req()) is True
+
+
+async def test_side_effect_guard_skips_retry_on_successful_write_tool():
+    """finus_save_diary 저장 성공 후 수치를 주장해도 재시도 없이 즉시 거절한다.
+
+    시나리오: 저장 성공(ok=True) → produced_rows=False이므로 any_success()=False
+    → 에이전트가 수치 주장 → 게이트 트립 → had_side_effect()=True → 재시도 건너뜀.
+    이 경로가 성공 경로(ok=True)에서도 부작용 가드가 동작함을 고정한다.
+    """
+    fabricated = "Final Answer: 실현손익 52,000원을 일지에 저장했습니다."
+    call_count = 0
+
+    async def ainvoke_with_successful_side_effect(_input):
+        nonlocal call_count
+        call_count += 1
+        # _record_to_ledger를 직접 호출해 실제 운영 경로와 동일한 기록 방식으로 검증
+        _record_to_ledger("finus_save_diary", '{"id": 12, "title": "매매일지"}')
+        return ChatResponse.from_string(fabricated, usage=Usage())
+
+    mock_inner = MagicMock()
+    mock_inner.ainvoke = ainvoke_with_successful_side_effect
+
+    result = await _run_with_gate(
+        inner=mock_inner,
+        query="오늘 매매일지 저장해줘",
+        chat_request=_simple_req("오늘 매매일지 저장해줘"),
+        inner_name="diary_agent",
+    )
+
+    assert result == _TOOL_ENFORCEMENT_REJECTION, (
+        f"결정론적 거절 메시지가 반환돼야 합니다. 실제: {result!r}"
+    )
+    assert call_count == 1, (
+        f"부작용 가드로 재시도 없이 1회만 호출해야 합니다. 실제: {call_count}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Improvement (신규) — 주격 조사 '가'가 붙은 수량은 탐지해야 한다
+# ---------------------------------------------------------------------------
+
+def test_has_numeric_claims_matches_stock_quantity_with_ga_particle():
+    """'100주가 남아 있습니다'처럼 수량 뒤에 주격 조사 가가 붙어도 탐지한다."""
+    assert _has_numeric_claims("삼성전자 100주가 남아 있습니다.") is True
+
+
+def test_has_numeric_claims_matches_stock_quantity_ga_particle_variant():
+    """'보유 수량 100주가 전부입니다'에서 수량을 탐지한다."""
+    assert _has_numeric_claims("보유 수량 100주가 전부입니다.") is True
+
+
+def test_has_numeric_claims_matches_executed_quantity_with_ga_particle():
+    """'50주가 체결됐습니다'에서 수량을 탐지한다."""
+    assert _has_numeric_claims("50주가 체결됐습니다.") is True
+
+
+def test_has_numeric_claims_does_not_match_juga_as_stock_price_noun():
+    """'주가가 상승했습니다'에서 주가(株價) 자체는 탐지하지 않는다(수치 없음)."""
+    assert _has_numeric_claims("주가가 상승했습니다.") is False
+
+
+def test_has_numeric_claims_does_not_match_juga_with_neun_particle():
+    """'주가는 N원입니다'에서 주가 명사는 제외하되 원 단위 수치로 탐지된다."""
+    # 주가(株價) 자체는 MISS이지만 7만원 때문에 전체 문장은 HIT
+    assert _has_numeric_claims("주가는 7만원입니다.") is True

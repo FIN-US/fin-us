@@ -96,7 +96,9 @@ def _record_to_ledger(tool_name: str, result: str) -> None:
         return
     stripped = result.strip()
     ok = bool(stripped) and not _ERROR_JSON_PREFIX_RE.match(stripped)
-    ledger.record(tool_name, ok=ok, produced_rows=ok)
+    # 쓰기 도구의 성공은 "조회해서 데이터를 받았다"가 아니다. any_success()에 포함되면
+    # 일지 저장 한 번으로 그 호출 전체의 게이트가 풀린다.
+    ledger.record(tool_name, ok=ok, produced_rows=ok and tool_name not in _SIDE_EFFECT_TOOLS)
 
 
 # Remote MCP / doc 한도
