@@ -73,6 +73,15 @@ CATALYST_EVENT_LABELS = {
 }
 
 
+# get_balance 연속 실패 횟수. 감시 잡이 10분 주기로 상시 도는 탓에, 장애가 지속되면
+# 동일한 에러 로그가 무한 반복돼 알림 피로를 낳고 정작 중요한 장애를 묻는다(#185).
+# 이 카운터로 "첫 실패·원인 변경·1시간 주기"마다 error를 남기고 복구 시 집계 보고한다.
+# 카운터는 프로세스마다 별개이고 정확도가 로그 억제에만 쓰이므로 동기화가 필요 없다.
+# (worker가 여럿이면 worker당 첫 실패가 각각 error로 남지만, 그 정도 중복은 허용한다.)
+_balance_failure_streak = 0
+_last_balance_error: str | None = None
+
+
 def _default_watchlist_repo() -> SqliteWatchlistRepo:
     return SqliteWatchlistRepo(lambda: Session(engine))
 
@@ -395,28 +404,75 @@ async def _monitor_market_task(
     state: RedisSchedulerState | None,
     watchlist_repo: SqliteWatchlistRepo | None = None,
 ):
+    global _balance_failure_streak, _last_balance_error
+
     try:
         # 1. 실시간 잔고 조회 및 모니터링 대상 확정
-        balance_text = await run_mcp_tool(TRADING_MCP_PARAMS, "get_balance", {})
-        owned_stocks = extract_stocks_from_balance(balance_text)
+        #
+        # get_balance만 자체 try/except로 격리하는 이유(#185): 아래에서 도는
+        # _monitor_signal의 신호는 SIGNAL_SOURCES(mcp-news/mcp-dart)에서 오고 KIS와
+        # 아무 관련이 없는데, 이 호출이 태스크 전체 try의 첫 문장이라 KIS 장애 한 번이
+        # 뉴스·공시 감시까지 통째로 정지시켰다. 관심 종목 조회(아래)가 이미 쓰는
+        # fail-open 관용구를 그대로 적용해, 잔고를 못 읽으면 owned_stocks만 비우고
+        # 관심 종목·기본 종목 감시는 계속 진행한다. 장애 중 보유 종목 감시 공백은
+        # 어차피 조회 자체가 불가능하므로 불가피한 대가다.
+        owned_stocks: list[str] = []
+        balance_ok = False
+        try:
+            balance_text = await run_mcp_tool(TRADING_MCP_PARAMS, "get_balance", {})
+        except Exception as e:
+            signature = f"{type(e).__name__}:{e}"
+            _balance_failure_streak += 1
+            # 6회 = 약 1시간(10분 주기). 첫 실패는 즉시, 원인이 바뀌면 즉시, 이후는
+            # 1시간에 한 번만 error로 올려 알림 피로를 피하면서도 "아직 장애 중"이라는
+            # 신호가 끊기지 않게 한다.
+            if (
+                _balance_failure_streak == 1
+                or signature != _last_balance_error
+                or _balance_failure_streak % 6 == 0
+            ):
+                logger.error(
+                    "잔고 조회에 실패해 이번 주기의 보유 종목 감시를 건너뜁니다 "
+                    "(관심 종목·기본 종목 감시는 계속, %d회 연속): %s",
+                    _balance_failure_streak,
+                    e,
+                    exc_info=True,
+                )
+            else:
+                # 동일 원인의 반복 실패는 debug로 내려 알림 피로를 방지한다.
+                logger.debug(
+                    "잔고 조회 실패가 %d회 연속됩니다: %s", _balance_failure_streak, e
+                )
+            _last_balance_error = signature
+        else:
+            balance_ok = True
+            if _balance_failure_streak:
+                logger.warning(
+                    "잔고 조회가 복구되었습니다. 직전까지 %d회 연속 실패해 보유 종목 감시를 건너뛰었습니다.",
+                    _balance_failure_streak,
+                )
+                _balance_failure_streak = 0
+                _last_balance_error = None
 
-        if is_balance_truncated(balance_text):
-            # 잘림 사유(max_pages/time_budget/error/...)마다 운영 대응이 다르므로,
-            # 안내 문구 줄을 그대로 실어 사유가 로그에 남게 한다. 사유 문자열을 따로
-            # 파싱하지 않으므로 balance.js에 새 사유가 추가돼도 자동으로 따라간다.
-            notice = next(
-                (
-                    line
-                    for line in balance_text.splitlines()
-                    if _BALANCE_TRUNCATION_MARKER in line
-                ),
-                "",
-            )
-            logger.warning(
-                "잔고 연속조회가 잘려 감시 대상이 불완전할 수 있습니다: 보유 종목 %d건만 확보 — %s",
-                len(owned_stocks),
-                notice.strip(),
-            )
+            owned_stocks = extract_stocks_from_balance(balance_text)
+
+            if is_balance_truncated(balance_text):
+                # 잘림 사유(max_pages/time_budget/error/...)마다 운영 대응이 다르므로,
+                # 안내 문구 줄을 그대로 실어 사유가 로그에 남게 한다. 사유 문자열을 따로
+                # 파싱하지 않으므로 balance.js에 새 사유가 추가돼도 자동으로 따라간다.
+                notice = next(
+                    (
+                        line
+                        for line in balance_text.splitlines()
+                        if _BALANCE_TRUNCATION_MARKER in line
+                    ),
+                    "",
+                )
+                logger.warning(
+                    "잔고 연속조회가 잘려 감시 대상이 불완전할 수 있습니다: 보유 종목 %d건만 확보 — %s",
+                    len(owned_stocks),
+                    notice.strip(),
+                )
 
         if watchlist_repo is None:
             watchlist_repo = SqliteWatchlistRepo(lambda: Session(engine))
@@ -435,6 +491,11 @@ async def _monitor_market_task(
                 stocks_to_monitor.append(stock)
 
         if not stocks_to_monitor:
+            if not balance_ok:
+                # 보유 종목이 "없는" 게 아니라 "모르는" 상태다. 기본 종목을 감시하면
+                # 사용자와 무관한 종목의 알림이 나가므로 이번 주기는 조용히 건너뛴다.
+                logger.info("잔고 조회 실패 + 관심 종목 없음 — 이번 주기 감시 대상이 없습니다.")
+                return
             logger.info("보유 종목 및 관심 종목이 없습니다. 기본 종목을 감시합니다.")
             stocks_to_monitor = DEFAULT_MONITOR_STOCKS
 
