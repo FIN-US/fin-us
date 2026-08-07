@@ -23,6 +23,10 @@ const STATUS_LABEL: Record<EndpointStatus, string> = {
   unknown: '확인 중',
 };
 
+// 상태 점에 role="img"를 쓰는 이유: role="status"는 암묵적 aria-live="polite"를 동반해
+// 엔드포인트 6개마다 라이브 리전이 생긴다. 이 점은 변경 공지가 아니라 현재 상태 지표이므로
+// role="img"가 의미에 맞다. 회귀 가드는 BackendPanel.test.tsx의 getByRole('img', ...) 참조.
+
 const BackendPanel: React.FC<BackendPanelProps> = ({ resources, endpointStatuses, loading, onRefresh }) => {
   const endpoints = [
     { label: 'Health', status: endpointStatuses.health, path: '/health' },
@@ -68,14 +72,6 @@ const BackendPanel: React.FC<BackendPanelProps> = ({ resources, endpointStatuses
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
           {endpoints.map((endpoint) => (
             <div key={endpoint.path} className="flex items-center gap-2 rounded-lg bg-slate-50 px-3 py-2">
-              {/*
-                role="status"는 암묵적으로 aria-live="polite"를 동반해, 엔드포인트마다
-                별도의 라이브 리전을 만든다. 엔드포인트가 6개면 라이브 리전도 6개가 되어
-                새로고침 한 번에 스크린리더가 상태를 6번 연달아 읽는다. 이 점은 "방금
-                바뀌었다고 알리는 공지"가 아니라 "지금 상태를 나타내는 지표"이므로
-                role="img"가 의미에 맞고, 접근 가능한 이름은 아래 aria-label이 그대로
-                제공한다.
-              */}
               <span
                 role="img"
                 aria-label={`${endpoint.label} ${STATUS_LABEL[endpoint.status]}`}

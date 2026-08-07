@@ -49,7 +49,7 @@ describe('BackendPanel', () => {
         />,
       );
 
-      const dot = screen.getByLabelText(`Portfolio ${statusLabel}`);
+      const dot = screen.getByRole('img', { name: `Portfolio ${statusLabel}` });
       expect(dot).toHaveAttribute('data-status', status);
       expect(dot).toHaveClass(expected);
       forbidden.forEach((cls) => expect(dot).not.toHaveClass(cls));
@@ -66,8 +66,8 @@ describe('BackendPanel', () => {
       />,
     );
 
-    expect(screen.getByLabelText(/^Portfolio /)).toHaveAttribute('data-status', 'fail');
-    expect(screen.getByLabelText(/^Trades /)).toHaveAttribute('data-status', 'unknown');
-    expect(screen.getByLabelText(/^Health /)).toHaveAttribute('data-status', 'ok');
+    expect(screen.getByRole('img', { name: /^Portfolio / })).toHaveAttribute('data-status', 'fail');
+    expect(screen.getByRole('img', { name: /^Trades / })).toHaveAttribute('data-status', 'unknown');
+    expect(screen.getByRole('img', { name: /^Health / })).toHaveAttribute('data-status', 'ok');
   });
 });
