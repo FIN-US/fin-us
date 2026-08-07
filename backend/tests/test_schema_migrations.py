@@ -397,3 +397,57 @@ def test_nullable_migration_is_idempotent(tmp_path, monkeypatch):
     conn.close()
     assert "decision" in columns
     assert "confidence_score" in columns
+
+
+def _agentreport_index_names(db_path: str) -> list[str]:
+    import sqlite3
+
+    conn = sqlite3.connect(db_path)
+    try:
+        return sorted(
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='agentreport'"
+            )
+            if row[0] is not None
+        )
+    finally:
+        conn.close()
+
+
+def test_nullable_migration_preserves_indexes(tmp_path, monkeypatch):
+    """테이블 재생성 마이그레이션이 stock_code·stock_name 인덱스를 보존해야 한다.
+
+    DROP TABLE은 그 테이블에 딸린 인덱스도 함께 지운다. 재생성 후 CREATE INDEX를
+    다시 실행하지 않으면 models.py의 index=True로 선언된 두 인덱스가 영구히 사라진다 —
+    테이블이 이미 존재하므로 create_all()이 다시 만들어 주지 않기 때문에 조용한 성능
+    저하로만 남는다.
+
+    이 테스트가 잡는 mutation: _RECREATE_AGENTREPORT_INDEX_DDL 실행 루프 제거.
+    """
+    db_path = tmp_path / "preserve_indexes.db"
+    _create_post_c_schema_agentreport(str(db_path))
+
+    # 픽스처는 create_all이 만든 테이블을 DROP하고 인덱스 없이 다시 만든다.
+    # 실제 배포 DB에는 SQLModel이 붙인 인덱스가 있으므로 그 상태를 재현한다.
+    import sqlite3
+
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("CREATE INDEX ix_agentreport_stock_code ON agentreport (stock_code)")
+    conn.execute("CREATE INDEX ix_agentreport_stock_name ON agentreport (stock_name)")
+    conn.commit()
+    conn.close()
+
+    before = _agentreport_index_names(str(db_path))
+    assert before == ["ix_agentreport_stock_code", "ix_agentreport_stock_name"], (
+        f"이 테스트의 전제(마이그레이션 전 인덱스 2개 존재)가 깨졌습니다: {before}"
+    )
+
+    test_engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
+    monkeypatch.setattr(database, "engine", test_engine)
+
+    database.init_db()
+
+    assert _agentreport_index_names(str(db_path)) == before, (
+        "테이블 재생성 마이그레이션이 인덱스를 잃었습니다"
+    )

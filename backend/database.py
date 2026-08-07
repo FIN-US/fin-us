@@ -89,6 +89,14 @@ _RECREATE_AGENTREPORT_COLS = (
     "id, stock_code, stock_name, provider, summary, decision, "
     "confidence_score, reason, provider_supports_tools, created_at"
 )
+# DROP TABLE은 그 테이블에 딸린 인덱스도 함께 지운다. 재생성 후 다시 만들지 않으면
+# models.py의 index=True로 선언된 stock_code·stock_name 인덱스가 영구히 사라진다 —
+# 테이블이 이미 존재하므로 create_all()은 다시 만들어 주지 않는다. 이름은 SQLModel이
+# 붙이는 규칙(ix_<table>_<column>)을 그대로 따라야 create_all()과 충돌하지 않는다.
+_RECREATE_AGENTREPORT_INDEX_DDL = (
+    "CREATE INDEX IF NOT EXISTS ix_agentreport_stock_code ON agentreport (stock_code)",
+    "CREATE INDEX IF NOT EXISTS ix_agentreport_stock_name ON agentreport (stock_name)",
+)
 
 
 def _run_table_recreate_migrations() -> None:
@@ -128,6 +136,8 @@ def _run_table_recreate_migrations() -> None:
             ))
             conn.execute(text("DROP TABLE agentreport"))
             conn.execute(text("ALTER TABLE agentreport_new RENAME TO agentreport"))
+            for index_sql in _RECREATE_AGENTREPORT_INDEX_DDL:
+                conn.execute(text(index_sql))
     except OperationalError as exc:
         # 동시 실행된 워커가 이미 재생성을 완료했는지 재확인한다.
         refreshed = {col["name"]: col for col in inspect(engine).get_columns("agentreport")}
