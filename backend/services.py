@@ -19,6 +19,7 @@ from .config import (
     NAT_BASE_URL, NAT_CHAT_MODEL, NAT_CONVERSATION_ID,
     NEWS_MCP_PARAMS, TRADING_MCP_PARAMS,
 )
+from pydantic import ValidationError
 from .schemas import TradingSignal, AnalysisReport
 from .models import AgentReport
 
@@ -266,40 +267,39 @@ def _build_toolless_prompt(stock: str, trigger_context: str) -> str:
     )
 
 
-def _analysis_from_toolless_text(raw: str, stock: str) -> dict[str, Any]:
+def _analysis_from_toolless_text(raw: str) -> dict[str, Any]:
     """도구 없는 provider 응답 파싱. details(decision/confidence_score)는 생성하지 않는다.
 
-    JSON 파싱에 성공하면 summary/source_news 등을 추출한다. 실패하면 원문을 요약으로
-    사용한다. 어느 경우에도 details=None을 유지한다 — None과 HOLD/0.0은 의미가 다르다.
+    JSON 파싱에 성공하면 summary/source_news 등을 추출하고 AnalysisReport로 스키마 검증한다.
+    실패하면 원문을 요약으로 사용한다. 어느 경우에도 details=None을 유지한다.
+
+    stock 파라미터는 이 함수 안에서 쓸 곳이 없다(details=None이므로 TradingSignal.target_stock
+    미사용) — Improvement #2 (#162 리뷰).
     """
     text = (raw or "").strip()
     for data in _json_objects_from_text(text):
         try:
-            return {
-                "summary": str(data.get("summary") or text[:8000] or "빈 응답"),
-                "details": None,
-                "source_news": _string_list(data.get("source_news")),
-                "source_signals": _string_list(
+            report = AnalysisReport(
+                summary=str(data.get("summary") or text[:8000] or "빈 응답"),
+                details=None,  # 도구 없는 provider는 매매 판단을 생성하지 않는다
+                source_news=_string_list(data.get("source_news")),
+                source_signals=_string_list(
                     data.get("source_signals") or data.get("source_news")
                 ),
-                "trading_trend": data.get("trading_trend"),
-                "urgency": data.get("urgency", "normal"),
-                "urgency_reason": data.get("urgency_reason"),
-                "telegram_alert": bool(data.get("telegram_alert", False)),
-            }
-        except (ValueError, AttributeError):
-            pass
-    # JSON 파싱 실패: 원문을 요약으로 사용
-    return {
-        "summary": text[:8000] if text else "빈 응답",
-        "details": None,
-        "source_news": [],
-        "source_signals": [],
-        "trading_trend": None,
-        "urgency": "normal",
-        "urgency_reason": None,
-        "telegram_alert": False,
-    }
+                trading_trend=data.get("trading_trend"),
+                urgency=data.get("urgency", "normal"),
+                urgency_reason=data.get("urgency_reason"),
+                telegram_alert=bool(data.get("telegram_alert", False)),
+            )
+        except ValidationError:
+            continue  # 관련 없는 JSON 객체(urgency 리터럴 위반 등) — 다음 후보로
+        return report.model_dump()
+    # JSON 파싱 실패 또는 유효한 후보 없음: 원문을 요약으로 사용
+    return AnalysisReport(
+        summary=text[:8000] if text else "빈 응답",
+        details=None,
+        source_news=[],
+    ).model_dump()
 
 
 async def perform_stock_analysis(
@@ -345,7 +345,7 @@ async def perform_stock_analysis(
         # 도구 없는 provider: 일반 설명만 생성, 매매 판단 없음
         user_msg = _build_toolless_prompt(stock, trigger_context)
         raw = await llm_chat(key, user_msg, conversation_id=nat_cid)
-        data = _analysis_from_toolless_text(str(raw), stock)
+        data = _analysis_from_toolless_text(str(raw))
         decision = None
         confidence_score = None
         reason = ""

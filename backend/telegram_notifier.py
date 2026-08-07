@@ -91,7 +91,9 @@ class TelegramNotifier:
         analysis_data: dict[str, Any],
     ) -> str:
         details = analysis_data.get("details") or {}
-        decision = details.get("decision", "HOLD")
+        # Improvement #3 (#162 리뷰): details=None은 도구 없는 provider — 판단이 존재하지 않는다.
+        # "HOLD"로 채우면 이 PR이 없애려는 "지어낸 판단" 문제를 알림 채널에서 재생산한다.
+        decision = details.get("decision") or "판단 없음 (도구 미사용 provider)"
         confidence = details.get("confidence_score", "")
         reason = details.get("reason") or analysis_data.get("summary", "")
         urgency = analysis_data.get("urgency", "normal")

@@ -1012,19 +1012,18 @@ def test_analysis_from_toolless_text_always_returns_none_details():
     """
     # 정상 JSON
     result = services._analysis_from_toolless_text(
-        '{"summary":"요약","source_news":[],"trading_trend":null}', "삼성전자"
+        '{"summary":"요약","source_news":[],"trading_trend":null}'
     )
     assert result["details"] is None
 
     # JSON에 details가 있어도 무시
     result = services._analysis_from_toolless_text(
         '{"summary":"요약","details":{"decision":"BUY","confidence_score":0.9,'
-        '"reason":"강세","target_stock":"삼성전자"},"source_news":[]}',
-        "삼성전자",
+        '"reason":"강세","target_stock":"삼성전자"},"source_news":[]}'
     )
     assert result["details"] is None
 
     # JSON 파싱 실패 (평문)
-    result = services._analysis_from_toolless_text("plain text response", "삼성전자")
+    result = services._analysis_from_toolless_text("plain text response")
     assert result["details"] is None
     assert result["summary"] == "plain text response"

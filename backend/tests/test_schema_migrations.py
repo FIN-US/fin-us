@@ -415,6 +415,79 @@ def _agentreport_index_names(db_path: str) -> list[str]:
         conn.close()
 
 
+def test_leftover_agentreport_new_does_not_prevent_migration(tmp_path, monkeypatch):
+    """Critical (#162 리뷰): agentreport_new가 이미 존재하는 DB에서도 init_db()가 성공해야 한다.
+
+    pysqlite는 DML에서만 암묵적으로 BEGIN하므로 CREATE TABLE agentreport_new는
+    engine.begin() 블록 진입 시점에도 autocommit으로 즉시 디스크에 커밋된다.
+    SIGTERM/OOM kill/디스크 부족 등으로 마이그레이션이 중단되면 agentreport_new가
+    남고, 다음 부팅에서 CREATE TABLE "already exists" → 재확인에서 decision이 여전히
+    NOT NULL → raise → 영구 부팅 불능이 된다.
+
+    이 테스트가 잡는 mutation: DROP TABLE IF EXISTS agentreport_new 줄 제거.
+    """
+    db_path = tmp_path / "leftover_new.db"
+    _create_post_c_schema_agentreport(str(db_path))  # agentreport: decision NOT NULL
+
+    # 이전 시도가 중단된 상황을 재현: agentreport_new 고아 테이블을 미리 만들어 둔다.
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "CREATE TABLE agentreport_new ("
+        "id INTEGER PRIMARY KEY, "
+        "stock_code VARCHAR NOT NULL, "
+        "stock_name VARCHAR NOT NULL, "
+        "provider VARCHAR NOT NULL, "
+        "summary VARCHAR NOT NULL, "
+        "decision VARCHAR, "
+        "confidence_score FLOAT, "
+        "reason VARCHAR NOT NULL DEFAULT '', "
+        "provider_supports_tools BOOLEAN NOT NULL DEFAULT 0, "
+        "created_at DATETIME NOT NULL"
+        ")"
+    )
+    conn.commit()
+    conn.close()
+
+    test_engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
+    monkeypatch.setattr(database, "engine", test_engine)
+
+    # 고아 테이블이 있어도 init_db()가 예외 없이 완료되어야 한다.
+    database.init_db()
+
+    conn = sqlite3.connect(str(db_path))
+    col_info = {row[1]: row for row in conn.execute("PRAGMA table_info(agentreport)")}
+    tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    conn.close()
+
+    assert col_info["decision"][3] == 0, "decision이 여전히 NOT NULL이다"
+    assert "agentreport_new" not in tables, "agentreport_new 고아 테이블이 남아 있다"
+
+
+def test_column_set_mismatch_raises_before_recreation(tmp_path, monkeypatch):
+    """Improvement #1 (#162 리뷰): 실제 컬럼 집합이 DDL 가정과 다를 때 RuntimeError를 던져야 한다.
+
+    _PENDING_COLUMN_MIGRATIONS에 agentreport의 새 컬럼이 추가된 뒤 이 함수의 DDL을
+    갱신하지 않으면 컬럼과 데이터가 조용히 소실된다. 단언으로 명시적 부팅 실패를 만든다.
+
+    이 테스트가 잡는 mutation: _RECREATE_AGENTREPORT_COL_SET 불일치 단언 제거.
+    """
+    db_path = tmp_path / "extra_col.db"
+    _create_post_c_schema_agentreport(str(db_path))  # agentreport: decision NOT NULL
+
+    # DDL이 모르는 컬럼 extra_col을 추가해 불일치 상황을 재현한다.
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("ALTER TABLE agentreport ADD COLUMN extra_col VARCHAR")
+    conn.commit()
+    conn.close()
+
+    test_engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
+    monkeypatch.setattr(database, "engine", test_engine)
+
+    import pytest
+    with pytest.raises(RuntimeError, match="agentreport 스키마가 재생성 DDL의 가정과 다릅니다"):
+        database.init_db()
+
+
 def test_nullable_migration_preserves_indexes(tmp_path, monkeypatch):
     """테이블 재생성 마이그레이션이 stock_code·stock_name 인덱스를 보존해야 한다.
 

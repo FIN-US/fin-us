@@ -89,6 +89,12 @@ _RECREATE_AGENTREPORT_COLS = (
     "id, stock_code, stock_name, provider, summary, decision, "
     "confidence_score, reason, provider_supports_tools, created_at"
 )
+# Improvement #1 (#162 리뷰): 재생성 직전 실제 컬럼 집합과 DDL 가정을 비교하는 단언에 쓴다.
+# _PENDING_COLUMN_MIGRATIONS에 agentreport 컬럼이 추가되어도 이 집합을 갱신하지 않으면
+# 부팅 실패(RuntimeError)로 드러난다 — DDL을 갱신하기 전까지는 재생성을 막는다.
+_RECREATE_AGENTREPORT_COL_SET: frozenset[str] = frozenset(
+    c.strip() for c in _RECREATE_AGENTREPORT_COLS.split(",")
+)
 # DROP TABLE은 그 테이블에 딸린 인덱스도 함께 지운다. 재생성 후 다시 만들지 않으면
 # models.py의 index=True로 선언된 stock_code·stock_name 인덱스가 영구히 사라진다 —
 # 테이블이 이미 존재하므로 create_all()은 다시 만들어 주지 않는다. 이름은 SQLModel이
@@ -126,9 +132,32 @@ def _run_table_recreate_migrations() -> None:
         # 컬럼이 없거나(create_all이 최신 스키마로 만든 경우) 이미 nullable이면 skip
         return
 
+    # Improvement #1 (#162 리뷰): 실제 컬럼 집합이 DDL의 가정과 일치하는지 단언한다.
+    # _run_schema_migrations()가 새 컬럼 X를 ALTER로 추가한 뒤 이 함수가 X 없는 테이블을
+    # 만들면 X와 그 데이터가 조용히 소실된다. 불일치 시 명시적 부팅 실패로 만든다.
+    actual_cols = set(col_info.keys())
+    if actual_cols != _RECREATE_AGENTREPORT_COL_SET:
+        raise RuntimeError(
+            "agentreport 스키마가 재생성 DDL의 가정과 다릅니다. DDL을 갱신하지 않으면 "
+            f"차이나는 컬럼이 소실됩니다: DB에만 있음={sorted(actual_cols - _RECREATE_AGENTREPORT_COL_SET)}, "
+            f"DDL에만 있음={sorted(_RECREATE_AGENTREPORT_COL_SET - actual_cols)}"
+        )
+
     # decision이 NOT NULL인 경우: 테이블 재생성으로 nullable로 변경
     try:
         with engine.begin() as conn:
+            # Critical fix (#162 리뷰): 이전 시도가 중단되어 남겨진 고아 테이블을 먼저 회수한다.
+            # pysqlite는 DML에서만 암묵적으로 BEGIN하므로 CREATE TABLE은 engine.begin()
+            # 진입 시점에도 autocommit으로 즉시 커밋된다. SIGTERM/OOM kill/디스크 부족 등으로
+            # 마이그레이션이 중단되면 agentreport_new가 디스크에 남고, 다음 부팅에서
+            # CREATE TABLE "already exists" → 재확인에서 decision이 여전히 NOT NULL →
+            # raise → init_db() 실패 → 영구 부팅 불능이 된다.
+            # DROP TABLE IF EXISTS는 이 경로를 차단한다. 테이블이 없으면 no-op.
+            #
+            # 주의: 동시 워커 A가 CREATE TABLE을 커밋한 직후 B가 DROP하면 A의 진행 중
+            # 테이블이 사라진다. 현재 배포(단일 프로세스)에서는 해당 없다. 다중 워커가
+            # 필요해지면 engine 이벤트로 BEGIN IMMEDIATE를 선점해 직렬화해야 한다.
+            conn.execute(text("DROP TABLE IF EXISTS agentreport_new"))
             conn.execute(text(_RECREATE_AGENTREPORT_NULLABLE_DDL))
             conn.execute(text(
                 f"INSERT INTO agentreport_new ({_RECREATE_AGENTREPORT_COLS}) "
