@@ -310,7 +310,7 @@ test("kisOrderPost: throws a named error identifying the missing dependency when
 // the original string would fail.
 test("kisOrderPost: a bare string thrown by getAccessToken propagates unchanged instead of crashing on the tagging assignment", async () => {
   const getAccessToken = async () => {
-    throw "token service unavailable"; // eslint-disable-line no-throw-literal -- exercising the primitive-error guard
+    throw "token service unavailable"; // 의도적으로 원시 문자열을 던져 에러 태깅 할당(error.kisOrderSubmittedMaybe) 전 타입 가드를 검증한다
   };
   const kisAxios = fakeAxios({
     post: async () => { throw new Error("no HTTP call should happen"); },
@@ -339,7 +339,7 @@ test("kisOrderPost: a bare string thrown by the order POST propagates unchanged 
   const getAccessToken = async () => "test-token";
   const kisAxios = fakeAxios({
     post: async () => {
-      throw "socket hang up"; // eslint-disable-line no-throw-literal -- exercising the primitive-error guard
+      throw "socket hang up"; // 의도적으로 원시 문자열을 던져 KIS POST 후 에러 태깅 할당 전 타입 가드를 검증한다
     },
   });
 
