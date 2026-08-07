@@ -13,8 +13,10 @@ export const BALANCE_MAX_PAGES = 20;
 export const BALANCE_TIME_BUDGET_MS = 15_000;
 
 function isContinuationTrCont(value) {
-  // index.js의 isKisContinueTrCont()와 동일한 KIS tr_cont 연속조회 판정을 balance.js에서도
-  // 그대로 사용하기 위한 로컬 사본이다 (index.js는 부작용을 가진 서버 진입점이라 여기서 import하지 않는다).
+  // KIS tr_cont 연속조회 판정. "F"(first/더 있음) 또는 "M"(more)일 때 다음 페이지가 있다.
+  // fetchAllPaged를 통해 index.js의 두 루프(fetchAllDailyOrderCcld, fetchAllBalanceRlzPl)에서도
+  // 재사용된다. index.js는 import 시점에 StdioServerTransport를 연결하는 부작용이 있어
+  // 여기서 import하지 않으므로, 이 파일이 두 함수의 정규 구현처다.
   return value === "F" || value === "M";
 }
 
@@ -35,20 +37,29 @@ export function buildBalanceParams(accountNo, { ctxAreaFk100 = "", ctxAreaNk100 
 }
 
 /**
- * inquire-balance 연속조회 루프. KIS 호출 자체는 fetchPage로 주입받아
- * (index.js의 kisApiGet 등) balance.js 단독으로 유닛 테스트할 수 있게 한다.
+ * KIS 연속조회 공용 루프. inquire-balance(fetchAllBalance), inquire-daily-ccld,
+ * inquire-balance-rlz-pl 세 루프의 공통 페이지네이션 로직을 하나로 모은 것이다.
  *
  * fetchPage({ ctxAreaFk100, ctxAreaNk100, trCont }) => Promise<{ body, trCont }>
- *   - body: KIS 응답 바디 (output1/output2/ctx_area_fk100/ctx_area_nk100 포함)
+ *   - body.output1: 행 배열
+ *   - body.output2: 요약(배열 또는 단일 객체)
+ *   - body.ctx_area_fk100, body.ctx_area_nk100: 연속조회 커서
  *   - trCont: 응답 tr_cont 헤더 값
  *
- * 반환: { rows, summary, pages, truncated }
- *   - truncated: null | "max_pages" | "time_budget" | "no_cursor" | "repeated_cursor" | "error"
+ * @param {Function} fetchPage  KIS 단일 페이지 호출 함수
+ * @param {object}   options
+ * @param {number}   options.maxPages      페이지 상한 (필수; 루프마다 다름)
+ * @param {number}   options.timeBudgetMs  전체 시간 예산 ms (필수; 루프마다 다름)
+ * @param {Function} [options.now]         현재 시각 반환 함수 (테스트 주입용, 기본 Date.now)
+ * @param {string}   [options.label]       오류 로그 접두사 (기본 "연속조회")
+ * @returns {Promise<{ rows, summary, pages, truncated }>}
+ *   truncated: null | "max_pages" | "time_budget" | "no_cursor" | "repeated_cursor" | "error"
  */
-export async function fetchAllBalance(fetchPage, {
-  maxPages = BALANCE_MAX_PAGES,
-  timeBudgetMs = BALANCE_TIME_BUDGET_MS,
+export async function fetchAllPaged(fetchPage, {
+  maxPages,
+  timeBudgetMs,
   now = () => Date.now(),
+  label = "연속조회",
 } = {}) {
   const rows = [];
   let summary = null;
@@ -59,8 +70,8 @@ export async function fetchAllBalance(fetchPage, {
   let truncated = null;
   const startedAt = now();
   // 지금까지 받아본 연속조회 커서 전체를 기억해 둔다. 직전 값하고만 비교하면
-  // A,B,A,B처럼 주기 2 이상으로 순환하는 커서를 놓치고 상한(20회)까지 같은
-  // 종목을 계속 중복 조회하게 된다.
+  // A,B,A,B처럼 주기 2 이상으로 순환하는 커서를 놓치고 상한까지 같은
+  // 데이터를 계속 중복 조회하게 된다.
   const seenCursors = new Set();
 
   while (true) {
@@ -84,15 +95,15 @@ export async function fetchAllBalance(fetchPage, {
     } catch (error) {
       // 첫 페이지 실패는 인증·계좌 설정 오류일 수 있어 원인을 숨기지 않고 그대로 전파한다.
       // 2페이지 이후 실패는 이미 확보한 페이지를 버리지 않고 부분 결과 + 잘림 표시로 반환한다.
-      // (누락 방지가 목적인데 일시적 오류 1회로 잔고 전체가 사라지면 방향이 반대다.)
+      // (누락 방지가 목적인데 일시적 오류 1회로 데이터 전체가 사라지면 방향이 반대다.)
       if (pages === 0) throw error;
-      // balance.js는 MCP 서버에 import되어 stdout이 JSON-RPC 채널로 쓰인다. 여기서
-      // console.log를 쓰면 프로토콜이 깨지므로 반드시 console.error(stderr)만 사용한다.
+      // balance.js·index.js 모두 stdout이 JSON-RPC 채널로 쓰인다. console.log를 쓰면
+      // 프로토콜이 깨지므로 반드시 console.error(stderr)만 사용한다.
       // error 객체 전체나 error.config/error.response는 절대 남기지 않는다 — axios가
       // config.params(CANO 계좌번호)와 config.headers(appkey, appsecret,
-      // authorization: Bearer 토큰)를 그대로 들고 있어 그대로 로그를 남기면 인증정보가
-      // 노출된다. message만 남긴다.
-      console.error(`잔고 연속조회 ${pages + 1}페이지 조회 실패: ${error.message}`);
+      // authorization: Bearer 토큰)를 그대로 들고 있어 인증정보가 노출된다.
+      // message만 남긴다.
+      console.error(`${label} ${pages + 1}페이지 조회 실패: ${error.message}`);
       truncated = "error";
       break;
     }
@@ -100,8 +111,8 @@ export async function fetchAllBalance(fetchPage, {
     const pageRows = Array.isArray(body.output1) ? body.output1 : [];
     rows.push(...pageRows);
     if (!summary) {
-      // index.js의 fetchAllBalanceRlzPl과 동일하게 단일 객체로 정규화한다.
-      // 빈 배열/undefined면 summary를 확정하지 않아, 요약이 뒤 페이지에 오는 경우를 놓치지 않는다.
+      // 단일 객체로 정규화한다. 빈 배열/undefined면 summary를 확정하지 않아,
+      // 요약이 뒤 페이지에 오는 경우를 놓치지 않는다.
       const candidate = Array.isArray(body.output2) ? body.output2[0] : body.output2;
       if (candidate) summary = candidate;
     }
@@ -122,8 +133,8 @@ export async function fetchAllBalance(fetchPage, {
       truncated = "no_cursor";
       break;
     }
-    // 다음 요청에 실리는 커서는 FK/NK 쌍이므로(buildBalanceParams가 둘 다 내보낸다)
-    // 쌍 전체를 키로 삼는다. NK만 같고 FK가 다르면 서로 다른 요청이라 반복이 아닌데,
+    // 다음 요청에 실리는 커서는 FK/NK 쌍이므로 쌍 전체를 키로 삼는다.
+    // NK만 같고 FK가 다르면 서로 다른 요청이라 반복이 아닌데,
     // NK만 보면 조기 중단해 이 함수가 없애려는 조용한 누락을 만든다.
     // 구분자는 커서 값에 나타날 수 없는 NUL을 쓴다. 공백을 쓰면
     // ("A B","C")와 ("A","B C")가 같은 키가 된다.
@@ -133,13 +144,7 @@ export async function fetchAllBalance(fetchPage, {
       // 보냈던 커서와 같다. 즉 반복되는 것은 "다음에 받을 페이지"이지 방금
       // 받은 이 페이지가 아니다 — 방금 받은 페이지는 이번에 처음 그 커서로
       // 조회해서 받은 실제 신규 데이터이므로 rows에 남겨야 한다. 다음 조회를
-      // 계속하면 그 페이지가 재조회가 되므로, 그 전에 멈춘다. pdno 기준 중복
-      // 제거는 하지 않는다 — 행별 pdno가 유일하다는 전제는 buildBalanceParams가
-      // INQR_DVSN을 항상 "02"(종목별)로 고정하기 때문에만 성립한다. "01"
-      // (대출일별) 조회라면 같은 pdno가 여러 행에 정당하게 걸쳐 나타날 수 있어,
-      // 행 단위 dedup은 서로 다른 실제 보유 종목을 하나로 합쳐버리게 된다.
-      // 혹시라도 진짜 중복 행이 들어오는 경우가 있더라도, 조용히 종목을
-      // 빠뜨리는 것보다는 [안내] 잘림 표시와 함께 과다 집계되는 쪽이 낫다.
+      // 계속하면 그 페이지가 재조회가 되므로, 그 전에 멈춘다.
       truncated = "repeated_cursor";
       break;
     }
@@ -148,6 +153,25 @@ export async function fetchAllBalance(fetchPage, {
   }
 
   return { rows, summary, pages, truncated };
+}
+
+/**
+ * inquire-balance 연속조회 루프. KIS 호출 자체는 fetchPage로 주입받아
+ * (index.js의 kisApiGet 등) balance.js 단독으로 유닛 테스트할 수 있게 한다.
+ *
+ * fetchPage({ ctxAreaFk100, ctxAreaNk100, trCont }) => Promise<{ body, trCont }>
+ *   - body: KIS 응답 바디 (output1/output2/ctx_area_fk100/ctx_area_nk100 포함)
+ *   - trCont: 응답 tr_cont 헤더 값
+ *
+ * 반환: { rows, summary, pages, truncated }
+ *   - truncated: null | "max_pages" | "time_budget" | "no_cursor" | "repeated_cursor" | "error"
+ */
+export async function fetchAllBalance(fetchPage, {
+  maxPages = BALANCE_MAX_PAGES,
+  timeBudgetMs = BALANCE_TIME_BUDGET_MS,
+  now = () => Date.now(),
+} = {}) {
+  return fetchAllPaged(fetchPage, { maxPages, timeBudgetMs, now, label: "잔고 연속조회" });
 }
 
 export function formatPercent(value) {

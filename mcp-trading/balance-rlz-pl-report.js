@@ -1,5 +1,21 @@
 import { formatPercent, formatQuantity, formatWon } from "./formatters.js";
 
+// 잘림 안내 문구. "- "로 시작하면 파싱 오류를 낼 수 있으므로 반드시 "[안내]"로 시작한다.
+// rows.length === 0인 경우에도 출력해야 한다 — 그렇지 않으면 잘림 때문에 빈 결과가 나온 상황을
+// "보유 종목이 없습니다"로 사실로 단언하게 된다.
+function formatRlzPlTruncationNote(truncated, pages) {
+  if (!truncated) return "";
+  const reasons = {
+    max_pages: `페이지 상한(${pages}회)에 도달하여`,
+    time_budget: "조회 시간 예산을 초과하여",
+    no_cursor: "연속조회 커서가 오지 않아",
+    repeated_cursor: "동일한 연속조회 커서가 반복되어",
+    error: "연속조회 중 오류가 발생하여",
+  };
+  const reason = reasons[truncated] || "연속조회가 완료되지 않아";
+  return `\n\n[안내] ${reason} 조회가 중단되어 일부 실현손익 내역이 누락되었을 수 있습니다. 실제 내역은 별도로 확인하세요.`;
+}
+
 export function formatBalanceRlzPlSummaryBlock(summary) {
   if (!summary) {
     return "";
@@ -15,8 +31,9 @@ export function formatBalanceRlzPlSummaryBlock(summary) {
   `.trim();
 }
 
-export function formatBalanceRlzPlReport({ rows, summary, pages, trId, stockLabel }) {
+export function formatBalanceRlzPlReport({ rows, summary, pages, truncated, trId, stockLabel }) {
   const summaryBlock = formatBalanceRlzPlSummaryBlock(summary);
+  const truncationNote = formatRlzPlTruncationNote(truncated, pages);
 
   if (rows.length === 0) {
     const holdingsNote = stockLabel
@@ -26,7 +43,7 @@ export function formatBalanceRlzPlReport({ rows, summary, pages, trId, stockLabe
 [주식잔고조회_실현손익]${stockLabel ? ` / ${stockLabel}` : ""}
 - 조회 TR: ${trId} (v1_국내주식-041, inquire-balance-rlz-pl)
 ${holdingsNote}
-${summaryBlock ? `\n${summaryBlock}` : ""}
+${summaryBlock ? `\n${summaryBlock}` : ""}${truncationNote}
     `.trim();
   }
 
@@ -49,6 +66,6 @@ ${summaryBlock ? `\n${summaryBlock}` : ""}
 ${summaryBlock}
 
 [보유 종목]
-${lines.join("\n\n")}
+${lines.join("\n\n")}${truncationNote}
   `.trim();
 }
