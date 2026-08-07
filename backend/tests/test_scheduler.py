@@ -1136,6 +1136,42 @@ async def test_monitor_market_task_still_watches_stocks_returned_despite_truncat
     assert monitored_stocks == ["삼성전자"]
 
 
+@pytest.fixture(autouse=True)
+def reset_balance_failure_streak(monkeypatch):
+    """모듈 전역 카운터가 테스트 간에 새지 않도록 매 테스트 시작 시 0으로 고정한다."""
+    monkeypatch.setattr("backend.scheduler._balance_failure_streak", 0)
+    monkeypatch.setattr("backend.scheduler._last_balance_error", None)
+
+
+def _make_balance_failure_mocks(monkeypatch, mock_run_mcp_tool_fn):
+    """fake_redis_state / SIGNAL_SOURCES / check_significance / manager.broadcast 패치 헬퍼.
+
+    이 PR(#185)에서 추가한 잔고 조회 실패 관련 테스트에서 반복되는 셋업 4종을 공통화한다.
+    mock_run_mcp_tool_fn만 테스트별로 달라지므로 매개변수로 받는다.
+    """
+    from ..scheduler import SignalSource
+
+    state = RedisSchedulerState(FakeRedis())
+
+    @asynccontextmanager
+    async def fake_redis_state():
+        yield state
+
+    async def mock_check_significance(stock, current, last, *, source, provider):
+        return False
+
+    monkeypatch.setattr("backend.scheduler.redis_state", fake_redis_state)
+    monkeypatch.setattr(
+        "backend.scheduler.SIGNAL_SOURCES",
+        [SignalSource(name="news", mcp_params=object(), tool_name="get_market_news")],
+    )
+    monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool_fn)
+    monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
+    monkeypatch.setattr("backend.scheduler.manager.broadcast", MagicMock(return_value=asyncio.Future()))
+
+    return state
+
+
 @pytest.mark.asyncio
 async def test_monitor_market_task_still_monitors_watchlist_when_balance_raises(monkeypatch):
     """get_balance가 예외를 던져도 관심 종목의 뉴스·공시 감시는 계속됩니다 (이슈 #185).
@@ -1145,15 +1181,7 @@ async def test_monitor_market_task_still_monitors_watchlist_when_balance_raises(
     감싸는 자체 try/except를 제거해 예외가 태스크 전체 except로 튀는 회귀(그러면
     _monitor_signal이 한 번도 불리지 않아 monitored_stocks가 비게 된다).
     """
-    from ..scheduler import SignalSource, monitor_market_task
-
-    monkeypatch.setattr("backend.scheduler._balance_failure_streak", 0)
-
-    state = RedisSchedulerState(FakeRedis())
-
-    @asynccontextmanager
-    async def fake_redis_state():
-        yield state
+    from ..scheduler import monitor_market_task
 
     monitored_stocks = []
 
@@ -1163,17 +1191,7 @@ async def test_monitor_market_task_still_monitors_watchlist_when_balance_raises(
         monitored_stocks.append(args["stock_name"])
         return "news"
 
-    async def mock_check_significance(stock, current, last, *, source, provider):
-        return False
-
-    monkeypatch.setattr("backend.scheduler.redis_state", fake_redis_state)
-    monkeypatch.setattr(
-        "backend.scheduler.SIGNAL_SOURCES",
-        [SignalSource(name="news", mcp_params=object(), tool_name="get_market_news")],
-    )
-    monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
-    monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
-    monkeypatch.setattr("backend.scheduler.manager.broadcast", MagicMock(return_value=asyncio.Future()))
+    _make_balance_failure_mocks(monkeypatch, mock_run_mcp_tool)
 
     await monitor_market_task(watchlist_repo=FakeWatchlistRepo(["카카오"]))
 
@@ -1181,23 +1199,14 @@ async def test_monitor_market_task_still_monitors_watchlist_when_balance_raises(
 
 
 @pytest.mark.asyncio
-async def test_monitor_market_task_falls_back_to_default_stocks_when_balance_raises(monkeypatch):
-    """get_balance가 예외를 던지고 관심 종목도 없으면 기본 종목 감시로 degrade합니다 (이슈 #185).
+async def test_monitor_market_task_skips_when_balance_fails_and_no_watchlist(monkeypatch):
+    """get_balance가 예외를 던지고 관심 종목도 없으면 이번 주기 감시를 건너뜁니다 (이슈 #185, PR #190).
 
-    보유 종목이 비어도 나머지 감시 대상 조립(DEFAULT_MONITOR_STOCKS fallback)까지
-    도달함을 고정한다. 이 테스트가 잡는 mutation: get_balance 실패 시 owned_stocks를
-    비운 뒤 early return 하거나, 실패 경로가 stocks_to_monitor 조립 이전에서 태스크를
-    끝내는 회귀.
+    보유 종목이 "없는" 게 아니라 "모르는" 상태이므로 DEFAULT_MONITOR_STOCKS 폴백을 쓰면
+    사용자와 무관한 종목의 알림이 나갈 수 있다. 이 테스트가 잡는 mutation: balance_ok
+    체크를 제거해 장애 중에도 DEFAULT_MONITOR_STOCKS 폴백이 걸리는 회귀.
     """
-    from ..scheduler import DEFAULT_MONITOR_STOCKS, SignalSource, monitor_market_task
-
-    monkeypatch.setattr("backend.scheduler._balance_failure_streak", 0)
-
-    state = RedisSchedulerState(FakeRedis())
-
-    @asynccontextmanager
-    async def fake_redis_state():
-        yield state
+    from ..scheduler import monitor_market_task
 
     monitored_stocks = []
 
@@ -1207,21 +1216,11 @@ async def test_monitor_market_task_falls_back_to_default_stocks_when_balance_rai
         monitored_stocks.append(args["stock_name"])
         return "news"
 
-    async def mock_check_significance(stock, current, last, *, source, provider):
-        return False
-
-    monkeypatch.setattr("backend.scheduler.redis_state", fake_redis_state)
-    monkeypatch.setattr(
-        "backend.scheduler.SIGNAL_SOURCES",
-        [SignalSource(name="news", mcp_params=object(), tool_name="get_market_news")],
-    )
-    monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
-    monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
-    monkeypatch.setattr("backend.scheduler.manager.broadcast", MagicMock(return_value=asyncio.Future()))
+    _make_balance_failure_mocks(monkeypatch, mock_run_mcp_tool)
 
     await monitor_market_task(watchlist_repo=FakeWatchlistRepo())
 
-    assert monitored_stocks == DEFAULT_MONITOR_STOCKS
+    assert monitored_stocks == []
 
 
 @pytest.mark.asyncio
@@ -1235,15 +1234,7 @@ async def test_monitor_market_task_logs_balance_failure_once_per_outage(monkeypa
     """
     import logging
     from .. import scheduler as scheduler_module
-    from ..scheduler import SignalSource, monitor_market_task
-
-    monkeypatch.setattr("backend.scheduler._balance_failure_streak", 0)
-
-    state = RedisSchedulerState(FakeRedis())
-
-    @asynccontextmanager
-    async def fake_redis_state():
-        yield state
+    from ..scheduler import monitor_market_task
 
     balance_should_fail = True
 
@@ -1254,17 +1245,7 @@ async def test_monitor_market_task_logs_balance_failure_once_per_outage(monkeypa
             return "[보유 종목 리스트]\n- 삼성전자 (005930): 10주"
         return "news"
 
-    async def mock_check_significance(stock, current, last, *, source, provider):
-        return False
-
-    monkeypatch.setattr("backend.scheduler.redis_state", fake_redis_state)
-    monkeypatch.setattr(
-        "backend.scheduler.SIGNAL_SOURCES",
-        [SignalSource(name="news", mcp_params=object(), tool_name="get_market_news")],
-    )
-    monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
-    monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
-    monkeypatch.setattr("backend.scheduler.manager.broadcast", MagicMock(return_value=asyncio.Future()))
+    _make_balance_failure_mocks(monkeypatch, mock_run_mcp_tool)
 
     with caplog.at_level(logging.DEBUG, logger=scheduler_module.logger.name):
         # 같은 장애가 3주기 연속되는 상황
@@ -1278,6 +1259,72 @@ async def test_monitor_market_task_logs_balance_failure_once_per_outage(monkeypa
         balance_should_fail = False
         await monitor_market_task(watchlist_repo=FakeWatchlistRepo(["카카오"]))
 
+        # 두 번째 장애: 카운터가 리셋됐다면 첫 실패가 다시 error로 남아야 한다
+        balance_should_fail = True
+        await monitor_market_task(watchlist_repo=FakeWatchlistRepo(["카카오"]))
+
     assert "잔고 조회가 복구되었습니다" in caplog.text
     assert "3회" in caplog.text
-    assert scheduler_module._balance_failure_streak == 0
+    assert len([r for r in caplog.records if r.levelno == logging.ERROR]) == 2
+
+
+@pytest.mark.asyncio
+async def test_monitor_market_task_logs_error_when_failure_cause_changes(monkeypatch, caplog):
+    """잔고 조회 실패 원인이 바뀌면 카운터에 관계없이 다시 error를 남깁니다 (PR #190).
+
+    타임아웃 → 인증 실패 등 원인 변경은 운영 대응이 달라지므로 즉시 알려야 한다는
+    수용 기준을 고정한다. 이 테스트가 잡는 mutation: signature != _last_balance_error
+    조건을 제거해 원인이 바뀌어도 debug만 남기는 회귀.
+    """
+    import logging
+    from .. import scheduler as scheduler_module
+    from ..scheduler import monitor_market_task
+
+    call_count = [0]
+
+    async def mock_run_mcp_tool(params, name, args):
+        if name == "get_balance":
+            call_count[0] += 1
+            if call_count[0] == 1:
+                raise RuntimeError("타임아웃")
+            raise ValueError("인증 실패")
+        return "news"
+
+    _make_balance_failure_mocks(monkeypatch, mock_run_mcp_tool)
+
+    with caplog.at_level(logging.DEBUG, logger=scheduler_module.logger.name):
+        # 1차 실패: RuntimeError → error
+        await monitor_market_task(watchlist_repo=FakeWatchlistRepo(["카카오"]))
+        # 2차 실패: ValueError (원인 변경) → error 다시 발생해야 한다
+        await monitor_market_task(watchlist_repo=FakeWatchlistRepo(["카카오"]))
+
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(errors) == 2
+
+
+@pytest.mark.asyncio
+async def test_monitor_market_task_reescalates_error_after_six_cycles(monkeypatch, caplog):
+    """잔고 조회 실패가 6회 연속되면 1시간 주기로 다시 error를 남깁니다 (PR #190).
+
+    알림 피로 방지와 "아직 장애 중" 신호의 균형을 고정한다. 이 테스트가 잡는
+    mutation: _balance_failure_streak % 6 == 0 조건을 제거해 6회차 이후 error가
+    완전히 사라지는 회귀.
+    """
+    import logging
+    from .. import scheduler as scheduler_module
+    from ..scheduler import monitor_market_task
+
+    async def mock_run_mcp_tool(params, name, args):
+        if name == "get_balance":
+            raise RuntimeError("KIS 장애")
+        return "news"
+
+    _make_balance_failure_mocks(monkeypatch, mock_run_mcp_tool)
+
+    with caplog.at_level(logging.DEBUG, logger=scheduler_module.logger.name):
+        for _ in range(6):
+            await monitor_market_task(watchlist_repo=FakeWatchlistRepo(["카카오"]))
+
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    # streak=1 → error, streak=2~5 → debug, streak=6 (% 6 == 0) → error
+    assert len(errors) == 2

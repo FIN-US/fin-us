@@ -75,10 +75,11 @@ CATALYST_EVENT_LABELS = {
 
 # get_balance 연속 실패 횟수. 감시 잡이 10분 주기로 상시 도는 탓에, 장애가 지속되면
 # 동일한 에러 로그가 무한 반복돼 알림 피로를 낳고 정작 중요한 장애를 묻는다(#185).
-# 이 카운터로 "장애당 1회"만 error를 남기고 복구 시 누적 횟수를 집계해 보고한다.
-# 잡이 단일 이벤트 루프에서 순차 실행되고(다중 worker는 Redis 스케줄러 lock으로
-# 이미 배제) 정확도가 로그 억제에만 쓰이므로 프로세스 로컬 정수로 충분하다.
+# 이 카운터로 "첫 실패·원인 변경·1시간 주기"마다 error를 남기고 복구 시 집계 보고한다.
+# 카운터는 프로세스마다 별개이고 정확도가 로그 억제에만 쓰이므로 동기화가 필요 없다.
+# (worker가 여럿이면 worker당 첫 실패가 각각 error로 남지만, 그 정도 중복은 허용한다.)
 _balance_failure_streak = 0
+_last_balance_error: str | None = None
 
 
 def _default_watchlist_repo() -> SqliteWatchlistRepo:
@@ -403,7 +404,7 @@ async def _monitor_market_task(
     state: RedisSchedulerState | None,
     watchlist_repo: SqliteWatchlistRepo | None = None,
 ):
-    global _balance_failure_streak
+    global _balance_failure_streak, _last_balance_error
 
     try:
         # 1. 실시간 잔고 조회 및 모니터링 대상 확정
@@ -416,30 +417,42 @@ async def _monitor_market_task(
         # 관심 종목·기본 종목 감시는 계속 진행한다. 장애 중 보유 종목 감시 공백은
         # 어차피 조회 자체가 불가능하므로 불가피한 대가다.
         owned_stocks: list[str] = []
+        balance_ok = False
         try:
             balance_text = await run_mcp_tool(TRADING_MCP_PARAMS, "get_balance", {})
         except Exception as e:
+            signature = f"{type(e).__name__}:{e}"
             _balance_failure_streak += 1
-            if _balance_failure_streak == 1:
+            # 6회 = 약 1시간(10분 주기). 첫 실패는 즉시, 원인이 바뀌면 즉시, 이후는
+            # 1시간에 한 번만 error로 올려 알림 피로를 피하면서도 "아직 장애 중"이라는
+            # 신호가 끊기지 않게 한다.
+            if (
+                _balance_failure_streak == 1
+                or signature != _last_balance_error
+                or _balance_failure_streak % 6 == 0
+            ):
                 logger.error(
-                    "잔고 조회에 실패해 이번 주기의 보유 종목 감시를 건너뜁니다"
-                    "(관심 종목·기본 종목 감시는 계속): %s",
+                    "잔고 조회에 실패해 이번 주기의 보유 종목 감시를 건너뜁니다 "
+                    "(관심 종목·기본 종목 감시는 계속, %d회 연속): %s",
+                    _balance_failure_streak,
                     e,
+                    exc_info=True,
                 )
             else:
-                # 10분 주기 잡이라 장애가 지속되면 같은 error가 무한 반복돼 알림 피로를
-                # 낳고 진짜 장애를 묻는다. 장애당 첫 실패만 error로 남기고 이후는
-                # debug로 내린 뒤, 복구 시점에 누적 횟수를 집계해 한 번에 보고한다.
+                # 동일 원인의 반복 실패는 debug로 내려 알림 피로를 방지한다.
                 logger.debug(
                     "잔고 조회 실패가 %d회 연속됩니다: %s", _balance_failure_streak, e
                 )
+            _last_balance_error = signature
         else:
+            balance_ok = True
             if _balance_failure_streak:
                 logger.warning(
                     "잔고 조회가 복구되었습니다. 직전까지 %d회 연속 실패해 보유 종목 감시를 건너뛰었습니다.",
                     _balance_failure_streak,
                 )
                 _balance_failure_streak = 0
+                _last_balance_error = None
 
             owned_stocks = extract_stocks_from_balance(balance_text)
 
@@ -478,6 +491,11 @@ async def _monitor_market_task(
                 stocks_to_monitor.append(stock)
 
         if not stocks_to_monitor:
+            if not balance_ok:
+                # 보유 종목이 "없는" 게 아니라 "모르는" 상태다. 기본 종목을 감시하면
+                # 사용자와 무관한 종목의 알림이 나가므로 이번 주기는 조용히 건너뛴다.
+                logger.info("잔고 조회 실패 + 관심 종목 없음 — 이번 주기 감시 대상이 없습니다.")
+                return
             logger.info("보유 종목 및 관심 종목이 없습니다. 기본 종목을 감시합니다.")
             stocks_to_monitor = DEFAULT_MONITOR_STOCKS
 
