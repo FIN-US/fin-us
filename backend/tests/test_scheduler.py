@@ -1710,3 +1710,51 @@ def test_sync_portfolio_allows_genuinely_empty_holdings(portfolio_session):
 
     rows = portfolio_session.exec(select(Portfolio)).all()
     assert len(rows) == 0, "실제 보유 0건이면 기존 데이터를 삭제해야 합니다"
+
+
+# ---------------------------------------------------------------------------
+# Critical 3: price_known 플래그 테스트
+# ---------------------------------------------------------------------------
+
+def test_portfolio_endpoint_includes_price_known_flag(client):
+    """/api/v1/portfolio 응답의 각 holding에 price_known 플래그가 포함됩니다.
+
+    이 테스트가 잡는 mutation: holdings.append에서 "price_known" 키를 제거하면
+    응답에 없어 assert "price_known" in holding이 실패한다.
+    """
+    from sqlmodel import Session, select
+    from ..database import engine
+    from ..models import Portfolio
+    from datetime import datetime, timezone
+
+    with Session(engine) as session:
+        for row in session.exec(select(Portfolio)).all():
+            session.delete(row)
+        session.add(Portfolio(
+            stock_code="005930",
+            stock_name="삼성전자",
+            quantity=10,
+            avg_price=70000,
+            current_price=None,
+            updated_at=datetime.now(timezone.utc),
+        ))
+        session.commit()
+
+    try:
+        resp = client.get("/api/v1/portfolio")
+        assert resp.status_code == 200
+        data = resp.json()["data"]
+        assert len(data["holdings"]) == 1
+        holding = data["holdings"][0]
+        assert "price_known" in holding, "price_known 플래그가 응답에 없습니다"
+        # current_price가 None이므로 price_known은 False여야 한다
+        assert holding["price_known"] is False
+        assert "total_asset_is_estimate" in data
+        assert data["total_asset_is_estimate"] is True
+        assert "total_return_rate_known" in data
+        assert data["total_return_rate_known"] is False
+    finally:
+        with Session(engine) as session:
+            for row in session.exec(select(Portfolio)).all():
+                session.delete(row)
+            session.commit()

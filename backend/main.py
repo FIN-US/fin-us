@@ -109,12 +109,21 @@ def _portfolio_return_rate(current_price: float, avg_price: float) -> float:
 
 @app.get("/api/v1/portfolio", response_model=CommonResponse, tags=["Portfolio"])
 async def get_visualization_portfolio(session: Session = Depends(get_session)):
-    """Unity WebGL 시각화 화면에서 사용하는 포트폴리오 요약을 조회합니다."""
+    """Unity WebGL 시각화 화면에서 사용하는 포트폴리오 요약을 조회합니다.
+
+    Unity는 JsonUtility로 파싱하므로 nullable 값 타입(int?, float?)을 지원하지
+    않습니다. JSON null은 JsonUtility에서 예외 없이 기본값(0)으로 처리됩니다.
+    이를 방지하기 위해 각 nullable 필드에 대응하는 bool 플래그를 함께 내립니다:
+      - price_known: current_price와 return_rate가 실제 값인지 여부(이슈 #122)
+      - total_asset_is_estimate: total_asset이 현재가 없는 종목의 매입가 기준 추정값인지
+      - total_return_rate_known: total_return_rate가 실제 계산된 값인지 여부
+    """
     portfolios = session.exec(select(Portfolio)).all()
     holdings = []
     total_asset = 0.0
     total_cost = 0.0
     total_market_for_return = 0.0
+    any_price_unknown = False
 
     for portfolio in portfolios:
         avg_price = float(portfolio.avg_price)
@@ -124,6 +133,7 @@ async def get_visualization_portfolio(session: Session = Depends(get_session)):
             # 현재가가 있는 종목: 평가금액과 수익률을 정확히 계산합니다.
             current_price: float | None = float(portfolio.current_price)
             return_rate: float | None = _portfolio_return_rate(current_price, avg_price)
+            price_known = True
             market_value = current_price * quantity
             total_asset += market_value
             if avg_price > 0:
@@ -135,6 +145,8 @@ async def get_visualization_portfolio(session: Session = Depends(get_session)):
             # 총자산은 매입금액(avg_price × quantity) 기준 근사값을 사용합니다.
             current_price = None
             return_rate = None
+            price_known = False
+            any_price_unknown = True
             total_asset += avg_price * quantity
 
         holdings.append({
@@ -143,6 +155,9 @@ async def get_visualization_portfolio(session: Session = Depends(get_session)):
             "avg_price": avg_price,
             "return_rate": return_rate,
             "quantity": quantity,
+            # Unity JsonUtility가 null을 0으로 읽는 문제를 우회하기 위한 명시 플래그.
+            # price_known=False 이면 current_price·return_rate는 0이 아니라 "알 수 없음"이다.
+            "price_known": price_known,
         })
 
     # 종목별 return_rate와 같은 이유로 총수익률도 "모름"과 "실제 0%"를 구분한다(이슈 #122).
@@ -163,7 +178,12 @@ async def get_visualization_portfolio(session: Session = Depends(get_session)):
         "status": "success",
         "data": {
             "total_asset": total_asset,
+            # True이면 total_asset에 현재가 없는 종목의 매입가 추정분이 포함된다.
+            "total_asset_is_estimate": any_price_unknown,
             "total_return_rate": total_return_rate,
+            # Unity JsonUtility가 null→0으로 읽는 문제 우회. False이면 total_return_rate는
+            # 실제 계산값이 아니며 0으로 표시해서는 안 된다.
+            "total_return_rate_known": total_return_rate is not None,
             "holdings": holdings,
         },
     }

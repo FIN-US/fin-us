@@ -166,9 +166,15 @@ public class PanelController : MonoBehaviour
             return;
 
         stockName.text = holding.name;
-        currentPrice.text = $"현재가: {holding.current_price:N0}원";
+        // price_known=false이면 API가 현재가·수익률을 알 수 없다고 명시한 것이다.
+        // JsonUtility가 JSON null을 0으로 변환하므로 플래그로 구분해 "—"를 표시한다.
+        currentPrice.text = holding.price_known
+            ? $"현재가: {holding.current_price:N0}원"
+            : "현재가: —";
         avgPrice.text = $"평단가: {holding.avg_price:N0}원";
-        returnRate.text = $"수익률: {holding.return_rate:F2}%";
+        returnRate.text = holding.price_known
+            ? $"수익률: {holding.return_rate:F2}%"
+            : "수익률: —";
         quantity.text = $"보유 수량: {holding.quantity:N0}주";
     }
 
@@ -180,8 +186,14 @@ public class PanelController : MonoBehaviour
         if (!EnsureBindings())
             return false;
 
-        totalAsset.text = $"총자산: {portfolioData.total_asset:N0}원";
-        totalReturnRate.text = $"총수익률: {portfolioData.total_return_rate:F2}%";
+        // total_asset_is_estimate=true이면 현재가 없는 종목이 매입가 기준으로 잡혀 있다.
+        totalAsset.text = portfolioData.total_asset_is_estimate
+            ? $"총자산: {portfolioData.total_asset:N0}원 (추정)"
+            : $"총자산: {portfolioData.total_asset:N0}원";
+        // total_return_rate_known=false이면 현재가가 없어 수익률을 계산할 수 없다.
+        totalReturnRate.text = portfolioData.total_return_rate_known
+            ? $"총수익률: {portfolioData.total_return_rate:F2}%"
+            : "총수익률: —";
         return true;
     }
 

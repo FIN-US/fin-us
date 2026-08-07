@@ -42,7 +42,9 @@ def test_get_visualization_portfolio_empty(client: TestClient):
         "status": "success",
         "data": {
             "total_asset": 0,
+            "total_asset_is_estimate": False,
             "total_return_rate": 0.0,
+            "total_return_rate_known": True,
             "holdings": [],
         },
         "message": None,
@@ -79,7 +81,9 @@ def test_get_visualization_portfolio_maps_holdings(
     assert response.json()["status"] == "success"
     assert response.json()["data"] == {
         "total_asset": 1720000.0,
+        "total_asset_is_estimate": False,
         "total_return_rate": 1.1765,
+        "total_return_rate_known": True,
         "holdings": [
             {
                 "name": "삼성전자",
@@ -87,6 +91,7 @@ def test_get_visualization_portfolio_maps_holdings(
                 "avg_price": 70000.0,
                 "return_rate": 10.0,
                 "quantity": 10,
+                "price_known": True,
             },
             {
                 "name": "SK하이닉스",
@@ -94,6 +99,7 @@ def test_get_visualization_portfolio_maps_holdings(
                 "avg_price": 200000.0,
                 "return_rate": -5.0,
                 "quantity": 5,
+                "price_known": True,
             },
         ],
     }
@@ -130,10 +136,13 @@ def test_get_visualization_portfolio_handles_missing_prices(
         # 카카오 current_price=None → total_asset에 avg_price*qty(126,000)로 포함.
         # 평단가없음 current_price=1000 → total_asset에 1000*2(2,000)로 포함.
         "total_asset": 128000.0,
+        # 카카오의 current_price=None으로 인해 total_asset이 추정값이다.
+        "total_asset_is_estimate": True,
         # 카카오는 current_price 없어 return_rate 미반영.
         # 평단가없음은 avg_price=0 이라 수익률 계산에서 제외.
         # → total_cost=0. 보유 종목은 있으므로 "모름"이고 실제 0%가 아니다 → null.
         "total_return_rate": None,
+        "total_return_rate_known": False,
         "holdings": [
             {
                 "name": "카카오",
@@ -143,6 +152,7 @@ def test_get_visualization_portfolio_handles_missing_prices(
                 "avg_price": 42000.0,
                 "return_rate": None,
                 "quantity": 3,
+                "price_known": False,
             },
             {
                 "name": "평단가없음",
@@ -150,6 +160,7 @@ def test_get_visualization_portfolio_handles_missing_prices(
                 "avg_price": 0.0,
                 "return_rate": 0.0,
                 "quantity": 2,
+                "price_known": True,
             },
         ],
     }
