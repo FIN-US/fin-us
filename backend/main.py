@@ -101,10 +101,6 @@ async def get_account_balance():
     return {"status": "success", "data": {"report": balance_text}}
 
 
-def _portfolio_current_price(portfolio: Portfolio) -> float:
-    return float(portfolio.current_price if portfolio.current_price is not None else portfolio.avg_price)
-
-
 def _portfolio_return_rate(current_price: float, avg_price: float) -> float:
     if avg_price <= 0:
         return 0.0
@@ -121,21 +117,31 @@ async def get_visualization_portfolio(session: Session = Depends(get_session)):
     total_market_for_return = 0.0
 
     for portfolio in portfolios:
-        current_price = _portfolio_current_price(portfolio)
         avg_price = float(portfolio.avg_price)
         quantity = portfolio.quantity
-        market_value = current_price * quantity
-        total_asset += market_value
 
-        if avg_price > 0:
-            total_cost += avg_price * quantity
-            total_market_for_return += market_value
+        if portfolio.current_price is not None:
+            # 현재가가 있는 종목: 평가금액과 수익률을 정확히 계산합니다.
+            current_price: float | None = float(portfolio.current_price)
+            return_rate: float | None = _portfolio_return_rate(current_price, avg_price)
+            market_value = current_price * quantity
+            total_asset += market_value
+            if avg_price > 0:
+                total_cost += avg_price * quantity
+                total_market_for_return += market_value
+        else:
+            # 현재가가 없는 종목: 수익률을 알 수 없으므로 None을 반환합니다.
+            # None을 반환해 "실제 0%"와 구분합니다(이슈 #122).
+            # 총자산은 매입금액(avg_price × quantity) 기준 근사값을 사용합니다.
+            current_price = None
+            return_rate = None
+            total_asset += avg_price * quantity
 
         holdings.append({
             "name": portfolio.stock_name,
             "current_price": current_price,
             "avg_price": avg_price,
-            "return_rate": _portfolio_return_rate(current_price, avg_price),
+            "return_rate": return_rate,
             "quantity": quantity,
         })
 

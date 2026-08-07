@@ -127,14 +127,21 @@ def test_get_visualization_portfolio_handles_missing_prices(
 
     assert response.status_code == 200
     assert response.json()["data"] == {
+        # 카카오 current_price=None → total_asset에 avg_price*qty(126,000)로 포함.
+        # 평단가없음 current_price=1000 → total_asset에 1000*2(2,000)로 포함.
         "total_asset": 128000.0,
+        # 카카오는 current_price 없어 return_rate 미반영.
+        # 평단가없음은 avg_price=0 이라 return_rate=0.0이지만 수익률 계산 제외.
+        # → total_cost=0 → total_return_rate=0.0.
         "total_return_rate": 0.0,
         "holdings": [
             {
                 "name": "카카오",
-                "current_price": 42000.0,
+                # current_price=None → null. avg_price 대체값 42000을 반환하던
+                # 기존 동작은 "실제 0%" 수익률과 구분이 불가능해 이슈 #122에서 수정됨.
+                "current_price": None,
                 "avg_price": 42000.0,
-                "return_rate": 0.0,
+                "return_rate": None,
                 "quantity": 3,
             },
             {

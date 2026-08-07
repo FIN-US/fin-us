@@ -1336,3 +1336,255 @@ async def test_monitor_market_task_reescalates_error_after_six_cycles(monkeypatc
     errors = [r for r in caplog.records if r.levelno == logging.ERROR]
     # streak=1 → error, streak=2~5 → debug, streak=6 (% 6 == 0) → error
     assert len(errors) == 2
+
+
+# ---------------------------------------------------------------------------
+# Portfolio 동기화 테스트 (이슈 #122)
+# ---------------------------------------------------------------------------
+
+def _make_balance_text(*holdings):
+    """(name, code, qty, avg_price) 튜플 목록으로 get_balance 텍스트 픽스처를 합성합니다.
+
+    mcp-trading/balance.js의 formatBalanceReport()가 생성하는 형식을 그대로 재현합니다.
+    formatAmount(pchs_avg_pric) = "N,NNN원", formatQuantity(hldg_qty) = "N"(또는 "N,NNN").
+    """
+    lines = []
+    for name, code, qty, avg_price in holdings:
+        avg_str = f"{int(avg_price):,}"
+        evlu = int(avg_price * qty)
+        lines.append(
+            f"- {name} ({code}) · {qty}주\n"
+            f"  평단가 {avg_str}원 → 평가금액 {evlu:,}원\n"
+            f"  손익 +0원 · 수익률 ⚪ 0.00%"
+        )
+    stock_list = "\n\n".join(lines) if lines else "보유 종목이 없습니다."
+    return (
+        "[계좌 잔고 현황]\n"
+        "- 총 평가금액: 0원\n"
+        "\n"
+        f"[보유 종목 리스트]\n{stock_list}"
+    )
+
+
+@pytest.fixture(name="portfolio_session")
+def portfolio_session_fixture():
+    """Portfolio 동기화 단위 테스트용 인메모리 SQLite 세션."""
+    from sqlmodel import SQLModel, create_engine
+    from sqlmodel.pool import StaticPool
+    from sqlmodel import Session as _Session
+    eng = create_engine(
+        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
+    )
+    SQLModel.metadata.create_all(eng)
+    with _Session(eng) as session:
+        yield session
+
+
+def test_parse_balance_holdings_extracts_name_code_qty_avg():
+    """_parse_balance_holdings가 이름·코드·수량·평단가를 올바르게 파싱합니다.
+
+    이 테스트가 잡는 mutation: _QTY_RE 또는 _AVG_PRICE_RE를 제거해
+    quantity=0 또는 avg_price=0.0만 반환하는 회귀.
+    """
+    from ..scheduler import _parse_balance_holdings
+
+    text = _make_balance_text(
+        ("삼성전자", "005930", 10, 70000),
+        ("SK하이닉스", "000660", 5, 200000),
+    )
+    holdings = _parse_balance_holdings(text)
+
+    assert len(holdings) == 2
+    assert holdings[0].name == "삼성전자"
+    assert holdings[0].code == "005930"
+    assert holdings[0].quantity == 10
+    assert holdings[0].avg_price == 70000.0
+    assert holdings[1].name == "SK하이닉스"
+    assert holdings[1].code == "000660"
+    assert holdings[1].quantity == 5
+    assert holdings[1].avg_price == 200000.0
+
+
+def test_parse_balance_holdings_with_real_fixture():
+    """REAL_BALANCE_TEXT(balance.js 실제 출력 픽스처)에서 올바르게 파싱됩니다."""
+    from ..scheduler import _parse_balance_holdings
+    from .test_balance_parser import REAL_BALANCE_TEXT
+
+    holdings = _parse_balance_holdings(REAL_BALANCE_TEXT)
+
+    assert len(holdings) == 2
+    assert holdings[0].name == "삼성전자"
+    assert holdings[0].code == "005930"
+    assert holdings[0].quantity == 3
+    assert holdings[0].avg_price == 67000.0
+    assert holdings[1].name == "NAVER"
+    assert holdings[1].code == "035420"
+    assert holdings[1].quantity == 1
+    assert holdings[1].avg_price == 201000.0
+
+
+def test_parse_balance_holdings_empty_returns_empty_list():
+    from ..scheduler import _parse_balance_holdings
+
+    assert _parse_balance_holdings("보유 종목이 없습니다.") == []
+    assert _parse_balance_holdings(_make_balance_text()) == []
+
+
+def test_sync_portfolio_writes_holdings(portfolio_session):
+    """_sync_portfolio_from_balance가 Portfolio 행을 실제로 씁니다.
+
+    이 테스트가 잡는 mutation: _sync_portfolio_from_balance 호출을 제거하거나
+    session.add() 없이 반환하는 회귀 → rows가 비어 assert len==1이 실패한다.
+    """
+    from sqlmodel import select
+    from ..models import Portfolio
+    from ..scheduler import _sync_portfolio_from_balance
+
+    text = _make_balance_text(("삼성전자", "005930", 10, 70000))
+    _sync_portfolio_from_balance(text, portfolio_session)
+
+    rows = portfolio_session.exec(select(Portfolio)).all()
+    assert len(rows) == 1
+    assert rows[0].stock_code == "005930"
+    assert rows[0].stock_name == "삼성전자"
+    assert rows[0].quantity == 10
+    assert rows[0].avg_price == 70000.0
+    # current_price는 get_balance output1에 현재가 필드가 없어 항상 null(이슈 #122)
+    assert rows[0].current_price is None
+
+
+def test_sync_portfolio_removes_stale_holdings(portfolio_session):
+    """보유하지 않게 된 종목이 동기화 후 제거됩니다.
+
+    이 테스트가 잡는 mutation: delete 없이 add만 하는 회귀 → stale 행이
+    남아 assert len==1이 실패한다.
+    """
+    from sqlmodel import select
+    from ..models import Portfolio
+    from ..scheduler import _sync_portfolio_from_balance
+
+    # 초기: 삼성전자 + SK하이닉스
+    portfolio_session.add(Portfolio(stock_code="005930", stock_name="삼성전자", quantity=10, avg_price=70000))
+    portfolio_session.add(Portfolio(stock_code="000660", stock_name="SK하이닉스", quantity=5, avg_price=200000))
+    portfolio_session.commit()
+
+    # 이후 잔고에 삼성전자만 남음
+    text = _make_balance_text(("삼성전자", "005930", 10, 70000))
+    _sync_portfolio_from_balance(text, portfolio_session)
+
+    rows = portfolio_session.exec(select(Portfolio)).all()
+    assert len(rows) == 1
+    assert rows[0].stock_code == "005930"
+
+
+def test_sync_portfolio_skips_when_balance_truncated(portfolio_session):
+    """잔고 연속조회가 잘리면 기존 Portfolio 데이터를 파괴하지 않습니다.
+
+    이 테스트가 잡는 mutation: is_balance_truncated 가드를 제거하면 잘린 잔고로
+    전량 교체가 일어나 기존 종목이 사라져 assert len==2가 실패한다.
+    """
+    from sqlmodel import select
+    from ..models import Portfolio
+    from ..scheduler import _sync_portfolio_from_balance
+    from .test_balance_parser import TRUNCATION_NOTES_BY_REASON
+
+    # 기존 데이터: 삼성전자 + SK하이닉스
+    portfolio_session.add(Portfolio(stock_code="005930", stock_name="삼성전자", quantity=10, avg_price=70000))
+    portfolio_session.add(Portfolio(stock_code="000660", stock_name="SK하이닉스", quantity=5, avg_price=200000))
+    portfolio_session.commit()
+
+    # 잘린 잔고: 삼성전자만 있는 척
+    truncated_text = (
+        _make_balance_text(("삼성전자", "005930", 10, 70000)).rstrip()
+        + TRUNCATION_NOTES_BY_REASON["max_pages"]
+    )
+    _sync_portfolio_from_balance(truncated_text, portfolio_session)
+
+    rows = portfolio_session.exec(select(Portfolio)).all()
+    # 잘린 잔고 → 동기화 건너뜀 → 기존 2개 유지
+    assert len(rows) == 2
+
+
+@pytest.mark.asyncio
+async def test_monitor_market_task_syncs_portfolio_when_balance_succeeds(monkeypatch):
+    """잔고 조회 성공 시 monitor_market_task가 Portfolio 동기화를 호출합니다.
+
+    이 테스트가 잡는 mutation: _monitor_market_task에서 _sync_portfolio_from_balance
+    호출을 제거하는 회귀 → sync_calls가 비어 assert len==1이 실패한다.
+    """
+    from ..scheduler import SignalSource, monitor_market_task
+
+    state = RedisSchedulerState(FakeRedis())
+    sync_calls = []
+
+    @asynccontextmanager
+    async def fake_redis_state():
+        yield state
+
+    async def mock_run_mcp_tool(params, name, args):
+        if name == "get_balance":
+            return _make_balance_text(("삼성전자", "005930", 10, 70000))
+        return "news"
+
+    def mock_sync_portfolio(balance_text, session):
+        sync_calls.append(balance_text)
+
+    async def mock_check_significance(stock, current, last, *, source, provider):
+        return False
+
+    monkeypatch.setattr("backend.scheduler.redis_state", fake_redis_state)
+    monkeypatch.setattr(
+        "backend.scheduler.SIGNAL_SOURCES",
+        [SignalSource(name="news", mcp_params=object(), tool_name="get_market_news")],
+    )
+    monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
+    monkeypatch.setattr("backend.scheduler._sync_portfolio_from_balance", mock_sync_portfolio)
+    monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
+    monkeypatch.setattr("backend.scheduler.manager.broadcast", MagicMock(return_value=asyncio.Future()))
+
+    await monitor_market_task(watchlist_repo=FakeWatchlistRepo())
+
+    assert len(sync_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_monitor_market_task_does_not_sync_when_balance_fails(monkeypatch):
+    """잔고 조회 실패 시 Portfolio 동기화를 호출하지 않습니다 (기존 데이터 보호).
+
+    이 테스트가 잡는 mutation: balance_ok 가드를 제거해 실패 시에도
+    _sync_portfolio_from_balance가 호출되는 회귀 → sync_calls가 비어야 하는데
+    1개가 들어가 assert sync_calls==[] 가 실패한다.
+    """
+    from ..scheduler import SignalSource, monitor_market_task
+
+    state = RedisSchedulerState(FakeRedis())
+    sync_calls = []
+
+    @asynccontextmanager
+    async def fake_redis_state():
+        yield state
+
+    async def mock_run_mcp_tool(params, name, args):
+        if name == "get_balance":
+            raise RuntimeError("KIS 장애")
+        return "news"
+
+    def mock_sync_portfolio(balance_text, session):
+        sync_calls.append(balance_text)
+
+    async def mock_check_significance(stock, current, last, *, source, provider):
+        return False
+
+    monkeypatch.setattr("backend.scheduler.redis_state", fake_redis_state)
+    monkeypatch.setattr(
+        "backend.scheduler.SIGNAL_SOURCES",
+        [SignalSource(name="news", mcp_params=object(), tool_name="get_market_news")],
+    )
+    monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
+    monkeypatch.setattr("backend.scheduler._sync_portfolio_from_balance", mock_sync_portfolio)
+    monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
+    monkeypatch.setattr("backend.scheduler.manager.broadcast", MagicMock(return_value=asyncio.Future()))
+
+    await monitor_market_task(watchlist_repo=FakeWatchlistRepo(["카카오"]))
+
+    assert sync_calls == []

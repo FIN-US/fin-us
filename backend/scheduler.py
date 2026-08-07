@@ -2,11 +2,11 @@ import os
 import logging
 import re
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
 from typing import Any, Callable
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from sqlmodel import Session
+from sqlmodel import Session, select
 from .catalyst_repo import CatalystEventInput, SqliteCatalystEventRepo
 from .ws_manager import manager
 from .database import engine
@@ -18,6 +18,7 @@ from .services import (
     check_signal_significance,
     generate_morning_briefing,
 )
+from .models import Portfolio
 from .watchlist_repo import SqliteWatchlistRepo
 from .telegram_notifier import telegram_notifier
 from .telegram_notifier import should_send_telegram_alert
@@ -193,6 +194,134 @@ def is_balance_truncated(balance_text: str) -> bool:
     종목명으로 오인식되지 않도록), 잘림 여부는 이 함수로 별도 확인해야 한다.
     """
     return _BALANCE_TRUNCATION_MARKER in balance_text
+
+
+# balance.js formatBalanceReport()의 종목 줄 형식에서 수량과 평단가를 추출하는 정규식.
+#
+# 수량(hldg_qty): "- 삼성전자 (005930) · 3주" 줄 끝의 "N주" 부분.
+# 코드 닫는 괄호 직후 공백+중점+공백("· ")을 앵커로 사용한다. formatQuantity가
+# toLocaleString("ko-KR")로 쉼표를 삽입하므로 "1,234주" 형태도 허용한다.
+# · 는 U+00B7(MIDDLE DOT)로, balance.js 템플릿 리터럴에서 그대로 쓰는 문자다.
+_QTY_RE = re.compile(r"\)\s*·\s*([\d,]+)주")
+
+# 평단가(pchs_avg_pric): "  평단가 67,000원 → ..." 줄.
+# formatAmount가 toLocaleString("ko-KR")로 쉼표를 삽입하고 "원"을 붙인다.
+# "-원" 형태(parseNumber가 null을 반환하는 경우)는 [\d,]+에 매치되지 않아
+# 기본값 0.0이 사용된다.
+_AVG_PRICE_RE = re.compile(r"평단가\s+([\d,]+)원")
+
+
+@dataclass(frozen=True)
+class _BalanceHolding:
+    """_parse_balance_holdings의 파싱 결과 단위."""
+    code: str
+    name: str
+    quantity: int
+    avg_price: float
+
+
+def _parse_balance_holdings(balance_text: str) -> list[_BalanceHolding]:
+    """get_balance 텍스트에서 보유 종목의 코드·이름·수량·평단가를 파싱합니다.
+
+    mcp-trading/balance.js의 formatBalanceReport()가 생성하는 3줄 블록 형식에
+    의존합니다:
+      줄1: "- {prdt_name} ({pdno}) · {hldg_qty}주"
+      줄2: "  평단가 {pchs_avg_pric}원 → 평가금액 {evlu_amt}원"
+      줄3: "  손익 ... · 수익률 ..."
+
+    current_price는 이 포맷에 포함되지 않아 파싱하지 않습니다.
+    inquire-balance(TTTC8434R) output1에 현재가 필드가 없기 때문입니다
+    (이슈 #122 후속 이슈 참고).
+
+    잘림 가드는 호출처(_sync_portfolio_from_balance)가 담당하므로 이 함수는
+    잘린 응답도 있는 그대로 파싱합니다.
+    """
+    holdings: list[_BalanceHolding] = []
+    if "[보유 종목 리스트]" not in balance_text:
+        return holdings
+
+    section = balance_text.split("[보유 종목 리스트]")[1]
+    lines = section.split("\n")
+
+    for i, line in enumerate(lines):
+        if not line.startswith("- "):
+            continue
+
+        match = STOCK_LINE_RE.match(line)
+        if match is None:
+            continue  # 형식 위반 줄 — extract_stocks_from_balance와 동일하게 건너뜀
+
+        name = match.group("name").strip()
+        code = match.group("code")
+        if not name:
+            continue
+
+        # 수량: "- 삼성전자 (005930) · 3주" → 3
+        qty_match = _QTY_RE.search(line)
+        quantity = 0
+        if qty_match:
+            try:
+                quantity = int(qty_match.group(1).replace(",", ""))
+            except ValueError:
+                pass
+
+        # 평단가: 다음 줄 "  평단가 67,000원 → ..." → 67000.0
+        avg_price = 0.0
+        if i + 1 < len(lines):
+            avg_match = _AVG_PRICE_RE.search(lines[i + 1])
+            if avg_match:
+                try:
+                    avg_price = float(avg_match.group(1).replace(",", ""))
+                except ValueError:
+                    pass
+
+        holdings.append(_BalanceHolding(code=code, name=name, quantity=quantity, avg_price=avg_price))
+
+    return holdings
+
+
+def _sync_portfolio_from_balance(balance_text: str, session: Session) -> None:
+    """get_balance 응답을 바탕으로 Portfolio 테이블을 동기화합니다.
+
+    전략: 전량 교체 (기존 행 전체 삭제 후 신규 삽입). 매 잔고 조회마다 실행되어
+    보유하지 않게 된 종목을 자동으로 제거합니다.
+
+    잔고가 잘린 경우(is_balance_truncated) 전량 교체를 수행하면 아직 파악되지 않은
+    보유 종목이 삭제될 수 있으므로, 동기화를 건너뛰고 기존 데이터를 보존합니다.
+
+    current_price는 get_balance(inquire-balance, TTTC8434R) output1에 현재가 필드가
+    없어 항상 null로 둡니다. null 수익률이 "실제 0%"와 혼동되지 않도록
+    /api/v1/portfolio 응답에서 return_rate: null로 구분됩니다(이슈 #122).
+    current_price 확보 방안은 후속 이슈를 참고하세요.
+    """
+    if is_balance_truncated(balance_text):
+        logger.warning(
+            "잔고 연속조회가 잘려 Portfolio 동기화를 건너뜁니다. 기존 데이터를 유지합니다."
+        )
+        return
+
+    holdings = _parse_balance_holdings(balance_text)
+
+    # 전량 교체: 기존 행 전체 삭제
+    existing = session.exec(select(Portfolio)).all()
+    for row in existing:
+        session.delete(row)
+    session.flush()
+
+    # 신규 삽입
+    now = datetime.now(timezone.utc)
+    for h in holdings:
+        session.add(Portfolio(
+            stock_code=h.code,
+            stock_name=h.name,
+            quantity=h.quantity,
+            avg_price=h.avg_price,
+            current_price=None,
+            updated_at=now,
+        ))
+
+    session.commit()
+    logger.info("Portfolio 동기화 완료: %d개 종목", len(holdings))
 
 
 def _infer_catalyst_event_type(description: str) -> str:
@@ -455,6 +584,16 @@ async def _monitor_market_task(
                 _last_balance_error = None
 
             owned_stocks = extract_stocks_from_balance(balance_text)
+
+            # Portfolio 테이블 동기화 — 잔고 조회 성공 시에만 실행.
+            # 잘린 잔고에서 전량 교체하면 보유 종목이 사라지므로,
+            # _sync_portfolio_from_balance가 내부에서 잘림을 감지해 건너뜁니다.
+            # 동기화 실패는 감시 루프에 영향을 주지 않아야 하므로 예외를 격리합니다.
+            try:
+                with Session(engine) as sync_session:
+                    _sync_portfolio_from_balance(balance_text, sync_session)
+            except Exception as e:
+                logger.error("Portfolio 동기화 중 오류 (감시는 계속): %s", e, exc_info=True)
 
             if is_balance_truncated(balance_text):
                 # 잘림 사유(max_pages/time_budget/error/...)마다 운영 대응이 다르므로,
