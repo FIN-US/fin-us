@@ -34,7 +34,7 @@ description: >
    PR마다 고유한 named ref로 fetch합니다.
 3. **`cd`, `git checkout`, `git switch`, `git stash`를 사용하지 않습니다.**
    git은 `git -C <경로>`, gh는 `gh ... -R <owner/repo>`로 호출해 현재 디렉토리에 의존하지 않게 합니다.
-4. worktree 경로와 ref 이름은 **실행마다 고유**해야 합니다.
+4. worktree 경로와 ref 이름은 **실행마다 고유**해야 합니다. 아래 "값 확정과 기록" 참조.
 5. **셸 변수가 호출 간에 살아남는다고 가정하지 않습니다.** 아래 "값 확정과 기록" 참조.
 6. **`worktree add`와 `fetch`는 락 경합으로 실패할 수 있습니다.** 병렬 실행에서 `.git/worktrees`와
    `packed-refs` 락이 경합합니다. 실패하면 몇 초 후 1회 재시도하고, 그래도 실패하면 사용자에게 보고합니다.
@@ -45,52 +45,96 @@ description: >
 `$$`(PID)는 호출마다 다른 값이 됩니다. 1단계에서 정한 `$WT`를 6단계 정리에서 그대로 참조하면
 빈 문자열이 되어 정리가 조용히 실패하고, worktree와 `refs/pr-review/*`가 리뷰할 때마다 누적됩니다.
 
-따라서:
+**복구 가능성을 주는 것은 아래의 "리터럴 기록"이지 이름의 결정성이 아닙니다.**
+따라서 이름은 고유해야 하고, 동시에 기록되어야 합니다.
 
-- 고유 토큰으로 `$$`를 쓰지 않습니다. **PR 번호 + head 커밋 short SHA**를 씁니다. 결정적이라
-  나중에 다시 유도할 수 있습니다.
-- 1단계에서 확정한 **`WT_PATH`와 `REF_NAME`의 리터럴 값을 출력해 기록**하고, 이후 모든 단계
-  (특히 6단계 정리)에서는 셸 변수가 아니라 **그 리터럴 문자열을 직접 사용**합니다.
+- 이름에 **nonce를 반드시 포함**합니다: `<PR>-<SHA7>-<nonce>`.
+  `<PR>-<SHA7>`만 쓰면 같은 PR을 같은 커밋에서 두 번 동시에 리뷰할 때 경로와 ref가 완전히 같아지고,
+  6단계의 `worktree remove --force`가 **아직 리뷰 중인 다른 실행의 worktree를 통째로 지웁니다.**
+  (규칙 6의 재시도는 `worktree add` 시점만 막아주고 정리 시점은 못 막습니다.)
+- `<nonce>`는 1단계에서 **한 번만** 만들어 리터럴로 기록합니다. `$$`를 쓰지 않습니다 —
+  호출마다 달라지는 것이 원래 문제였습니다. 예: `date +%s%N`의 뒤 6자리, 또는 임의의 6자 영숫자.
+- 1단계에서 확정한 **`REPO`, `WT_PATH`, `REF_NAME`, `OWNER`, `BASE`의 리터럴 값을 출력해 기록**하고,
+  이후 모든 단계(특히 6단계 정리)에서는 셸 변수가 아니라 **그 리터럴 문자열을 직접 사용**합니다.
 - 여러 명령을 한 셸 호출에 이어 붙여도 되지만, 그렇게 했다는 이유로 리터럴 기록을 생략하지 않습니다.
 
 ## 워크플로
 
 ### 1. 사전 준비 — 원격 PR인 경우
 
-먼저 stale 스윕으로 이전 실행이 남긴 누수를 회수합니다.
+먼저 `<REPO>`를 확정합니다. 이 한 줄만 현재 디렉토리에 의존하는 부트스트랩이며,
+이후 모든 git 호출은 여기서 얻은 리터럴로 `git -C "<REPO>"` 형태를 씁니다.
 
 ```bash
-git worktree prune
-# 살아있는 worktree가 없는 리뷰용 ref 정리
-git for-each-ref --format='%(refname)' refs/pr-review/ | while read -r r; do
-  git worktree list --porcelain | grep -q "$(git rev-parse "$r")" || git update-ref -d "$r"
+git rev-parse --show-toplevel        # → <REPO>
+```
+
+stale 스윕으로 이전 실행이 남긴 누수를 회수합니다.
+판정은 **worktree 디렉토리의 존재 여부 하나**로만 합니다.
+
+```bash
+git -C "<REPO>" worktree prune
+WTROOT="<REPO의 부모>/.fin-us-worktrees"
+git -C "<REPO>" for-each-ref --format='%(refname)' refs/pr-review/ | while read -r r; do
+  [ -d "$WTROOT/rv-${r#refs/pr-review/}" ] && continue   # 마커 또는 살아있는 worktree → 보존
+  git -C "<REPO>" update-ref -d "$r"
 done
 ```
+
+**커밋 SHA로 판정하지 않습니다.** `git rev-parse`가 실패하면 빈 문자열이 되어 `grep -q ""`가
+항상 참이라 깨진 ref가 영원히 남고, 개발자가 그 PR 브랜치를 로컬 체크아웃 중이면 메인 워킹 트리가
+같은 커밋이라 "살아있음"으로 오판합니다.
+
+**ref의 나이로도 판정하지 않습니다.** `git log -1 --format=%ct`는 *커밋* 시각이지 ref 생성 시각이
+아닙니다. 며칠 전 커밋을 head로 둔 PR을 리뷰하면 방금 만든 ref가 "오래됨"으로 판정되어
+진행 중인데도 지워집니다. `refs/pr-review/*`에는 reflog도 없어(`core.logAllRefUpdates`는
+`refs/heads`·`refs/remotes`만 기록) 생성 시각을 알아낼 방법이 없습니다.
+
+대신 **마커 디렉토리**로 경합 창 자체를 없앱니다. 1단계는 `fetch`로 ref를 만든 **다음**
+`worktree add`를 하므로 그 사이 ref는 있고 worktree는 없습니다. 다른 실행의 스윕이 이 창에
+들어오면 진행 중인 ref를 지워 `worktree add`가 `invalid reference`로 죽습니다.
+그래서 **ref를 만들기 전에 `<WT_PATH>` 디렉토리를 먼저 만듭니다.**
+`git worktree add`는 기존 빈 디렉토리를 그대로 받아들이므로(실측 확인) 문제되지 않습니다.
 
 base 레포와 base 브랜치를 **PR에서 직접 조회해 고정**합니다. base를 `main`으로 가정하지 않습니다.
 
 ```bash
-OWNER="$(gh repo view --json nameWithOwner -q .nameWithOwner)"
-gh pr view <PR번호> -R "$OWNER" --json baseRefName,headRefOid,title,url
+gh repo view --json nameWithOwner -q .nameWithOwner       # → <OWNER>
+gh pr view <PR번호> -R "<OWNER>" --json baseRefName,headRefOid,title,url
 ```
 
-`OWNER`는 `gh repo view`가 해석한 값입니다. 레포에 remote가 여러 개면 `git remote -v`로
-`origin`이 이 base 레포를 가리키는지 확인하고, 어긋나면 진행하지 말고 사용자에게 보고합니다.
-(fetch는 `origin`으로 하고 메타데이터는 `gh`가 해석한 레포에서 읽으므로, 둘이 다르면
-서로 다른 레포의 코드와 메타데이터를 섞어 보게 됩니다.)
-
-위 조회 결과로 리터럴 값을 확정합니다 — `<PR>`, `<BASE>`(baseRefName), `<SHA7>`(headRefOid 앞 7자).
+remote가 여러 개면 `git -C "<REPO>" remote -v`로 `origin`이 이 base 레포인지 확인합니다.
+**단순 문자열 비교는 하지 마세요** — 레포가 전송/이름변경된 경우 origin URL은 옛 이름이고
+`gh`는 새 이름으로 해석하므로 정상 상태에서도 어긋나 보입니다(이 레포가 실제로 그렇습니다:
+origin은 `sorocode/fin-us`, `gh`는 `FIN-US/fin-us`). 레포 동일성은 id로 비교합니다.
 
 ```bash
-# 아래 <...>는 위에서 확정한 리터럴로 치환해 실행하고, 그 결과 경로/ref를 기록해 둡니다.
-#   REF_NAME = refs/pr-review/<PR>-<SHA7>
-#   WT_PATH  = <REPO의 부모>/.fin-us-worktrees/rv-<PR>-<SHA7>
+gh api "repos/<origin URL의 owner/repo>" --jq .id      # vs
+gh api "repos/<OWNER>" --jq .id
+```
+
+id가 다르면 fetch한 코드와 `gh`로 읽은 메타데이터가 서로 다른 레포의 것이 되므로 **경고하고**,
+사용자에게 계속할지 확인합니다. 중단이 아니라 경고입니다 — 오탐 여지가 있습니다.
+
+위 조회 결과로 리터럴 값을 확정하고 **출력해 기록**합니다 —
+`<PR>`, `<BASE>`(baseRefName), `<SHA7>`(headRefOid 앞 7자), `<nonce>`(1단계에서 한 번 생성).
+
+```bash
+# 아래 <...>는 확정한 리터럴로 치환해 실행하고, 그 결과 경로/ref를 반드시 기록해 둡니다.
+#   REF_NAME = refs/pr-review/<PR>-<SHA7>-<nonce>
+#   WT_PATH  = <REPO의 부모>/.fin-us-worktrees/rv-<PR>-<SHA7>-<nonce>
+# 아래 명령들은 한 셸 호출에 이어 붙여 실행한다.
+
+# 마커를 먼저 만든다. 이 디렉토리가 ref보다 먼저 존재해야 다른 실행의 스윕이
+# "누수"로 오판하고 이 실행의 ref를 지우는 일을 막을 수 있다.
+mkdir -p "<WT_PATH>"
 
 # PR head를 고유 named ref로 가져온다 (FETCH_HEAD 미사용 → 병렬 안전)
-git fetch origin "pull/<PR>/head:refs/pr-review/<PR>-<SHA7>"
-git fetch origin "<BASE>" --quiet
-
-git worktree add --detach "<WT_PATH>" "refs/pr-review/<PR>-<SHA7>"
+git -C "<REPO>" fetch origin "pull/<PR>/head:refs/pr-review/<PR>-<SHA7>-<nonce>"
+# base는 refspec을 명시한다. --single-branch 클론에서는 refs/remotes/origin/<BASE>가
+# 갱신되지 않아 바로 아래 origin/<BASE> 참조가 unknown revision으로 죽는다.
+git -C "<REPO>" fetch origin "<BASE>:refs/remotes/origin/<BASE>" --quiet
+git -C "<REPO>" worktree add --detach "<WT_PATH>" "refs/pr-review/<PR>-<SHA7>-<nonce>"
 ```
 
 `--detach`가 핵심입니다. git은 같은 브랜치를 두 worktree에서 동시에 체크아웃할 수 없어서,
@@ -121,10 +165,14 @@ merge-base가 엉뚱한 곳에 잡혀 이 PR과 무관한 커밋이 리뷰 대�
 
 worktree를 만들지 않고 메인 트리를 **읽기 전용**으로 조회합니다. 상태를 바꾸지 않습니다.
 
+이 모드도 `<REPO>`를 먼저 확정해 `-C`로 호출합니다. 대상이 메인 워킹 트리인 것은 의도이지만,
+그것과 *프로세스의 현재 디렉토리에 의존하는 것*은 다른 문제입니다.
+
 ```bash
-git diff HEAD                  # 커밋되지 않은 전체 변경사항
-git diff --staged              # 스테이징된 변경사항
-git log --oneline -10          # 최근 커밋 이력
+git rev-parse --show-toplevel              # → <REPO> (부트스트랩)
+git -C "<REPO>" diff HEAD                  # 커밋되지 않은 전체 변경사항
+git -C "<REPO>" diff --staged              # 스테이징된 변경사항
+git -C "<REPO>" log --oneline -10          # 최근 커밋 이력
 ```
 
 ### 2. 프리플라이트 체크
@@ -168,17 +216,24 @@ uv run --no-sync --project "<WT_PATH>/backend" pytest
 `node_modules`는 실행만으로 재설치되지 않으므로 링크해도 안전합니다.
 
 ```bash
-ln -s "<REPO>/frontend-react/node_modules" "<WT_PATH>/frontend-react/node_modules"
-# ln -s가 실패하는 Windows 환경(개발자 모드 꺼짐, MSYS=winsymlinks 미설정)에서는 junction 사용:
-# cmd //c mklink //J "<WT_PATH>/frontend-react/node_modules" "<REPO>/frontend-react/node_modules"
+ln -s "<REPO>/frontend-react/node_modules" "<WT_PATH>/frontend-react/node_modules" \
+  || cmd //c mklink //J "<WT_PATH>/frontend-react/node_modules" "<REPO>/frontend-react/node_modules"
+# ln -s는 Windows에서 개발자 모드가 꺼져 있고 MSYS=winsymlinks도 미설정이면 실패한다.
+# 그 경우 junction(mklink //J)으로 폴백한다.
+
+# 링크가 실제로 디렉토리로 해석되는지 반드시 확인한다. 실패하면 프리플라이트를 건너뛴다.
+[ -d "<WT_PATH>/frontend-react/node_modules" ] || echo "PREFLIGHT SKIP: node_modules 링크 실패"
 ```
 
-링크가 디렉토리로 해석되는지 확인한 뒤(`[ -d ... ]`) 검증을 실행합니다.
+확인에 성공한 경우에만 검증을 실행합니다.
 
 ```bash
 npm --prefix "<WT_PATH>/frontend-react" test
 npm --prefix "<WT_PATH>/frontend-react" run lint
 ```
+
+> 6단계의 `git worktree remove --force`는 링크를 따라가지 않고 **링크 자체만** 제거합니다.
+> 원본 `node_modules`는 보존됩니다. 심볼릭 링크와 junction 모두 실측으로 확인했습니다.
 
 #### 건너뛴 경우
 
@@ -251,16 +306,26 @@ PR 리뷰: <PR 제목 또는 브랜치명>
 정리가 조용히 실패합니다.
 
 ```bash
-git worktree remove --force "<WT_PATH>"
-git update-ref -d "refs/pr-review/<PR>-<SHA7>"
-git worktree prune
+git -C "<REPO>" worktree remove --force "<WT_PATH>"
+git -C "<REPO>" update-ref -d "refs/pr-review/<PR>-<SHA7>-<nonce>"
+git -C "<REPO>" worktree prune
+```
+
+`<WT_PATH>`와 ref 이름은 **이 실행의 nonce가 붙은 것**입니다. 다른 실행의 것을 지우지 않도록
+1단계에서 기록한 리터럴을 그대로 씁니다.
+
+`worktree add` 전에 중단한 경우에는 `worktree remove`가 실패합니다. 그때는 마커 디렉토리를
+직접 지웁니다 — 남겨두면 다음 실행의 스윕이 그 ref를 "진행 중"으로 오판해 영원히 보존합니다.
+
+```bash
+rmdir "<WT_PATH>" 2>/dev/null
 ```
 
 정리 후 실제로 사라졌는지 확인합니다.
 
 ```bash
-git worktree list
-git for-each-ref refs/pr-review/
+git -C "<REPO>" worktree list
+git -C "<REPO>" for-each-ref refs/pr-review/
 ```
 
 중간 단계에서 오류가 나거나 리뷰를 중단하더라도 worktree와 임시 ref는 제거합니다.

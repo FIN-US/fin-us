@@ -31,23 +31,45 @@ worktree는 `.git`은 공유하되 인덱스와 HEAD는 분리되므로, 실행�
 `$$`(PID)는 호출마다 다른 값이 됩니다. 0단계에서 정한 `$WT`를 7단계 정리에서 그대로 참조하면
 빈 문자열이 되어 정리가 조용히 실패하고, worktree가 PR을 올릴 때마다 누적됩니다.
 
-따라서 고유 토큰으로 `$$`를 쓰지 않고 **브랜치 slug + 커밋 short SHA**를 씁니다(결정적이라 재유도 가능).
-0단계에서 확정한 **`WT_PATH`의 리터럴 값을 출력해 기록**하고, 이후 모든 단계에서는 셸 변수가 아니라
-그 리터럴 문자열을 직접 사용합니다.
+**복구 가능성을 주는 것은 아래의 "리터럴 기록"이지 이름의 결정성이 아닙니다.**
+따라서 이름은 고유해야 하고, 동시에 기록되어야 합니다.
+
+- 이름에 **nonce를 반드시 포함**합니다: `pr-<SLUG>-<SHA7>-<nonce>`.
+  결정적 이름만 쓰면 같은 브랜치를 같은 커밋에서 두 번 동시에 처리할 때 경로가 완전히 같아지고,
+  7단계의 `worktree remove --force`가 **아직 작업 중인 다른 실행의 worktree를 통째로 지웁니다.**
+- `<nonce>`는 0단계에서 **한 번만** 만들어 리터럴로 기록합니다. `$$`를 쓰지 않습니다 —
+  호출마다 달라지는 것이 원래 문제였습니다.
+- 0단계에서 확정한 **`REPO`, `WT_PATH`, `OWNER`, `BASE`, `BRANCH`의 리터럴 값을 출력해 기록**하고,
+  이후 모든 단계에서는 셸 변수가 아니라 그 리터럴 문자열을 직접 사용합니다.
 
 ## 워크플로
 
 ### 0. 값 확정
 
 ```bash
-git rev-parse --show-toplevel          # → <REPO>
-git branch --show-current              # → <BRANCH> (사용자가 지정하지 않은 경우에만)
-gh repo view --json nameWithOwner -q .nameWithOwner   # → <OWNER>
+git rev-parse --show-toplevel          # → <REPO> (현재 디렉토리에 의존하는 유일한 부트스트랩)
+git -C "<REPO>" branch --show-current  # → <BRANCH> (사용자가 지정하지 않은 경우에만)
+gh repo view --json nameWithOwner -q .nameWithOwner       # → <OWNER>
+gh repo view --json defaultBranchRef -q .defaultBranchRef.name   # → <BASE> 기본값
 ```
 
-`<BASE>`는 사용자가 지정하지 않았으면 이 레포의 기본 브랜치(`main`)를 씁니다.
-`git remote -v`로 `origin`이 `<OWNER>`와 같은 레포인지 확인합니다. 어긋나면 push한 브랜치와
-`gh pr create`가 바라보는 레포가 달라지므로, 진행하지 말고 사용자에게 보고합니다.
+`<REPO>`를 얻는 첫 줄만 현재 디렉토리에 의존합니다. 이후 모든 git 호출은 `git -C "<REPO>"` 형태를 씁니다.
+
+`<BASE>`를 리터럴 `main`으로 하드코딩하지 않습니다. 사용자가 지정하지 않았으면 위의
+`defaultBranchRef`로 조회한 값을 씁니다.
+
+remote가 여러 개면 `git -C "<REPO>" remote -v`로 `origin`이 `<OWNER>`와 같은 레포인지 확인합니다.
+**단순 문자열 비교는 하지 마세요** — 레포가 전송/이름변경된 경우 origin URL은 옛 이름이고 `gh`는
+새 이름으로 해석하므로 정상 상태에서도 어긋나 보입니다(이 레포가 실제로 그렇습니다:
+origin은 `sorocode/fin-us`, `gh`는 `FIN-US/fin-us`). 레포 동일성은 id로 비교합니다.
+
+```bash
+gh api "repos/<origin URL의 owner/repo>" --jq .id      # vs
+gh api "repos/<OWNER>" --jq .id
+```
+
+id가 다르면 push한 브랜치와 `gh pr create`가 바라보는 레포가 달라지므로 **경고하고** 사용자에게
+계속할지 확인합니다. 중단이 아니라 경고입니다 — 오탐 여지가 있습니다.
 
 > **규칙 2·3의 예외:** 브랜치를 지정받지 못했을 때만 `git branch --show-current`로 공유 HEAD를
 > 읽습니다. 이는 규칙 2·3이 금지한 가변 상태이지만, 대상 브랜치를 알아낼 다른 방법이 없어
@@ -58,8 +80,9 @@ gh repo view --json nameWithOwner -q .nameWithOwner   # → <OWNER>
 
 ```
 SLUG     = <BRANCH의 "/"를 "-"로 치환>
-SHA7     = git rev-parse --short=7 <BRANCH>
-WT_PATH  = <REPO의 부모>/.fin-us-worktrees/pr-<SLUG>-<SHA7>
+SHA7     = git -C "<REPO>" rev-parse --short=7 <BRANCH>
+nonce    = 이 실행에서 한 번만 생성한 6자 영숫자
+WT_PATH  = <REPO의 부모>/.fin-us-worktrees/pr-<SLUG>-<SHA7>-<nonce>
 ```
 
 worktree는 **레포 바깥**에 둡니다. 레포 안에 두면 소스 트리 전체 사본이 생겨, 누군가 루트에서
@@ -69,8 +92,10 @@ worktree는 **레포 바깥**에 둡니다. 레포 안에 두면 소스 트리 �
 ### 1. 격리된 worktree 생성
 
 ```bash
-git fetch origin "<BASE>" --quiet
-git worktree add --detach "<WT_PATH>" "<BRANCH>"
+# base는 refspec을 명시한다. --single-branch 클론에서는 refs/remotes/origin/<BASE>가
+# 갱신되지 않아 3단계의 origin/<BASE> 참조가 unknown revision으로 죽는다.
+git -C "<REPO>" fetch origin "<BASE>:refs/remotes/origin/<BASE>" --quiet
+git -C "<REPO>" worktree add --detach "<WT_PATH>" "<BRANCH>"
 ```
 
 `<BRANCH>`는 fetch하지 않습니다. PR을 올리기 전이라 원격에 아직 없는 것이 정상이며,
@@ -114,7 +139,7 @@ git -C "<WT_PATH>" diff "origin/<BASE>...<BRANCH>"
 ### 6. 브랜치 푸시 + PR 생성
 
 ```bash
-git push origin "<BRANCH>:<BRANCH>"
+git -C "<REPO>" push origin "<BRANCH>:<BRANCH>"
 
 gh pr create \
   -R "<OWNER>" \
@@ -136,10 +161,13 @@ gh pr create \
 정리가 조용히 실패합니다.
 
 ```bash
-git worktree remove --force "<WT_PATH>"
-git worktree prune
-git worktree list          # 실제로 사라졌는지 확인
+git -C "<REPO>" worktree remove --force "<WT_PATH>"
+git -C "<REPO>" worktree prune
+git -C "<REPO>" worktree list          # 실제로 사라졌는지 확인
 ```
+
+`<WT_PATH>`는 **이 실행의 nonce가 붙은 것**입니다. 다른 실행의 worktree를 지우지 않도록
+0단계에서 기록한 리터럴을 그대로 씁니다.
 
 중간 단계에서 오류가 나거나 사용자가 5단계에서 취소하더라도 worktree는 제거합니다.
 정리에 실패하면 `<WT_PATH>`를 사용자에게 알려 수동으로 지울 수 있게 합니다.
