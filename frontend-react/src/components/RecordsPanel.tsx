@@ -103,7 +103,10 @@ const RecordsPanel: React.FC<RecordsPanelProps> = ({ resources, loading, onSubmi
                     >
                       {badgeLabel}
                     </span>
-                    <span className="text-xs font-black text-slate-500">{item.decision}</span>
+                    <span className="text-xs font-black text-slate-500">
+                      {/* A (#162): decision=null은 도구 없는 provider — 판단 없음을 명시 */}
+                      {item.decision ?? '—'}
+                    </span>
                   </div>
                 </div>
                 <p className="mt-2 line-clamp-3 text-xs leading-relaxed text-slate-500">{item.summary}</p>

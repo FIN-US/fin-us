@@ -198,31 +198,29 @@ def _nat_conversation_id(
     return f"{prefix}:{safe_stock}:{today}"
 
 
-async def perform_stock_analysis(
-    stock: str,
-    provider: str,
-    session: Session,
-    *,
-    trigger_source: str | None = None,
-    trigger_signal: str | None = None,
-    conversation_id: str | None = None,
-) -> dict[str, Any]:
-    """
-    종목 분석을 수행하고 결과를 DB에 저장한 뒤 반환합니다.
-    API 엔드포인트와 백그라운드 스케줄러에서 공용으로 사용됩니다.
-    """
-    trigger_context = ""
-    if trigger_signal:
-        source_label = trigger_source or "signal"
-        trigger_context = (
-            f"\n분석 트리거 데이터 출처: {source_label}\n"
-            f"--- 트리거 데이터 ---\n{trigger_signal[:4000]}\n"
-            "------------------\n"
-            "위 트리거 데이터를 투자 판단의 주요 근거로 반영하라. "
-            "필요하면 라우터·서브에이전트로 보조 시장 데이터를 추가 확인하라.\n"
-        )
+def _build_trigger_context(
+    trigger_source: str | None,
+    trigger_signal: str | None,
+) -> str:
+    """trigger_signal이 있을 때 프롬프트에 삽입할 컨텍스트 블록을 만든다."""
+    if not trigger_signal:
+        return ""
+    source_label = trigger_source or "signal"
+    return (
+        f"\n분석 트리거 데이터 출처: {source_label}\n"
+        f"--- 트리거 데이터 ---\n{trigger_signal[:4000]}\n"
+        "------------------\n"
+        "위 트리거 데이터를 투자 판단의 주요 근거로 반영하라. "
+        "필요하면 라우터·서브에이전트로 보조 시장 데이터를 추가 확인하라.\n"
+    )
 
-    user_msg = (
+
+def _build_nat_prompt(stock: str, trigger_context: str) -> str:
+    """NAT 멀티에이전트용 프롬프트. 도구를 활용해 BUY/SELL/HOLD 판단을 생성한다.
+
+    provider=nat 경로 전용이며, provider_supports_tools=True인 경우에만 호출한다.
+    """
+    return (
         f"종목: {stock}. 라우터·서브에이전트를 활용해 투자 관점 분석을 하라. "
         f"{trigger_context}"
         "Telegram 알림은 매우 긴급한 경우에만 사용한다. "
@@ -243,32 +241,131 @@ async def perform_stock_analysis(
         '"urgency_reason":"긴급 판단 사유 한 줄 또는 null",'
         '"telegram_alert":true|false}'
     )
-    
+
+
+def _build_toolless_prompt(stock: str, trigger_context: str) -> str:
+    """도구 없는 provider(openai/anthropic/ollama)용 프롬프트.
+
+    실시간 시장 데이터(MCP/KIS/뉴스)에 접근하지 못하므로 BUY/SELL/HOLD 판단과
+    신뢰도 점수를 생성하지 않는다 (#162 A). 일반적 배경 설명만 허용한다.
+    """
+    return (
+        f"종목: {stock}에 대한 일반적인 배경 정보와 투자 관련 개요를 설명하라. "
+        f"{trigger_context}"
+        "이 요청은 실시간 시장 데이터(공시·수급·뉴스 도구)에 접근하지 않는다. "
+        "따라서 BUY/SELL/HOLD 판단이나 신뢰도 점수를 생성하지 않는다 — "
+        "데이터 없이 만들어진 매매 신호는 소비자를 오도할 수 있다. "
+        "답변 마지막에 **다음 JSON 한 개만** 출력하라 (다른 텍스트 없이도 됨):\n"
+        '{"summary":"한 줄 설명",'
+        '"source_news":[],'
+        '"source_signals":[],'
+        '"trading_trend":null,'
+        '"urgency":"normal",'
+        '"urgency_reason":null,'
+        '"telegram_alert":false}'
+    )
+
+
+def _analysis_from_toolless_text(raw: str, stock: str) -> dict[str, Any]:
+    """도구 없는 provider 응답 파싱. details(decision/confidence_score)는 생성하지 않는다.
+
+    JSON 파싱에 성공하면 summary/source_news 등을 추출한다. 실패하면 원문을 요약으로
+    사용한다. 어느 경우에도 details=None을 유지한다 — None과 HOLD/0.0은 의미가 다르다.
+    """
+    text = (raw or "").strip()
+    for data in _json_objects_from_text(text):
+        try:
+            return {
+                "summary": str(data.get("summary") or text[:8000] or "빈 응답"),
+                "details": None,
+                "source_news": _string_list(data.get("source_news")),
+                "source_signals": _string_list(
+                    data.get("source_signals") or data.get("source_news")
+                ),
+                "trading_trend": data.get("trading_trend"),
+                "urgency": data.get("urgency", "normal"),
+                "urgency_reason": data.get("urgency_reason"),
+                "telegram_alert": bool(data.get("telegram_alert", False)),
+            }
+        except (ValueError, AttributeError):
+            pass
+    # JSON 파싱 실패: 원문을 요약으로 사용
+    return {
+        "summary": text[:8000] if text else "빈 응답",
+        "details": None,
+        "source_news": [],
+        "source_signals": [],
+        "trading_trend": None,
+        "urgency": "normal",
+        "urgency_reason": None,
+        "telegram_alert": False,
+    }
+
+
+async def perform_stock_analysis(
+    stock: str,
+    provider: str,
+    session: Session,
+    *,
+    trigger_source: str | None = None,
+    trigger_signal: str | None = None,
+    conversation_id: str | None = None,
+) -> dict[str, Any]:
+    """
+    종목 분석을 수행하고 결과를 DB에 저장한 뒤 반환합니다.
+    API 엔드포인트와 백그라운드 스케줄러에서 공용으로 사용됩니다.
+
+    provider=nat: NAT 멀티에이전트를 통해 도구(MCP/KIS/뉴스)를 호출하고
+    BUY/SELL/HOLD 판단·신뢰도 점수를 생성한다 (#162 A 불변).
+
+    provider=openai/anthropic/ollama: 도구 없이 일반 배경 설명만 생성한다.
+    decision·confidence_score는 저장하지 않는다 (DB와 API 응답 모두 null).
+    """
     key = normalize_llm_provider(provider)
+    supports_tools = provider_supports_tools(key)
+
+    trigger_context = _build_trigger_context(trigger_source, trigger_signal)
+
     nat_cid = conversation_id
     if key == "nat" and nat_cid is None:
         nat_cid = _nat_conversation_id(stock, trigger_source=trigger_source)
-    raw = await llm_chat(key, user_msg, conversation_id=nat_cid)
-    data = analysis_from_nat_text(str(raw), stock)
+
+    if supports_tools:
+        # NAT 멀티에이전트: 도구를 활용해 BUY/SELL/HOLD 판단 생성
+        user_msg = _build_nat_prompt(stock, trigger_context)
+        raw = await llm_chat(key, user_msg, conversation_id=nat_cid)
+        data = analysis_from_nat_text(str(raw), stock)
+        details = data.get("details") or {}
+        decision: str | None = details.get("decision") if isinstance(details, dict) else None
+        confidence_score: float | None = (
+            details.get("confidence_score") if isinstance(details, dict) else None
+        )
+        reason: str = details.get("reason", "") if isinstance(details, dict) else ""
+    else:
+        # 도구 없는 provider: 일반 설명만 생성, 매매 판단 없음
+        user_msg = _build_toolless_prompt(stock, trigger_context)
+        raw = await llm_chat(key, user_msg, conversation_id=nat_cid)
+        data = _analysis_from_toolless_text(str(raw), stock)
+        decision = None
+        confidence_score = None
+        reason = ""
 
     # #162: 이 값을 API 응답(data)과 DB 저장(report) 양쪽에 동일하게 붙인다 —
     # 소비자가 provider 문자열만 보고 도구 사용 여부를 스스로 추론하지 않게 한다.
-    supports_tools = provider_supports_tools(key)
     data["provider"] = key
     data["provider_supports_tools"] = supports_tools
 
     # 분석 리포트를 데이터베이스에 자동으로 저장
     try:
-        details = data.get("details", {})
         stock_code = await _resolve_stock_code(stock)
         report = AgentReport(
             stock_code=stock_code,
             stock_name=stock,
             provider=key,
             summary=data.get("summary", ""),
-            decision=details.get("decision", "HOLD"),
-            confidence_score=details.get("confidence_score", 0.0),
-            reason=details.get("reason", ""),
+            decision=decision,
+            confidence_score=confidence_score,
+            reason=reason,
             provider_supports_tools=supports_tools,
         )
         session.add(report)

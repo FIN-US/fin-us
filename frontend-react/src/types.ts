@@ -75,8 +75,10 @@ export interface AgentReportItem {
   // string | null로 선언한다. UI 보간 시 ?? 폴백을 사용한다.
   provider: string | null;
   summary: string;
-  decision: string;
-  confidence_score: number;
+  // A (#162): provider_supports_tools=False인 provider는 매매 판단을 생성하지 않으므로
+  // null이다. null과 "HOLD"/0.0은 의미가 다르다 — null은 "판단 없음"이다.
+  decision: string | null;
+  confidence_score: number | null;
   reason: string;
   // provider가 도구(MCP/KIS/뉴스)를 호출할 수 있는 경로로 구성돼 있는지 여부.
   // provider 자체에서 파생된 "능력" 신호일 뿐, 이 리포트에서 실제로 도구가

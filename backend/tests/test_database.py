@@ -177,25 +177,15 @@ def test_get_trades_empty(client: TestClient):
 
 @pytest.mark.asyncio
 async def test_analyze_stock_saves_report(client: TestClient, session: Session, monkeypatch):
-    # Mocking llm_chat and analysis_from_nat_text
+    # A (#162): openai는 도구 없는 경로(_build_toolless_prompt + _analysis_from_toolless_text)를
+    # 타므로 analysis_from_nat_text는 호출되지 않는다. llm_chat만 mocking한다.
     async def mock_llm_chat(*args, **kwargs):
         return "mocked raw response"
-
-    def mock_analysis_from_nat_text(raw_text, stock):
-        return {
-            "summary": f"Summary for {stock}",
-            "details": {
-                "decision": "BUY",
-                "confidence_score": 0.85,
-                "reason": "Strong momentum"
-            }
-        }
 
     async def mock_run_mcp_tool(*args, **kwargs):
         return "삼성전자 (005930, KOSPI)"
 
     monkeypatch.setattr("backend.services.llm_chat", mock_llm_chat)
-    monkeypatch.setattr("backend.services.analysis_from_nat_text", mock_analysis_from_nat_text)
     monkeypatch.setattr("backend.services.run_mcp_tool", mock_run_mcp_tool)
 
     # API Call
@@ -208,13 +198,16 @@ async def test_analyze_stock_saves_report(client: TestClient, session: Session, 
     # 않으면 이 두 줄이 깨진다.
     assert payload["provider"] == "openai"
     assert payload["provider_supports_tools"] is False
+    # A (#162): 도구 없는 provider는 매매 판단을 생성하지 않는다.
+    assert payload.get("details") is None
 
     # Verify DB save
     reports = session.query(AgentReport).all()
     assert len(reports) == 1
     assert reports[0].stock_name == "삼성전자"
-    assert reports[0].decision == "BUY"
-    assert reports[0].confidence_score == 0.85
+    # A (#162): 도구 없는 provider는 decision/confidence_score를 null로 저장한다.
+    assert reports[0].decision is None
+    assert reports[0].confidence_score is None
     assert reports[0].stock_code == "005930"
     # /api/v1/analyze의 기본 provider(openai)는 tools 없이 모델을 그대로 호출하므로
     # (#162) 저장되는 리포트는 도구를 쓸 수 없는 provider로 표시되어야 한다.

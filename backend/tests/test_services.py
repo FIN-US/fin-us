@@ -237,6 +237,10 @@ async def test_perform_stock_analysis_marks_toolless_provider_report_unverified(
     provider_supports_tools=False로 저장되고, API 응답 payload에도 같은 값이
     실려야 한다. provider_supports_tools가 항상 True를 반환하도록 뒤집으면(또는
     perform_stock_analysis가 이 값을 무시하면) 이 테스트가 깨진다.
+
+    A (#162): 도구 없는 provider는 decision/confidence_score를 생성하지 않으므로
+    AgentReport에 null로 저장되고 API 응답 payload에도 details=None이어야 한다.
+    decision=None이 아니라 HOLD/0.5로 채워지면 이 테스트가 깨진다.
     """
     async def fake_llm_chat(provider, prompt, *, conversation_id=None):
         return "plain analysis"
@@ -253,6 +257,10 @@ async def test_perform_stock_analysis_marks_toolless_provider_report_unverified(
     assert session.report.provider_supports_tools is False
     assert result["provider"] == "openai"
     assert result["provider_supports_tools"] is False
+    # A (#162): 도구 없는 provider는 매매 판단을 생성하지 않는다.
+    assert session.report.decision is None
+    assert session.report.confidence_score is None
+    assert result.get("details") is None
 
 
 @pytest.mark.asyncio
@@ -891,3 +899,132 @@ async def test_llm_nat_chat_logs_json_parse_failure(monkeypatch, caplog):
     assert "NAT response received: status_code=200 body_length=8" in caplog.text
     assert "Failed to parse NAT response JSON: status_code=200" in caplog.text
     assert "NAT response body preview: not-json" in caplog.text
+
+
+# ── A (#162): 도구 없는 provider 출력 범위 축소 ──────────────────────────────
+
+
+def test_build_toolless_prompt_does_not_request_decision_or_confidence_score():
+    """도구 없는 provider용 프롬프트는 BUY/SELL/HOLD나 confidence_score를
+    요청해서는 안 된다. 이 두 단어가 프롬프트에 포함되면 모델이 매매 판단을
+    지어낼 수 있다 — 프롬프트를 제거하면 이 테스트가 깨진다.
+    """
+    prompt = services._build_toolless_prompt("삼성전자", "")
+    # JSON 포맷으로 매매 판단을 요청하는 표현이 없어야 한다.
+    # 설명 문구에 "BUY/SELL/HOLD"가 언급될 수 있으므로 JSON 키·값 형식으로만 확인한다.
+    assert '"decision"' not in prompt
+    assert '"confidence_score"' not in prompt
+    # JSON 포맷 내에서 BUY/SELL/HOLD 옵션 지정("BUY"|"SELL"|"HOLD")이 없어야 한다.
+    assert '"BUY"' not in prompt
+    assert '"SELL"' not in prompt
+
+
+def test_build_nat_prompt_includes_decision_and_confidence_score():
+    """NAT 프롬프트는 도구를 갖춘 경로 전용이므로 BUY/SELL/HOLD 판단과
+    confidence_score를 요청해야 한다. 이 두 항목이 빠지면 NAT 응답을
+    파싱하는 analysis_from_nat_text가 결과를 얻지 못한다 — nat 경로의
+    동작이 불변이어야 한다는 수용 기준(#162)을 이 테스트가 고정한다.
+    """
+    prompt = services._build_nat_prompt("삼성전자", "")
+    assert '"decision"' in prompt
+    assert '"confidence_score"' in prompt
+    assert '"source_signals"' in prompt
+
+
+@pytest.mark.asyncio
+async def test_toolless_provider_does_not_generate_decision(monkeypatch):
+    """도구 없는 provider(openai/anthropic/ollama)가 perform_stock_analysis를
+    통해 저장하는 AgentReport의 decision/confidence_score는 반드시 None이어야
+    한다. _build_toolless_prompt 대신 _build_nat_prompt를 쓰거나 파싱 후
+    fallback 값("HOLD"/0.5)을 채우면 이 테스트가 깨진다.
+    """
+    captured_prompts: list[str] = []
+
+    async def fake_llm_chat(provider, prompt, *, conversation_id=None):
+        captured_prompts.append(prompt)
+        return "plain analysis"
+
+    async def fake_run_mcp_tool(params, tool_name, arguments):
+        return "삼성전자 (005930, KOSPI)"
+
+    monkeypatch.setattr(services, "llm_chat", fake_llm_chat)
+    monkeypatch.setattr(services, "run_mcp_tool", fake_run_mcp_tool)
+
+    for provider in ("openai", "anthropic", "ollama"):
+        captured_prompts.clear()
+        session = FakeSession()
+        result = await services.perform_stock_analysis("삼성전자", provider, session)
+
+        # DB
+        assert session.report.decision is None, (
+            f"provider={provider}: decision은 None이어야 한다 (받은 값: {session.report.decision!r})"
+        )
+        assert session.report.confidence_score is None, (
+            f"provider={provider}: confidence_score는 None이어야 한다"
+        )
+        # API 응답
+        assert result.get("details") is None, (
+            f"provider={provider}: details는 None이어야 한다 (받은 값: {result.get('details')!r})"
+        )
+        # 프롬프트에 매매 판단 형식이 없어야 함
+        assert len(captured_prompts) == 1
+        assert '"decision"' not in captured_prompts[0], (
+            f"provider={provider}: 도구 없는 프롬프트에 '\"decision\"'이 포함되면 안 된다"
+        )
+
+
+@pytest.mark.asyncio
+async def test_nat_provider_decision_is_preserved(monkeypatch):
+    """provider=nat은 도구를 갖춘 경로이므로 BUY/SELL/HOLD 판단·신뢰도 점수를
+    생성하고 AgentReport에 저장해야 한다. (#162 수용 기준: provider=nat 경로의
+    동작은 불변.) _build_nat_prompt 대신 _build_toolless_prompt를 쓰거나
+    decision을 null로 저장하면 이 테스트가 깨진다.
+    """
+    nat_response = (
+        '{"summary":"삼성전자 분석",'
+        '"details":{"decision":"BUY","confidence_score":0.8,"reason":"수급 개선","target_stock":"삼성전자"},'
+        '"source_news":["헤드라인"],"source_signals":["signal"],"trading_trend":"외국인 순매수",'
+        '"urgency":"normal","urgency_reason":null,"telegram_alert":false}'
+    )
+
+    async def fake_llm_chat(provider, prompt, *, conversation_id=None):
+        return nat_response
+
+    async def fake_run_mcp_tool(params, tool_name, arguments):
+        return "삼성전자 (005930, KOSPI)"
+
+    monkeypatch.setattr(services, "llm_chat", fake_llm_chat)
+    monkeypatch.setattr(services, "run_mcp_tool", fake_run_mcp_tool)
+
+    session = FakeSession()
+    result = await services.perform_stock_analysis("삼성전자", "nat", session)
+
+    assert session.report.decision == "BUY"
+    assert session.report.confidence_score == pytest.approx(0.8)
+    assert result["details"]["decision"] == "BUY"
+    assert result["provider_supports_tools"] is True
+
+
+def test_analysis_from_toolless_text_always_returns_none_details():
+    """_analysis_from_toolless_text가 반환하는 dict의 details는 항상 None이어야
+    한다. JSON에 details 키가 있어도 무시해야 한다 — 모델이 프롬프트를 무시하고
+    details를 출력해도 파싱 단계에서 걸러내야 한다.
+    """
+    # 정상 JSON
+    result = services._analysis_from_toolless_text(
+        '{"summary":"요약","source_news":[],"trading_trend":null}', "삼성전자"
+    )
+    assert result["details"] is None
+
+    # JSON에 details가 있어도 무시
+    result = services._analysis_from_toolless_text(
+        '{"summary":"요약","details":{"decision":"BUY","confidence_score":0.9,'
+        '"reason":"강세","target_stock":"삼성전자"},"source_news":[]}',
+        "삼성전자",
+    )
+    assert result["details"] is None
+
+    # JSON 파싱 실패 (평문)
+    result = services._analysis_from_toolless_text("plain text response", "삼성전자")
+    assert result["details"] is None
+    assert result["summary"] == "plain text response"

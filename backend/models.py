@@ -36,9 +36,25 @@ class AgentReport(SQLModel, table=True):
     stock_name: str = Field(index=True, description="분석 종목명")
     provider: str = Field(description="사용된 LLM 제공자 (openai, anthropic 등)")
     summary: str = Field(description="분석 요약")
-    decision: str = Field(description="투자 결정 (BUY/SELL/HOLD)")
-    confidence_score: float = Field(description="신뢰도 점수 (0.0~1.0)")
-    reason: str = Field(description="투자 결정 근거")
+    # A (#162): provider_supports_tools=False인 provider(openai/anthropic/ollama)는
+    # 도구 없이 매매 판단을 생성하지 않는다. 이 경우 두 필드는 null이다.
+    # null과 "HOLD"/0.0의 의미가 다르다 — null은 "판단 없음"이고
+    # "HOLD"/0.0은 NAT이 판단한 관망 의견이다.
+    decision: Optional[str] = Field(
+        default=None,
+        description=(
+            "투자 결정 (BUY/SELL/HOLD). provider_supports_tools=True인 provider(nat)만 생성한다. "
+            "도구 없는 provider(openai/anthropic/ollama)는 null."
+        ),
+    )
+    confidence_score: Optional[float] = Field(
+        default=None,
+        description=(
+            "신뢰도 점수 (0.0~1.0). provider_supports_tools=True인 provider(nat)만 생성한다. "
+            "도구 없는 provider(openai/anthropic/ollama)는 null."
+        ),
+    )
+    reason: str = Field(default="", description="투자 결정 근거. 도구 없는 provider는 빈 문자열.")
     # provider 차원의 "능력" 신호 — 실제 도구 호출 관측이 아님 (#162):
     # - openai/anthropic/ollama: tools 파라미터 없이 모델 직접 호출 → False는 코드로 증명 가능
     # - nat=True: NAT 멀티에이전트로 라우팅됐다는 뜻이며, 그 안에서 실제 도구가

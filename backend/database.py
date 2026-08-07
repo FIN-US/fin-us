@@ -66,6 +66,77 @@ def _run_schema_migrations() -> None:
                 raise
 
 
+# A (#162): decision/confidence_score를 nullable로 변경하는 테이블 재생성.
+# SQLite는 ALTER TABLE로 NOT NULL constraint 제거가 불가능하므로 (공식 권장:
+# CREATE new → INSERT SELECT → DROP old → RENAME), 부팅 시 필요한 경우에만 실행.
+# _run_schema_migrations()가 provider_supports_tools 컬럼을 먼저 추가하므로,
+# 이 함수가 실행될 때 해당 컬럼은 항상 존재한다.
+_RECREATE_AGENTREPORT_NULLABLE_DDL = (
+    "CREATE TABLE agentreport_new ("
+    "id INTEGER PRIMARY KEY, "
+    "stock_code VARCHAR NOT NULL, "
+    "stock_name VARCHAR NOT NULL, "
+    "provider VARCHAR NOT NULL, "
+    "summary VARCHAR NOT NULL, "
+    "decision VARCHAR, "            # nullable: 도구 없는 provider는 null
+    "confidence_score FLOAT, "      # nullable: 도구 없는 provider는 null
+    "reason VARCHAR NOT NULL DEFAULT '', "
+    "provider_supports_tools BOOLEAN NOT NULL DEFAULT 0, "
+    "created_at DATETIME NOT NULL"
+    ")"
+)
+_RECREATE_AGENTREPORT_COLS = (
+    "id, stock_code, stock_name, provider, summary, decision, "
+    "confidence_score, reason, provider_supports_tools, created_at"
+)
+
+
+def _run_table_recreate_migrations() -> None:
+    """decision/confidence_score 컬럼을 nullable로 변경하는 agentreport 테이블 재생성.
+
+    기존 행은 모두 NOT NULL 시절 저장돼 있으므로 decision/confidence_score 값을
+    그대로 유지한다(NULL이 아닌 기존 값은 보존). 새로 저장하는 도구 없는 provider
+    리포트만 NULL로 기록된다.
+
+    주의: BOOLEAN NOT NULL DEFAULT 0, VARCHAR 타입명, "duplicate column" 등의 문자열은
+    SQLite 전용이다. 다른 방언으로 전환할 때는 alembic을 도입해야 한다.
+    """
+    if engine.dialect.name != "sqlite":
+        raise RuntimeError(
+            f"테이블 재생성 마이그레이션은 SQLite 전용입니다 (현재: {engine.dialect.name}). "
+            "다른 DB로 옮기려면 alembic을 도입하세요."
+        )
+    inspector = inspect(engine)
+    if "agentreport" not in inspector.get_table_names():
+        # create_all이 최신 스키마(nullable decision/confidence_score)로 새로 만들었으므로
+        # 건드릴 필요 없음
+        return
+
+    col_info = {col["name"]: col for col in inspector.get_columns("agentreport")}
+    decision_col = col_info.get("decision")
+    if decision_col is None or decision_col.get("nullable", True):
+        # 컬럼이 없거나(create_all이 최신 스키마로 만든 경우) 이미 nullable이면 skip
+        return
+
+    # decision이 NOT NULL인 경우: 테이블 재생성으로 nullable로 변경
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(_RECREATE_AGENTREPORT_NULLABLE_DDL))
+            conn.execute(text(
+                f"INSERT INTO agentreport_new ({_RECREATE_AGENTREPORT_COLS}) "
+                f"SELECT {_RECREATE_AGENTREPORT_COLS} FROM agentreport"
+            ))
+            conn.execute(text("DROP TABLE agentreport"))
+            conn.execute(text("ALTER TABLE agentreport_new RENAME TO agentreport"))
+    except OperationalError as exc:
+        # 동시 실행된 워커가 이미 재생성을 완료했는지 재확인한다.
+        refreshed = {col["name"]: col for col in inspect(engine).get_columns("agentreport")}
+        refreshed_col = refreshed.get("decision")
+        if refreshed_col is not None and refreshed_col.get("nullable", True):
+            return  # 다른 워커가 이미 완료한 상태
+        raise
+
+
 def init_db():
     """
     데이터베이스 테이블을 초기화합니다.
@@ -76,6 +147,7 @@ def init_db():
         if "already exists" not in str(exc).lower():
             raise
     _run_schema_migrations()
+    _run_table_recreate_migrations()
 
 def get_session():
     """
