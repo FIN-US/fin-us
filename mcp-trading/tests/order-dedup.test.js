@@ -47,9 +47,9 @@ after(() => {
 });
 
 // 두 에러 클래스에 공통으로 적용하는 누출 표면 헬퍼. stderrCapture는 호출자가
-// 직접 캡처한 stderr/console.error 출력 문자열이다 - DuplicateOrderError 쪽은
-// process.stderr.write를 가로채 실제 바이트를 보고, LedgerUnreadableError 쪽은
-// console.error 목(mock) 호출 인자를 문자열로 이어붙여 넘긴다.
+// 직접 캡처한 stderr 출력 문자열이다 - 두 쪽 모두 process.stderr.write를
+// 가로채 실제 바이트를 본다. console.error를 몽키패치하면 인자 객체만 잡혀
+// process.stderr.write로 직접 우회하는 누출을 탐지하지 못하기 때문이다.
 function assertNoLeakOnAnyLoggingSurface(err, secret, stderrCapture = "") {
   for (const [surface, rendered] of [
     [".message", err.message],
@@ -522,7 +522,16 @@ for (const [label, buildPayload] of [
     );
 
     const store = new OrderDedupStore({ filePath, ttlMs: 60_000, now: () => 1_000 });
-    const consoleError = t.mock.method(console, "error", () => {});
+
+    // console.error(err) 표면은 실제 stderr 출력 바이트로 검사한다.
+    // console.error를 몽키패치하면 인자 객체만 잡혀, process.stderr.write로
+    // 직접 우회하는 누출(예: 내부 로그가 error.message를 에코하는 경우)을
+    // 탐지하지 못한다. process.stderr.write를 가로채고 진짜 console.error를 호출한다.
+    const stderrChunks = [];
+    const stderrWrite = t.mock.method(process.stderr, "write", (chunk) => {
+      stderrChunks.push(String(chunk));
+      return true;
+    });
 
     let thrownError;
     assert.throws(
@@ -533,8 +542,15 @@ for (const [label, buildPayload] of [
       },
     );
 
-    const stderrCapture = consoleError.mock.calls.flatMap((c) => c.arguments).map(String).join("");
-    assertNoLeakOnAnyLoggingSurface(thrownError, LEAKED_CANO, stderrCapture);
+    console.error(thrownError);
+    stderrWrite.mock.restore();
+
+    assert.ok(
+      stderrChunks.join("").includes("KIS order dedup ledger read failed"),
+      "stderr 캡처 자체가 동작하지 않았습니다 - 이 검사의 전제가 깨졌습니다",
+    );
+
+    assertNoLeakOnAnyLoggingSurface(thrownError, LEAKED_CANO, stderrChunks.join(""));
   });
 }
 
