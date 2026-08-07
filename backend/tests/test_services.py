@@ -1078,3 +1078,16 @@ def test_analysis_from_toolless_text_urgency_key_absent_defaults_to_normal():
     assert result["summary"] == "삼성전자 요약"
     assert result["source_news"] == ["뉴스1"]
     assert result["urgency"] == "normal"
+
+
+def test_analysis_from_toolless_text_fallback_source_signals_is_empty_list():
+    """JSON 파싱 실패 시 폴백의 source_signals는 None이 아니라 []여야 한다.
+
+    이 테스트가 잡는 mutation: 폴백에서 `source_signals=[]` 제거.
+    source_signals를 명시하지 않으면 AnalysisReport 기본값 None이 나가고,
+    NAT 경로(source_signals=None → source_news 되채움 보정)와 비대칭이 생긴다.
+    """
+    result = services._analysis_from_toolless_text("JSON이 없는 순수 텍스트 응답")
+    assert result["source_signals"] == [], (
+        "폴백 경로의 source_signals는 None이 아니라 []여야 한다"
+    )
