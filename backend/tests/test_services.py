@@ -1027,3 +1027,54 @@ def test_analysis_from_toolless_text_always_returns_none_details():
     result = services._analysis_from_toolless_text("plain text response")
     assert result["details"] is None
     assert result["summary"] == "plain text response"
+
+
+# ── #211: urgency 정규화 — 재현 케이스 4종 ───────────────────────────────────
+
+
+def test_analysis_from_toolless_text_urgency_valid_high_preserves_summary_and_news():
+    """urgency가 유효값("high")이면 summary·source_news가 그대로 보존된다.
+
+    urgency 정규화를 제거(원래대로 data.get("urgency","normal"))해도 이 케이스는
+    통과하므로, 뮤테이션 가드로서 아래 null/medium 케이스와 함께 동작한다.
+    """
+    raw = '{"summary":"삼성전자 요약","source_news":["뉴스1"],"urgency":"high"}'
+    result = services._analysis_from_toolless_text(raw)
+    assert result["summary"] == "삼성전자 요약"
+    assert result["source_news"] == ["뉴스1"]
+    assert result["urgency"] == "high"
+
+
+def test_analysis_from_toolless_text_urgency_null_preserves_summary_and_news():
+    """urgency=null 이면 summary·source_news를 버리지 않고, urgency는 "normal"로 정규화한다.
+
+    urgency 정규화를 제거하면 ValidationError → continue → 폴백으로 원본 JSON이
+    summary에 노출되어 이 테스트가 red가 된다.
+    """
+    raw = '{"summary":"삼성전자 요약","source_news":["뉴스1"],"urgency":null}'
+    result = services._analysis_from_toolless_text(raw)
+    assert result["summary"] == "삼성전자 요약", "urgency=null이 원본 JSON을 summary에 노출해서는 안 된다"
+    assert result["source_news"] == ["뉴스1"]
+    assert result["urgency"] == "normal"
+
+
+def test_analysis_from_toolless_text_urgency_unsupported_string_preserves_summary_and_news():
+    """urgency가 미지원 문자열("medium")이면 "normal"로 정규화하고 summary·source_news를 보존한다.
+
+    urgency 정규화를 제거하면 ValidationError → continue → 폴백으로 원본 JSON이
+    summary에 노출되어 이 테스트가 red가 된다.
+    """
+    raw = '{"summary":"삼성전자 요약","source_news":["뉴스1"],"urgency":"medium"}'
+    result = services._analysis_from_toolless_text(raw)
+    assert result["summary"] == "삼성전자 요약", "urgency=medium이 원본 JSON을 summary에 노출해서는 안 된다"
+    assert result["source_news"] == ["뉴스1"]
+    assert result["urgency"] == "normal"
+
+
+def test_analysis_from_toolless_text_urgency_key_absent_defaults_to_normal():
+    """urgency 키가 없으면 기본값 "normal"이 적용되고 summary·source_news가 보존된다."""
+    raw = '{"summary":"삼성전자 요약","source_news":["뉴스1"]}'
+    result = services._analysis_from_toolless_text(raw)
+    assert result["summary"] == "삼성전자 요약"
+    assert result["source_news"] == ["뉴스1"]
+    assert result["urgency"] == "normal"
