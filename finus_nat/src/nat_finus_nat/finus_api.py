@@ -75,6 +75,68 @@ DATA_TOOL_LEDGER: ContextVar["DataToolLedger | None"] = ContextVar(
 
 _ERROR_JSON_PREFIX_RE = re.compile(r'^\s*\{"error"')
 
+# 각 MCP 서버가 조회 결과가 없을 때 출력하는 리터럴 부분문자열.
+# 추측한 휴리스틱이 아니라 MCP 소스 코드에서 직접 추출한 문자열이다.
+#   mcp-trading/index.js  formatDailyOrderCcldReport (~411행):
+#     "- 결과: 해당 조건의 주문·체결이 없습니다."
+#   mcp-news/index.js     fetchMarketNews (~107행):
+#     `'${stockName}'에 대한 뉴스를 찾지 못했습니다.`  (종목명 부분 제외한 고정 접미사)
+#   mcp-dart/index.js     formatEarningsReport (~427행):
+#     "- 조회 결과: OpenDART 재무제표 데이터가 없습니다."
+_EMPTY_RESULT_LITERALS: dict[str, str] = {
+    "finus_mcp_trading_today_orders": "해당 조건의 주문·체결이 없습니다.",
+    "finus_market_news": "에 대한 뉴스를 찾지 못했습니다.",
+    "finus_earnings_report": "OpenDART 재무제표 데이터가 없습니다.",
+}
+
+
+def _has_empty_result(tool_name: str, stripped: str) -> bool:
+    """Return True when the tool response is successful but contains no data rows.
+
+    Detection priority:
+
+    1. Structural (JSON): attempt to parse the result; an empty list or null
+       signals no data.  Covers finus_list_diaries ("[]" or "null").
+
+    2. finus_mcp_trading_balance_rlz_pl: balance-rlz-pl-report.js emits
+       "보유 종목이 없습니다." for an empty rows set.  When KIS also returns a
+       summary object, "[계좌 집계]" is appended with real account numbers, so
+       only the no-summary path is truly empty.
+
+    3. Documented MCP literals (_EMPTY_RESULT_LITERALS): exact substrings from
+       each MCP server's source code — not guessed patterns.
+
+    Tools not covered here return False (conservative: do not block unknown
+    formats) to avoid false positives on variable-shape responses such as
+    finus_account_balance (remote KIS, api_type-dependent) or
+    finus_disclosure_signal (all-empty detection would require multi-section
+    parsing) or finus_mcp_trading_get_balance (always contains account-level
+    summary numbers even when no individual holdings are held).
+    """
+    # --- 1. Structural: JSON empty array or null ---
+    try:
+        parsed = json.loads(stripped)
+        if parsed is None or (isinstance(parsed, list) and len(parsed) == 0):
+            return True
+        # Non-empty JSON (object or non-empty list) → has data; skip literal checks.
+        return False
+    except json.JSONDecodeError:
+        pass
+
+    # --- 2. balance_rlz_pl: empty holdings without account summary ---
+    # balance-rlz-pl-report.js formatBalanceRlzPlReport rows.length===0 branch:
+    #   always emits "보유 종목이 없습니다."
+    #   appends "[계좌 집계]" block only when summary object exists (real numbers).
+    if tool_name == "finus_mcp_trading_balance_rlz_pl":
+        return "보유 종목이 없습니다." in stripped and "[계좌 집계]" not in stripped
+
+    # --- 3. Documented literal markers from MCP source code ---
+    literal = _EMPTY_RESULT_LITERALS.get(tool_name)
+    if literal is not None:
+        return literal in stripped
+
+    return False
+
 
 def _record_to_ledger(tool_name: str, result: str) -> None:
     """Record a completed data-tool call into the current context's ledger.
@@ -96,9 +158,15 @@ def _record_to_ledger(tool_name: str, result: str) -> None:
         return
     stripped = result.strip()
     ok = bool(stripped) and not _ERROR_JSON_PREFIX_RE.match(stripped)
-    # 쓰기 도구의 성공은 "조회해서 데이터를 받았다"가 아니다. any_success()에 포함되면
-    # 일지 저장 한 번으로 그 호출 전체의 게이트가 풀린다.
-    ledger.record(tool_name, ok=ok, produced_rows=ok and tool_name not in _SIDE_EFFECT_TOOLS)
+    # produced_rows 조건:
+    # 1. ok — 오류 응답이 아님
+    # 2. 쓰기 도구가 아님 (_SIDE_EFFECT_TOOLS) — 일지 저장 성공이 게이트를 끄지 않도록
+    # 3. 빈 결과가 아님 (_has_empty_result) — 성공했지만 데이터가 없는 응답(#209)
+    ledger.record(
+        tool_name,
+        ok=ok,
+        produced_rows=ok and tool_name not in _SIDE_EFFECT_TOOLS and not _has_empty_result(tool_name, stripped),
+    )
 
 
 # Remote MCP / doc 한도

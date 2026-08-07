@@ -493,3 +493,183 @@ def test_has_numeric_claims_does_not_match_juga_with_neun_particle():
     """'주가는 N원입니다'에서 주가 명사는 제외하되 원 단위 수치로 탐지된다."""
     # 주가(株價) 자체는 MISS이지만 7만원 때문에 전체 문장은 HIT
     assert _has_numeric_claims("주가는 7만원입니다.") is True
+
+
+# ---------------------------------------------------------------------------
+# 이슈 #209 — 빈-결과 축: 읽기 도구 성공 + 빈 응답은 any_success()=False
+# ---------------------------------------------------------------------------
+
+def test_record_to_ledger_empty_today_orders_does_not_count_as_success():
+    """당일 주문체결 조회 성공 + 결과 없음 → any_success()=False.
+
+    mcp-trading/index.js formatDailyOrderCcldReport 의 rows.length===0 분기가
+    "해당 조건의 주문·체결이 없습니다." 리터럴을 출력한다.
+    이 응답으로 _record_to_ledger를 호출하면 produced_rows=False가 돼야 한다.
+    """
+    ledger = DataToolLedger()
+    token = DATA_TOOL_LEDGER.set(ledger)
+    try:
+        _record_to_ledger(
+            "finus_mcp_trading_today_orders",
+            "[당일 주문·체결 내역] 20260807\n- 조회 TR: TTTC0081R\n- 결과: 해당 조건의 주문·체결이 없습니다.",
+        )
+    finally:
+        DATA_TOOL_LEDGER.reset(token)
+
+    assert ledger.any_success() is False
+    answer = "Final Answer: 오늘 체결된 주문은 삼성전자 100주입니다."
+    assert _check_tool_enforcement(answer, ledger, _simple_req()) is True
+
+
+def test_record_to_ledger_nonempty_today_orders_counts_as_success():
+    """당일 주문체결 조회 성공 + 데이터 있음 → any_success()=True (오탐 없음)."""
+    ledger = DataToolLedger()
+    token = DATA_TOOL_LEDGER.set(ledger)
+    try:
+        _record_to_ledger(
+            "finus_mcp_trading_today_orders",
+            "[당일 주문·체결 내역] 20260807\n1. 삼성전자 (005930)\n   주문 100주 @ 75,300원",
+        )
+    finally:
+        DATA_TOOL_LEDGER.reset(token)
+
+    assert ledger.any_success() is True
+
+
+def test_record_to_ledger_empty_market_news_does_not_count_as_success():
+    """시장 뉴스 조회 성공 + 결과 없음 → any_success()=False.
+
+    mcp-news/index.js fetchMarketNews 가 뉴스 항목이 없을 때
+    "'${stockName}'에 대한 뉴스를 찾지 못했습니다." 를 반환한다.
+    """
+    ledger = DataToolLedger()
+    token = DATA_TOOL_LEDGER.set(ledger)
+    try:
+        _record_to_ledger(
+            "finus_market_news",
+            "'삼성전자'에 대한 뉴스를 찾지 못했습니다.",
+        )
+    finally:
+        DATA_TOOL_LEDGER.reset(token)
+
+    assert ledger.any_success() is False
+
+
+def test_record_to_ledger_nonempty_market_news_counts_as_success():
+    """시장 뉴스 조회 성공 + 데이터 있음 → any_success()=True (오탐 없음)."""
+    ledger = DataToolLedger()
+    token = DATA_TOOL_LEDGER.set(ledger)
+    try:
+        _record_to_ledger(
+            "finus_market_news",
+            "삼성전자 4분기 실적 호조 - 반도체 수요 회복 | 2026-08-07 | https://news.naver.com/...",
+        )
+    finally:
+        DATA_TOOL_LEDGER.reset(token)
+
+    assert ledger.any_success() is True
+
+
+def test_record_to_ledger_empty_earnings_report_does_not_count_as_success():
+    """실적 리포트 조회 성공 + 데이터 없음 → any_success()=False.
+
+    mcp-dart/index.js formatEarningsReport 의 rows.length===0 분기가
+    "OpenDART 재무제표 데이터가 없습니다." 리터럴을 출력한다.
+    """
+    ledger = DataToolLedger()
+    token = DATA_TOOL_LEDGER.set(ledger)
+    try:
+        _record_to_ledger(
+            "finus_earnings_report",
+            "[삼성전자] DART 실적 리포트\n- 조회기간: 2026Q1\n- 조회 결과: OpenDART 재무제표 데이터가 없습니다.",
+        )
+    finally:
+        DATA_TOOL_LEDGER.reset(token)
+
+    assert ledger.any_success() is False
+
+
+def test_record_to_ledger_empty_list_diaries_does_not_count_as_success():
+    """매매일지 목록 조회 성공 + 빈 배열("[]") → any_success()=False.
+
+    finus_api.py finus_list_diaries 는 body.get("data")를 json.dumps()해 반환한다.
+    data가 빈 리스트일 때 결과는 "[]" 이므로 구조적으로 탐지한다.
+    """
+    ledger = DataToolLedger()
+    token = DATA_TOOL_LEDGER.set(ledger)
+    try:
+        _record_to_ledger("finus_list_diaries", "[]")
+    finally:
+        DATA_TOOL_LEDGER.reset(token)
+
+    assert ledger.any_success() is False
+
+
+def test_record_to_ledger_null_list_diaries_does_not_count_as_success():
+    """매매일지 목록 조회 성공 + null 응답("null") → any_success()=False.
+
+    body.get("data")가 None이면 json.dumps(None)="null" 이 반환된다.
+    """
+    ledger = DataToolLedger()
+    token = DATA_TOOL_LEDGER.set(ledger)
+    try:
+        _record_to_ledger("finus_list_diaries", "null")
+    finally:
+        DATA_TOOL_LEDGER.reset(token)
+
+    assert ledger.any_success() is False
+
+
+def test_record_to_ledger_nonempty_list_diaries_counts_as_success():
+    """매매일지 목록 조회 성공 + 데이터 있음 → any_success()=True (오탐 없음)."""
+    ledger = DataToolLedger()
+    token = DATA_TOOL_LEDGER.set(ledger)
+    try:
+        _record_to_ledger(
+            "finus_list_diaries",
+            '[{"id": 1, "title": "매매일지 2026-08-07", "content": "삼성전자 매수"}]',
+        )
+    finally:
+        DATA_TOOL_LEDGER.reset(token)
+
+    assert ledger.any_success() is True
+
+
+def test_record_to_ledger_empty_rlz_pl_no_summary_does_not_count_as_success():
+    """실현손익 조회 성공 + 보유종목 없음 + 계좌집계 없음 → any_success()=False.
+
+    balance-rlz-pl-report.js formatBalanceRlzPlReport 의 rows.length===0 분기:
+    summary가 null이면 "[계좌 집계]" 블록을 출력하지 않는다.
+    실제 수치가 전혀 없는 이 응답은 produced_rows=False가 돼야 한다.
+    """
+    ledger = DataToolLedger()
+    token = DATA_TOOL_LEDGER.set(ledger)
+    try:
+        _record_to_ledger(
+            "finus_mcp_trading_balance_rlz_pl",
+            "[주식잔고조회_실현손익]\n- 조회 TR: TTTC8494R (v1_국내주식-041)\n- 보유 종목이 없습니다.",
+        )
+    finally:
+        DATA_TOOL_LEDGER.reset(token)
+
+    assert ledger.any_success() is False
+
+
+def test_record_to_ledger_empty_rlz_pl_with_summary_counts_as_success():
+    """실현손익 조회 성공 + 보유종목 없음 + 계좌집계 있음 → any_success()=True (오탐 없음).
+
+    balance-rlz-pl-report.js 의 rows.length===0 + summary 존재 분기:
+    "[계좌 집계]" 블록에 예수금·평가금액 등 실제 계좌 수치가 포함된다.
+    produced_rows=False로 만들면 이 정상 데이터 응답을 차단하는 오탐이 된다.
+    """
+    ledger = DataToolLedger()
+    token = DATA_TOOL_LEDGER.set(ledger)
+    try:
+        _record_to_ledger(
+            "finus_mcp_trading_balance_rlz_pl",
+            "[주식잔고조회_실현손익]\n- 보유 종목이 없습니다.\n\n[계좌 집계]\n- 예수금: 1,000,000원\n- 실현손익: 52,000원",
+        )
+    finally:
+        DATA_TOOL_LEDGER.reset(token)
+
+    assert ledger.any_success() is True
