@@ -75,9 +75,21 @@ stale 스윕으로 이전 실행이 남긴 누수를 회수합니다.
 ```bash
 git -C "<REPO>" worktree prune
 WTROOT="<REPO의 부모>/.fin-us-worktrees"
+
+# (a) 디렉토리가 없는 ref → 삭제
 git -C "<REPO>" for-each-ref --format='%(refname)' refs/pr-review/ | while read -r r; do
   [ -d "$WTROOT/rv-${r#refs/pr-review/}" ] && continue   # 마커 또는 살아있는 worktree → 보존
   git -C "<REPO>" update-ref -d "$r"
+done
+
+# (b) ref 없이 남은 빈 디렉토리 → 삭제 (fetch가 실패해 마커만 고아로 남은 경우)
+#     rv-* 만 대상으로 한다. pr-* 는 pr-creator의 것이므로 건드리지 않는다.
+#     rmdir이므로 비어있지 않으면 실패하고 그대로 둔다 — 살아있는 worktree는 안전하다.
+#     디렉토리 mtime은 우리가 만든 시각이라 신뢰할 수 있다(ref 나이와 다름). 1시간 미만은
+#     진행 중일 수 있으므로 제외한다.
+find "$WTROOT" -mindepth 1 -maxdepth 1 -type d -name 'rv-*' -mmin +60 | while read -r d; do
+  git -C "<REPO>" show-ref --verify --quiet "refs/pr-review/${d##*/rv-}" && continue
+  rmdir "$d" 2>/dev/null
 done
 ```
 
@@ -133,7 +145,9 @@ mkdir -p "<WT_PATH>"
 git -C "<REPO>" fetch origin "pull/<PR>/head:refs/pr-review/<PR>-<SHA7>-<nonce>"
 # base는 refspec을 명시한다. --single-branch 클론에서는 refs/remotes/origin/<BASE>가
 # 갱신되지 않아 바로 아래 origin/<BASE> 참조가 unknown revision으로 죽는다.
-git -C "<REPO>" fetch origin "<BASE>:refs/remotes/origin/<BASE>" --quiet
+# 선두의 '+'는 필수다. 없으면 base가 rebase/force-push된 뒤 non-fast-forward로 거부되어
+# ! [rejected] (non-fast-forward)로 죽는다. 기본 refspec에 '+'가 있어서 원래는 없던 실패 모드다.
+git -C "<REPO>" fetch origin "+<BASE>:refs/remotes/origin/<BASE>" --quiet
 git -C "<REPO>" worktree add --detach "<WT_PATH>" "refs/pr-review/<PR>-<SHA7>-<nonce>"
 ```
 
@@ -221,15 +235,12 @@ ln -s "<REPO>/frontend-react/node_modules" "<WT_PATH>/frontend-react/node_module
 # ln -s는 Windows에서 개발자 모드가 꺼져 있고 MSYS=winsymlinks도 미설정이면 실패한다.
 # 그 경우 junction(mklink //J)으로 폴백한다.
 
-# 링크가 실제로 디렉토리로 해석되는지 반드시 확인한다. 실패하면 프리플라이트를 건너뛴다.
-[ -d "<WT_PATH>/frontend-react/node_modules" ] || echo "PREFLIGHT SKIP: node_modules 링크 실패"
-```
-
-확인에 성공한 경우에만 검증을 실행합니다.
-
-```bash
-npm --prefix "<WT_PATH>/frontend-react" test
-npm --prefix "<WT_PATH>/frontend-react" run lint
+# 링크가 실제로 디렉토리로 해석되는지 확인하고, 성공한 경우에만 검증을 실행한다.
+# 확인을 && 로 묶어 실패 시 npm이 실행되지 않도록 한다.
+[ -d "<WT_PATH>/frontend-react/node_modules" ] \
+  && npm --prefix "<WT_PATH>/frontend-react" test \
+  && npm --prefix "<WT_PATH>/frontend-react" run lint \
+  || echo "PREFLIGHT SKIP: node_modules 링크 실패 — 리포트에 사유를 명시할 것"
 ```
 
 > 6단계의 `git worktree remove --force`는 링크를 따라가지 않고 **링크 자체만** 제거합니다.
@@ -314,12 +325,21 @@ git -C "<REPO>" worktree prune
 `<WT_PATH>`와 ref 이름은 **이 실행의 nonce가 붙은 것**입니다. 다른 실행의 것을 지우지 않도록
 1단계에서 기록한 리터럴을 그대로 씁니다.
 
-`worktree add` 전에 중단한 경우에는 `worktree remove`가 실패합니다. 그때는 마커 디렉토리를
-직접 지웁니다 — 남겨두면 다음 실행의 스윕이 그 ref를 "진행 중"으로 오판해 영원히 보존합니다.
+**`worktree remove`가 실패하면 반드시 폴백을 실행합니다.** Windows에서 node/vitest가 파일을
+잡고 있으면 흔히 실패합니다. `rmdir`은 디렉토리가 비어 있지 않아 실패하고(`Directory not empty`),
+`worktree prune`도 디렉토리가 남아 있는 한 등록을 유지하므로 회수하지 못합니다(실측 확인).
+디렉토리가 남으면 스윕이 그 ref를 "진행 중"으로 보고 **영원히 보존합니다.**
 
 ```bash
-rmdir "<WT_PATH>" 2>/dev/null
+# 1차: 정상 경로
+git -C "<REPO>" worktree remove --force "<WT_PATH>"
+# 실패했다면 폴백 — 경로가 <WTROOT> 하위인지 확인한 뒤에만 실행한다
+rm -rf "<WT_PATH>"
+git -C "<REPO>" worktree prune
+git -C "<REPO>" update-ref -d "refs/pr-review/<PR>-<SHA7>-<nonce>"
 ```
+
+`worktree add` 전에 중단한 경우에도 같은 폴백으로 마커 디렉토리를 지웁니다.
 
 정리 후 실제로 사라졌는지 확인합니다.
 
@@ -330,7 +350,10 @@ git -C "<REPO>" for-each-ref refs/pr-review/
 
 중간 단계에서 오류가 나거나 리뷰를 중단하더라도 worktree와 임시 ref는 제거합니다.
 정리에 실패하면 `<WT_PATH>`와 ref 이름을 사용자에게 알려 수동으로 지울 수 있게 합니다.
-(누수가 남아도 다음 실행의 1단계 stale 스윕이 회수합니다.)
+
+> **스윕의 회수 범위 (정확히):** 1단계 스윕이 회수하는 것은 **디렉토리가 이미 사라진 ref**와
+> **ref 없이 남은 빈 디렉토리**뿐입니다. `worktree remove`가 실패해 디렉토리가 남은 경우는
+> 회수하지 **못합니다** — 그래서 위 폴백이 필수입니다.
 
 ## 행동 원칙
 

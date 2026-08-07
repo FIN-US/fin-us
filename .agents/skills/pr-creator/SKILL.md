@@ -91,10 +91,29 @@ worktree는 **레포 바깥**에 둡니다. 레포 안에 두면 소스 트리 �
 
 ### 1. 격리된 worktree 생성
 
+먼저 stale 스윕으로 이전 실행이 남긴 누수를 회수합니다. `pr-reviewer`와 `.fin-us-worktrees`
+루트를 공유하므로, **`pr-*` 디렉토리만** 대상으로 합니다(`rv-*`는 pr-reviewer의 것입니다).
+
+```bash
+git -C "<REPO>" worktree prune
+WTROOT="<REPO의 부모>/.fin-us-worktrees"
+# 등록된 worktree가 아닌 pr-* 잔여 디렉토리를 회수한다.
+# 디렉토리 mtime은 우리가 만든 시각이라 신뢰할 수 있다. 1시간 미만은 진행 중일 수 있으므로 제외.
+find "$WTROOT" -mindepth 1 -maxdepth 1 -type d -name 'pr-*' -mmin +60 2>/dev/null | while read -r d; do
+  git -C "<REPO>" worktree list --porcelain | grep -qF "$d" && continue
+  rm -rf "$d"
+done
+git -C "<REPO>" worktree prune
+```
+
+이어서 이 실행의 worktree를 만듭니다.
+
 ```bash
 # base는 refspec을 명시한다. --single-branch 클론에서는 refs/remotes/origin/<BASE>가
 # 갱신되지 않아 3단계의 origin/<BASE> 참조가 unknown revision으로 죽는다.
-git -C "<REPO>" fetch origin "<BASE>:refs/remotes/origin/<BASE>" --quiet
+# 선두의 '+'는 필수다. 없으면 base가 rebase/force-push된 뒤 non-fast-forward로 거부되어
+# ! [rejected] (non-fast-forward)로 죽는다. 기본 refspec에 '+'가 있어서 원래는 없던 실패 모드다.
+git -C "<REPO>" fetch origin "+<BASE>:refs/remotes/origin/<BASE>" --quiet
 git -C "<REPO>" worktree add --detach "<WT_PATH>" "<BRANCH>"
 ```
 
@@ -161,10 +180,17 @@ gh pr create \
 정리가 조용히 실패합니다.
 
 ```bash
+# 1차: 정상 경로
 git -C "<REPO>" worktree remove --force "<WT_PATH>"
+# 실패했다면 폴백 — 경로가 <WTROOT> 하위인지 확인한 뒤에만 실행한다
+rm -rf "<WT_PATH>"
 git -C "<REPO>" worktree prune
 git -C "<REPO>" worktree list          # 실제로 사라졌는지 확인
 ```
+
+**`worktree remove`가 실패하면 반드시 폴백을 실행합니다.** Windows에서 프로세스가 파일을
+잡고 있으면 흔히 실패하고, `worktree prune`은 디렉토리가 남아 있는 한 등록을 유지하므로
+회수하지 못합니다(실측 확인). 1단계 스윕은 1시간이 지나야 회수하므로 그때까지 누수가 남습니다.
 
 `<WT_PATH>`는 **이 실행의 nonce가 붙은 것**입니다. 다른 실행의 worktree를 지우지 않도록
 0단계에서 기록한 리터럴을 그대로 씁니다.
