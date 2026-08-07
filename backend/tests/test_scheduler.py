@@ -1346,11 +1346,18 @@ def _make_balance_text(*holdings):
     """(name, code, qty, avg_price) 튜플 목록으로 get_balance 텍스트 픽스처를 합성합니다.
 
     mcp-trading/balance.js의 formatBalanceReport()가 생성하는 형식을 그대로 재현합니다.
-    formatAmount(pchs_avg_pric) = "N,NNN원", formatQuantity(hldg_qty) = "N"(또는 "N,NNN").
+    formatAmount(pchs_avg_pric) = toLocaleString("ko-KR"): 정수는 "N,NNN원",
+    소수는 "N,NNN.NN원" 형태. avg_price가 정수가 아니면 소수점을 그대로 보존한다.
+    mcp-trading/tests/balance.test.js가 "평단가 66,666.67원"을 단언하므로 소수 케이스도
+    픽스처가 통과시켜야 한다(Critical 1 참고).
     """
     lines = []
     for name, code, qty, avg_price in holdings:
-        avg_str = f"{int(avg_price):,}"
+        # formatAmount(toLocaleString("ko-KR")): 정수면 정수 포맷, 소수면 소수 포맷
+        if avg_price == int(avg_price):
+            avg_str = f"{int(avg_price):,}"
+        else:
+            avg_str = f"{avg_price:,}"
         evlu = int(avg_price * qty)
         lines.append(
             f"- {name} ({code}) · {qty}주\n"
@@ -1588,3 +1595,118 @@ async def test_monitor_market_task_does_not_sync_when_balance_fails(monkeypatch)
     await monitor_market_task(watchlist_repo=FakeWatchlistRepo(["카카오"]))
 
     assert sync_calls == []
+
+
+# ---------------------------------------------------------------------------
+# Critical 1: 소수점 평단가 파싱 테스트
+# ---------------------------------------------------------------------------
+
+def test_parse_balance_holdings_accepts_fractional_avg_price():
+    """balance.js formatAmount는 정수가 아닌 평단가에 소수점을 붙인다.
+    mcp-trading/tests/balance.test.js가 "평단가 66,666.67원"을 리터럴로 단언하므로
+    이것은 가정이 아니라 계약이다.
+
+    이 테스트가 잡는 mutation: _AVG_PRICE_RE를 원래 r"평단가\\s+([\\d,]+)원"으로
+    되돌리면 "66,666"까지 먹고 다음 글자가 "."라 매치 실패 → avg_price=0.0으로 red.
+    """
+    from ..scheduler import _parse_balance_holdings
+
+    text = (
+        "[보유 종목 리스트]\n"
+        "- 삼성전자 (005930) · 3주\n"
+        "  평단가 66,666.67원 → 평가금액 190,000원\n"
+        "  손익 -10,000원 · 수익률 🔵 ▼ -5.00%"
+    )
+    holdings = _parse_balance_holdings(text)
+    assert len(holdings) == 1
+    assert holdings[0].avg_price == pytest.approx(66666.67)
+
+
+def test_make_balance_text_fixture_passes_fractional_avg_price():
+    """_make_balance_text 픽스처 자체가 소수 평단가를 올바르게 렌더링하는지 확인합니다.
+    픽스처가 int(avg_price)만 쓰면 "66,666원"이 돼 매치되고 파싱값이 66666.0으로
+    틀린 반올림이 일어납니다.
+
+    이 테스트가 잡는 mutation: _make_balance_text에서 avg_str을 f"{int(avg_price):,}"
+    로 되돌리면 "66,666.67" 대신 "66,666"이 생성 → 파싱값이 66666.0 ≠ approx(66666.67)
+    으로 red.
+    """
+    from ..scheduler import _parse_balance_holdings
+
+    text = _make_balance_text(("삼성전자", "005930", 3, 66666.67))
+    assert "66,666.67원" in text, f"픽스처에 소수 평단가가 없습니다: {text!r}"
+    holdings = _parse_balance_holdings(text)
+    assert len(holdings) == 1
+    assert holdings[0].avg_price == pytest.approx(66666.67)
+
+
+# ---------------------------------------------------------------------------
+# Critical 2: 마커 부재 시 동기화 건너뜀 테스트
+# ---------------------------------------------------------------------------
+
+def test_sync_portfolio_skips_when_marker_absent(portfolio_session):
+    """[보유 종목 리스트] 마커가 없는 응답에서 기존 Portfolio 데이터를 파괴하지 않습니다.
+
+    이 테스트가 잡는 mutation: _BALANCE_HOLDINGS_MARKER 가드를 제거하면 빈 holdings로
+    전량 교체가 일어나 기존 1개 행이 사라져 assert len==1이 실패한다.
+    """
+    from sqlmodel import select
+    from ..models import Portfolio
+    from ..scheduler import _sync_portfolio_from_balance
+
+    portfolio_session.add(Portfolio(stock_code="005930", stock_name="삼성전자", quantity=10, avg_price=70000))
+    portfolio_session.commit()
+
+    # 마커 없는 응답 — "보유 0건"이 아니라 "응답을 읽지 못함"
+    no_marker_text = "응답을 가져왔지만 종목 섹션이 없습니다."
+    _sync_portfolio_from_balance(no_marker_text, portfolio_session)
+
+    rows = portfolio_session.exec(select(Portfolio)).all()
+    assert len(rows) == 1, "마커 부재 시 기존 데이터가 보존되어야 합니다"
+
+
+def test_sync_portfolio_skips_empty_balance_text(portfolio_session):
+    """빈 문자열(run_mcp_tool이 MCP content 없을 때 반환하는 값)에서
+    기존 Portfolio 데이터를 파괴하지 않습니다.
+
+    이 테스트가 잡는 mutation: _BALANCE_HOLDINGS_MARKER 가드를 제거하면 ""를 성공
+    응답으로 처리해 전량 교체 → 기존 데이터 소실 → assert len==1이 실패한다.
+    """
+    from sqlmodel import select
+    from ..models import Portfolio
+    from ..scheduler import _sync_portfolio_from_balance
+
+    portfolio_session.add(Portfolio(stock_code="005930", stock_name="삼성전자", quantity=10, avg_price=70000))
+    portfolio_session.commit()
+
+    _sync_portfolio_from_balance("", portfolio_session)
+
+    rows = portfolio_session.exec(select(Portfolio)).all()
+    assert len(rows) == 1, "빈 응답 시 기존 데이터가 보존되어야 합니다"
+
+
+def test_sync_portfolio_allows_genuinely_empty_holdings(portfolio_session):
+    """마커는 있지만 보유 종목이 없는 응답("보유 종목이 없습니다.")은
+    실제 0건으로 처리해 기존 데이터를 전량 삭제합니다.
+
+    마커 가드가 "실제 0건"을 막아서는 안 됩니다.
+    """
+    from sqlmodel import select
+    from ..models import Portfolio
+    from ..scheduler import _sync_portfolio_from_balance
+
+    portfolio_session.add(Portfolio(stock_code="005930", stock_name="삼성전자", quantity=10, avg_price=70000))
+    portfolio_session.commit()
+
+    # balance.js가 보유 0건일 때 실제로 생성하는 텍스트(balance.js:273-274)
+    empty_holdings_text = (
+        "[계좌 잔고 현황]\n"
+        "- 총 평가금액: 0원\n"
+        "\n"
+        "[보유 종목 리스트]\n"
+        "보유 종목이 없습니다."
+    )
+    _sync_portfolio_from_balance(empty_holdings_text, portfolio_session)
+
+    rows = portfolio_session.exec(select(Portfolio)).all()
+    assert len(rows) == 0, "실제 보유 0건이면 기존 데이터를 삭제해야 합니다"
