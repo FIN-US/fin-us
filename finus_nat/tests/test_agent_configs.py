@@ -177,6 +177,115 @@ _IDENTICAL_SYSTEM_PROMPT_AGENTS = [
 ]
 
 
+# ---------------------------------------------------------------------------
+# #66 회귀 가드 — 비-trading 에이전트의 kis-trading-mcp-tool이 조회 전용인지 확인
+# ---------------------------------------------------------------------------
+
+# (config_path, agent 함수 이름) — kis-trading-mcp-tool이 scope에 있고 주문 실행 차단 대상.
+# news_agent.yml의 override가 상속 체인(recommend → strategy → diary)에 전파됨.
+# diary_agent는 tool_names에 kis-trading-mcp-tool을 포함하지 않지만, 함수가 scope에
+# 정의되어 있으므로 readonly 상태를 고정한다.
+_NON_TRADING_KIS_CONFIGS = [
+    (AGENTS_DIR / "news_agent.yml", "news_agent"),
+    (AGENTS_DIR / "recommend_agent.yml", "recommend_agent"),
+    (AGENTS_DIR / "strategy_agent.yml", "strategy_agent"),
+    (AGENTS_DIR / "diary_agent.yml", "diary_agent"),
+]
+
+# kis-trading-mcp-tool이 전체 권한(finus_account_balance)을 유지해야 하는 에이전트
+_TRADING_KIS_CONFIGS = [
+    (AGENTS_DIR / "trading_agent.yml", "trading_agent_react"),
+    (AGENTS_DIR / "monitoring_agent.yml", "monitoring_agent"),
+]
+
+_NON_TRADING_KIS_IDS = [f"{p.name}::{a}" for p, a in _NON_TRADING_KIS_CONFIGS]
+_TRADING_KIS_IDS = [f"{p.name}::{a}" for p, a in _TRADING_KIS_CONFIGS]
+
+
+@pytest.mark.parametrize("config_path,agent_fn", _NON_TRADING_KIS_CONFIGS, ids=_NON_TRADING_KIS_IDS)
+def test_non_trading_agents_kis_tool_is_readonly(config_path: Path, agent_fn: str):
+    """#66: news/recommend/strategy/diary의 kis-trading-mcp-tool은 finus_account_balance_readonly여야 한다.
+
+    trading_agent.yml이 정의한 finus_account_balance(전체 권한)가 상속 체인을 통해
+    비-trading 에이전트(news→recommend→strategy→diary)에 그대로 전파되는 회귀를 방지한다.
+    diary_agent는 tool_names에 포함하지 않지만 scope에 정의된 함수 타입을 고정한다.
+    """
+    import nat_finus_nat.register  # noqa: F401
+    from nat.runtime.loader import load_config
+    from nat_finus_nat.finus_api import FinusAccountBalanceReadonlyConfig
+
+    config = load_config(config_path)
+    tool_config = config.functions["kis-trading-mcp-tool"]
+    assert isinstance(tool_config, FinusAccountBalanceReadonlyConfig), (
+        f"{config_path.name}: kis-trading-mcp-tool은 finus_account_balance_readonly여야 합니다. "
+        f"실제 타입: {type(tool_config).__name__}"
+    )
+
+
+@pytest.mark.parametrize("config_path,agent_fn", _TRADING_KIS_CONFIGS, ids=_TRADING_KIS_IDS)
+def test_trading_agents_kis_tool_is_full(config_path: Path, agent_fn: str):
+    """trading/monitoring의 kis-trading-mcp-tool은 전체 권한(finus_account_balance)이어야 한다.
+
+    조회 전용 래퍼가 실수로 trading/monitoring 에이전트에도 적용되는 회귀를 방지한다.
+    """
+    import nat_finus_nat.register  # noqa: F401
+    from nat.runtime.loader import load_config
+    from nat_finus_nat.finus_api import FinusAccountBalanceConfig, FinusAccountBalanceReadonlyConfig
+
+    config = load_config(config_path)
+    tool_config = config.functions["kis-trading-mcp-tool"]
+    assert not isinstance(tool_config, FinusAccountBalanceReadonlyConfig), (
+        f"{config_path.name}: kis-trading-mcp-tool은 readonly가 아닌 finus_account_balance여야 합니다."
+    )
+    assert isinstance(tool_config, FinusAccountBalanceConfig), (
+        f"{config_path.name}: kis-trading-mcp-tool은 finus_account_balance여야 합니다. "
+        f"실제 타입: {type(tool_config).__name__}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# #66 allowlist 단위 테스트 — _is_readonly_api_type 판정 고정
+# fail-closed 검증: allowlist 판정을 무조건 True로 뒤집으면 이 테스트가 red.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("api_type", [
+    "inquire_balance",
+    "inquire_price",
+    "inquire_account_balance",
+    "inquire_daily_itemchartprice",
+    "inquire_investor",
+    "search_stock_info",
+    "find_api_detail",
+], ids=lambda x: x)
+def test_readonly_api_type_allows_read_only(api_type: str):
+    """#66: 조회 계열 api_type은 _is_readonly_api_type이 True를 반환해야 한다."""
+    from nat_finus_nat.finus_api import _is_readonly_api_type
+    assert _is_readonly_api_type(api_type) is True, (
+        f"{api_type!r}는 조회 전용 허용 목록에 포함되어야 합니다."
+    )
+
+
+@pytest.mark.parametrize("api_type", [
+    "order_cash",
+    "order_sell",
+    "modify_order",
+    "cancel_order",
+    "overseas_stock_order",   # order_ 접두사 없는 가상의 주문 TR — fail-closed 핵심 케이스
+    "unknown_operation",      # 목록에 없는 임의 api_type — fail-closed 핵심 케이스
+    "",                       # 빈 문자열
+], ids=lambda x: x or "<empty>")
+def test_readonly_api_type_blocks_non_allowlisted(api_type: str):
+    """#66: 허용 목록에 없는 api_type은 _is_readonly_api_type이 False를 반환해야 한다.
+
+    ``unknown_operation``, ``overseas_stock_order`` 케이스가 fail-closed 핵심이다.
+    allowlist 판정을 무조건 True로 교체하면 이 테스트들이 red가 된다.
+    """
+    from nat_finus_nat.finus_api import _is_readonly_api_type
+    assert _is_readonly_api_type(api_type) is False, (
+        f"{api_type!r}는 조회 전용 허용 목록에서 차단되어야 합니다."
+    )
+
+
 def test_kis_agents_share_identical_system_prompt():
     """monitoring/strategy/trading 프롬프트는 의도적으로 동일하다 - 한 곳만 수정되는 드리프트를 막는다."""
     import nat_finus_nat.register  # noqa: F401 - 등록 트리거만 필요

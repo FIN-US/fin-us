@@ -8,6 +8,15 @@ llms:
     model_name: ${NEWS_OPENAI_CHAT_MODEL:-gpt-5.4-mini}
 
 functions:
+  # #66: news/recommend/strategy/diary 에이전트에서 주문 실행 api_type을 차단한다.
+  # trading_agent.yml의 finus_account_balance(전체 권한)를 조회 전용 래퍼로 대체.
+  # 이 오버라이드는 base 상속 체인(recommend_agent → strategy_agent → diary_agent)에 자동 전파된다.
+  kis-trading-mcp-tool:
+    _type: finus_account_balance_readonly
+    mcp_transport: sse
+    mcp_url: ${FINUS_KIS_TRADING_MCP_URL:-http://host.docker.internal:3300/sse}
+    trading_tool_name: ${FINUS_KIS_TRADING_TOOL_NAME:-domestic_stock}
+
   news_agent:
     _type: react_agent
     llm_name: news_openai_llm
