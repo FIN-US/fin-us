@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test, { after } from "node:test";
+import util from "node:util";
 import {
   DEFAULT_ORDER_DEDUP_TTL_MS,
   DuplicateOrderError,
@@ -44,6 +45,25 @@ after(() => {
     assert.equal(fs.existsSync(dir), false, `임시 디렉터리가 정리되지 않았습니다: ${dir}`);
   }
 });
+
+// 두 에러 클래스에 공통으로 적용하는 누출 표면 헬퍼. stderrCapture는 호출자가
+// 직접 캡처한 stderr/console.error 출력 문자열이다 - DuplicateOrderError 쪽은
+// process.stderr.write를 가로채 실제 바이트를 보고, LedgerUnreadableError 쪽은
+// console.error 목(mock) 호출 인자를 문자열로 이어붙여 넘긴다.
+function assertNoLeakOnAnyLoggingSurface(err, secret, stderrCapture = "") {
+  for (const [surface, rendered] of [
+    [".message", err.message],
+    [".stack", err.stack],
+    ["String(err)", String(err)],
+    ["JSON.stringify(err)", JSON.stringify(err)],
+    ["util.inspect(err, {depth: null})", util.inspect(err, { depth: null })],
+    ["util.inspect(err, {depth: null, showHidden: true})", util.inspect(err, { depth: null, showHidden: true })],
+    ["console.error(err)", stderrCapture],
+    ["Object.getOwnPropertyNames(err)", Object.getOwnPropertyNames(err).join(",")],
+  ]) {
+    assert.ok(!String(rendered).includes(secret), `${surface}에 계좌번호가 노출되면 안 됩니다: ${rendered}`);
+  }
+}
 
 test("createOrderDedupKey normalizes equivalent order arguments", () => {
   const first = createOrderDedupKey({
@@ -157,6 +177,101 @@ test("OrderDedupStore blocks duplicate reservations across separate instances sh
   assert.throws(
     () => storeB.reserve("same-order", { stockCode: "005930" }),
     DuplicateOrderError,
+  );
+});
+
+const LEAKED_CANO = "1234567890";
+
+// index.js의 placeOrder가 reserve()에 실제로 넘기는 모양 그대로다(pathname·
+// trId·body). CANO가 평문으로 들어가는 것은 이 body이므로, 축약된 페이로드로
+// 검증하면 정작 새는 필드를 지나치게 된다.
+function reserveThenTriggerDuplicate(t) {
+  const filePath = tempLedgerPath(t);
+  const store = new OrderDedupStore({ filePath, ttlMs: 60_000, now: () => 1_000 });
+  const request = {
+    pathname: "/uapi/domestic-stock/v1/trading/order-cash",
+    trId: "VTTC0802U",
+    body: { CANO: LEAKED_CANO, ACNT_PRDT_CD: "01", PDNO: "005930", ORD_QTY: "1" },
+  };
+
+  store.reserve("same-order", request);
+
+  // 원장에 CANO가 평문으로 저장된다는 전제를 함께 고정한다. 이 전제가 깨지면
+  // (예: 호출자가 body를 더 이상 넘기지 않게 되면) 아래 "누출 없음" 단언들이
+  // 전부 공허하게 참이 되어 조용히 검증력을 잃는다.
+  assert.ok(
+    fs.readFileSync(filePath, "utf8").includes(LEAKED_CANO),
+    "이 테스트의 전제(원장 항목에 CANO가 평문으로 저장됨)가 깨졌습니다",
+  );
+
+  let thrown;
+  assert.throws(
+    () => store.reserve("same-order", request),
+    (error) => {
+      thrown = error;
+      return error instanceof DuplicateOrderError;
+    },
+  );
+  return thrown;
+}
+
+// DuplicateOrderError는 예약 항목 전체를 들고 있었고 그 안에 CANO(계좌번호)가
+// 평문으로 있었다. message는 깨끗한데도 에러 "객체"를 로깅하는 순간 계좌번호가
+// 찍혔다. 지금 이 결함이 도달 불가인 것은 우연이다 - 아무도 에러 객체를
+// 로깅하지 않기로 정해서가 아니라 아직 그렇게 한 사람이 없어서다. 게다가 같은
+// 파일의 LedgerUnreadableError는 정반대로 "로깅해도 안전"하게 만들어져 있어,
+// 다음에 에러 로깅을 추가하는 사람이 둘을 같은 것으로 취급하기 쉽다. 그래서
+// LedgerUnreadableError와 같은 수준으로 누출 표면을 테스트로 고정한다.
+//
+// 잡는 뮤테이션: 생성자가 다시 예약 항목을 통째로 싣게 되면(`this.entry =
+// entry`) 실패해야 한다. Object.defineProperty로 non-enumerable하게 숨기기만
+// 하는 절충안도 showHidden 검사에서 걸린다 - 숨긴 값은 여전히 살아 있어
+// 커스텀 직렬화나 getOwnPropertyNames로 언제든 다시 꺼낼 수 있기 때문이다.
+test("DuplicateOrderError never exposes ledger contents (CANO) on any logging surface", (t) => {
+  const thrown = reserveThenTriggerDuplicate(t);
+
+  // console.error(err)는 인자를 util.inspect로 포매팅해 stderr에 쓴다. console.error
+  // 자체를 몽키패치하면 캡처되는 것은 에러 "객체"라 String(arg)가 항상
+  // "DuplicateOrderError: <message>"로만 나와, 항목을 통째로 든 구현에서도
+  // 통과하는 공허한 검사가 된다. 실제로 출력되는 바이트를 봐야 하므로
+  // process.stderr.write를 가로채고 진짜 console.error를 호출한다.
+  const stderrChunks = [];
+  const stderrWrite = t.mock.method(process.stderr, "write", (chunk) => {
+    stderrChunks.push(String(chunk));
+    return true;
+  });
+  console.error(thrown);
+  stderrWrite.mock.restore();
+
+  assert.ok(
+    stderrChunks.join("").includes("DuplicateOrderError"),
+    "stderr 캡처 자체가 동작하지 않았습니다 - 이 검사의 전제가 깨졌습니다",
+  );
+
+  assertNoLeakOnAnyLoggingSurface(thrown, LEAKED_CANO, stderrChunks.join(""));
+
+  // 생성자에 원장 항목을 직접 넘겨도 내용이 실리지 않는다 - Number() 강제가
+  // 호출부 관례가 아니라 클래스 자체에 있음을 고정한다.
+  assert.ok(
+    !JSON.stringify(new DuplicateOrderError({ request: { body: { CANO: LEAKED_CANO } } })).includes(LEAKED_CANO),
+    "생성자에 원장 항목을 넘겨도 내용이 실리면 안 됩니다",
+  );
+});
+
+// 항목을 버리되 진단 가치까지 통째로 버리지는 않는다는 계약, 그리고 축소 자체를
+// 고정한다. 잡는 뮤테이션: this.expiresAt을 빼거나 reserve()가 만료 시각 대신
+// 항목을 넘기도록 되돌리면(그러면 expiresAt이 객체가 되고 entry가 되살아난다)
+// 실패해야 한다. 위 누출 테스트는 CANO 문자열만 보므로, 만료 시각이 조용히
+// 사라지는 변경은 이 테스트만 잡는다.
+test("DuplicateOrderError carries only the expiry timestamp, not the ledger entry", (t) => {
+  const thrown = reserveThenTriggerDuplicate(t);
+
+  assert.equal(thrown.expiresAt, 61_000, "now(1_000) + ttlMs(60_000)이어야 합니다");
+  assert.equal(thrown.entry, undefined, "예약 항목을 들고 있으면 안 됩니다");
+  assert.deepEqual(
+    Object.getOwnPropertyNames(thrown).filter((name) => !["message", "stack"].includes(name)),
+    ["name", "expiresAt"],
+    "이름과 만료 시각 외의 필드를 들고 있으면 안 됩니다",
   );
 });
 
@@ -388,19 +503,18 @@ for (const [label, buildPayload] of [
 ]) {
   test(`OrderDedupStore.reserve never leaks ledger contents (CANO) into the thrown error or logs (${label})`, (t) => {
     const filePath = tempLedgerPath(t);
-    const leakedCano = "1234567890";
-    const payload = buildPayload(leakedCano);
+    const payload = buildPayload(LEAKED_CANO);
     fs.writeFileSync(filePath, payload);
 
-    // 이 페이로드가 실제로 V8의 SyntaxError 메시지에 leakedCano를 에코하는지
+    // 이 페이로드가 실제로 V8의 SyntaxError 메시지에 LEAKED_CANO를 에코하는지
     // 먼저 확인한다 - 이 전제가 깨지면(예: 엔진이 바뀌어 더 이상 에코하지
-    // 않으면) 아래 assert.ok(!...)가 항상 참이 되어 테스트가 다시 공허해질
-    // 수 있으므로, 전제 자체를 함께 고정한다.
+    // 않으면) 아래 assertNoLeakOnAnyLoggingSurface의 검사가 항상 참이 되어
+    // 테스트가 다시 공허해질 수 있으므로, 전제 자체를 함께 고정한다.
     let parseEchoesPayload = false;
     try {
       JSON.parse(payload);
     } catch (error) {
-      parseEchoesPayload = error.message.includes(leakedCano);
+      parseEchoesPayload = error.message.includes(LEAKED_CANO);
     }
     assert.ok(
       parseEchoesPayload,
@@ -410,25 +524,17 @@ for (const [label, buildPayload] of [
     const store = new OrderDedupStore({ filePath, ttlMs: 60_000, now: () => 1_000 });
     const consoleError = t.mock.method(console, "error", () => {});
 
+    let thrownError;
     assert.throws(
       () => store.reserve("k", { stockCode: "005930" }),
       (error) => {
-        assert.ok(
-          !error.message.includes(leakedCano),
-          `던지는 메시지에 원장 내용(CANO)이 섞이면 안 됩니다: ${error.message}`,
-        );
+        thrownError = error;
         return true;
       },
     );
 
-    for (const call of consoleError.mock.calls) {
-      for (const arg of call.arguments) {
-        assert.ok(
-          !String(arg).includes(leakedCano),
-          `console.error 로그에 원장 내용(CANO)이 섞이면 안 됩니다: ${arg}`,
-        );
-      }
-    }
+    const stderrCapture = consoleError.mock.calls.flatMap((c) => c.arguments).map(String).join("");
+    assertNoLeakOnAnyLoggingSurface(thrownError, LEAKED_CANO, stderrCapture);
   });
 }
 
