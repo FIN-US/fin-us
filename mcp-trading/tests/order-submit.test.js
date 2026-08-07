@@ -225,6 +225,58 @@ test("submitOrder: a non-Error thrown by markSucceeded (e.g. a plain string) doe
   assert.match(logged, /disk full/);
 });
 
+// Mutation this catches: calling release() after a successful markSucceeded, which
+// releases the dedup guard while the order is already confirmed live in KIS. If the guard
+// is released, a retried order for the same key would pass dedup and produce a duplicate
+// fill. The comment at order-submit.js:35 spells out exactly this risk; this test pins it.
+test("submitOrder: release()는 markSucceeded가 성공한 경로에서 호출되지 않는다 — 해제하면 재시도가 통과해 중복 주문이 나간다", async (t) => {
+  const releaseCalls = [];
+  const store = {
+    markSucceeded() {},
+    release(key) { releaseCalls.push(key); },
+  };
+
+  const kisResponse = { rt_cd: "0", output: { ODNO: "0000001234" } };
+  const data = await submitOrder({
+    dedupStore: store,
+    dedupKey: "order-key-no-release-on-success",
+    submit: async () => kisResponse,
+  });
+
+  assert.equal(data, kisResponse, "KIS 성공 응답이 호출자에게 그대로 전달되어야 한다");
+  assert.deepEqual(
+    releaseCalls,
+    [],
+    "markSucceeded 성공 후 release()가 호출되면 dedup 가드가 해제돼 중복 주문이 나가므로, 절대 호출되어선 안 된다",
+  );
+});
+
+// Mutation this catches: dereferencing `releaseError.message` without the optional-chain
+// guard (`releaseError?.message ?? releaseError`) in the release() catch block. When
+// release() throws a non-Error (e.g. null), `null.message` raises a TypeError *inside*
+// the catch block, which then propagates out and replaces the original KIS error —
+// destroying the rejection reason. The guard ensures that regardless of what release()
+// throws, the original KIS error is always what the caller receives.
+test("submitOrder: release()가 null(non-Error)을 던져도 크래시하지 않고 원래 KIS 오류가 그대로 전파된다", async (t) => {
+  const consoleError = t.mock.method(console, "error", () => {});
+  const store = {
+    // 의도적으로 null을 던져 releaseError?.message 무가드 참조(null.message → TypeError)를 잡는다
+    release() { throw null; },
+  };
+
+  const rejected = new Error("KIS API 오류: 주문가능금액을 초과하였습니다.");
+  rejected.kisOrderRejected = true;
+
+  await assert.rejects(
+    () => submitOrder({ dedupStore: store, dedupKey: "order-key-release-non-error", submit: async () => { throw rejected; } }),
+    (err) => err === rejected,
+    "release()가 null을 던져도 원래 KIS 거절 오류가 그대로 전파되어야 한다 — TypeError로 대체되면 안 됨",
+  );
+  // null은 String(null) = "null"로 기록되어야 한다
+  const logged = consoleError.mock.calls.map((call) => util.format(...call.arguments)).join("\n");
+  assert.match(logged, /null/);
+});
+
 // Mutation this catches: dereferencing `error.kisOrderRejected` or `releaseError.message`
 // unguarded when submit() itself rejects with a non-Error value (e.g. `throw null`,
 // which real code should never do, but a defensive guard must still not crash on it).
