@@ -105,6 +105,11 @@ export interface DashboardResources {
   diaries: DiaryItem[];
 }
 
+export type EndpointStatus = 'unknown' | 'ok' | 'fail';
+
+// 엔드포인트 집합은 DashboardResources와 1:1이다. 파생시켜 두 곳이 어긋나는 걸 막는다.
+export type EndpointStatuses = Record<keyof DashboardResources, EndpointStatus>;
+
 export interface ChatMessage {
   id: string;
   role: 'system' | 'user' | 'server';

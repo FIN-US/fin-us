@@ -1,11 +1,10 @@
 import React from 'react';
 import { Activity, RefreshCw, Server, WalletCards } from 'lucide-react';
-import type { DashboardResources } from '../types';
-import type { EndpointOk, EndpointStatus } from '../hooks/useFinUsDashboard';
+import type { DashboardResources, EndpointStatus, EndpointStatuses } from '../types';
 
 interface BackendPanelProps {
   resources: DashboardResources;
-  endpointOk: EndpointOk;
+  endpointStatuses: EndpointStatuses;
   loading: boolean;
   onRefresh: () => void;
 }
@@ -24,14 +23,18 @@ const STATUS_LABEL: Record<EndpointStatus, string> = {
   unknown: '확인 중',
 };
 
-const BackendPanel: React.FC<BackendPanelProps> = ({ resources, endpointOk, loading, onRefresh }) => {
+// 상태 점에 role="img"를 쓰는 이유: role="status"는 암묵적 aria-live="polite"를 동반해
+// 엔드포인트 6개마다 라이브 리전이 생긴다. 이 점은 변경 공지가 아니라 현재 상태 지표이므로
+// role="img"가 의미에 맞다. 회귀 가드는 BackendPanel.test.tsx의 getByRole('img', ...) 참조.
+
+const BackendPanel: React.FC<BackendPanelProps> = ({ resources, endpointStatuses, loading, onRefresh }) => {
   const endpoints = [
-    { label: 'Health', status: endpointOk.health, path: '/health' },
-    { label: 'Balance', status: endpointOk.balance, path: '/api/v1/trading/balance' },
-    { label: 'Portfolio', status: endpointOk.portfolio, path: '/api/v1/db/portfolio' },
-    { label: 'Trades', status: endpointOk.trades, path: '/api/v1/db/trades' },
-    { label: 'Reports', status: endpointOk.reports, path: '/api/v1/db/reports' },
-    { label: 'Diary', status: endpointOk.diaries, path: '/api/v1/db/diary' },
+    { label: 'Health', status: endpointStatuses.health, path: '/health' },
+    { label: 'Balance', status: endpointStatuses.balance, path: '/api/v1/trading/balance' },
+    { label: 'Portfolio', status: endpointStatuses.portfolio, path: '/api/v1/db/portfolio' },
+    { label: 'Trades', status: endpointStatuses.trades, path: '/api/v1/db/trades' },
+    { label: 'Reports', status: endpointStatuses.reports, path: '/api/v1/db/reports' },
+    { label: 'Diary', status: endpointStatuses.diaries, path: '/api/v1/db/diary' },
   ];
 
   return (
@@ -70,7 +73,7 @@ const BackendPanel: React.FC<BackendPanelProps> = ({ resources, endpointOk, load
           {endpoints.map((endpoint) => (
             <div key={endpoint.path} className="flex items-center gap-2 rounded-lg bg-slate-50 px-3 py-2">
               <span
-                role="status"
+                role="img"
                 aria-label={`${endpoint.label} ${STATUS_LABEL[endpoint.status]}`}
                 data-status={endpoint.status}
                 className={`w-2.5 h-2.5 rounded-full ${DOT_CLASS[endpoint.status]}`}

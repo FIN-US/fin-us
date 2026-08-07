@@ -1,8 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import BackendPanel from './BackendPanel';
-import type { DashboardResources } from '../types';
-import type { EndpointOk, EndpointStatus } from '../hooks/useFinUsDashboard';
+import type { DashboardResources, EndpointStatus, EndpointStatuses } from '../types';
 
 // 렌더링 매핑 가드: 훅이 판정한 EndpointStatus가 화면의 상태 점에 그대로 반영되는지 본다.
 // 판정 로직 자체의 #71 회귀 가드는 useFinUsDashboard.test.tsx가 담당한다.
@@ -19,7 +18,7 @@ const baseResources: DashboardResources = {
   diaries: [],
 };
 
-const allOk: EndpointOk = {
+const allOk: EndpointStatuses = {
   health: 'ok',
   balance: 'ok',
   portfolio: 'ok',
@@ -44,13 +43,13 @@ describe('BackendPanel', () => {
       render(
         <BackendPanel
           resources={baseResources}
-          endpointOk={{ ...allOk, portfolio: status }}
+          endpointStatuses={{ ...allOk, portfolio: status }}
           loading={false}
           onRefresh={vi.fn()}
         />,
       );
 
-      const dot = screen.getByLabelText(`Portfolio ${statusLabel}`);
+      const dot = screen.getByRole('img', { name: `Portfolio ${statusLabel}` });
       expect(dot).toHaveAttribute('data-status', status);
       expect(dot).toHaveClass(expected);
       forbidden.forEach((cls) => expect(dot).not.toHaveClass(cls));
@@ -61,14 +60,14 @@ describe('BackendPanel', () => {
     render(
       <BackendPanel
         resources={baseResources}
-        endpointOk={{ ...allOk, portfolio: 'fail', trades: 'unknown' }}
+        endpointStatuses={{ ...allOk, portfolio: 'fail', trades: 'unknown' }}
         loading={false}
         onRefresh={vi.fn()}
       />,
     );
 
-    expect(screen.getByLabelText(/^Portfolio /)).toHaveAttribute('data-status', 'fail');
-    expect(screen.getByLabelText(/^Trades /)).toHaveAttribute('data-status', 'unknown');
-    expect(screen.getByLabelText(/^Health /)).toHaveAttribute('data-status', 'ok');
+    expect(screen.getByRole('img', { name: /^Portfolio / })).toHaveAttribute('data-status', 'fail');
+    expect(screen.getByRole('img', { name: /^Trades / })).toHaveAttribute('data-status', 'unknown');
+    expect(screen.getByRole('img', { name: /^Health / })).toHaveAttribute('data-status', 'ok');
   });
 });
