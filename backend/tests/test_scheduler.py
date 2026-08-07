@@ -1533,7 +1533,7 @@ async def test_monitor_market_task_syncs_portfolio_when_balance_succeeds(monkeyp
             return _make_balance_text(("삼성전자", "005930", 10, 70000))
         return "news"
 
-    def mock_sync_portfolio(balance_text, session):
+    def mock_sync_portfolio(balance_text, session, **kwargs):
         sync_calls.append(balance_text)
 
     async def mock_check_significance(stock, current, last, *, source, provider):
@@ -1576,7 +1576,7 @@ async def test_monitor_market_task_does_not_sync_when_balance_fails(monkeypatch)
             raise RuntimeError("KIS 장애")
         return "news"
 
-    def mock_sync_portfolio(balance_text, session):
+    def mock_sync_portfolio(balance_text, session, **kwargs):
         sync_calls.append(balance_text)
 
     async def mock_check_significance(stock, current, last, *, source, provider):

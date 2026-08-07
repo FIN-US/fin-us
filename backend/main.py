@@ -101,9 +101,10 @@ async def get_account_balance():
     return {"status": "success", "data": {"report": balance_text}}
 
 
-def _portfolio_return_rate(current_price: float, avg_price: float) -> float:
+def _portfolio_return_rate(current_price: float, avg_price: float) -> float | None:
+    # 매입가를 모르면 수익률도 모른다 — 0%로 단언하지 않는다(이슈 #122).
     if avg_price <= 0:
-        return 0.0
+        return None
     return round(((current_price - avg_price) / avg_price) * 100, 4)
 
 
@@ -132,8 +133,8 @@ async def get_visualization_portfolio(session: Session = Depends(get_session)):
         if portfolio.current_price is not None:
             # 현재가가 있는 종목: 평가금액과 수익률을 정확히 계산합니다.
             current_price: float | None = float(portfolio.current_price)
-            return_rate: float | None = _portfolio_return_rate(current_price, avg_price)
-            price_known = True
+            return_rate = _portfolio_return_rate(current_price, avg_price)
+            price_known = return_rate is not None
             market_value = current_price * quantity
             total_asset += market_value
             if avg_price > 0:

@@ -272,7 +272,12 @@ def _parse_balance_holdings(balance_text: str) -> list[_BalanceHolding]:
     return holdings
 
 
-def _sync_portfolio_from_balance(balance_text: str, session: Session) -> None:
+def _sync_portfolio_from_balance(
+    balance_text: str,
+    session: Session,
+    *,
+    holdings: list[_BalanceHolding] | None = None,
+) -> None:
     """get_balance 응답을 바탕으로 Portfolio 테이블을 동기화합니다.
 
     전략: 전량 교체 (기존 행 전체 삭제 후 신규 삽입). 매 잔고 조회마다 실행되어
@@ -285,6 +290,10 @@ def _sync_portfolio_from_balance(balance_text: str, session: Session) -> None:
     없어 항상 null로 둡니다. null 수익률이 "실제 0%"와 혼동되지 않도록
     /api/v1/portfolio 응답에서 return_rate: null로 구분됩니다(이슈 #122).
     current_price 확보 방안은 후속 이슈를 참고하세요.
+
+    holdings: 호출처에서 이미 _parse_balance_holdings를 실행한 경우 그 결과를 전달하면
+    재파싱을 건너뜁니다. None이면 balance_text에서 직접 파싱합니다.
+    잘림·마커 가드는 holdings 인자 유무에 관계없이 항상 balance_text를 검사합니다.
     """
     if is_balance_truncated(balance_text):
         logger.warning(
@@ -306,7 +315,9 @@ def _sync_portfolio_from_balance(balance_text: str, session: Session) -> None:
         )
         return
 
-    holdings = _parse_balance_holdings(balance_text)
+    # 호출처에서 이미 파싱한 결과가 있으면 재파싱을 건너뛴다(경고 중복 방지).
+    if holdings is None:
+        holdings = _parse_balance_holdings(balance_text)
 
     # 전량 교체: 기존 행 전체 삭제
     existing = session.exec(select(Portfolio)).all()
@@ -589,7 +600,12 @@ async def _monitor_market_task(
                 _balance_failure_streak = 0
                 _last_balance_error = None
 
-            owned_stocks = extract_stocks_from_balance(balance_text)
+            # 같은 텍스트를 두 번 파싱하지 않도록 먼저 한 번만 파싱합니다.
+            # extract_stocks_from_balance도 내부에서 _parse_balance_holdings를 호출하는데,
+            # _sync_portfolio_from_balance가 같은 텍스트를 또 파싱하면 경고가 두 번씩
+            # 찍히고 "저장합니다"라는 문구가 실제로 저장하지 않는 호출에서도 나옵니다.
+            _holdings = _parse_balance_holdings(balance_text)
+            owned_stocks = [h.name for h in _holdings]
 
             # Portfolio 테이블 동기화 — 잔고 조회 성공 시에만 실행.
             # 잘린 잔고에서 전량 교체하면 보유 종목이 사라지므로,
@@ -597,7 +613,7 @@ async def _monitor_market_task(
             # 동기화 실패는 감시 루프에 영향을 주지 않아야 하므로 예외를 격리합니다.
             try:
                 with Session(engine) as sync_session:
-                    _sync_portfolio_from_balance(balance_text, sync_session)
+                    _sync_portfolio_from_balance(balance_text, sync_session, holdings=_holdings)
             except Exception as e:
                 logger.error("Portfolio 동기화 중 오류 (감시는 계속): %s", e, exc_info=True)
 

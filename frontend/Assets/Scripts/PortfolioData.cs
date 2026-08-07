@@ -17,12 +17,19 @@ public class Holding
 
     public float GetWeight(double total_asset)
     {
-        if (!price_known || total_asset == 0)
+        if (total_asset == 0)
             return 0f;
+        if (!price_known)
+        {
+            // 현재가 미상 종목: total_asset도 avg_price × quantity 기준 근사값을 포함하므로
+            // 같은 기준으로 비중을 계산한다. avg_price=0이면 기여분이 없으므로 0을 반환.
+            return (float)((double)avg_price * quantity / total_asset * 100.0);
+        }
         // 정수 오버플로 방지: current_price(float)를 double로 승격한 뒤 계산한다.
         return (float)((double)current_price * quantity / total_asset * 100.0);
     }
 }
+
 
 [System.Serializable]
 public class PortfolioData
