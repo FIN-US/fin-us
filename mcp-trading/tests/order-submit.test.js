@@ -26,6 +26,25 @@ function tempDedupLedgerPath(t) {
   return path.join(dir, "ledger.json");
 }
 
+// release(key) → releaseCalls 기록, withMarkSucceededGuard=true 시 markSucceeded 가드 추가
+// (submit()이 throw할 때 markSucceeded가 절대 호출되지 않아야 하는 테스트용)
+function stubStore({ withMarkSucceededGuard = false } = {}) {
+  const releaseCalls = [];
+  return {
+    releaseCalls,
+    store: {
+      release: (key) => releaseCalls.push(key),
+      ...(withMarkSucceededGuard
+        ? {
+            markSucceeded() {
+              throw new Error("markSucceeded should not run when submit() throws");
+            },
+          }
+        : {}),
+    },
+  };
+}
+
 // Mutation this catches: moving markSucceeded back inside the try (or letting any
 // exception from it flow into the shared catch) so that a ledger write failure is
 // treated the same as an order failure — release() gets called and/or the success
@@ -95,15 +114,7 @@ test("submitOrder: after a markSucceeded failure, the ledger entry stays in plac
 // from before #161: KIS explicitly said rt_cd !== "0", so nothing was submitted and
 // the guard must be released for a legitimate retry.
 test("submitOrder: releases the dedup guard when KIS rejects the order (rt_cd !== \"0\") — unchanged behavior", async (t) => {
-  const releaseCalls = [];
-  const store = {
-    release(key) {
-      releaseCalls.push(key);
-    },
-    markSucceeded() {
-      throw new Error("markSucceeded should not run when submit() throws");
-    },
-  };
+  const { releaseCalls, store } = stubStore({ withMarkSucceededGuard: true });
 
   const rejected = new Error("KIS API 오류: 주문가능금액을 초과하였습니다.");
   rejected.kisOrderRejected = true;
@@ -123,15 +134,7 @@ test("submitOrder: releases the dedup guard when KIS rejects the order (rt_cd !=
 // full TTL and DuplicateOrderError tells the user to "check the order shortly" for an
 // order that provably never existed, with no escape except changing quantity/price.
 test("submitOrder: releases the dedup guard when the KIS POST never went out (kisOrderNotSubmitted, e.g. token/hashkey pre-flight failure)", async (t) => {
-  const releaseCalls = [];
-  const store = {
-    release(key) {
-      releaseCalls.push(key);
-    },
-    markSucceeded() {
-      throw new Error("markSucceeded should not run when submit() throws");
-    },
-  };
+  const { releaseCalls, store } = stubStore({ withMarkSucceededGuard: true });
 
   const notSubmitted = new Error("Access Token 발급 실패: EGW00133 초당 거래건수를 초과하였습니다.");
   notSubmitted.kisOrderNotSubmitted = true;
@@ -149,12 +152,7 @@ test("submitOrder: releases the dedup guard when the KIS POST never went out (ki
 // received the order is unknown — releasing here could let a duplicate through while
 // the original order might still be live, so the guard must stay (fail-closed).
 test("submitOrder: does not release the dedup guard when the axios POST fails and submission status is unknown — unchanged behavior", async (t) => {
-  const releaseCalls = [];
-  const store = {
-    release(key) {
-      releaseCalls.push(key);
-    },
-  };
+  const { releaseCalls, store } = stubStore();
 
   const submitFailure = new Error("connect ETIMEDOUT");
   submitFailure.kisOrderSubmittedMaybe = true;
@@ -172,12 +170,7 @@ test("submitOrder: does not release the dedup guard when the axios POST fails an
 // application code unrelated to the KIS call) must default to NOT releasing — the old
 // code's `!error.kisOrderSubmittedMaybe` fell through to release() here instead.
 test("submitOrder: does not release the dedup guard for an error with none of the three recognized flags (inversion of pre-#161 behavior, which released here)", async (t) => {
-  const releaseCalls = [];
-  const store = {
-    release(key) {
-      releaseCalls.push(key);
-    },
-  };
+  const { releaseCalls, store } = stubStore();
 
   const unrecognizedError = new TypeError("Cannot read properties of undefined (reading 'output')");
 
@@ -236,12 +229,7 @@ test("submitOrder: a non-Error thrown by markSucceeded (e.g. a plain string) doe
 // unguarded when submit() itself rejects with a non-Error value (e.g. `throw null`,
 // which real code should never do, but a defensive guard must still not crash on it).
 test("submitOrder: a non-Error value thrown by submit() (e.g. null) does not crash and defaults to not releasing", async (t) => {
-  const releaseCalls = [];
-  const store = {
-    release(key) {
-      releaseCalls.push(key);
-    },
-  };
+  const { releaseCalls, store } = stubStore();
 
   await assert.rejects(
     () => submitOrder({ dedupStore: store, dedupKey: "order-key-null-throw", submit: async () => { throw null; } }), // eslint-disable-line no-throw-literal
