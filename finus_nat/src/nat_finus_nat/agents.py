@@ -28,6 +28,7 @@ from nat.data_models.component_ref import FunctionRef
 from nat.data_models.component_ref import LLMRef
 from nat.data_models.function import FunctionBaseConfig
 from nat.utils.type_converter import GlobalTypeConverter
+from nat_finus_nat.finus_api import DATA_TOOL_LEDGER, DataToolLedger
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +40,180 @@ _DEFAULT_CONVERSATION_ID = os.environ.get(
 ).strip()
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _KNOWN_STOCK_NAMES = ("삼성전자", "NAVER", "네이버")
+
+# ---- Tool enforcement gate (#152) ----
+
+# Matches financial numbers: "5,000,000원", "500만원", "1억원", "7만 5300원", "5.3%", "100주".
+# `주` uses a negative lookahead to exclude time expressions like "2주 동안", "1주일", "2주간".
+_FIN_NUM_RE = re.compile(
+    r"[\d,]+(?:\.\d+)?"                           # base number with optional decimal
+    r"(?:\s*[만억조]\s*(?:[\d,]+(?:\.\d+)?)?)*"   # 만/억/조 chain; trailing digits optional
+    r"\s*(?:원|달러|위안|엔|%"
+    r"|주(?!\s*(?:일|간|동안|가\s*(?:가|는|를|에|의|상승|하락|올|내)|식|말|중|후|째|만에))"  # 주: exclude time/price(주가+조사) expressions
+    r"|좌)",
+    re.UNICODE,
+)
+
+_KO_UNIT_VALUES: dict[str, int] = {
+    "만": 10_000,
+    "억": 100_000_000,
+    "조": 1_000_000_000_000,
+}
+# Regex for one numeric term: digits (with optional decimal) + optional Korean unit.
+_NUM_TERM_RE = re.compile(r"(\d+(?:\.\d+)?)\s*([만억조])?")
+# Scale factor: multiply normalised value by 1000 to preserve up to 3 decimal places.
+# This prevents int(float(s)) truncation that would equate 5.3% and 5.7%.
+_NUM_SCALE = 1000
+
+
+def _normalize_number_str(s: str) -> int | None:
+    """Normalize a comma/Korean-unit number to a scaled integer (×_NUM_SCALE=1000).
+
+    Examples: ``"75,300"`` → 75_300_000; ``"7만5300"`` → 75_300_000;
+              ``"500만"`` → 5_000_000_000; ``"5.3"`` → 5_300 (≠ ``"5.7"`` → 5_700).
+    Returns None when *s* cannot be fully parsed (e.g. trailing non-numeric residue).
+    """
+    s = s.replace(",", "").strip()
+    if not s:
+        return None
+    total, pos, seen = 0.0, 0, False
+    for m in _NUM_TERM_RE.finditer(s):
+        if m.start() != pos:      # gap between matches means unparsed residue
+            return None
+        pos, seen = m.end(), True
+        value = float(m.group(1))
+        total += value * _KO_UNIT_VALUES[m.group(2)] if m.group(2) else value
+    if not seen or pos != len(s):
+        return None
+    return int(round(total * _NUM_SCALE))
+
+
+def _extract_financial_numbers(text: str) -> frozenset[int]:
+    """Return a frozenset of normalized integer values of all financial numbers in *text*."""
+    result: set[int] = set()
+    for m in _FIN_NUM_RE.finditer(text):
+        raw = re.sub(r"[원달러위안엔%주좌\s]", "", m.group()).strip()
+        n = _normalize_number_str(raw)
+        if n is not None:
+            result.add(n)
+    return frozenset(result)
+
+
+def _has_numeric_claims(text: str) -> bool:
+    """Return True when *text* contains any numeric financial claim."""
+    return bool(_FIN_NUM_RE.search(text))
+
+
+def _check_tool_enforcement(
+    answer: str,
+    ledger: DataToolLedger,
+    chat_request: ChatRequest,
+) -> bool:
+    """Return True when the gate should trip (answer must be retried or rejected).
+
+    The gate trips only when ALL three conditions hold:
+    1. The answer contains financial numeric claims.
+    2. No data tool produced a successful result.
+    3. The claimed numbers are NOT already present in the input transcript
+       (an agent restating previously provided numbers must pass).
+    """
+    if not _has_numeric_claims(answer):
+        return False
+    if ledger.any_success():
+        return False
+    answer_nums = _extract_financial_numbers(answer)
+    if not answer_nums:
+        return False
+    transcript_text = "\n".join(message_content_text(m) for m in chat_request.messages)
+    transcript_nums = _extract_financial_numbers(transcript_text)
+    return not answer_nums.issubset(transcript_nums)
+
+
+# Deterministic rejection returned when both retry attempts fail.
+# Must NOT be model-generated text.
+_TOOL_ENFORCEMENT_REJECTION = (
+    "[데이터 미확인] 데이터 조회 도구 없이 수치가 포함된 답변이 반복됐습니다. "
+    "잔고·현재가·거래내역 등은 반드시 도구로 조회한 뒤 제시해야 합니다. "
+    "다시 질문해 주세요."
+)
+
+# Prepended to the query on the second attempt to force tool usage.
+# Changes the input rather than repeating the same system-prompt instruction
+# (which the model already ignored on the first attempt).
+_CORRECTIVE_TOOL_PREFIX = (
+    "[도구 강제] 반드시 적절한 데이터 조회 도구를 먼저 호출하여 Observation을 받은 후 답변하세요. "
+    "도구 없이 수치를 포함한 답변은 거부됩니다.\n\n"
+)
+
+
+async def _run_with_gate(
+    *,
+    inner: Any,
+    query: str,
+    chat_request: ChatRequest,
+    inner_name: str,
+) -> str:
+    """Invoke *inner* agent with the tool enforcement gate applied.
+
+    First attempt:
+        Run with *query*; return the answer if the gate passes.
+    Second attempt (gate tripped on first):
+        Re-run with a *changed* input that prepends an explicit tool-use directive.
+        Return the second answer if the gate passes.
+    Both attempts fail:
+        Return *_TOOL_ENFORCEMENT_REJECTION* — a deterministic, non-model string.
+    """
+    # --- First attempt ---
+    ledger = DataToolLedger()
+    token = DATA_TOOL_LEDGER.set(ledger)
+    try:
+        result = await inner.ainvoke(ChatRequestOrMessage(input_message=query))
+    finally:
+        DATA_TOOL_LEDGER.reset(token)
+    answer = chat_response_plain_text(result)
+
+    if not _check_tool_enforcement(answer, ledger, chat_request):
+        return answer
+
+    # Gate tripped — log judgment details for post-hoc analysis.
+    transcript_text = "\n".join(message_content_text(m) for m in chat_request.messages)
+    logger.warning(
+        "Tool enforcement gate tripped on first attempt (%s) — retrying. "
+        "claimed=%s transcript=%s ledger_records=%d",
+        inner_name,
+        sorted(_extract_financial_numbers(answer)),
+        sorted(_extract_financial_numbers(transcript_text)),
+        len(ledger.records),
+    )
+
+    # Side-effect guard: if a write tool already ran, skip the retry to avoid
+    # duplicate side effects (e.g. duplicate diary entries).
+    if ledger.had_side_effect():
+        logger.error(
+            "Tool enforcement gate tripped on first attempt (%s) but a side-effecting "
+            "tool ran — skipping retry to avoid duplicate writes",
+            inner_name,
+        )
+        return _TOOL_ENFORCEMENT_REJECTION
+
+    # --- Second attempt with changed input ---
+    corrective_query = _CORRECTIVE_TOOL_PREFIX + query
+    ledger2 = DataToolLedger()
+    token2 = DATA_TOOL_LEDGER.set(ledger2)
+    try:
+        result2 = await inner.ainvoke(ChatRequestOrMessage(input_message=corrective_query))
+    finally:
+        DATA_TOOL_LEDGER.reset(token2)
+    answer2 = chat_response_plain_text(result2)
+
+    if not _check_tool_enforcement(answer2, ledger2, chat_request):
+        return answer2
+
+    logger.error(
+        "Tool enforcement gate tripped twice (%s) — returning deterministic rejection",
+        inner_name,
+    )
+    return _TOOL_ENFORCEMENT_REJECTION
 
 
 def message_content_text(message: Message) -> str:
@@ -218,21 +393,30 @@ async def fe_branch(config: FeBranchConfig, builder: Builder):
     async def run_subagent(chat_request_or_message: ChatRequestOrMessage) -> str:
         chat_request = GlobalTypeConverter.get().convert(chat_request_or_message, to_type=ChatRequest)
         if inner_name == "news_agent":
-            direct = await _holdings_news_answer(builder, chat_request)
+            # Deterministic path: assembles tool output directly without going through
+            # _run_with_gate. A ledger box is still required so that _record_to_ledger
+            # inside the news tool does not log a spurious ERROR on every happy-path call.
+            token = DATA_TOOL_LEDGER.set(DataToolLedger())
+            try:
+                direct = await _holdings_news_answer(builder, chat_request)
+            finally:
+                DATA_TOOL_LEDGER.reset(token)
             if direct is not None:
                 return direct
         inner = await builder.get_function(inner_name)
-        payload = ChatRequestOrMessage(
-            input_message=_contextual_user_query(
-                chat_request,
-                config.max_history_messages,
-                config.history_message_max_chars,
-                config.history_assistant_message_max_chars,
-                config.history_transcript_max_chars,
-            )
+        query = _contextual_user_query(
+            chat_request,
+            config.max_history_messages,
+            config.history_message_max_chars,
+            config.history_assistant_message_max_chars,
+            config.history_transcript_max_chars,
         )
-        result = await inner.ainvoke(payload)
-        return chat_response_plain_text(result)
+        return await _run_with_gate(
+            inner=inner,
+            query=query,
+            chat_request=chat_request,
+            inner_name=inner_name,
+        )
 
     yield FunctionInfo.from_fn(run_subagent, description=desc)
 

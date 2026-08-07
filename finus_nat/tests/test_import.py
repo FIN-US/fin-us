@@ -53,3 +53,23 @@ def test_react_agent_graph_init_is_unpatched_vendor_code():
 
     # 옛 패치의 실제 페이로드: 소스 재작성이 아니라 모듈 전역 SYSTEM_PROMPT 재바인딩.
     assert ra_mod.SYSTEM_PROMPT is prompt_mod.SYSTEM_PROMPT
+
+
+def test_vendor_patch_status_reflects_actual_installation():
+    """#152: VENDOR_PATCH_STATUS가 실제 벤더 패치 설치 여부를 반영한다.
+
+    패치 코드가 제거됐으므로 세 항목 모두 ``"not_applied"``여야 한다.
+    값이 ``"applied"``이면 예상치 못한 런타임 패치가 벤더를 수정하고 있다는 뜻이고,
+    값이 ``"unknown"``이면 벤더 모듈을 import하지 못했다는 뜻 — 둘 다 이상 상태다.
+    """
+    from nat_finus_nat.register import VENDOR_PATCH_STATUS
+
+    assert VENDOR_PATCH_STATUS["react_system_prompt"] == "not_applied", (
+        "react_system_prompt: 패치가 예상치 않게 설치돼 있거나 모듈 import 실패"
+    )
+    assert VENDOR_PATCH_STATUS["agent_node_plain_final"] == "not_applied", (
+        "agent_node_plain_final: 패치가 예상치 않게 설치돼 있거나 모듈 import 실패"
+    )
+    assert VENDOR_PATCH_STATUS["react_graph_init"] == "not_applied", (
+        "react_graph_init: 패치가 예상치 않게 설치돼 있거나 모듈 import 실패"
+    )

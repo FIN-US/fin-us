@@ -1,10 +1,14 @@
 import asyncio
 import json
+import logging
 import os
-from contextlib import asynccontextmanager
-from pathlib import Path
+import re
 from collections.abc import Callable
-from typing import Any, Literal, TypeAlias
+from contextlib import asynccontextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Literal, NamedTuple, TypeAlias
 
 import httpx
 from mcp import ClientSession
@@ -18,6 +22,84 @@ from nat.builder.builder import Builder
 from nat.builder.function_info import FunctionInfo
 from nat.cli.register_workflow import register_function
 from nat.data_models.function import FunctionBaseConfig
+
+logger = logging.getLogger(__name__)
+
+# ---- Data-tool ledger for tool enforcement (#152) ----
+
+
+class DataToolRecord(NamedTuple):
+    """Immutable record of one Fin-Us data tool invocation."""
+
+    tool_name: str
+    ok: bool          # True when the response contains non-error data
+    produced_rows: bool  # True when ok and the response body is non-empty
+
+
+# Tools that produce irreversible side effects (writes). When any of these appear in
+# the ledger and the gate trips, _run_with_gate skips the retry to prevent duplicate
+# writes (e.g. two identical diary entries created for one user request).
+_SIDE_EFFECT_TOOLS: frozenset[str] = frozenset({"finus_save_diary"})
+
+
+@dataclass
+class DataToolLedger:
+    """Mutable box tracking Fin-Us data tool calls within a run_subagent invocation.
+
+    Stored as a mutable object (not ContextVar[int] + .set()) so that
+    mutations remain visible across asyncio.create_task context copies that
+    LangGraph creates internally via copy_context().
+    """
+
+    records: list[DataToolRecord] = field(default_factory=list)
+
+    def record(self, tool_name: str, *, ok: bool, produced_rows: bool) -> None:
+        self.records.append(DataToolRecord(tool_name=tool_name, ok=ok, produced_rows=produced_rows))
+
+    def any_success(self) -> bool:
+        """Return True if at least one tool call successfully produced data rows."""
+        return any(r.ok and r.produced_rows for r in self.records)
+
+    def had_side_effect(self) -> bool:
+        """Return True if a side-effecting (write) tool was recorded.
+
+        Used by _run_with_gate to skip the retry and return the rejection immediately,
+        preventing duplicate writes when the gate trips after a diary save.
+        """
+        return any(r.tool_name in _SIDE_EFFECT_TOOLS for r in self.records)
+
+
+DATA_TOOL_LEDGER: ContextVar["DataToolLedger | None"] = ContextVar(
+    "finus_data_tool_ledger", default=None
+)
+
+_ERROR_JSON_PREFIX_RE = re.compile(r'^\s*\{"error"')
+
+
+def _record_to_ledger(tool_name: str, result: str) -> None:
+    """Record a completed data-tool call into the current context's ledger.
+
+    Logs ERROR and returns without recording when the ledger box is None —
+    this happens when a tool runs in a threadpool that did not inherit the
+    ContextVar (e.g., outside a run_subagent context).  The resulting empty
+    ledger causes the gate to trip for any numeric claim, which is the
+    correct conservative behaviour.
+    """
+    ledger = DATA_TOOL_LEDGER.get()
+    if ledger is None:
+        logger.error(
+            "DATA_TOOL_LEDGER not set when %s completed — tool enforcement cannot "
+            "track this call. Tool may have run outside a run_subagent context or "
+            "in a threadpool that does not propagate contextvars.",
+            tool_name,
+        )
+        return
+    stripped = result.strip()
+    ok = bool(stripped) and not _ERROR_JSON_PREFIX_RE.match(stripped)
+    # 쓰기 도구의 성공은 "조회해서 데이터를 받았다"가 아니다. any_success()에 포함되면
+    # 일지 저장 한 번으로 그 호출 전체의 게이트가 풀린다.
+    ledger.record(tool_name, ok=ok, produced_rows=ok and tool_name not in _SIDE_EFFECT_TOOLS)
+
 
 # Remote MCP / doc 한도
 _MCP_DOC_MAX_CHARS = 14_000 #텍스트 최대 길이
@@ -589,14 +671,17 @@ def _mcp_news_stock_function_info(
     timeout_sec: float,
     mcp_tool: str,
     fn_doc: str,
+    ledger_tool_name: str,  # required — omitting silently disables ledger tracking
 ) -> FunctionInfo:
     async def by_stock(stock_name: str) -> str:
-        return await _mcp_news_stock(
+        result = await _mcp_news_stock(
             vendor_root=vendor_root,
             timeout_sec=timeout_sec,
             tool_name=mcp_tool,
             stock_name=stock_name,
         )
+        _record_to_ledger(ledger_tool_name, result)
+        return result
 
     by_stock.__doc__ = fn_doc
     return FunctionInfo.from_fn(by_stock, description=fn_doc)
@@ -613,6 +698,7 @@ async def finus_market_news(config: FinusMarketNewsConfig, _builder: Builder):
         timeout_sec=config.timeout_sec,
         mcp_tool="get_market_news",
         fn_doc=doc,
+        ledger_tool_name="finus_market_news",
     )
 
 
@@ -624,11 +710,13 @@ async def finus_disclosure_signal(config: FinusDisclosureSignalConfig, _builder:
     )
 
     async def get_disclosure_signal(stock_name: str) -> str:
-        return await _mcp_dart_stock(
+        result = await _mcp_dart_stock(
             vendor_root=config.vendor_root,
             timeout_sec=config.timeout_sec,
             stock_name=stock_name,
         )
+        _record_to_ledger("finus_disclosure_signal", result)
+        return result
 
     get_disclosure_signal.__doc__ = doc
     yield FunctionInfo.from_fn(get_disclosure_signal, description=doc)
@@ -643,12 +731,14 @@ async def finus_earnings_report(config: FinusEarningsReportConfig, _builder: Bui
     )
 
     async def get_earnings_report(stock_name: str, period: str | None = None) -> str:
-        return await _mcp_dart_earnings_stock(
+        result = await _mcp_dart_earnings_stock(
             vendor_root=config.vendor_root,
             timeout_sec=config.timeout_sec,
             stock_name=stock_name,
             period=period,
         )
+        _record_to_ledger("finus_earnings_report", result)
+        return result
 
     get_earnings_report.__doc__ = doc
     yield FunctionInfo.from_fn(get_earnings_report, description=doc)
@@ -672,12 +762,14 @@ async def finus_mcp_trading_today_orders(config: FinusMcpTradingTodayOrdersConfi
             arguments["ccld_dvsn"] = inp.ccld_dvsn.strip()
         if inp.sll_buy_dvsn.strip():
             arguments["sll_buy_dvsn"] = inp.sll_buy_dvsn.strip()
-        return await _mcp_trading_call(
+        result = await _mcp_trading_call(
             vendor_root=config.vendor_root,
             timeout_sec=config.timeout_sec,
             tool_name="get_today_daily_orders",
             arguments=arguments,
         )
+        _record_to_ledger("finus_mcp_trading_today_orders", result)
+        return result
 
     get_today_daily_orders.__doc__ = doc
     yield FunctionInfo.from_fn(
@@ -696,12 +788,14 @@ async def finus_mcp_trading_get_balance(config: FinusMcpTradingGetBalanceConfig,
     )
 
     async def get_balance(inp: FinusMcpTradingGetBalanceInput) -> str:  # noqa: ARG001
-        return await _mcp_trading_call(
+        result = await _mcp_trading_call(
             vendor_root=config.vendor_root,
             timeout_sec=config.timeout_sec,
             tool_name="get_balance",
             arguments={},
         )
+        _record_to_ledger("finus_mcp_trading_get_balance", result)
+        return result
 
     get_balance.__doc__ = doc
     yield FunctionInfo.from_fn(
@@ -724,12 +818,14 @@ async def finus_mcp_trading_balance_rlz_pl(config: FinusMcpTradingBalanceRlzPlCo
         arguments: McpCallArguments = {}
         if inp.stock_name.strip():
             arguments["stock_name"] = inp.stock_name.strip()
-        return await _mcp_trading_call(
+        result = await _mcp_trading_call(
             vendor_root=config.vendor_root,
             timeout_sec=config.timeout_sec,
             tool_name="get_balance_rlz_pl",
             arguments=arguments,
         )
+        _record_to_ledger("finus_mcp_trading_balance_rlz_pl", result)
+        return result
 
     get_balance_rlz_pl.__doc__ = doc
     yield FunctionInfo.from_fn(
@@ -757,9 +853,13 @@ async def finus_save_diary(config: FinusSaveDiaryConfig, _builder: Builder):
         title = (inp.title or "").strip()
         content = (inp.content or "").strip()
         if not title:
-            return _err_json("diary_title_required", hint="Provide a non-empty title.")
+            result = _err_json("diary_title_required", hint="Provide a non-empty title.")
+            _record_to_ledger("finus_save_diary", result)
+            return result
         if not content:
-            return _err_json("diary_content_required", hint="Provide non-empty diary content.")
+            result = _err_json("diary_content_required", hint="Provide non-empty diary content.")
+            _record_to_ledger("finus_save_diary", result)
+            return result
 
         url = f"{base_url}/api/v1/db/diary"
         try:
@@ -768,18 +868,26 @@ async def finus_save_diary(config: FinusSaveDiaryConfig, _builder: Builder):
                 resp.raise_for_status()
                 body = resp.json()
         except httpx.HTTPStatusError as exc:
-            return _err_json(
+            result = _err_json(
                 "diary_api_http_error",
                 status_code=exc.response.status_code,
                 detail=exc.response.text[:500],
                 url=url,
             )
+            _record_to_ledger("finus_save_diary", result)
+            return result
         except Exception as exc:  # noqa: BLE001
-            return _err_json("diary_api_request_failed", detail=str(exc), url=url)
+            result = _err_json("diary_api_request_failed", detail=str(exc), url=url)
+            _record_to_ledger("finus_save_diary", result)
+            return result
 
         if body.get("status") != "success":
-            return _err_json("diary_api_error", response=body)
-        return json.dumps(body.get("data"), ensure_ascii=False)
+            result = _err_json("diary_api_error", response=body)
+            _record_to_ledger("finus_save_diary", result)
+            return result
+        result = json.dumps(body.get("data"), ensure_ascii=False)
+        _record_to_ledger("finus_save_diary", result)
+        return result
 
     yield FunctionInfo.from_fn(
         save_trading_diary,
@@ -806,18 +914,26 @@ async def finus_list_diaries(config: FinusListDiariesConfig, _builder: Builder):
                 resp.raise_for_status()
                 body = resp.json()
         except httpx.HTTPStatusError as exc:
-            return _err_json(
+            result = _err_json(
                 "diary_api_http_error",
                 status_code=exc.response.status_code,
                 detail=exc.response.text[:500],
                 url=url,
             )
+            _record_to_ledger("finus_list_diaries", result)
+            return result
         except Exception as exc:  # noqa: BLE001
-            return _err_json("diary_api_request_failed", detail=str(exc), url=url)
+            result = _err_json("diary_api_request_failed", detail=str(exc), url=url)
+            _record_to_ledger("finus_list_diaries", result)
+            return result
 
         if body.get("status") != "success":
-            return _err_json("diary_api_error", response=body)
-        return json.dumps(body.get("data"), ensure_ascii=False)
+            result = _err_json("diary_api_error", response=body)
+            _record_to_ledger("finus_list_diaries", result)
+            return result
+        result = json.dumps(body.get("data"), ensure_ascii=False)
+        _record_to_ledger("finus_list_diaries", result)
+        return result
 
     yield FunctionInfo.from_fn(
         list_trading_diaries,
@@ -914,15 +1030,18 @@ async def finus_account_balance(config: FinusAccountBalanceConfig, _builder: Bui
         """
         prepared = _prepare_kis_trading_mcp_call(inp, config)
         if isinstance(prepared, str):
+            _record_to_ledger("finus_account_balance", prepared)
             return prepared
         tool_name, arguments = prepared
-        return await _mcp_call_tool_remote(
+        result = await _mcp_call_tool_remote(
             transport=config.mcp_transport,
             url=config.mcp_url,
             tool_name=tool_name,
             arguments=arguments,
             timeout_sec=config.timeout_sec,
         )
+        _record_to_ledger("finus_account_balance", result)
+        return result
 
     base_desc = (get_account_balance.__doc__ or "").strip()
     remote = await _fetch_mcp_tool_documentation(config)
