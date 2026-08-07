@@ -667,31 +667,50 @@ _KIS_TRADING_TOOL_GUIDE = """
 
 # ---- 조회 전용 KIS Trading MCP 래퍼 (#66) ----
 
-# KIS TR api_type 중 주문 실행(write) 동작에 해당하는 명시적 값 집합.
-# "order" 접두사가 매수·매도·해외주문 계열을 모두 커버하고,
-# modify_/cancel_ 계열은 명시적으로 추가한다.
-_ORDER_EXECUTION_API_EXACT: frozenset[str] = frozenset({
-    "modify_order",
-    "cancel_order",
-})
+# 허용 목록(allowlist) 방식 — fail-closed: 목록에 없는 api_type은 기본 차단.
+#
+# 설계 근거:
+#   KIS TR 이름 규칙: 조회 계열은 예외 없이 ``inquire_`` 또는 ``search_`` 로 시작한다.
+#   스키마 조회(find_api_detail)도 읽기 전용이다 — 에이전트가 이 도구로 TR 스키마를
+#   발견하더라도, 실제 호출 시 api_type이 이 허용 목록을 통과해야 하므로 이중 차단이 된다.
+#   결과적으로 원격 MCP 서버가 새 TR을 추가해도 허용 목록에 명시하기 전까지는 차단된다.
+#
+# 허용 접두사:
+#   inquire_  — 잔고·시세·체결·투자자·일봉·분봉 등 모든 조회 TR
+#   search_   — 종목 코드 검색 등 검색 TR
+#
+# 허용 정확 값:
+#   find_api_detail — TR 스키마 조회 (에이전트 자기교정 루프용; 읽기 전용)
+#
+# 운영자 추가 방법: 새 조회 TR이 위 접두사 패턴을 벗어나면
+# _READONLY_API_ALLOWLIST_EXACT에 추가하거나 접두사를 확장하세요.
+_READONLY_API_ALLOWLIST_PREFIXES: tuple[str, ...] = ("inquire_", "search_")
+_READONLY_API_ALLOWLIST_EXACT: frozenset[str] = frozenset({"find_api_detail"})
 
 
-def _is_order_execution_api_type(api_type: str) -> bool:
-    """Return True when *api_type* is a KIS order-execution (write) operation.
+def _is_readonly_api_type(api_type: str) -> bool:
+    """Return True when *api_type* is a permitted read-only KIS Trading API (allowlist, fail-closed).
 
-    Blocks ``order_*`` prefixed types (order_cash, order_sell, overseas variants, …)
-    and explicit ``modify_order`` / ``cancel_order``.
-    Read-only types (``inquire_*``, ``find_api_detail``, ``auth``, …) return False.
+    Allowed:
+    - ``inquire_*`` prefix — balance, price, chart, investor, and all other inquiry TRs
+    - ``search_*`` prefix — stock code and other search TRs
+    - ``find_api_detail`` — TR schema lookup (safe: discovering schemas does not execute orders)
+
+    Any api_type not in the above list returns False, including all order-execution types
+    (``order_cash``, ``order_sell``, ``modify_order``, ``cancel_order``, novel future types, …).
     """
     lower = (api_type or "").strip().lower()
-    return lower.startswith("order") or lower in _ORDER_EXECUTION_API_EXACT
+    return (
+        any(lower.startswith(p) for p in _READONLY_API_ALLOWLIST_PREFIXES)
+        or lower in _READONLY_API_ALLOWLIST_EXACT
+    )
 
 
 class FinusAccountBalanceReadonlyConfig(FinusAccountBalanceConfig, name="finus_account_balance_readonly"):
-    """finus_account_balance 조회 전용 래퍼 — 주문 실행 api_type 차단 (#66).
+    """finus_account_balance 조회 전용 래퍼 — allowlist 방식 api_type 차단 (#66).
 
-    비-trading 에이전트(news/recommend/strategy)가 잔고·시세 조회 능력은 유지하되
-    주문 실행 api_type(order_*, modify_order, cancel_order)을 호출하지 못하도록 한다.
+    비-trading 에이전트(news/recommend/strategy/diary)가 잔고·시세 조회 능력은 유지하되
+    허용 목록(inquire_*, search_*, find_api_detail)에 없는 api_type은 fail-closed로 차단한다.
     """
 
 
@@ -699,11 +718,10 @@ class FinusAccountBalanceReadonlyConfig(FinusAccountBalanceConfig, name="finus_a
 async def finus_account_balance_readonly(config: FinusAccountBalanceReadonlyConfig, _builder: Builder):
 
     async def get_account_balance_readonly(inp: KisTradingMcpCallInput) -> str:
-        """Kis Trading MCP 조회 전용 래퍼 — 주문 실행 api_type은 차단된다 (#66).
+        """Kis Trading MCP 조회 전용 래퍼 — 허용 목록에 없는 api_type은 차단된다 (#66).
 
-        잔고·시세·종목 조회(inquire_balance, inquire_price, find_api_detail 등)는
-        finus_account_balance와 동일하게 동작한다.
-        주문 실행(order_cash, modify_order, cancel_order 등)은 즉시 오류를 반환한다.
+        허용(pass-through): inquire_*(잔고·시세·체결 등), search_*, find_api_detail.
+        차단(fail-closed): order_*, modify_order, cancel_order, 및 목록에 없는 모든 api_type.
         """
         prepared = _prepare_kis_trading_mcp_call(inp, config)
         if isinstance(prepared, str):
@@ -711,11 +729,17 @@ async def finus_account_balance_readonly(config: FinusAccountBalanceReadonlyConf
             return prepared
         tool_name, arguments = prepared
         api_type = str(arguments.get("api_type", ""))
-        if _is_order_execution_api_type(api_type):
+        if not _is_readonly_api_type(api_type):
             result = _err_json(
-                "kis_order_execution_blocked",
+                "kis_api_type_not_allowed_readonly",
                 api_type=api_type,
-                hint="이 에이전트는 조회 전용입니다. 주문 실행은 trading_agent를 사용하세요.",
+                hint=(
+                    "조회 전용 에이전트에서 허용되지 않은 api_type입니다. "
+                    f"차단된 값: {api_type!r}. "
+                    "허용 목록: inquire_* 접두사, search_* 접두사, find_api_detail. "
+                    "운영자: finus_api.py의 _READONLY_API_ALLOWLIST_EXACT 또는 "
+                    "_READONLY_API_ALLOWLIST_PREFIXES에 추가하세요."
+                ),
             )
             _record_to_ledger("finus_account_balance", result)
             return result
