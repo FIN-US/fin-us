@@ -243,3 +243,284 @@ def test_init_db_concurrent_on_empty_db_does_not_abort_startup(tmp_path, monkeyp
     columns = [row[1] for row in conn.execute("PRAGMA table_info(agentreport)")]
     conn.close()
     assert "provider_supports_tools" in columns
+
+
+# ── A (#162): decision/confidence_score nullable 마이그레이션 ────────────────
+
+
+def _create_post_c_schema_agentreport(db_path: str) -> None:
+    """PR #171(C 구현) 이후, 이 PR(A 구현) 이전의 agentreport 스키마를 재현한다.
+
+    _create_old_schema_agentreport는 Column(String) 기본값(nullable=True)을 쓰므로
+    decision/confidence_score가 이미 nullable이다. 반면 실제 배포된 DB는 SQLModel
+    `decision: str = Field(...)` 선언에서 NOT NULL로 만들어졌다. A 마이그레이션
+    (_run_table_recreate_migrations)이 실제로 NOT NULL → nullable 변환을 수행하는지
+    검증하려면 NOT NULL 컬럼을 가진 테이블이 필요하다.
+    """
+    import sqlite3
+    from sqlmodel import SQLModel
+
+    setup_engine = create_engine(f"sqlite:///{db_path}")
+    SQLModel.metadata.create_all(setup_engine)  # 최신 스키마로 다른 테이블들 생성
+    setup_engine.dispose()
+
+    conn = sqlite3.connect(db_path)
+    conn.execute("DROP TABLE agentreport")
+    conn.execute(
+        "CREATE TABLE agentreport ("
+        "id INTEGER PRIMARY KEY, "
+        "stock_code VARCHAR NOT NULL, "
+        "stock_name VARCHAR NOT NULL, "
+        "provider VARCHAR NOT NULL, "
+        "summary VARCHAR NOT NULL, "
+        "decision VARCHAR NOT NULL, "           # C 이전처럼 NOT NULL
+        "confidence_score FLOAT NOT NULL, "     # C 이전처럼 NOT NULL
+        "reason VARCHAR NOT NULL DEFAULT '', "
+        "provider_supports_tools BOOLEAN NOT NULL DEFAULT 0, "
+        "created_at DATETIME NOT NULL"
+        ")"
+    )
+    conn.execute(
+        "INSERT INTO agentreport "
+        "(stock_code, stock_name, provider, summary, decision, confidence_score, "
+        "reason, provider_supports_tools, created_at) "
+        "VALUES ('005930', '삼성전자', 'openai', '요약', 'BUY', 0.9, '지어낸 근거', 0, "
+        "'2026-01-01 00:00:00')"
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_init_db_makes_decision_and_confidence_score_nullable(tmp_path, monkeypatch):
+    """NOT NULL decision/confidence_score를 가진 구버전 DB에 init_db()를 실행하면
+    두 컬럼이 nullable로 변경되어야 한다. _run_table_recreate_migrations()가 호출되지
+    않거나 DDL에서 nullable을 제거하면 이 테스트가 깨진다.
+    """
+    import sqlite3
+
+    db_path = tmp_path / "post_c_schema_not_null.db"
+    _create_post_c_schema_agentreport(str(db_path))  # decision NOT NULL인 상태
+
+    test_engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
+    monkeypatch.setattr(database, "engine", test_engine)
+
+    database.init_db()
+
+    conn = sqlite3.connect(str(db_path))
+    col_info = {row[1]: row for row in conn.execute("PRAGMA table_info(agentreport)")}
+    conn.close()
+
+    # notnull 비트(인덱스 3)가 0이어야 nullable
+    assert col_info["decision"][3] == 0, "decision이 여전히 NOT NULL이다"
+    assert col_info["confidence_score"][3] == 0, "confidence_score가 여전히 NOT NULL이다"
+
+
+def test_nullable_migration_preserves_existing_rows(tmp_path, monkeypatch):
+    """테이블 재생성 마이그레이션이 기존 데이터를 그대로 보존해야 한다.
+    INSERT SELECT가 빠지거나 컬럼 목록이 어긋나면 이 테스트가 깨진다.
+    """
+    import sqlite3
+
+    db_path = tmp_path / "preserve_rows.db"
+    _create_post_c_schema_agentreport(str(db_path))  # decision="BUY", confidence_score=0.9로 행 삽입됨
+
+    test_engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
+    monkeypatch.setattr(database, "engine", test_engine)
+
+    database.init_db()
+
+    conn = sqlite3.connect(str(db_path))
+    rows = conn.execute(
+        "SELECT stock_name, decision, confidence_score, provider_supports_tools FROM agentreport"
+    ).fetchall()
+    conn.close()
+
+    assert len(rows) == 1
+    stock_name, decision, confidence_score, pst = rows[0]
+    assert stock_name == "삼성전자"
+    assert decision == "BUY"                     # 기존 NOT NULL 값은 보존
+    assert abs(confidence_score - 0.9) < 1e-9    # 기존 값 보존
+    assert pst == 0                               # provider_supports_tools 기본값 유지
+
+
+def test_nullable_migration_allows_null_decision_insert(tmp_path, monkeypatch):
+    """마이그레이션 후 decision/confidence_score에 NULL을 INSERT할 수 있어야 한다.
+    도구 없는 provider 리포트가 실제로 저장될 수 있는지 확인한다.
+    마이그레이션이 NOT NULL을 남겨두면 이 INSERT가 실패해 테스트가 깨진다.
+    """
+    import sqlite3
+
+    db_path = tmp_path / "null_insert.db"
+    _create_post_c_schema_agentreport(str(db_path))  # decision NOT NULL인 상태
+
+    test_engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
+    monkeypatch.setattr(database, "engine", test_engine)
+
+    database.init_db()
+
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "INSERT INTO agentreport "
+        "(stock_code, stock_name, provider, summary, decision, confidence_score, "
+        "reason, provider_supports_tools, created_at) "
+        "VALUES ('005930', '삼성전자', 'openai', '배경 설명', NULL, NULL, "
+        "'', 0, '2026-01-02 00:00:00')"
+    )
+    conn.commit()
+    # created_at으로 새로 삽입한 행(도구 없는 provider)만 필터링한다.
+    # 기존 행('2026-01-01')과 구분하기 위해 날짜를 다르게 지정했다.
+    rows = conn.execute(
+        "SELECT decision, confidence_score FROM agentreport WHERE created_at='2026-01-02 00:00:00'"
+    ).fetchall()
+    conn.close()
+
+    assert len(rows) == 1
+    assert rows[0][0] is None   # decision=NULL
+    assert rows[0][1] is None   # confidence_score=NULL
+
+
+def test_nullable_migration_is_idempotent(tmp_path, monkeypatch):
+    """이미 nullable인 DB에 init_db()를 두 번 호출해도 예외 없이 통과해야 한다."""
+    import sqlite3
+
+    db_path = tmp_path / "idempotent_recreate.db"
+    _create_post_c_schema_agentreport(str(db_path))  # NOT NULL 상태에서 시작
+
+    test_engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
+    monkeypatch.setattr(database, "engine", test_engine)
+
+    database.init_db()
+    database.init_db()  # 두 번째 호출에서 예외가 나면 테스트 실패
+
+    conn = sqlite3.connect(str(db_path))
+    columns = [row[1] for row in conn.execute("PRAGMA table_info(agentreport)")]
+    conn.close()
+    assert "decision" in columns
+    assert "confidence_score" in columns
+
+
+def _agentreport_index_names(db_path: str) -> list[str]:
+    import sqlite3
+
+    conn = sqlite3.connect(db_path)
+    try:
+        return sorted(
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='agentreport'"
+            )
+            if row[0] is not None
+        )
+    finally:
+        conn.close()
+
+
+def test_leftover_agentreport_new_does_not_prevent_migration(tmp_path, monkeypatch):
+    """Critical (#162 리뷰): agentreport_new가 이미 존재하는 DB에서도 init_db()가 성공해야 한다.
+
+    pysqlite는 DML에서만 암묵적으로 BEGIN하므로 CREATE TABLE agentreport_new는
+    engine.begin() 블록 진입 시점에도 autocommit으로 즉시 디스크에 커밋된다.
+    SIGTERM/OOM kill/디스크 부족 등으로 마이그레이션이 중단되면 agentreport_new가
+    남고, 다음 부팅에서 CREATE TABLE "already exists" → 재확인에서 decision이 여전히
+    NOT NULL → raise → 영구 부팅 불능이 된다.
+
+    이 테스트가 잡는 mutation: DROP TABLE IF EXISTS agentreport_new 줄 제거.
+    """
+    db_path = tmp_path / "leftover_new.db"
+    _create_post_c_schema_agentreport(str(db_path))  # agentreport: decision NOT NULL
+
+    # 이전 시도가 중단된 상황을 재현: agentreport_new 고아 테이블을 미리 만들어 둔다.
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "CREATE TABLE agentreport_new ("
+        "id INTEGER PRIMARY KEY, "
+        "stock_code VARCHAR NOT NULL, "
+        "stock_name VARCHAR NOT NULL, "
+        "provider VARCHAR NOT NULL, "
+        "summary VARCHAR NOT NULL, "
+        "decision VARCHAR, "
+        "confidence_score FLOAT, "
+        "reason VARCHAR NOT NULL DEFAULT '', "
+        "provider_supports_tools BOOLEAN NOT NULL DEFAULT 0, "
+        "created_at DATETIME NOT NULL"
+        ")"
+    )
+    conn.commit()
+    conn.close()
+
+    test_engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
+    monkeypatch.setattr(database, "engine", test_engine)
+
+    # 고아 테이블이 있어도 init_db()가 예외 없이 완료되어야 한다.
+    database.init_db()
+
+    conn = sqlite3.connect(str(db_path))
+    col_info = {row[1]: row for row in conn.execute("PRAGMA table_info(agentreport)")}
+    tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    conn.close()
+
+    assert col_info["decision"][3] == 0, "decision이 여전히 NOT NULL이다"
+    assert "agentreport_new" not in tables, "agentreport_new 고아 테이블이 남아 있다"
+
+
+def test_column_set_mismatch_raises_before_recreation(tmp_path, monkeypatch):
+    """Improvement #1 (#162 리뷰): 실제 컬럼 집합이 DDL 가정과 다를 때 RuntimeError를 던져야 한다.
+
+    _PENDING_COLUMN_MIGRATIONS에 agentreport의 새 컬럼이 추가된 뒤 이 함수의 DDL을
+    갱신하지 않으면 컬럼과 데이터가 조용히 소실된다. 단언으로 명시적 부팅 실패를 만든다.
+
+    이 테스트가 잡는 mutation: _RECREATE_AGENTREPORT_COL_SET 불일치 단언 제거.
+    """
+    db_path = tmp_path / "extra_col.db"
+    _create_post_c_schema_agentreport(str(db_path))  # agentreport: decision NOT NULL
+
+    # DDL이 모르는 컬럼 extra_col을 추가해 불일치 상황을 재현한다.
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("ALTER TABLE agentreport ADD COLUMN extra_col VARCHAR")
+    conn.commit()
+    conn.close()
+
+    test_engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
+    monkeypatch.setattr(database, "engine", test_engine)
+
+    import pytest
+    with pytest.raises(RuntimeError, match="agentreport 스키마가 재생성 DDL의 가정과 다릅니다"):
+        database.init_db()
+
+
+def test_nullable_migration_preserves_indexes(tmp_path, monkeypatch):
+    """테이블 재생성 마이그레이션이 stock_code·stock_name 인덱스를 보존해야 한다.
+
+    DROP TABLE은 그 테이블에 딸린 인덱스도 함께 지운다. 재생성 후 CREATE INDEX를
+    다시 실행하지 않으면 models.py의 index=True로 선언된 두 인덱스가 영구히 사라진다 —
+    테이블이 이미 존재하므로 create_all()이 다시 만들어 주지 않기 때문에 조용한 성능
+    저하로만 남는다.
+
+    이 테스트가 잡는 mutation: _RECREATE_AGENTREPORT_INDEX_DDL 실행 루프 제거.
+    """
+    db_path = tmp_path / "preserve_indexes.db"
+    _create_post_c_schema_agentreport(str(db_path))
+
+    # 픽스처는 create_all이 만든 테이블을 DROP하고 인덱스 없이 다시 만든다.
+    # 실제 배포 DB에는 SQLModel이 붙인 인덱스가 있으므로 그 상태를 재현한다.
+    import sqlite3
+
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("CREATE INDEX ix_agentreport_stock_code ON agentreport (stock_code)")
+    conn.execute("CREATE INDEX ix_agentreport_stock_name ON agentreport (stock_name)")
+    conn.commit()
+    conn.close()
+
+    before = _agentreport_index_names(str(db_path))
+    assert before == ["ix_agentreport_stock_code", "ix_agentreport_stock_name"], (
+        f"이 테스트의 전제(마이그레이션 전 인덱스 2개 존재)가 깨졌습니다: {before}"
+    )
+
+    test_engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
+    monkeypatch.setattr(database, "engine", test_engine)
+
+    database.init_db()
+
+    assert _agentreport_index_names(str(db_path)) == before, (
+        "테이블 재생성 마이그레이션이 인덱스를 잃었습니다"
+    )

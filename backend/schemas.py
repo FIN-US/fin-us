@@ -10,7 +10,9 @@ class TradingSignal(BaseModel):
 
 class AnalysisReport(BaseModel):
     summary: str
-    details: TradingSignal
+    # A (#162): 도구 없는 provider(openai/anthropic/ollama)는 매매 판단을 생성하지 않으므로
+    # details=None이다. provider=nat만 TradingSignal을 채운다.
+    details: TradingSignal | None = None
     source_news: list[str]
     source_signals: list[str] | None = None
     trading_trend: str | None = None
