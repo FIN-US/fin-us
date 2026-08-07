@@ -145,9 +145,19 @@ async def get_visualization_portfolio(session: Session = Depends(get_session)):
             "quantity": quantity,
         })
 
-    total_return_rate = 0.0
+    # 종목별 return_rate와 같은 이유로 총수익률도 "모름"과 "실제 0%"를 구분한다(이슈 #122).
+    # 보유 종목은 있는데 현재가가 하나도 없으면 total_cost가 0으로 남는데, 이때 0.0을
+    # 돌려주면 소비자는 그것을 실제 수익률 0%로 읽는다. 현재 current_price 소스가 없어
+    # 항상 이 경우에 해당하므로(후속 이슈 참고), 여기서 0.0을 반환하면 종목별로 고친
+    # 구분이 계정 총계에서 그대로 무너진다.
+    total_return_rate: float | None
     if total_cost > 0:
         total_return_rate = round(((total_market_for_return - total_cost) / total_cost) * 100, 4)
+    elif portfolios:
+        total_return_rate = None
+    else:
+        # 보유 종목 자체가 없으면 수익률을 "모른다"고 할 것이 없다. 기존 동작을 유지한다.
+        total_return_rate = 0.0
 
     return {
         "status": "success",
