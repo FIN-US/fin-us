@@ -177,6 +177,67 @@ _IDENTICAL_SYSTEM_PROMPT_AGENTS = [
 ]
 
 
+# ---------------------------------------------------------------------------
+# #66 회귀 가드 — 비-trading 에이전트의 kis-trading-mcp-tool이 조회 전용인지 확인
+# ---------------------------------------------------------------------------
+
+# (config_path, agent 함수 이름) — kis-trading-mcp-tool을 보유하지만 주문 실행 차단 대상 에이전트
+_NON_TRADING_KIS_CONFIGS = [
+    (AGENTS_DIR / "news_agent.yml", "news_agent"),
+    (AGENTS_DIR / "recommend_agent.yml", "recommend_agent"),
+    (AGENTS_DIR / "strategy_agent.yml", "strategy_agent"),
+]
+
+# kis-trading-mcp-tool이 전체 권한(finus_account_balance)을 유지해야 하는 에이전트
+_TRADING_KIS_CONFIGS = [
+    (AGENTS_DIR / "trading_agent.yml", "trading_agent_react"),
+    (AGENTS_DIR / "monitoring_agent.yml", "monitoring_agent"),
+]
+
+_NON_TRADING_KIS_IDS = [f"{p.name}::{a}" for p, a in _NON_TRADING_KIS_CONFIGS]
+_TRADING_KIS_IDS = [f"{p.name}::{a}" for p, a in _TRADING_KIS_CONFIGS]
+
+
+@pytest.mark.parametrize("config_path,agent_fn", _NON_TRADING_KIS_CONFIGS, ids=_NON_TRADING_KIS_IDS)
+def test_non_trading_agents_kis_tool_is_readonly(config_path: Path, agent_fn: str):
+    """#66: news/recommend/strategy의 kis-trading-mcp-tool은 finus_account_balance_readonly여야 한다.
+
+    trading_agent.yml이 정의한 finus_account_balance(전체 권한)가 상속 체인을 통해
+    비-trading 에이전트에 그대로 전파되는 회귀를 방지한다.
+    """
+    import nat_finus_nat.register  # noqa: F401
+    from nat.runtime.loader import load_config
+    from nat_finus_nat.finus_api import FinusAccountBalanceReadonlyConfig
+
+    config = load_config(config_path)
+    tool_config = config.functions["kis-trading-mcp-tool"]
+    assert isinstance(tool_config, FinusAccountBalanceReadonlyConfig), (
+        f"{config_path.name}: kis-trading-mcp-tool은 finus_account_balance_readonly여야 합니다. "
+        f"실제 타입: {type(tool_config).__name__}"
+    )
+
+
+@pytest.mark.parametrize("config_path,agent_fn", _TRADING_KIS_CONFIGS, ids=_TRADING_KIS_IDS)
+def test_trading_agents_kis_tool_is_full(config_path: Path, agent_fn: str):
+    """trading/monitoring의 kis-trading-mcp-tool은 전체 권한(finus_account_balance)이어야 한다.
+
+    조회 전용 래퍼가 실수로 trading/monitoring 에이전트에도 적용되는 회귀를 방지한다.
+    """
+    import nat_finus_nat.register  # noqa: F401
+    from nat.runtime.loader import load_config
+    from nat_finus_nat.finus_api import FinusAccountBalanceConfig, FinusAccountBalanceReadonlyConfig
+
+    config = load_config(config_path)
+    tool_config = config.functions["kis-trading-mcp-tool"]
+    assert not isinstance(tool_config, FinusAccountBalanceReadonlyConfig), (
+        f"{config_path.name}: kis-trading-mcp-tool은 readonly가 아닌 finus_account_balance여야 합니다."
+    )
+    assert isinstance(tool_config, FinusAccountBalanceConfig), (
+        f"{config_path.name}: kis-trading-mcp-tool은 finus_account_balance여야 합니다. "
+        f"실제 타입: {type(tool_config).__name__}"
+    )
+
+
 def test_kis_agents_share_identical_system_prompt():
     """monitoring/strategy/trading 프롬프트는 의도적으로 동일하다 - 한 곳만 수정되는 드리프트를 막는다."""
     import nat_finus_nat.register  # noqa: F401 - 등록 트리거만 필요

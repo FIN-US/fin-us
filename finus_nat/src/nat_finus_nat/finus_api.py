@@ -665,6 +665,84 @@ _KIS_TRADING_TOOL_GUIDE = """
 """.strip()
 
 
+# ---- 조회 전용 KIS Trading MCP 래퍼 (#66) ----
+
+# KIS TR api_type 중 주문 실행(write) 동작에 해당하는 명시적 값 집합.
+# "order" 접두사가 매수·매도·해외주문 계열을 모두 커버하고,
+# modify_/cancel_ 계열은 명시적으로 추가한다.
+_ORDER_EXECUTION_API_EXACT: frozenset[str] = frozenset({
+    "modify_order",
+    "cancel_order",
+})
+
+
+def _is_order_execution_api_type(api_type: str) -> bool:
+    """Return True when *api_type* is a KIS order-execution (write) operation.
+
+    Blocks ``order_*`` prefixed types (order_cash, order_sell, overseas variants, …)
+    and explicit ``modify_order`` / ``cancel_order``.
+    Read-only types (``inquire_*``, ``find_api_detail``, ``auth``, …) return False.
+    """
+    lower = (api_type or "").strip().lower()
+    return lower.startswith("order") or lower in _ORDER_EXECUTION_API_EXACT
+
+
+class FinusAccountBalanceReadonlyConfig(FinusAccountBalanceConfig, name="finus_account_balance_readonly"):
+    """finus_account_balance 조회 전용 래퍼 — 주문 실행 api_type 차단 (#66).
+
+    비-trading 에이전트(news/recommend/strategy)가 잔고·시세 조회 능력은 유지하되
+    주문 실행 api_type(order_*, modify_order, cancel_order)을 호출하지 못하도록 한다.
+    """
+
+
+@register_function(config_type=FinusAccountBalanceReadonlyConfig)
+async def finus_account_balance_readonly(config: FinusAccountBalanceReadonlyConfig, _builder: Builder):
+
+    async def get_account_balance_readonly(inp: KisTradingMcpCallInput) -> str:
+        """Kis Trading MCP 조회 전용 래퍼 — 주문 실행 api_type은 차단된다 (#66).
+
+        잔고·시세·종목 조회(inquire_balance, inquire_price, find_api_detail 등)는
+        finus_account_balance와 동일하게 동작한다.
+        주문 실행(order_cash, modify_order, cancel_order 등)은 즉시 오류를 반환한다.
+        """
+        prepared = _prepare_kis_trading_mcp_call(inp, config)
+        if isinstance(prepared, str):
+            _record_to_ledger("finus_account_balance", prepared)
+            return prepared
+        tool_name, arguments = prepared
+        api_type = str(arguments.get("api_type", ""))
+        if _is_order_execution_api_type(api_type):
+            result = _err_json(
+                "kis_order_execution_blocked",
+                api_type=api_type,
+                hint="이 에이전트는 조회 전용입니다. 주문 실행은 trading_agent를 사용하세요.",
+            )
+            _record_to_ledger("finus_account_balance", result)
+            return result
+        result = await _mcp_call_tool_remote(
+            transport=config.mcp_transport,
+            url=config.mcp_url,
+            tool_name=tool_name,
+            arguments=arguments,
+            timeout_sec=config.timeout_sec,
+        )
+        _record_to_ledger("finus_account_balance", result)
+        return result
+
+    base_desc = (get_account_balance_readonly.__doc__ or "").strip()
+    remote = await _fetch_mcp_tool_documentation(config)
+    merged = (
+        f"{base_desc}\n\n{_KIS_TRADING_TOOL_GUIDE}\n\n{remote}"
+        if remote
+        else f"{base_desc}\n\n{_KIS_TRADING_TOOL_GUIDE}"
+    )
+    yield FunctionInfo.from_fn(
+        get_account_balance_readonly,
+        description=_langchain_escape_braces(merged),
+        input_schema=KisTradingMcpCallInput,
+    )
+
+
 def _mcp_news_stock_function_info(
     *,
     vendor_root: str | None,
