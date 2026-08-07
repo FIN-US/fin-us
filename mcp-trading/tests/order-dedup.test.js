@@ -46,6 +46,25 @@ after(() => {
   }
 });
 
+// 두 에러 클래스에 공통으로 적용하는 누출 표면 헬퍼. stderrCapture는 호출자가
+// 직접 캡처한 stderr/console.error 출력 문자열이다 - DuplicateOrderError 쪽은
+// process.stderr.write를 가로채 실제 바이트를 보고, LedgerUnreadableError 쪽은
+// console.error 목(mock) 호출 인자를 문자열로 이어붙여 넘긴다.
+function assertNoLeakOnAnyLoggingSurface(err, secret, stderrCapture = "") {
+  for (const [surface, rendered] of [
+    [".message", err.message],
+    [".stack", err.stack],
+    ["String(err)", String(err)],
+    ["JSON.stringify(err)", JSON.stringify(err)],
+    ["util.inspect(err, {depth: null})", util.inspect(err, { depth: null })],
+    ["util.inspect(err, {depth: null, showHidden: true})", util.inspect(err, { depth: null, showHidden: true })],
+    ["console.error(err)", stderrCapture],
+    ["Object.getOwnPropertyNames(err)", Object.getOwnPropertyNames(err).join(",")],
+  ]) {
+    assert.ok(!String(rendered).includes(secret), `${surface}에 계좌번호가 노출되면 안 됩니다: ${rendered}`);
+  }
+}
+
 test("createOrderDedupKey normalizes equivalent order arguments", () => {
   const first = createOrderDedupKey({
     accountNo: "1234567801",
@@ -229,24 +248,14 @@ test("DuplicateOrderError never exposes ledger contents (CANO) on any logging su
     "stderr 캡처 자체가 동작하지 않았습니다 - 이 검사의 전제가 깨졌습니다",
   );
 
-  for (const [surface, rendered] of [
-    [".message", thrown.message],
-    [".stack", thrown.stack],
-    ["String(err)", String(thrown)],
-    ["JSON.stringify(err)", JSON.stringify(thrown)],
-    ["util.inspect(err, {depth: null})", util.inspect(thrown, { depth: null })],
-    [
-      "util.inspect(err, {depth: null, showHidden: true})",
-      util.inspect(thrown, { depth: null, showHidden: true }),
-    ],
-    ["console.error(err)", stderrChunks.join("")],
-    ["Object.getOwnPropertyNames(err)", Object.getOwnPropertyNames(thrown).join(",")],
-  ]) {
-    assert.ok(
-      !String(rendered).includes(LEAKED_CANO),
-      `${surface}에 계좌번호가 노출되면 안 됩니다: ${rendered}`,
-    );
-  }
+  assertNoLeakOnAnyLoggingSurface(thrown, LEAKED_CANO, stderrChunks.join(""));
+
+  // 생성자에 원장 항목을 직접 넘겨도 내용이 실리지 않는다 - Number() 강제가
+  // 호출부 관례가 아니라 클래스 자체에 있음을 고정한다.
+  assert.ok(
+    !JSON.stringify(new DuplicateOrderError({ request: { body: { CANO: LEAKED_CANO } } })).includes(LEAKED_CANO),
+    "생성자에 원장 항목을 넘겨도 내용이 실리면 안 됩니다",
+  );
 });
 
 // 항목을 버리되 진단 가치까지 통째로 버리지는 않는다는 계약, 그리고 축소 자체를
@@ -494,19 +503,18 @@ for (const [label, buildPayload] of [
 ]) {
   test(`OrderDedupStore.reserve never leaks ledger contents (CANO) into the thrown error or logs (${label})`, (t) => {
     const filePath = tempLedgerPath(t);
-    const leakedCano = "1234567890";
-    const payload = buildPayload(leakedCano);
+    const payload = buildPayload(LEAKED_CANO);
     fs.writeFileSync(filePath, payload);
 
-    // 이 페이로드가 실제로 V8의 SyntaxError 메시지에 leakedCano를 에코하는지
+    // 이 페이로드가 실제로 V8의 SyntaxError 메시지에 LEAKED_CANO를 에코하는지
     // 먼저 확인한다 - 이 전제가 깨지면(예: 엔진이 바뀌어 더 이상 에코하지
-    // 않으면) 아래 assert.ok(!...)가 항상 참이 되어 테스트가 다시 공허해질
-    // 수 있으므로, 전제 자체를 함께 고정한다.
+    // 않으면) 아래 assertNoLeakOnAnyLoggingSurface의 검사가 항상 참이 되어
+    // 테스트가 다시 공허해질 수 있으므로, 전제 자체를 함께 고정한다.
     let parseEchoesPayload = false;
     try {
       JSON.parse(payload);
     } catch (error) {
-      parseEchoesPayload = error.message.includes(leakedCano);
+      parseEchoesPayload = error.message.includes(LEAKED_CANO);
     }
     assert.ok(
       parseEchoesPayload,
@@ -516,25 +524,17 @@ for (const [label, buildPayload] of [
     const store = new OrderDedupStore({ filePath, ttlMs: 60_000, now: () => 1_000 });
     const consoleError = t.mock.method(console, "error", () => {});
 
+    let thrownError;
     assert.throws(
       () => store.reserve("k", { stockCode: "005930" }),
       (error) => {
-        assert.ok(
-          !error.message.includes(leakedCano),
-          `던지는 메시지에 원장 내용(CANO)이 섞이면 안 됩니다: ${error.message}`,
-        );
+        thrownError = error;
         return true;
       },
     );
 
-    for (const call of consoleError.mock.calls) {
-      for (const arg of call.arguments) {
-        assert.ok(
-          !String(arg).includes(leakedCano),
-          `console.error 로그에 원장 내용(CANO)이 섞이면 안 됩니다: ${arg}`,
-        );
-      }
-    }
+    const stderrCapture = consoleError.mock.calls.flatMap((c) => c.arguments).map(String).join("");
+    assertNoLeakOnAnyLoggingSurface(thrownError, LEAKED_CANO, stderrCapture);
   });
 }
 
