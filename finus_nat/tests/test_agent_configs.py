@@ -204,10 +204,11 @@ _TRADING_KIS_IDS = [f"{p.name}::{a}" for p, a in _TRADING_KIS_CONFIGS]
 
 @pytest.mark.parametrize("config_path,agent_fn", _NON_TRADING_KIS_CONFIGS, ids=_NON_TRADING_KIS_IDS)
 def test_non_trading_agents_kis_tool_is_readonly(config_path: Path, agent_fn: str):
-    """#66: news/recommend/strategy의 kis-trading-mcp-tool은 finus_account_balance_readonly여야 한다.
+    """#66: news/recommend/strategy/diary의 kis-trading-mcp-tool은 finus_account_balance_readonly여야 한다.
 
     trading_agent.yml이 정의한 finus_account_balance(전체 권한)가 상속 체인을 통해
-    비-trading 에이전트에 그대로 전파되는 회귀를 방지한다.
+    비-trading 에이전트(news→recommend→strategy→diary)에 그대로 전파되는 회귀를 방지한다.
+    diary_agent는 tool_names에 포함하지 않지만 scope에 정의된 함수 타입을 고정한다.
     """
     import nat_finus_nat.register  # noqa: F401
     from nat.runtime.loader import load_config
