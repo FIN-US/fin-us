@@ -47,10 +47,14 @@ after(() => {
 });
 
 // 두 에러 클래스에 공통으로 적용하는 누출 표면 헬퍼. stderrCapture는 호출자가
-// 직접 캡처한 stderr/console.error 출력 문자열이다 - DuplicateOrderError 쪽은
-// process.stderr.write를 가로채 실제 바이트를 보고, LedgerUnreadableError 쪽은
-// console.error 목(mock) 호출 인자를 문자열로 이어붙여 넘긴다.
-function assertNoLeakOnAnyLoggingSurface(err, secret, stderrCapture = "") {
+// 직접 캡처한 stderr 출력 문자열이다 - 두 쪽 모두 process.stderr.write를
+// 가로채 실제 바이트를 본다. console.error를 몽키패치하면 인자 객체만 잡혀
+// process.stderr.write로 직접 우회하는 누출을 탐지하지 못하기 때문이다.
+function assertNoLeakOnAnyLoggingSurface(err, secret, stderrCapture) {
+  // 기본값을 두지 않는다. 두면 세 번째 에러 클래스를 추가하는 사람이 인자를 빠뜨렸을 때
+  // stderr 축이 빈 문자열로 조용히 통과한다 - 이 헬퍼가 없애려는 공허한 검사가
+  // 기본값으로 되살아난다.
+  assert.equal(typeof stderrCapture, "string", "stderrCapture는 필수입니다");
   for (const [surface, rendered] of [
     [".message", err.message],
     [".stack", err.stack],
@@ -58,7 +62,10 @@ function assertNoLeakOnAnyLoggingSurface(err, secret, stderrCapture = "") {
     ["JSON.stringify(err)", JSON.stringify(err)],
     ["util.inspect(err, {depth: null})", util.inspect(err, { depth: null })],
     ["util.inspect(err, {depth: null, showHidden: true})", util.inspect(err, { depth: null, showHidden: true })],
-    ["console.error(err)", stderrCapture],
+    // 캡처 창이 호출부마다 다르다. LedgerUnreadableError 쪽은 store.reserve() 전체를
+    // 덮어 프로덕션 내부 로그까지 포함하므로, 라벨을 좁게 쓰면 실패 시 디버깅할 사람을
+    // 엉뚱한 곳으로 보낸다.
+    ["stderr 출력 전체 (프로덕션 내부 로그 + console.error(err))", stderrCapture],
     ["Object.getOwnPropertyNames(err)", Object.getOwnPropertyNames(err).join(",")],
   ]) {
     assert.ok(!String(rendered).includes(secret), `${surface}에 계좌번호가 노출되면 안 됩니다: ${rendered}`);
@@ -522,7 +529,16 @@ for (const [label, buildPayload] of [
     );
 
     const store = new OrderDedupStore({ filePath, ttlMs: 60_000, now: () => 1_000 });
-    const consoleError = t.mock.method(console, "error", () => {});
+
+    // console.error(err) 표면은 실제 stderr 출력 바이트로 검사한다.
+    // console.error를 몽키패치하면 인자 객체만 잡혀, process.stderr.write로
+    // 직접 우회하는 누출(예: 내부 로그가 error.message를 에코하는 경우)을
+    // 탐지하지 못한다. process.stderr.write를 가로채고 진짜 console.error를 호출한다.
+    const stderrChunks = [];
+    const stderrWrite = t.mock.method(process.stderr, "write", (chunk) => {
+      stderrChunks.push(String(chunk));
+      return true;
+    });
 
     let thrownError;
     assert.throws(
@@ -533,7 +549,22 @@ for (const [label, buildPayload] of [
       },
     );
 
-    const stderrCapture = consoleError.mock.calls.flatMap((c) => c.arguments).map(String).join("");
+    console.error(thrownError);
+    stderrWrite.mock.restore();
+
+    const stderrCapture = stderrChunks.join("");
+    // 이 캡처는 두 가지를 덮는다: reserve() 내부의 프로덕션 로그와 console.error(err)
+    // 렌더. 둘 다 살아있는지 각각 고정한다 - 하나만 확인하면 나머지 한쪽이 조용히
+    // 비어도 아래 !includes 검사가 그 축에서 공허하게 참이 된다.
+    assert.ok(
+      stderrCapture.includes("KIS order dedup ledger read failed"),
+      "reserve() 내부 stderr 로그가 캡처되지 않았습니다 - 이 검사의 전제가 깨졌습니다",
+    );
+    assert.ok(
+      stderrCapture.includes("LedgerUnreadableError"),
+      "console.error(err) 출력이 캡처되지 않았습니다 - 이 검사의 전제가 깨졌습니다",
+    );
+
     assertNoLeakOnAnyLoggingSurface(thrownError, LEAKED_CANO, stderrCapture);
   });
 }
