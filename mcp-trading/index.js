@@ -9,7 +9,7 @@ import axios from "axios";
 import dotenv from "dotenv";
 import { z } from "zod";
 import { formatBalanceRlzPlReport } from "./balance-rlz-pl-report.js";
-import { buildBalanceParams, fetchAllBalance, formatBalanceReport } from "./balance.js";
+import { buildBalanceParams, fetchAllBalance, fetchAllPaged, formatBalanceReport } from "./balance.js";
 import {
   formatPercent,
   formatQuantity,
@@ -51,6 +51,12 @@ const KIS_DAILY_CCLD_TR_ID = (() => {
 })();
 const DAILY_CCLD_PATH = "/uapi/domestic-stock/v1/trading/inquire-daily-ccld";
 const DAILY_CCLD_MAX_PAGES = 50;
+// inquire-daily-ccld 연속조회 전체 시간 예산. 호출자는 NAT 일지 에이전트(diary_agent.yml)이고
+// timeout_sec: 120이 상한이다. kisAxios 요청당 8초 타임아웃 + 기동 오버헤드 ~2초를 빼면
+// 헤드룸은 ~110초. 측정치가 없어 정상 부하는 알 수 없으나, 90 + 8(진행 중 요청) + 2(기동) =
+// 100 < 120이므로 상한 안에 안전하게 들어온다. 90초 초과가 이상 상황이라고 판단하기에
+// 충분하다고 본다. 실제 페이지당 지연 측정치가 확보되면 이 값을 재조정해야 한다.
+const DAILY_CCLD_TIME_BUDGET_MS = 90_000;
 const BALANCE_RLZ_PL_PATH = "/uapi/domestic-stock/v1/trading/inquire-balance-rlz-pl";
 const BALANCE_RLZ_PL_TR_ID = (() => {
   const override = (process.env.KIS_TR_ID_BALANCE_RLZ_PL || process.env.FINUS_KIS_TR_ID_BALANCE_RLZ_PL || "").trim();
@@ -58,6 +64,9 @@ const BALANCE_RLZ_PL_TR_ID = (() => {
   return "TTTC8494R";
 })();
 const BALANCE_RLZ_PL_MAX_PAGES = 50;
+// inquire-balance-rlz-pl 연속조회 전체 시간 예산. DAILY_CCLD_TIME_BUDGET_MS와 같은 근거.
+// 두 TR의 호출자·상한·요청당 타임아웃이 동일하므로 동일한 값을 쓴다.
+const BALANCE_RLZ_PL_TIME_BUDGET_MS = 90_000;
 const TOKEN_TTL_MARGIN_MS = 60_000;
 const TOKEN_CACHE_PATH = process.env.KIS_TOKEN_CACHE_PATH || path.join(
   os.tmpdir(),
@@ -175,10 +184,6 @@ async function kisApiGet(pathname, trId, params, { trCont = "" } = {}) {
 async function kisGet(pathname, trId, params) {
   const { body } = await kisApiGet(pathname, trId, params);
   return body;
-}
-
-function isKisContinueTrCont(value) {
-  return value === "F" || value === "M";
 }
 
 function todayKstYmd() {
@@ -365,50 +370,46 @@ async function fetchAllDailyOrderCcld({
     INQR_DVSN_1: "",
   };
 
-  const rows = [];
-  let summary = null;
-  let trCont = "";
-  let ctxFk = "";
-  let ctxNk = "";
-  let pages = 0;
-
-  while (pages < DAILY_CCLD_MAX_PAGES) {
-    const { body, trCont: respTrCont } = await kisApiGet(
+  const { rows, summary, pages, truncated } = await fetchAllPaged(
+    ({ ctxAreaFk100, ctxAreaNk100, trCont }) => kisApiGet(
       DAILY_CCLD_PATH,
       KIS_DAILY_CCLD_TR_ID,
-      {
-        ...baseParams,
-        CTX_AREA_FK100: ctxFk,
-        CTX_AREA_NK100: ctxNk,
-      },
+      { ...baseParams, CTX_AREA_FK100: ctxAreaFk100, CTX_AREA_NK100: ctxAreaNk100 },
       { trCont },
-    );
+    ),
+    {
+      maxPages: DAILY_CCLD_MAX_PAGES,
+      timeBudgetMs: DAILY_CCLD_TIME_BUDGET_MS,
+      label: "일별 주문체결 연속조회",
+    },
+  );
 
-    const pageRows = Array.isArray(body.output1) ? body.output1 : [];
-    rows.push(...pageRows);
-    if (body.output2 && !summary) {
-      summary = Array.isArray(body.output2) ? body.output2[0] : body.output2;
-    }
-
-    ctxFk = body.ctx_area_fk100 || "";
-    ctxNk = body.ctx_area_nk100 || "";
-    pages += 1;
-
-    if (!isKisContinueTrCont(respTrCont)) {
-      break;
-    }
-    trCont = "N";
-  }
-
-  return { date, rows, summary, pages, trId: KIS_DAILY_CCLD_TR_ID };
+  return { date, rows, summary, pages, truncated, trId: KIS_DAILY_CCLD_TR_ID };
 }
 
-function formatDailyOrderCcldReport({ date, rows, summary, pages, trId, stockLabel }) {
+// 잘림 안내 문구. "- "로 시작하면 파싱 오류를 낼 수 있으므로 반드시 "[안내]"로 시작한다.
+// rows.length === 0인 경우에도 출력해야 한다 — 그렇지 않으면 잘림 때문에 빈 결과가 나온 상황을
+// "해당 조건의 주문·체결이 없습니다"로 사실로 단언하게 된다.
+function formatPaginationTruncationNote(truncated, pages, subject) {
+  if (!truncated) return "";
+  const reasons = {
+    max_pages: `페이지 상한(${pages}회)에 도달하여`,
+    time_budget: "조회 시간 예산을 초과하여",
+    no_cursor: "연속조회 커서가 오지 않아",
+    repeated_cursor: "동일한 연속조회 커서가 반복되어",
+    error: "연속조회 중 오류가 발생하여",
+  };
+  const reason = reasons[truncated] || "연속조회가 완료되지 않아";
+  return `\n\n[안내] ${reason} 조회가 중단되어 일부 ${subject}이(가) 누락되었을 수 있습니다. 실제 내역은 별도로 확인하세요.`;
+}
+
+function formatDailyOrderCcldReport({ date, rows, summary, pages, truncated, trId, stockLabel }) {
+  const truncationNote = formatPaginationTruncationNote(truncated, pages, "주문·체결 내역");
   if (rows.length === 0) {
     return `
 [당일 주문·체결 내역] ${date}${stockLabel ? ` / ${stockLabel}` : ""}
 - 조회 TR: ${trId} (주식일별주문체결조회 v1_국내주식-005)
-- 결과: 해당 조건의 주문·체결이 없습니다.
+- 결과: 해당 조건의 주문·체결이 없습니다.${truncationNote}
     `.trim();
   }
 
@@ -433,7 +434,7 @@ function formatDailyOrderCcldReport({ date, rows, summary, pages, trId, stockLab
 - 건수: ${rows.length}건 (${pages}회 API 호출, 연속조회 포함)
 ${summaryLines}
 
-${lines.join("\n\n")}
+${lines.join("\n\n")}${truncationNote}
   `.trim();
 }
 
@@ -486,42 +487,21 @@ async function fetchAllBalanceRlzPl() {
     COST_ICLD_YN: "N",
   };
 
-  const rows = [];
-  let summary = null;
-  let trCont = "";
-  let ctxFk = "";
-  let ctxNk = "";
-  let pages = 0;
-
-  while (pages < BALANCE_RLZ_PL_MAX_PAGES) {
-    const { body, trCont: respTrCont } = await kisApiGet(
+  const { rows, summary, pages, truncated } = await fetchAllPaged(
+    ({ ctxAreaFk100, ctxAreaNk100, trCont }) => kisApiGet(
       BALANCE_RLZ_PL_PATH,
       BALANCE_RLZ_PL_TR_ID,
-      {
-        ...baseParams,
-        CTX_AREA_FK100: ctxFk,
-        CTX_AREA_NK100: ctxNk,
-      },
+      { ...baseParams, CTX_AREA_FK100: ctxAreaFk100, CTX_AREA_NK100: ctxAreaNk100 },
       { trCont },
-    );
+    ),
+    {
+      maxPages: BALANCE_RLZ_PL_MAX_PAGES,
+      timeBudgetMs: BALANCE_RLZ_PL_TIME_BUDGET_MS,
+      label: "실현손익 연속조회",
+    },
+  );
 
-    const pageRows = Array.isArray(body.output1) ? body.output1 : [];
-    rows.push(...pageRows);
-    if (body.output2 && !summary) {
-      summary = Array.isArray(body.output2) ? body.output2[0] : body.output2;
-    }
-
-    ctxFk = body.ctx_area_fk100 || "";
-    ctxNk = body.ctx_area_nk100 || "";
-    pages += 1;
-
-    if (!isKisContinueTrCont(respTrCont)) {
-      break;
-    }
-    trCont = "N";
-  }
-
-  return { rows, summary, pages, trId: BALANCE_RLZ_PL_TR_ID };
+  return { rows, summary, pages, truncated, trId: BALANCE_RLZ_PL_TR_ID };
 }
 
 async function getBalanceRlzPl({ stock_name: stockName } = {}) {
