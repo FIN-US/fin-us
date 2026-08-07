@@ -10,8 +10,6 @@
 import logging
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
-
 from nat.data_models.api_server import (
     ChatRequest,
     ChatResponse,
@@ -27,7 +25,7 @@ from nat_finus_nat.agents import (
     _has_numeric_claims,
     _run_with_gate,
 )
-from nat_finus_nat.finus_api import DATA_TOOL_LEDGER, DataToolLedger, _record_to_ledger
+from nat_finus_nat.finus_api import DATA_TOOL_LEDGER, DataToolLedger, _err_json, _record_to_ledger
 
 
 # ---------------------------------------------------------------------------
@@ -201,11 +199,13 @@ async def test_second_attempt_failure_returns_deterministic_rejection():
 # ---------------------------------------------------------------------------
 
 def test_extract_financial_numbers_normalizes_comma_notation():
-    assert _extract_financial_numbers("75,300원") == frozenset({75300})
+    # Values are scaled by ×1000 to preserve decimal precision (see _NUM_SCALE).
+    assert _extract_financial_numbers("75,300원") == frozenset({75_300_000})
 
 
 def test_extract_financial_numbers_normalizes_korean_unit():
-    assert _extract_financial_numbers("7만 5300원") == frozenset({75300})
+    # Values are scaled by ×1000 to preserve decimal precision (see _NUM_SCALE).
+    assert _extract_financial_numbers("7만 5300원") == frozenset({75_300_000})
 
 
 def test_extract_financial_numbers_matches_comma_and_korean_unit():
@@ -219,3 +219,188 @@ def test_has_numeric_claims_positive():
 
 def test_has_numeric_claims_negative():
     assert _has_numeric_claims("반도체 수요가 회복되고 있습니다.") is False
+
+
+# ---------------------------------------------------------------------------
+# Critical 1 — 한국어 만/억/조 단위로 끝나는 금액 탐지
+# ---------------------------------------------------------------------------
+
+def test_has_numeric_claims_detects_man_unit_only():
+    """'500만원'처럼 만 단위로 끝나는 표기를 탐지한다."""
+    assert _has_numeric_claims("잔고는 500만원입니다.") is True
+
+
+def test_has_numeric_claims_detects_eok_unit_only():
+    """'1억원'처럼 억 단위로 끝나는 표기를 탐지한다."""
+    assert _has_numeric_claims("평가금액은 1억원입니다.") is True
+
+
+def test_has_numeric_claims_detects_man_with_comma():
+    """'1,200만원'처럼 쉼표+만 단위 표기를 탐지한다."""
+    assert _has_numeric_claims("예수금 1,200만원이 있습니다.") is True
+
+
+def test_has_numeric_claims_detects_jo_unit_only():
+    """'350조원'처럼 조 단위로 끝나는 표기를 탐지한다."""
+    assert _has_numeric_claims("시가총액은 350조원입니다.") is True
+
+
+def test_korean_unit_only_same_value_as_full_notation():
+    """'500만원'과 '5,000,000원'이 같은 정규화 값을 가진다(탐지+비교 모두 일치)."""
+    assert _extract_financial_numbers("500만원") == _extract_financial_numbers("5,000,000원")
+
+
+def test_korean_unit_only_cross_check():
+    """'1억원'과 '100,000,000원'이 같은 정규화 값을 가진다."""
+    assert _extract_financial_numbers("1억원") == _extract_financial_numbers("100,000,000원")
+
+
+def test_gate_trips_on_man_unit_amount_no_tool():
+    """'500만원'처럼 만 단위 표기가 있고 도구 없으면 게이트가 트립한다."""
+    ledger = DataToolLedger()
+    answer = "Final Answer: 잔고는 500만원입니다."
+    assert _check_tool_enforcement(answer, ledger, _simple_req()) is True
+
+
+# ---------------------------------------------------------------------------
+# Critical 3 — 소수 구분: 5.7%는 5.3%의 부분집합이 아님
+# ---------------------------------------------------------------------------
+
+def test_gate_trips_on_mismatched_decimal_numbers():
+    """5.7%와 5.3%는 다른 수치이므로 게이트가 트립해야 한다.
+
+    int(float(s)) 버그가 있으면 두 값 모두 5로 정규화돼 오통과한다.
+    _NUM_SCALE=1000 이후에는 5700≠5300이라 정확히 구분된다.
+    """
+    ledger = DataToolLedger()
+    req = _req(
+        ("user", "수익률 알려줘"),
+        ("assistant", "수익률은 5.3%입니다."),
+        ("user", "정말?"),
+    )
+    answer = "Final Answer: 수익률은 5.7%입니다."
+    assert _check_tool_enforcement(answer, ledger, req) is True
+
+
+def test_gate_passes_on_exact_decimal_restatement():
+    """대화록에 있는 소수 수치를 그대로 재진술하면 통과한다."""
+    ledger = DataToolLedger()
+    req = _req(
+        ("user", "수익률 알려줘"),
+        ("assistant", "수익률은 5.7%입니다."),
+        ("user", "확인해줘"),
+    )
+    answer = "Final Answer: 말씀드린 대로 수익률은 5.7%입니다."
+    assert _check_tool_enforcement(answer, ledger, req) is False
+
+
+# ---------------------------------------------------------------------------
+# Improvement 1 — 주(株) vs 기간 표현 오탐 방지
+# ---------------------------------------------------------------------------
+
+def test_has_numeric_claims_does_not_match_juil():
+    """'1주일'은 기간 표현이므로 탐지하지 않는다."""
+    assert _has_numeric_claims("1주일 전 뉴스입니다.") is False
+
+
+def test_has_numeric_claims_does_not_match_ju_dongan():
+    """'2주 동안'은 기간 표현이므로 탐지하지 않는다."""
+    assert _has_numeric_claims("최근 2주 동안 반도체 업황이 개선됐습니다.") is False
+
+
+def test_has_numeric_claims_does_not_match_jugan():
+    """'2주간'은 기간 표현이므로 탐지하지 않는다."""
+    assert _has_numeric_claims("2주간 상승세가 이어졌습니다.") is False
+
+
+def test_has_numeric_claims_does_not_match_ju_after():
+    """'3주 후'는 기간 표현이므로 탐지하지 않는다."""
+    assert _has_numeric_claims("3주 후 실적 발표가 있습니다.") is False
+
+
+def test_has_numeric_claims_matches_stock_quantity():
+    """'100주 보유'는 주식 수량이므로 탐지한다."""
+    assert _has_numeric_claims("삼성전자 100주 보유 중입니다.") is True
+
+
+def test_has_numeric_claims_matches_stock_sell():
+    """'100주를 매도'는 주식 수량이므로 탐지한다."""
+    assert _has_numeric_claims("삼성전자 100주를 매도했습니다.") is True
+
+
+# ---------------------------------------------------------------------------
+# Improvement 4 — _record_to_ledger의 오류 판정 정합성 고정
+# ---------------------------------------------------------------------------
+
+def test_record_to_ledger_marks_err_json_as_failure():
+    """_err_json()이 만든 오류 응답은 ok=False로, 정상 JSON은 ok=True로 기록된다.
+
+    이 단언이 깨지면 새 오류 반환 경로가 {"error": ...} 규약을 벗어난 것이고,
+    그 도구에 대해 게이트가 조용히 무력화된다.
+    """
+    ledger = DataToolLedger()
+    token = DATA_TOOL_LEDGER.set(ledger)
+    try:
+        _record_to_ledger("finus_account_balance", _err_json("mcp_timeout", tool="domestic_stock"))
+        _record_to_ledger("finus_account_balance", '{"output": [{"prpr": "75300"}]}')
+    finally:
+        DATA_TOOL_LEDGER.reset(token)
+
+    assert [r.ok for r in ledger.records] == [False, True]
+    assert ledger.any_success() is True
+
+
+# ---------------------------------------------------------------------------
+# Critical 2 — 부작용 도구 재시도 금지 가드
+# ---------------------------------------------------------------------------
+
+def test_ledger_had_side_effect_true_for_save_diary():
+    """finus_save_diary 기록이 있으면 had_side_effect()가 True를 반환한다."""
+    ledger = DataToolLedger()
+    ledger.record("finus_save_diary", ok=True, produced_rows=True)
+    assert ledger.had_side_effect() is True
+
+
+def test_ledger_had_side_effect_false_for_read_tools():
+    """읽기 전용 도구만 기록된 원장은 had_side_effect()가 False를 반환한다."""
+    ledger = DataToolLedger()
+    ledger.record("finus_mcp_trading_get_balance", ok=True, produced_rows=True)
+    assert ledger.had_side_effect() is False
+
+
+async def test_side_effect_guard_skips_retry_on_write_tool():
+    """finus_save_diary가 실패 후에도 수치를 주장하면 재시도 없이 즉시 거절한다.
+
+    시나리오: 저장 API 오류(ok=False) → 원장에 실패 기록 → 에이전트가 수치 주장
+    → 게이트 트립 → 가드가 had_side_effect()=True를 보고 재시도 건너뜀.
+    재시도가 일어나면 저장이 다시 시도되어 DB에 중복/잡음이 생길 수 있다.
+    """
+    # HTTP 오류 후에도 에이전트가 수치를 지어내는 답변을 돌려준다고 가정
+    fabricated = "Final Answer: 실현손익 52,000원을 일지에 저장했습니다."
+    call_count = 0
+
+    async def ainvoke_with_failed_side_effect(_input):
+        nonlocal call_count
+        call_count += 1
+        ledger = DATA_TOOL_LEDGER.get()
+        if ledger is not None:
+            # 저장 시도는 했지만 API 오류 — any_success()=False이므로 게이트가 트립된다
+            ledger.record("finus_save_diary", ok=False, produced_rows=False)
+        return ChatResponse.from_string(fabricated, usage=Usage())
+
+    mock_inner = MagicMock()
+    mock_inner.ainvoke = ainvoke_with_failed_side_effect
+
+    result = await _run_with_gate(
+        inner=mock_inner,
+        query="오늘 매매일지 저장해줘",
+        chat_request=_simple_req("오늘 매매일지 저장해줘"),
+        inner_name="diary_agent",
+    )
+
+    assert result == _TOOL_ENFORCEMENT_REJECTION, (
+        f"결정론적 거절 메시지가 반환돼야 합니다. 실제: {result!r}"
+    )
+    assert call_count == 1, (
+        f"부작용 가드로 재시도 없이 1회만 호출해야 합니다. 실제: {call_count}"
+    )

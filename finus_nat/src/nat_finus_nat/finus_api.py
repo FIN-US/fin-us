@@ -36,6 +36,12 @@ class DataToolRecord(NamedTuple):
     produced_rows: bool  # True when ok and the response body is non-empty
 
 
+# Tools that produce irreversible side effects (writes). When any of these appear in
+# the ledger and the gate trips, _run_with_gate skips the retry to prevent duplicate
+# writes (e.g. two identical diary entries created for one user request).
+_SIDE_EFFECT_TOOLS: frozenset[str] = frozenset({"finus_save_diary"})
+
+
 @dataclass
 class DataToolLedger:
     """Mutable box tracking Fin-Us data tool calls within a run_subagent invocation.
@@ -53,6 +59,14 @@ class DataToolLedger:
     def any_success(self) -> bool:
         """Return True if at least one tool call successfully produced data rows."""
         return any(r.ok and r.produced_rows for r in self.records)
+
+    def had_side_effect(self) -> bool:
+        """Return True if a side-effecting (write) tool was recorded.
+
+        Used by _run_with_gate to skip the retry and return the rejection immediately,
+        preventing duplicate writes when the gate trips after a diary save.
+        """
+        return any(r.tool_name in _SIDE_EFFECT_TOOLS for r in self.records)
 
 
 DATA_TOOL_LEDGER: ContextVar["DataToolLedger | None"] = ContextVar(
@@ -655,7 +669,7 @@ def _mcp_news_stock_function_info(
     timeout_sec: float,
     mcp_tool: str,
     fn_doc: str,
-    ledger_tool_name: str = "",
+    ledger_tool_name: str,  # required — omitting silently disables ledger tracking
 ) -> FunctionInfo:
     async def by_stock(stock_name: str) -> str:
         result = await _mcp_news_stock(
@@ -664,8 +678,7 @@ def _mcp_news_stock_function_info(
             tool_name=mcp_tool,
             stock_name=stock_name,
         )
-        if ledger_tool_name:
-            _record_to_ledger(ledger_tool_name, result)
+        _record_to_ledger(ledger_tool_name, result)
         return result
 
     by_stock.__doc__ = fn_doc
@@ -838,9 +851,13 @@ async def finus_save_diary(config: FinusSaveDiaryConfig, _builder: Builder):
         title = (inp.title or "").strip()
         content = (inp.content or "").strip()
         if not title:
-            return _err_json("diary_title_required", hint="Provide a non-empty title.")
+            result = _err_json("diary_title_required", hint="Provide a non-empty title.")
+            _record_to_ledger("finus_save_diary", result)
+            return result
         if not content:
-            return _err_json("diary_content_required", hint="Provide non-empty diary content.")
+            result = _err_json("diary_content_required", hint="Provide non-empty diary content.")
+            _record_to_ledger("finus_save_diary", result)
+            return result
 
         url = f"{base_url}/api/v1/db/diary"
         try:
@@ -849,18 +866,26 @@ async def finus_save_diary(config: FinusSaveDiaryConfig, _builder: Builder):
                 resp.raise_for_status()
                 body = resp.json()
         except httpx.HTTPStatusError as exc:
-            return _err_json(
+            result = _err_json(
                 "diary_api_http_error",
                 status_code=exc.response.status_code,
                 detail=exc.response.text[:500],
                 url=url,
             )
+            _record_to_ledger("finus_save_diary", result)
+            return result
         except Exception as exc:  # noqa: BLE001
-            return _err_json("diary_api_request_failed", detail=str(exc), url=url)
+            result = _err_json("diary_api_request_failed", detail=str(exc), url=url)
+            _record_to_ledger("finus_save_diary", result)
+            return result
 
         if body.get("status") != "success":
-            return _err_json("diary_api_error", response=body)
-        return json.dumps(body.get("data"), ensure_ascii=False)
+            result = _err_json("diary_api_error", response=body)
+            _record_to_ledger("finus_save_diary", result)
+            return result
+        result = json.dumps(body.get("data"), ensure_ascii=False)
+        _record_to_ledger("finus_save_diary", result)
+        return result
 
     yield FunctionInfo.from_fn(
         save_trading_diary,
@@ -887,18 +912,26 @@ async def finus_list_diaries(config: FinusListDiariesConfig, _builder: Builder):
                 resp.raise_for_status()
                 body = resp.json()
         except httpx.HTTPStatusError as exc:
-            return _err_json(
+            result = _err_json(
                 "diary_api_http_error",
                 status_code=exc.response.status_code,
                 detail=exc.response.text[:500],
                 url=url,
             )
+            _record_to_ledger("finus_list_diaries", result)
+            return result
         except Exception as exc:  # noqa: BLE001
-            return _err_json("diary_api_request_failed", detail=str(exc), url=url)
+            result = _err_json("diary_api_request_failed", detail=str(exc), url=url)
+            _record_to_ledger("finus_list_diaries", result)
+            return result
 
         if body.get("status") != "success":
-            return _err_json("diary_api_error", response=body)
-        return json.dumps(body.get("data"), ensure_ascii=False)
+            result = _err_json("diary_api_error", response=body)
+            _record_to_ledger("finus_list_diaries", result)
+            return result
+        result = json.dumps(body.get("data"), ensure_ascii=False)
+        _record_to_ledger("finus_list_diaries", result)
+        return result
 
     yield FunctionInfo.from_fn(
         list_trading_diaries,
