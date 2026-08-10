@@ -968,3 +968,95 @@ def test_has_empty_result_data_bearing_json_is_false():
     """
     data = json.dumps({"items": ["삼성전자 뉴스1", "뉴스2"]}, ensure_ascii=False)
     assert _has_empty_result("finus_market_news", data) is False
+
+
+# ---------------------------------------------------------------------------
+# 🟡 Improvement (PR #216 3차 리뷰) — 2차 시도 경로의 only_empty_reads() 가드
+# ---------------------------------------------------------------------------
+
+async def test_run_with_gate_second_attempt_empty_reads_returns_empty_rejection():
+    """1차 도구 없음 → 2차 도구 호출 + 빈 결과 → _EMPTY_RESULT_REJECTION 반환.
+
+    시나리오:
+      1차: 에이전트가 도구를 전혀 호출하지 않고 수치를 지어냄 → 게이트 트립
+           (ledger 비어 있음 → only_empty_reads()=False → 재시도 진행)
+      2차: 교정 프리픽스 덕분에 도구 호출함(today_orders 빈 결과) + 여전히 수치 주장
+           → 게이트 트립 → ledger2.only_empty_reads()=True
+           → _EMPTY_RESULT_REJECTION 반환 ("도구 없이"가 아니므로 올바른 메시지)
+    LLM 호출이 정확히 2회인지 확인한다(2차는 실제로 실행되므로).
+    """
+    call_count = 0
+
+    async def ainvoke_no_tool_then_empty(_input):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 2:
+            # 2차: 교정 프리픽스로 인해 도구를 호출하지만 빈 결과
+            _record_to_ledger(
+                "finus_mcp_trading_today_orders",
+                "[당일 주문·체결 내역] 20260807\n- 결과: 해당 조건의 주문·체결이 없습니다.",
+            )
+        # 1차·2차 모두 수치를 지어낸 답변 반환
+        return ChatResponse.from_string("오늘 체결된 주문은 삼성전자 100주입니다.", usage=Usage())
+
+    mock_inner = MagicMock()
+    mock_inner.ainvoke = ainvoke_no_tool_then_empty
+
+    result = await _run_with_gate(
+        inner=mock_inner,
+        query="오늘 주문 내역 알려줘",
+        chat_request=_simple_req("오늘 주문 내역 알려줘"),
+        inner_name="trading_agent_react",
+    )
+
+    assert result == _EMPTY_RESULT_REJECTION, (
+        f"2차 빈 결과 경로에서 _EMPTY_RESULT_REJECTION이 반환돼야 합니다. 실제: {result!r}"
+    )
+    assert call_count == 2, (
+        f"1차(도구 없음)·2차(빈 결과) 모두 실행되므로 LLM 호출은 2회여야 합니다. 실제: {call_count}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 🔵 Nitpick (PR #216 3차 리뷰) — had_side_effect + only_empty_reads 조합
+# ---------------------------------------------------------------------------
+
+async def test_side_effect_guard_with_empty_reads_returns_empty_rejection():
+    """save_diary + 빈 조회(market_news) 조합 → _EMPTY_RESULT_REJECTION + 재시도 건너뜀.
+
+    시나리오:
+      쓰기 도구(finus_save_diary)와 빈 결과 읽기 도구(finus_market_news)가 함께 실행됨.
+      had_side_effect()=True → 재시도 건너뜀(call_count=1 유지).
+      only_empty_reads()=True(읽기 목록이 전부 빈 결과) → _EMPTY_RESULT_REJECTION 반환.
+      "도구 없이"라고 말하는 _TOOL_ENFORCEMENT_REJECTION은 사실과 다르므로 차단된다.
+    """
+    call_count = 0
+
+    async def ainvoke_save_and_empty_news(_input):
+        nonlocal call_count
+        call_count += 1
+        # 쓰기 도구: 저장 성공
+        _record_to_ledger("finus_save_diary", '{"id": 12, "title": "매매일지"}')
+        # 읽기 도구: 빈 결과
+        _record_to_ledger(
+            "finus_market_news",
+            "'삼성전자'에 대한 뉴스를 찾지 못했습니다.",
+        )
+        return ChatResponse.from_string("잔고는 500만원입니다.", usage=Usage())
+
+    mock_inner = MagicMock()
+    mock_inner.ainvoke = ainvoke_save_and_empty_news
+
+    result = await _run_with_gate(
+        inner=mock_inner,
+        query="삼성전자 뉴스 알려줘",
+        chat_request=_simple_req("삼성전자 뉴스 알려줘"),
+        inner_name="news_agent",
+    )
+
+    assert result == _EMPTY_RESULT_REJECTION, (
+        f"쓰기+빈 조회 조합에서 _EMPTY_RESULT_REJECTION이 반환돼야 합니다. 실제: {result!r}"
+    )
+    assert call_count == 1, (
+        f"부작용 가드로 재시도 없이 1회만 호출해야 합니다. 실제: {call_count}"
+    )
