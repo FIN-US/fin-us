@@ -625,9 +625,9 @@ async def _monitor_market_task(
             try:
                 with Session(engine) as sync_session:
                     sync_result = _sync_portfolio_from_balance(balance_text, sync_session, holdings=holdings)
-                # 브로드캐스트는 실제로 테이블이 바뀐 경우(sync_result is not None)에만
-                # 보낸다. 잘림·마커 부재로 건너뛴 경우 테이블이 그대로이므로 클라이언트가
-                # 다시 조회해도 얻을 게 없다 — 불필요한 재조회를 유발하지 않기 위함이다.
+                # 잘림·마커 부재로 동기화를 건너뛴 경우(None)에는 테이블이 그대로이므로
+                # 브로드캐스트하지 않는다. 동기화가 수행된 경우 전량 교체 특성상 내용이
+                # 직전과 동일해도 신호가 나간다 — 즉 정상 주기마다 1건이다.
                 # payload에는 보유 종목 개수만 싣고 종목명·수량 등 실제 보유 내역은 담지
                 # 않는다. WebSocket에는 인증이 없어(#65) 계좌 보유 현황이 인증 없는
                 # 채널로 유출될 수 있으므로, 신호만 보내고 클라이언트가
@@ -637,7 +637,7 @@ async def _monitor_market_task(
                         await manager.broadcast({
                             "type": "PORTFOLIO_UPDATE",
                             "holdings_count": sync_result,
-                            "updated_at": datetime.now(timezone.utc).isoformat(),
+                            "broadcast_at": datetime.now(timezone.utc).isoformat(),
                         })
                     except Exception as e:
                         logger.error(

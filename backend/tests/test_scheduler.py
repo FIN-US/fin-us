@@ -240,22 +240,31 @@ async def test_monitor_market_task_filtering(monkeypatch):
     monkeypatch.setattr("backend.scheduler.perform_stock_analysis", mock_perform_analysis)
     monkeypatch.setattr("backend.scheduler.manager.broadcast", mock_broadcast)
     monkeypatch.setattr("backend.scheduler.redis_state", unavailable_redis_state)
-    
+    # 이 테스트의 관심사는 뉴스 필터링이지 Portfolio 동기화가 아니다.
+    # 동기화를 건너뜀(None)으로 고정하면 PORTFOLIO_UPDATE가 나가지 않아
+    # 기존 기대값이 그대로 유효하고, 실 DB 상태에도 좌우되지 않는다.
+    monkeypatch.setattr(
+        "backend.scheduler._sync_portfolio_from_balance",
+        lambda balance_text, session, **kwargs: None,
+    )
+
+    def _agent_analysis_calls():
+        return [
+            c for c in mock_broadcast.call_args_list
+            if c.args[0].get("type") == "AGENT_ANALYSIS"
+        ]
+
     # 1. 첫 번째 실행: 뉴스가 처음이므로 분석 수행
-    # 마커가 있고 잘리지 않은 잔고이므로 _sync_portfolio_from_balance(mock되지 않음)가
-    # 매 호출마다 실제로 성공해 PORTFOLIO_UPDATE 1건이 항상 추가된다(이슈 #229).
-    # 종목별 AGENT_ANALYSIS 3건 + PORTFOLIO_UPDATE 1건 = 4건.
     await monitor_market_task(watchlist_repo=FakeWatchlistRepo())
     assert mock_perform_analysis.call_count == 3 # 삼성전자, SK하이닉스, 현대차
-    assert mock_broadcast.call_count == 4
+    assert len(_agent_analysis_calls()) == 3
 
-    # 2. 두 번째 실행: 뉴스가 동일하므로 분석 스킵. Portfolio 동기화는 뉴스 변경 여부와
-    # 무관하게 매 주기 실행되므로 PORTFOLIO_UPDATE 1건은 그대로 나간다.
+    # 2. 두 번째 실행: 뉴스가 동일하므로 분석 스킵
     mock_perform_analysis.reset_mock()
     mock_broadcast.reset_mock()
     await monitor_market_task(watchlist_repo=FakeWatchlistRepo())
     assert mock_perform_analysis.call_count == 0
-    assert mock_broadcast.call_count == 1
+    assert len(_agent_analysis_calls()) == 0
 
     # 3. 세 번째 실행: 뉴스가 변경된 종목이 있으면 해당 종목만 분석
     async def mock_run_mcp_tool_changed(params, name, args):
@@ -270,8 +279,7 @@ async def test_monitor_market_task_filtering(monkeypatch):
     mock_broadcast.reset_mock()
     await monitor_market_task(watchlist_repo=FakeWatchlistRepo())
     assert mock_perform_analysis.call_count == 1
-    # AGENT_ANALYSIS 1건 + PORTFOLIO_UPDATE 1건 = 2건.
-    assert mock_broadcast.call_count == 2
+    assert len(_agent_analysis_calls()) == 1
     assert mock_perform_analysis.call_args[0][0] == "삼성전자"
 
 
@@ -524,15 +532,21 @@ async def test_monitor_market_task_uses_default_stocks_when_balance_empty(monkey
     monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
     monkeypatch.setattr("backend.scheduler.perform_stock_analysis", mock_perform_analysis)
     monkeypatch.setattr("backend.scheduler.manager.broadcast", mock_broadcast)
+    # 이 테스트의 관심사는 기본 감시 종목 사용 여부이지 Portfolio 동기화가 아니다.
+    # 동기화를 건너뜀(None)으로 고정하면 PORTFOLIO_UPDATE가 나가지 않아
+    # 기존 기대값이 그대로 유효하고, 실 DB 상태에도 좌우되지 않는다.
+    monkeypatch.setattr(
+        "backend.scheduler._sync_portfolio_from_balance",
+        lambda balance_text, session, **kwargs: None,
+    )
 
     await monitor_market_task(watchlist_repo=FakeWatchlistRepo())
 
     assert len(DEFAULT_MONITOR_STOCKS) == 4
     assert monitored_stocks == DEFAULT_MONITOR_STOCKS
     assert mock_perform_analysis.call_count == 0
-    # 뉴스 분석 브로드캐스트는 없지만, 잔고 응답에 마커가 있고 잘리지 않았으므로
-    # Portfolio 동기화(mock되지 않음)가 성공해 PORTFOLIO_UPDATE 1건이 나간다(이슈 #229).
-    assert mock_broadcast.call_count == 1
+    # 뉴스 분석이 없고 Portfolio 동기화도 건너뛰므로 브로드캐스트가 전혀 없다.
+    assert mock_broadcast.call_count == 0
 
 
 @pytest.mark.asyncio
@@ -568,15 +582,23 @@ async def test_monitor_market_task_uses_redis_hash_to_skip_duplicate_news(monkey
     monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
     monkeypatch.setattr("backend.scheduler.perform_stock_analysis", mock_perform_analysis)
     monkeypatch.setattr("backend.scheduler.manager.broadcast", mock_broadcast)
+    # 이 테스트의 관심사는 Redis 해시로 뉴스 중복을 걸러내는지이지 Portfolio 동기화가
+    # 아니다. 동기화를 건너뜀(None)으로 고정하면 PORTFOLIO_UPDATE가 나가지 않아
+    # AGENT_ANALYSIS만 남는다.
+    monkeypatch.setattr(
+        "backend.scheduler._sync_portfolio_from_balance",
+        lambda balance_text, session, **kwargs: None,
+    )
 
     await monitor_market_task(watchlist_repo=FakeWatchlistRepo())
     await monitor_market_task(watchlist_repo=FakeWatchlistRepo())
 
     assert mock_perform_analysis.call_count == 1
-    # AGENT_ANALYSIS는 첫 호출에서만 1건 나가지만, Portfolio 동기화(mock되지 않음)는
-    # 뉴스 중복 여부와 무관하게 두 호출 모두 성공해 PORTFOLIO_UPDATE가 2건 나간다
-    # (이슈 #229). 1(분석) + 2(동기화) = 3건.
-    assert mock_broadcast.call_count == 3
+    analysis_calls = [
+        c for c in mock_broadcast.call_args_list
+        if c.args[0].get("type") == "AGENT_ANALYSIS"
+    ]
+    assert len(analysis_calls) == 1
 
 
 @pytest.mark.asyncio
@@ -693,6 +715,13 @@ async def test_concurrent_monitor_market_task_runs_once_with_scheduler_lock(monk
     monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
     monkeypatch.setattr("backend.scheduler.perform_stock_analysis", mock_perform_analysis)
     monkeypatch.setattr("backend.scheduler.manager.broadcast", mock_broadcast)
+    # 이 테스트의 관심사는 스케줄러 락에 의한 동시 실행 방지이지 Portfolio 동기화가
+    # 아니다. 동기화를 건너뜀(None)으로 고정하면 PORTFOLIO_UPDATE가 나가지 않아
+    # AGENT_ANALYSIS만 남는다.
+    monkeypatch.setattr(
+        "backend.scheduler._sync_portfolio_from_balance",
+        lambda balance_text, session, **kwargs: None,
+    )
 
     await asyncio.gather(
         monitor_market_task(watchlist_repo=FakeWatchlistRepo()),
@@ -700,9 +729,12 @@ async def test_concurrent_monitor_market_task_runs_once_with_scheduler_lock(monk
     )
 
     assert mock_perform_analysis.call_count == 1
-    # 스케줄러 락으로 실제 실행되는 것은 한 쪽뿐이라 AGENT_ANALYSIS 1건 + Portfolio
-    # 동기화(mock되지 않음) 성공에 따른 PORTFOLIO_UPDATE 1건 = 2건이다(이슈 #229).
-    assert mock_broadcast.call_count == 2
+    # 스케줄러 락으로 실제 실행되는 것은 한 쪽뿐이다.
+    analysis_calls = [
+        c for c in mock_broadcast.call_args_list
+        if c.args[0].get("type") == "AGENT_ANALYSIS"
+    ]
+    assert len(analysis_calls) == 1
 
 
 @pytest.mark.asyncio
@@ -1480,14 +1512,19 @@ def test_sync_portfolio_writes_holdings(portfolio_session):
 
     이 테스트가 잡는 mutation: _sync_portfolio_from_balance 호출을 제거하거나
     session.add() 없이 반환하는 회귀 → rows가 비어 assert len==1이 실패한다.
+    반환값도 함께 검증한다: 동기화 성공 시 None이 아니라 삽입한 종목 수를
+    반환해야 monitor_market_task의 PORTFOLIO_UPDATE 브로드캐스트 판단(이슈 #229,
+    `sync_result is not None`)이 성립한다 — 성공 시 무조건 None을 반환하는 회귀는
+    이 assert로 잡힌다.
     """
     from sqlmodel import select
     from ..models import Portfolio
     from ..scheduler import _sync_portfolio_from_balance
 
     text = _make_balance_text(("삼성전자", "005930", 10, 70000))
-    _sync_portfolio_from_balance(text, portfolio_session)
+    result = _sync_portfolio_from_balance(text, portfolio_session)
 
+    assert result == 1
     rows = portfolio_session.exec(select(Portfolio)).all()
     assert len(rows) == 1
     assert rows[0].stock_code == "005930"
@@ -1649,7 +1686,7 @@ async def test_monitor_market_task_broadcasts_portfolio_update_on_sync_success(m
     (실 DB의 portfolio 테이블 존재 여부에 테스트 결과가 좌우되지 않게 하기 위함).
 
     이 테스트가 잡는 mutation: 호출처가 PORTFOLIO_UPDATE 브로드캐스트를 하지 않거나
-    holdings_count/updated_at 형태를 잘못 실으면 아래 단언이 실패한다.
+    holdings_count/broadcast_at 형태를 잘못 실으면 아래 단언이 실패한다.
     """
     from ..scheduler import SignalSource, monitor_market_task
 
@@ -1688,11 +1725,61 @@ async def test_monitor_market_task_broadcasts_portfolio_update_on_sync_success(m
     payload = mock_broadcast.call_args[0][0]
     assert payload["type"] == "PORTFOLIO_UPDATE"
     assert payload["holdings_count"] == 3
-    # updated_at은 ISO 8601로 파싱 가능해야 한다.
-    datetime.fromisoformat(payload["updated_at"])
+    # broadcast_at은 ISO 8601로 파싱 가능해야 한다.
+    datetime.fromisoformat(payload["broadcast_at"])
     # 보유 내역 원본(종목명·수량 등)은 인증 없는 WebSocket으로 나가면 안 된다(#65).
     assert "holdings" not in payload
     assert "stocks" not in payload
+
+
+@pytest.mark.asyncio
+async def test_monitor_market_task_broadcasts_portfolio_update_when_holdings_become_zero(monkeypatch):
+    """보유 종목이 0건으로 동기화되어도 PORTFOLIO_UPDATE를 브로드캐스트합니다.
+
+    _sync_portfolio_from_balance는 실제 보유 0건이면 None이 아니라 0을 반환한다
+    (test_sync_portfolio_allows_genuinely_empty_holdings). 호출처가 `sync_result
+    is not None` 대신 `sync_result`(truthy)로 판단하면 0은 falsy라 이 브로드캐스트가
+    빠진다 — 마지막 남은 보유 종목이 전량 매도된 순간 클라이언트에 신호가 가지 않는
+    회귀다. 이 테스트가 잡는 mutation: 호출처의 None 판단을 truthy 판단으로 바꾸면
+    mock_broadcast.assert_called_once()가 실패한다.
+    """
+    from ..scheduler import SignalSource, monitor_market_task
+
+    @asynccontextmanager
+    async def unavailable_redis_state():
+        raise ConnectionError("redis unavailable")
+        yield
+
+    async def mock_run_mcp_tool(params, name, args):
+        if name == "get_balance":
+            return _make_balance_text(("삼성전자", "005930", 10, 70000))
+        return "news"
+
+    def mock_sync_portfolio(balance_text, session, **kwargs):
+        return 0
+
+    async def mock_check_significance(stock, current, last, *, source, provider):
+        return False
+
+    mock_broadcast = MagicMock(return_value=asyncio.Future())
+    mock_broadcast.return_value.set_result(None)
+
+    monkeypatch.setattr("backend.scheduler.redis_state", unavailable_redis_state)
+    monkeypatch.setattr(
+        "backend.scheduler.SIGNAL_SOURCES",
+        [SignalSource(name="news", mcp_params=object(), tool_name="get_market_news")],
+    )
+    monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
+    monkeypatch.setattr("backend.scheduler._sync_portfolio_from_balance", mock_sync_portfolio)
+    monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
+    monkeypatch.setattr("backend.scheduler.manager.broadcast", mock_broadcast)
+
+    await monitor_market_task(watchlist_repo=FakeWatchlistRepo())
+
+    mock_broadcast.assert_called_once()
+    payload = mock_broadcast.call_args[0][0]
+    assert payload["type"] == "PORTFOLIO_UPDATE"
+    assert payload["holdings_count"] == 0
 
 
 @pytest.mark.asyncio
@@ -1790,6 +1877,12 @@ async def test_monitor_market_task_survives_portfolio_broadcast_failure(monkeypa
     기존 동기화 예외 격리(logger.error(..., "감시는 계속"))와 같은 수준으로 브로드캐스트
     예외도 격리해야 한다. 이 테스트가 잡는 mutation: 브로드캐스트 예외를 격리하지 않으면
     monitor_market_task가 예외를 전파해 await 자체가 실패한다.
+
+    참고: 현재 ConnectionManager.broadcast는 커넥션별 send_json을 각각 try/except로
+    삼켜(ws_manager.py:26-32) 스스로 예외를 던지지 않으므로, 이 시나리오는 실제
+    운영 경로에서는 아직 발생할 수 없다. 이 테스트는 monitor_market_task 쪽 방어
+    코드가 지키는 계약을 문서화하는 성격이며, ws_manager의 예외 처리가 바뀌면
+    (예: 커넥션이 아니라 broadcast 자체가 실패를 전파하도록 바뀌면) 실효를 갖는다.
     """
     from ..scheduler import SignalSource, monitor_market_task
 
@@ -1918,7 +2011,9 @@ def test_sync_portfolio_allows_genuinely_empty_holdings(portfolio_session):
     """마커는 있지만 보유 종목이 없는 응답("보유 종목이 없습니다.")은
     실제 0건으로 처리해 기존 데이터를 전량 삭제합니다.
 
-    마커 가드가 "실제 0건"을 막아서는 안 됩니다.
+    마커 가드가 "실제 0건"을 막아서는 안 됩니다. 반환값도 0이어야 한다 — None을
+    반환하면 monitor_market_task가 "동기화를 건너뛴 것"으로 오인해(이슈 #229)
+    보유 0건으로 갱신됐다는 PORTFOLIO_UPDATE를 브로드캐스트하지 않게 된다.
     """
     from sqlmodel import select
     from ..models import Portfolio
@@ -1935,8 +2030,9 @@ def test_sync_portfolio_allows_genuinely_empty_holdings(portfolio_session):
         "[보유 종목 리스트]\n"
         "보유 종목이 없습니다."
     )
-    _sync_portfolio_from_balance(empty_holdings_text, portfolio_session)
+    result = _sync_portfolio_from_balance(empty_holdings_text, portfolio_session)
 
+    assert result == 0, "실제 보유 0건 동기화는 None이 아니라 0을 반환해야 합니다"
     rows = portfolio_session.exec(select(Portfolio)).all()
     assert len(rows) == 0, "실제 보유 0건이면 기존 데이터를 삭제해야 합니다"
 
