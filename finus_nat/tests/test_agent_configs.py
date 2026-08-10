@@ -284,9 +284,9 @@ def test_agent_references_expected_kis_tool(config_path: Path, agent_fn: str, ex
 
     config = load_config(config_path)
     tool_names = [str(t) for t in config.functions[agent_fn].tool_names]
-    assert expected_tool in tool_names, (
-        f"{config_path.name}::{agent_fn}: tool_names에 {expected_tool!r}가 없습니다. "
-        f"실제 tool_names: {tool_names}"
+    kis_tools = [t for t in tool_names if t.startswith("kis-trading-mcp-tool")]
+    assert kis_tools == [expected_tool], (
+        f"{config_path.name}::{agent_fn}: KIS 도구 참조는 [{expected_tool!r}] 하나여야 합니다. 실제: {kis_tools}"
     )
 
 
@@ -330,6 +330,60 @@ def test_readonly_api_type_blocks_non_allowlisted(api_type: str):
     from nat_finus_nat.finus_api import _is_readonly_api_type
     assert _is_readonly_api_type(api_type) is False, (
         f"{api_type!r}는 조회 전용 허용 목록에서 차단되어야 합니다."
+    )
+
+
+# ---------------------------------------------------------------------------
+# #66 allowlist 단위 테스트 — _is_readonly_tool_name 판정 고정
+# fail-closed 검증: allowlist 판정을 무조건 True로 뒤집으면 이 테스트가 red.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("tool_name", [
+    "domestic_stock",
+    "overseas_stock",
+    "domestic_bond",
+    "domestic_futureoption",
+    "overseas_futureoption",
+    "elw",
+    "etfetn",
+], ids=lambda x: x)
+def test_readonly_tool_name_allows_asset_classes(tool_name: str):
+    """#66: 허용 자산군 7종은 _is_readonly_tool_name이 True를 반환해야 한다."""
+    from nat_finus_nat.finus_api import _is_readonly_tool_name
+    assert _is_readonly_tool_name(tool_name) is True, (
+        f"{tool_name!r}는 조회 전용 tool_name 허용 목록에 포함되어야 합니다."
+    )
+
+
+@pytest.mark.parametrize("tool_name", [
+    "auth",     # 인증 상태 변경 가능 — 핵심 차단 케이스
+    "foo_bar",  # 알 수 없는 tool_name — fail-closed 핵심 케이스
+    "",         # 빈 문자열
+], ids=lambda x: x or "<empty>")
+def test_readonly_tool_name_blocks_non_allowlisted(tool_name: str):
+    """#66: 허용 목록 밖의 tool_name은 _is_readonly_tool_name이 False를 반환해야 한다.
+
+    ``auth`` 케이스가 핵심: 인증 상태를 바꿀 수 있어 조회 전용 래퍼에서 제외한다.
+    allowlist 판정을 무조건 True로 교체하면 이 테스트들이 red가 된다.
+    """
+    from nat_finus_nat.finus_api import _is_readonly_tool_name
+    assert _is_readonly_tool_name(tool_name) is False, (
+        f"{tool_name!r}는 조회 전용 허용 목록에서 차단되어야 합니다."
+    )
+
+
+@pytest.mark.parametrize("tool_name,expected", [
+    ("DOMESTIC_STOCK", True),    # 대문자 → 허용 (대소문자 무시)
+    ("Overseas_Stock", True),    # 혼합 대소문자 → 허용
+    ("  etfetn  ", True),        # 앞뒤 공백 → 허용 (strip 처리)
+    ("AUTH", False),             # 대문자 auth → 차단
+    ("DOMESTIC_BOND ", True),    # 뒤 공백 있어도 strip 후 허용
+], ids=lambda x: repr(x) if isinstance(x, str) else str(x))
+def test_readonly_tool_name_case_and_whitespace(tool_name: str, expected: bool):
+    """#66: _is_readonly_tool_name은 대소문자·앞뒤 공백을 정규화해 판정해야 한다."""
+    from nat_finus_nat.finus_api import _is_readonly_tool_name
+    assert _is_readonly_tool_name(tool_name) is expected, (
+        f"{tool_name!r}: expected={expected}"
     )
 
 

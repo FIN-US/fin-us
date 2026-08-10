@@ -692,9 +692,13 @@ _READONLY_API_ALLOWLIST_PREFIXES: tuple[str, ...] = ("inquire_", "search_")
 _READONLY_API_ALLOWLIST_EXACT: frozenset[str] = frozenset({"find_api_detail"})
 
 # 조회 전용 래퍼가 허용하는 MCP tool_name 허용 목록. fail-closed: 목록 밖의 tool_name은 차단.
-# 비-trading 에이전트 프롬프트가 실제로 지정하는 값은 domestic_stock 하나이나,
-# 해외 주식 조회를 위해 overseas_stock도 포함한다.
-_READONLY_TOOL_ALLOWLIST: frozenset[str] = frozenset({"domestic_stock", "overseas_stock"})
+# api_type 게이트가 주문을 막으므로, tool_name은 조회 대상 자산군을 넓게 허용한다.
+# auth는 조회 목적이 없고 인증 상태를 바꿀 수 있어 제외한다.
+# trading_agent.yml·KisTradingMcpCallInput에 나열된 자산군 8종 중 auth만 제외한 7종.
+_READONLY_TOOL_ALLOWLIST: frozenset[str] = frozenset({
+    "domestic_stock", "overseas_stock", "domestic_bond",
+    "domestic_futureoption", "overseas_futureoption", "elw", "etfetn",
+})
 
 
 def _is_readonly_api_type(api_type: str) -> bool:
@@ -715,6 +719,18 @@ def _is_readonly_api_type(api_type: str) -> bool:
     )
 
 
+def _is_readonly_tool_name(tool_name: str) -> bool:
+    """Return True when *tool_name* is in the readonly asset-class allowlist (fail-closed).
+
+    Allowed: domestic_stock, overseas_stock, domestic_bond, domestic_futureoption,
+    overseas_futureoption, elw, etfetn.
+
+    Excluded: auth (인증 상태를 바꿀 수 있어 조회 전용 래퍼에서 허용하지 않는다).
+    Any unknown tool_name returns False.
+    """
+    return (tool_name or "").strip().lower() in _READONLY_TOOL_ALLOWLIST
+
+
 class FinusAccountBalanceReadonlyConfig(FinusAccountBalanceConfig, name="finus_account_balance_readonly"):
     """finus_account_balance 조회 전용 래퍼 — allowlist 방식 api_type 차단 (#66).
 
@@ -729,7 +745,8 @@ async def finus_account_balance_readonly(config: FinusAccountBalanceReadonlyConf
     async def get_account_balance_readonly(inp: KisTradingMcpCallInput) -> str:
         """Kis Trading MCP 조회 전용 래퍼 — tool_name·api_type 허용 목록으로 이중 차단 (#66).
 
-        허용 tool_name: domestic_stock, overseas_stock.
+        허용 tool_name: domestic_stock, overseas_stock, domestic_bond, domestic_futureoption,
+        overseas_futureoption, elw, etfetn (auth 제외 — 인증 상태 변경 가능).
         허용 api_type(pass-through): inquire_*(잔고·시세·체결 등), search_*, find_api_detail.
         차단(fail-closed): 목록 밖의 tool_name 또는 api_type(order_* 계열 포함).
         """
@@ -738,13 +755,15 @@ async def finus_account_balance_readonly(config: FinusAccountBalanceReadonlyConf
             _record_to_ledger(_KIS_BALANCE_LEDGER_NAME, prepared)
             return prepared
         tool_name, arguments = prepared
-        if tool_name.lower() not in _READONLY_TOOL_ALLOWLIST:
+        if not _is_readonly_tool_name(tool_name):
             logger.warning("readonly gate blocked tool_name=%r", tool_name)
             result = _err_json(
                 "kis_tool_name_not_allowed_readonly",
                 tool_name=tool_name,
                 hint=(
-                    "이 도구는 조회 전용입니다. domestic_stock 또는 overseas_stock만 사용하세요. "
+                    "이 도구는 조회 전용입니다. "
+                    "domestic_stock, overseas_stock, domestic_bond, domestic_futureoption, "
+                    "overseas_futureoption, elw, etfetn 중 하나를 사용하세요. "
                     "주문 실행은 이 에이전트의 권한이 아니므로 재시도하지 말고 사용자에게 안내하세요."
                 ),
             )
