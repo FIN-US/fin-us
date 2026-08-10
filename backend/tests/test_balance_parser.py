@@ -20,9 +20,14 @@ _FIXTURE_PATH = (
 _FIXTURE = json.loads(_FIXTURE_PATH.read_text(encoding="utf-8"))
 
 # REAL_BALANCE_TEXT는 이제 공유 픽스처에서 로드합니다(이슈 #137).
-# 이전에는 손으로 복사한 리터럴이었으나, 이제 balance.js balance.test.js 픽스처 테스트가
-# 깨지면 이 값도 함께 변경되므로, 아래 TestBalanceExtraction 테스트들도 드리프트를
-# 일으키지 않고 자동으로 새 형식을 검증합니다.
+# 이전에는 손으로 복사한 리터럴이었으나, 이제 balance.js의 변경이 balance.test.js 픽스처
+# 테스트를 깨뜨리므로, 아래 TestBalanceExtraction 테스트들도 드리프트를 일으키지 않고
+# 자동으로 새 형식을 검증합니다.
+#
+# 이 심볼은 test_scheduler.py::test_parse_balance_holdings_with_real_fixture 가
+# 크로스모듈 import 해 사용합니다. 수량·평단가 커버리지는
+# TestSharedFixture::test_fixture_normal_round_trips_qty_and_avg_price 에서도
+# 독립적으로 제공되므로, 이 export 를 제거할 때는 해당 테스트를 함께 확인하세요.
 REAL_BALANCE_TEXT = _FIXTURE["normal"]["expected_text"]
 
 
@@ -336,6 +341,28 @@ class TestSharedFixture(unittest.TestCase):
         """픽스처 normal.expected_text 에는 잘림 안내 문구가 없어야 합니다."""
         text = _FIXTURE["normal"]["expected_text"]
         self.assertFalse(is_balance_truncated(text))
+
+    def test_fixture_normal_round_trips_qty_and_avg_price(self):
+        """expected_text 를 파싱한 결과가 픽스처 input 의 원본 KIS 값과 일치해야 합니다.
+        기대값을 input 에서 파생시켜, 형식이 바뀌면 이 테스트가 직접 red 가 되게 합니다.
+
+        이 테스트는 test_scheduler.py::test_parse_balance_holdings_with_real_fixture 의
+        수량·평단가 커버리지를 TestSharedFixture 안에서 독립적으로 제공합니다.
+        크로스모듈 import 가 제거되거나 test_parse_balance_holdings_with_real_fixture 가
+        삭제되더라도, 이 테스트가 avg_price=0.0 회귀를 잡습니다.
+        """
+        from backend.scheduler import _parse_balance_holdings
+
+        case = _FIXTURE["normal"]
+        holdings = _parse_balance_holdings(case["expected_text"])
+        expected = case["input"]["output1"]
+
+        self.assertEqual(len(holdings), len(expected))
+        for parsed, raw in zip(holdings, expected):
+            self.assertEqual(parsed.code, raw["pdno"])
+            self.assertEqual(parsed.name, raw["prdt_name"])
+            self.assertEqual(parsed.quantity, int(raw["hldg_qty"]))
+            self.assertAlmostEqual(parsed.avg_price, float(raw["pchs_avg_pric"]), places=2)
 
     def test_fixture_truncated_extracts_stocks_without_notice_line(self):
         """픽스처 truncated.expected_text 에서 [안내] 잘림 문구는 종목으로 추출되지 않고,

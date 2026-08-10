@@ -7,7 +7,7 @@ import { buildBalanceParams, fetchAllBalance, formatBalanceReport, formatPercent
 // 이슈 #137: mcp-trading·backend 공유 픽스처. 이 파일을 로드해 JS와 Python 테스트가
 // 같은 expected_text를 사용하게 함으로써, formatBalanceReport() 형식 변경 시 한쪽만
 // 갱신하는 드리프트를 방지합니다. 아래 픽스처 테스트가 깨지면 fixtures/ 파일도 함께 수정하세요.
-const _fixture = JSON.parse(
+const balanceFixture = JSON.parse(
   readFileSync(new URL("fixtures/balance_report.json", import.meta.url), "utf-8"),
 );
 
@@ -700,11 +700,11 @@ test("formatBalanceReport highlights negative return rates", () => {
 // 픽스처 수정 시 Python 쪽에서 파서 계약이 유지되는지 확인하세요.
 
 test("formatBalanceReport output matches shared fixture — normal case (fixtures/balance_report.json)", () => {
-  const { input, expected_text } = _fixture.normal;
+  const { input, expected_text } = balanceFixture.normal;
   assert.equal(formatBalanceReport(input), expected_text);
 });
 
 test("formatBalanceReport output matches shared fixture — truncated/max_pages case (fixtures/balance_report.json)", () => {
-  const { input, format_meta, expected_text } = _fixture.truncated;
+  const { input, format_meta, expected_text } = balanceFixture.truncated;
   assert.equal(formatBalanceReport(input, format_meta), expected_text);
 });
