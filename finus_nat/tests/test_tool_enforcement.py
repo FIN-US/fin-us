@@ -7,6 +7,7 @@
 직접 호출해 검증하므로, 실제 ReAct 에이전트나 LLM 없이도 동작이 고정된다.
 """
 
+import json
 import logging
 import pytest
 from pathlib import Path
@@ -33,6 +34,7 @@ from nat_finus_nat.finus_api import (
     DataToolLedger,
     _EMPTY_RESULT_LITERALS,
     _err_json,
+    _has_empty_result,
     _record_to_ledger,
 )
 
@@ -902,3 +904,67 @@ def test_record_to_ledger_nonempty_earnings_report_counts_as_success():
         DATA_TOOL_LEDGER.reset(token)
 
     assert ledger.any_success() is True
+
+# ---------------------------------------------------------------------------
+# Improvement 1 (PR #216 리뷰) — JSON fall-through 회귀 가드
+#
+# _has_empty_result의 JSON 분기는 빈 컨테이너일 때만 True를 확정하고,
+# 비어있지 않은 JSON이어도 리터럴 검사로 fall-through한다.
+# 조기 `return False`를 복원(뮤턴트)하면 이 테스트들이 red가 된다.
+# ---------------------------------------------------------------------------
+
+def test_has_empty_result_json_string_wrapped_literal_detected():
+    """JSON 문자열로 감싼 리터럴도 빈 결과로 판정한다.
+
+    잡는 뮤턴트: JSON 분기에 `return False` 조기 종료를 복원하면,
+    파싱된 문자열이 비어있지 않아 fall-through 없이 False를 반환하고 이 단언이 깨진다.
+
+    Node.js JSON.stringify는 한국어를 \\uXXXX 없이 그대로 직렬화하므로
+    ensure_ascii=False로 시뮬레이션한다.
+    """
+    lit = _EMPTY_RESULT_LITERALS["finus_market_news"]
+    # Node.js style: JSON.stringify("'삼성전자'에 대한 뉴스를 찾지 못했습니다.")
+    wrapped = json.dumps("'삼성전자'" + lit, ensure_ascii=False)
+    assert _has_empty_result("finus_market_news", wrapped) is True
+
+
+def test_has_empty_result_json_object_wrapped_literal_detected():
+    """JSON 객체로 감싼 리터럴도 빈 결과로 판정한다.
+
+    잡는 뮤턴트: JSON 분기에 `return False` 조기 종료를 복원하면,
+    파싱된 객체가 비어있지 않아 fall-through 없이 False를 반환하고 이 단언이 깨진다.
+
+    MCP 래퍼가 {"text": "..."} 형태로 감쌀 때 리터럴 탐지가 유지됨을 고정한다.
+    """
+    lit = _EMPTY_RESULT_LITERALS["finus_market_news"]
+    wrapped = json.dumps({"text": "'삼성전자'" + lit}, ensure_ascii=False)
+    assert _has_empty_result("finus_market_news", wrapped) is True
+
+
+def test_has_empty_result_empty_dict_json_is_true():
+    """빈 dict JSON ('{}')을 빈 결과로 판정한다.
+
+    잡는 뮤턴트: isinstance 판정에서 dict를 제거(list만 허용)하면 {} → False가 돼
+    이 단언이 깨진다. finus_list_diaries 등에서 backend가 {}를 돌려줄 때의 방어선이다.
+    """
+    assert _has_empty_result("finus_list_diaries", "{}") is True
+
+
+def test_has_empty_result_empty_string_json_is_true():
+    """빈 문자열 JSON ('\"\"')을 빈 결과로 판정한다.
+
+    잡는 뮤턴트: isinstance 판정에서 str를 제거(list/dict만 허용)하면 \"\" → False가 돼
+    이 단언이 깨진다.
+    """
+    assert _has_empty_result("finus_list_diaries", '""') is True
+
+
+def test_has_empty_result_data_bearing_json_is_false():
+    """데이터가 있는 JSON은 빈 결과로 판정하지 않는다(오탐 방지).
+
+    fall-through 변경이 오탐을 만들지 않음을 고정한다.
+    리터럴 검사는 도구 이름으로 게이트되므로 finus_market_news 의
+    실제 뉴스 JSON 객체는 통과해야 한다.
+    """
+    data = json.dumps({"items": ["삼성전자 뉴스1", "뉴스2"]}, ensure_ascii=False)
+    assert _has_empty_result("finus_market_news", data) is False
