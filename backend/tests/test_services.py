@@ -1139,11 +1139,9 @@ def test_analysis_from_toolless_text_urgency_non_string_does_not_raise(urgency_v
 def test_analysis_from_toolless_text_urgency_dict_does_not_raise():
     """urgency가 dict여도 TypeError 없이 정상 반환된다.
 
-    dict urgency는 _json_objects_from_text의 reversed 순서 때문에
-    내부 객체가 먼저 후보로 선택되어 summary가 원본 JSON이 되는 선행 문제
-    (Improvement #3)가 있다. 이는 이 PR 이전부터 존재하는 문제이므로
-    이 테스트는 summary 내용이 아닌 '예외 없이 반환된다'만 고정한다.
-    urgency 결과는 내부 객체에 urgency 키가 없어 'normal'이 된다.
+    #218 수정 후: summary 키를 가진 바깥 객체가 우선 선택된다.
+    urgency는 {"level":"high"} dict를 받고, isinstance(..., str) 검사를
+    통과하지 못해 "normal"로 정규화된다. summary·source_news는 보존된다.
     """
     import json
 
@@ -1153,6 +1151,9 @@ def test_analysis_from_toolless_text_urgency_dict_does_not_raise():
     result = services._analysis_from_toolless_text(raw)
     assert isinstance(result, dict), "dict urgency여도 예외 없이 dict를 반환해야 한다"
     assert result["urgency"] == "normal"
+    # #218: 중첩된 urgency dict가 후보로 선택되어 summary를 오염시키면 안 된다
+    assert result["summary"] == "삼성전자 요약"
+    assert result["source_news"] == ["뉴스1"]
 
 
 # ── #211 리뷰 반영: urgency 하향 시 urgency_reason·telegram_alert 모순 방지 ──
@@ -1212,3 +1213,59 @@ def test_analysis_from_toolless_text_absent_urgency_preserves_reason_and_alert(r
     assert result["telegram_alert"] is True, (
         "urgency 키 부재·null은 하향이 아니므로 telegram_alert을 보존해야 한다"
     )
+
+
+# ── #218: 중첩 JSON 객체 — summary 키 우선 선택 ───────────────────────────────
+
+
+def test_analysis_from_toolless_text_nested_json_uses_outer_summary():
+    """중첩 JSON 객체가 있어도 summary 키를 가진 바깥 객체에서 올바른 요약을 뽑는다. (#218)
+
+    _json_objects_from_text는 reversed 순서로 후보를 반환하므로, 안쪽 {"pe":12}가
+    바깥 객체보다 먼저 온다. 안쪽 객체엔 summary 키가 없어
+    data.get("summary") or text[:8000]이 원본 JSON 전체를 summary로 채우고,
+    source_news는 []가 된다. summary 키 우선 정렬로 바깥 객체를 먼저 시도해 이를 막는다.
+
+    이 테스트가 잡는 mutation: 후보 정렬 로직(_candidates.sort(...)) 제거.
+    정렬을 지우면 안쪽 {"pe":12}가 먼저 시도돼 summary가 원본 JSON 전체로,
+    source_news가 []로 나와 두 단정 모두 실패한다.
+    """
+    raw = '{"summary":"삼성전자 요약","source_news":["뉴스1"],"detail":{"pe":12}}'
+    result = services._analysis_from_toolless_text(raw)
+    assert result["summary"] == "삼성전자 요약", (
+        "중첩 JSON이 있을 때 원본 JSON 전체가 summary로 노출되어서는 안 된다"
+    )
+    assert result["source_news"] == ["뉴스1"]
+
+
+def test_analysis_from_toolless_text_no_summary_json_still_falls_back():
+    """관련 없는 JSON(summary 키 없음)만 있으면 원문 전체가 summary로 사용된다.
+
+    {"count":3} 같은 객체는 summary 키가 없으므로 루프 안에서
+    `data.get("summary") or text[:8000]` 폴백이 동작해 원본 텍스트를 summary로 채운다.
+    ValidationError는 발생하지 않는다 — AnalysisReport 생성 인수가 모두 강제 변환되기 때문이다.
+    """
+    raw = '{"count":3,"items":["a","b","c"]}'
+    result = services._analysis_from_toolless_text(raw)
+    # 루프 내 폴백: data.get("summary") or text[:8000] → 원문 전체가 summary
+    assert result["summary"] == raw
+    assert result["source_news"] == []
+    assert result["details"] is None
+
+
+def test_analysis_from_toolless_text_invalid_candidate_is_skipped():
+    """스키마 검증에 실패하는 후보는 건너뛰고 유효한 후보를 쓴다.
+
+    summary 우선 정렬이 `except ValidationError: continue` 의도를 깨지 않는지 확인한다.
+    trading_trend는 `str | None`이라 정수를 넣으면 ValidationError가 난다.
+
+    이 테스트가 잡는 mutation: `except ValidationError: continue` 제거.
+    건너뛰기가 없으면 정수 trading_trend로 ValidationError가 전파되어 실패한다.
+    """
+    raw = (
+        '{"summary":"유효 요약","source_news":["뉴스1"],"trading_trend":"상승"} '
+        '{"summary":"깨진 후보","trading_trend":12}'
+    )
+    result = services._analysis_from_toolless_text(raw)
+    assert result["summary"] == "유효 요약"
+    assert result["trading_trend"] == "상승"
