@@ -338,6 +338,7 @@ async def test_perform_stock_analysis_resolves_alphanumeric_stock_code(monkeypat
 
 # test_looks_like_stock_code_* → backend/tests/test_stock_code.py (#140)
 
+
 def test_normalize_stock_input_handles_interleaved_bom_and_whitespace():
     """공백과 BOM(U+FEFF)이 번갈아 나오는 입력도 JS String.trim()처럼 끝까지 벗겨낸다.
 

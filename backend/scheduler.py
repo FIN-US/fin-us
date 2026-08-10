@@ -101,7 +101,9 @@ def _default_catalyst_repo() -> SqliteCatalystEventRepo:
 # 대응한다.
 #
 # 코드 클래스를 [0-9A-Z]{6,}으로 한정하는 이유:
-#   - services.py의 _STOCK_CODE_EXTRACT_RE, telegram_commands.py와 동일한 컨벤션.
+#   - stock_code.py의 _STOCK_CODE_EXTRACT_RE와 동일한 컨벤션. 다만 이 정규식 자체를
+#     stock_code.py로 통합하지는 않았다 — 추출 대상 포맷이 다르다("이름 (코드, 시장)"이
+#     아니라 "- 이름 (코드) · N주").
 #   - 하한 6: KIS 표준 6자리 코드(005930 등). 상한 없음({6,}): ETN 7자리(389종목),
 #     펀드 9자리(75종목 예: F70102B96)까지 포함.
 #   - [^()]*를 쓰면 두 가지 문제가 생긴다:

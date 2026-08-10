@@ -4,15 +4,19 @@ _STOCK_CODE_EXTRACT_RE, _STOCK_CODE_RE / _looks_like_stock_code, _ORDERABLE_STOC
 순수 단위 테스트. 각 호출부 고유 동작(services.py의 빈 문자열 폴백,
 telegram_commands.py의 조기 거절)은 각자의 테스트 파일에 남아 있다.
 """
-import pytest
+import json
+from pathlib import Path
 
-from backend import stock_code
 from backend.stock_code import (
     _ORDERABLE_STOCK_CODE_RE,
     _STOCK_CODE_EXTRACT_RE,
     _has_code_digit,
     _looks_like_stock_code,
 )
+
+# 종목마스터 실제 데이터(4,353종 전수) — 판정 함수가 이름·별칭을 코드로 오인하지
+# 않는지 검증하는 데 쓴다. 이 파일은 레포에 커밋돼 있어야 한다.
+_STOCKS_JSON_PATH = Path(__file__).resolve().parents[2] / "mcp-trading" / "data" / "stocks.json"
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -107,7 +111,7 @@ class TestLooksLikeStockCode:
 
     def test_lowercase_input_normalised(self):
         """소문자 입력도 upper() 정규화 후 판정한다."""
-        assert _looks_like_stock_code("005930")
+        assert _looks_like_stock_code("0001a0")  # 6자 영숫자, 소문자
         assert _looks_like_stock_code("f70100026")  # 9자 펀드, 소문자
 
     def test_leading_trailing_whitespace_stripped(self):
@@ -189,3 +193,36 @@ class TestOrderableStockCodeRe:
         Python의 `\d`는 전각 숫자를 포함하므로 `[0-9]`로 명시한 이유를 고정한다.
         """
         assert not _ORDERABLE_STOCK_CODE_RE.fullmatch("００５９３０")
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# 종목마스터 전수 회귀 가드 — 이름·별칭이 _looks_like_stock_code에 오인되지 않는가
+# ──────────────────────────────────────────────────────────────────────────
+
+def test_no_master_name_is_shadowed_by_looks_like_stock_code():
+    """마스터의 어떤 이름·별칭도 _looks_like_stock_code가 코드로 오인하지 않아야 한다.
+
+    오인하면 MCP 조회를 건너뛰어 마스터의 *다른* 종목을 가린다(#151).
+    #140이 판정 범위를 9자까지 넓혔으므로 이 불변식도 9자를 포함해야 한다 —
+    mcp-trading의 CODE_SHAPE_PATTERN은 `/^[A-Z0-9]{6,7}$/i`라 9자를 검사하지 못하므로
+    (mcp-trading/tests/stock-master.test.js의 "exactly 3 master stock names..." 테스트는
+    부분적인 신호일 뿐이다), 6·7·9자 전 범위를 덮는 신호는 이 테스트다.
+
+    뮤테이션 ③: _looks_like_stock_code가 항상 True를 반환하도록 무력화하면 이
+    테스트가 red가 돼야 한다. red가 되지 않으면 이 테스트는 공허하다.
+    """
+    assert _STOCKS_JSON_PATH.exists(), f"stocks.json이 없습니다: {_STOCKS_JSON_PATH}"
+    stocks = json.loads(_STOCKS_JSON_PATH.read_text(encoding="utf-8"))
+
+    shadowed = []
+    for stock in stocks:
+        code = stock["code"]
+        candidates = [stock["name"], *stock.get("aliases", [])]
+        for name in candidates:
+            if _looks_like_stock_code(name):
+                shadowed.append((name, code))
+
+    assert shadowed == [], (
+        "다음 마스터 이름·별칭이 _looks_like_stock_code에 종목코드로 오인됩니다 "
+        f"(이름, 오인된 이름이 속한 실제 코드): {shadowed}"
+    )

@@ -30,7 +30,7 @@ _STOCK_CODE_EXTRACT_RE = re.compile(r"\(([0-9A-Z]{6,}),")
 # 부수 효과). _STOCK_CODE_EXTRACT_RE({6,})과 달리 상한이 있다 — 추출 정규식은 MCP
 # *응답*에서 코드를 뽑는 것이고, 이 정규식은 *입력*이 코드 형태인지 판단하는 것이라
 # 역할이 다르다.
-_STOCK_CODE_RE = re.compile(r"^(?:[0-9A-Z]{6,7}|[0-9A-Z]{9})$")
+_STOCK_CODE_RE = re.compile(r"\A(?:[0-9A-Z]{6,7}|[0-9A-Z]{9})\Z")
 
 # ──────────────────────────────────────────────────────────────────────────
 # 주문 가능 코드 판정 — mcp-trading/order.js:77-84 정책의 백엔드 복제본
@@ -73,8 +73,11 @@ def _looks_like_stock_code(stock: str) -> bool:
     _has_code_digit이 안전망 역할을 한다 — 코드 형태 이름 3종(SIMPAC/INVENI/WISCOM)이
     모두 숫자를 포함하지 않아 여기서 걸러지고 MCP로 넘어간다.
     숫자를 포함한 6·7·9자 이름이 신규 상장되면 이 안전망이 뚫린다. mcp-trading/tests/
-    stock-master.test.js의 "exactly 3 master stock names..." 테스트가 그 신호이며,
-    그 테스트가 깨지면 이 함수도 함께 재검토해야 한다.
+    stock-master.test.js의 "exactly 3 master stock names..." 테스트가 부분적인 신호다 —
+    다만 그 테스트가 쓰는 CODE_SHAPE_PATTERN은 `/^[A-Z0-9]{6,7}$/i`라 6·7자만 덮고
+    9자는 검사하지 않는다. 6·7·9자 전 범위를 덮는 신호는 backend/tests/test_stock_code.py의
+    test_no_master_name_is_shadowed_by_looks_like_stock_code다 — 이 테스트가 깨지면
+    이 함수를 재검토해야 한다.
 
     #140 영향: {6,7} → {6,7}|{9} 확대로 F70100026 같은 9자 펀드 코드가 이제 지름길을 탄다.
     이 코드들은 MCP 검증 없이 통과하므로, 실재하지 않는 9자 코드를 직접 입력하면
