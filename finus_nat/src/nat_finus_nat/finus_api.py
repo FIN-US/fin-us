@@ -654,6 +654,18 @@ def _coerce_api_type_params_payload(tool_input: Any, kwargs: dict[str, Any]) -> 
     return None
 
 
+# Kis Trading MCP list_tools에 실제로 존재하는 도구 이름 전체 집합.
+# FinusAccountBalanceConfig.trading_tool_name 검증에 사용한다 — 설정 시점에
+# 허용 목록 밖의 값을 빠르게 감지해 readonly 래퍼 전면 차단 사고를 예방한다.
+# _READONLY_TOOL_ALLOWLIST와 달리 auth를 포함한다:
+#   readonly 래퍼는 auth를 차단하지만, 전체 권한 래퍼(finus_account_balance)는 허용한다.
+_KIS_TRADING_TOOL_NAMES: frozenset[str] = frozenset({
+    "domestic_stock", "overseas_stock", "domestic_bond",
+    "domestic_futureoption", "overseas_futureoption", "elw", "etfetn",
+    "auth",
+})
+
+
 class FinusAccountBalanceConfig(FunctionBaseConfig, name="finus_account_balance"):
     """원격 Kis Trading MCP — `call_tool` 에 `api_type`·`params` 만 전달.
 
@@ -676,6 +688,22 @@ class FinusAccountBalanceConfig(FunctionBaseConfig, name="finus_account_balance"
             "``list_tools`` 이름과 동일해야 합니다."
         ),
     )
+
+    @model_validator(mode="after")
+    def _validate_trading_tool_name(self) -> "FinusAccountBalanceConfig":
+        """FINUS_KIS_TRADING_TOOL_NAME 환경변수 등으로 잘못된 값이 들어올 때 설정 시점에 감지한다.
+
+        허용 목록 밖의 값이면 readonly 래퍼가 전면 차단되므로, 런타임 첫 호출까지 기다리지 않고
+        Config 로드 시점에 ValidationError를 발생시켜 조기에 알린다.
+        빈 문자열은 런타임에 ``kis_tool_name_missing`` 에러로 처리되므로 여기서는 허용한다.
+        """
+        name = (self.trading_tool_name or "").strip().lower()
+        if name and name not in _KIS_TRADING_TOOL_NAMES:
+            raise ValueError(
+                f"trading_tool_name={self.trading_tool_name!r}는 허용하지 않는 Kis MCP 도구 이름입니다. "
+                f"허용 목록: {sorted(_KIS_TRADING_TOOL_NAMES)}"
+            )
+        return self
 
 
 def _adjust_domestic_stock_params(api_type: str, params: dict[str, Any]) -> dict[str, Any]:
@@ -717,10 +745,13 @@ def _prepare_kis_trading_mcp_call(
         )
     blob = dict(blob)
     tool_from_blob = blob.pop("tool_name", None)
+    # tool_name을 소문자로 정규화한다 (#220).
+    # _is_readonly_tool_name·_adjust_domestic_stock_params 판정뿐 아니라
+    # _mcp_call_tool_remote에 전달되는 값도 MCP 서버가 기대하는 소문자여야 한다.
     tool_name = (
-        (inp.tool_name or "").strip()
-        or (str(tool_from_blob).strip() if tool_from_blob is not None else "")
-        or (config.trading_tool_name or "").strip()
+        (inp.tool_name or "").strip().lower()
+        or (str(tool_from_blob).strip().lower() if tool_from_blob is not None else "")
+        or (config.trading_tool_name or "").strip().lower()
     )
     if not tool_name:
         return _err_json(
@@ -732,7 +763,7 @@ def _prepare_kis_trading_mcp_call(
         return _err_json("kis_mcp_missing_api_type", tool=tool_name, blob_keys=list(blob.keys()))
     raw_params = blob.get("params")
     params: dict[str, Any] = raw_params if isinstance(raw_params, dict) else {}
-    if (tool_name or "").strip() == "domestic_stock":
+    if tool_name == "domestic_stock":
         params = _adjust_domestic_stock_params(str(api_type).strip(), params)
     return tool_name, {"api_type": str(api_type).strip(), "params": params}
 
@@ -817,6 +848,45 @@ def _is_readonly_tool_name(tool_name: str) -> bool:
     return (tool_name or "").strip().lower() in _READONLY_TOOL_ALLOWLIST
 
 
+# ---- 두 KIS 래퍼(전체/readonly) 공통 헬퍼 (#220) ----
+
+async def _call_kis_mcp_and_record(
+    tool_name: str,
+    arguments: McpCallArguments,
+    config: FinusAccountBalanceConfig,
+) -> str:
+    """원격 MCP 호출 후 원장에 기록한다 — finus_account_balance·readonly 공유.
+
+    두 래퍼가 개별로 _mcp_call_tool_remote + _record_to_ledger(_KIS_BALANCE_LEDGER_NAME)를
+    중복 구현하는 것을 이 헬퍼 한 곳으로 모은다.
+    """
+    result = await _mcp_call_tool_remote(
+        transport=config.mcp_transport,
+        url=config.mcp_url,
+        tool_name=tool_name,
+        arguments=arguments,
+        timeout_sec=config.timeout_sec,
+    )
+    _record_to_ledger(_KIS_BALANCE_LEDGER_NAME, result)
+    return result
+
+
+async def _build_kis_mcp_description(doc: str, config: FinusAccountBalanceConfig) -> str:
+    """description 문자열 조립 — finus_account_balance·readonly 공유 (#220).
+
+    base_doc + _KIS_TRADING_TOOL_GUIDE + (원격 MCP list_tools 문서) 를 합쳐
+    LangChain 중괄호 이스케이프 적용 후 반환한다.
+    """
+    base = doc.strip()
+    remote = await _fetch_mcp_tool_documentation(config)
+    merged = (
+        f"{base}\n\n{_KIS_TRADING_TOOL_GUIDE}\n\n{remote}"
+        if remote
+        else f"{base}\n\n{_KIS_TRADING_TOOL_GUIDE}"
+    )
+    return _langchain_escape_braces(merged)
+
+
 class FinusAccountBalanceReadonlyConfig(FinusAccountBalanceConfig, name="finus_account_balance_readonly"):
     """finus_account_balance 조회 전용 래퍼 — allowlist 방식 api_type 차단 (#66).
 
@@ -871,26 +941,12 @@ async def finus_account_balance_readonly(config: FinusAccountBalanceReadonlyConf
             )
             _record_to_ledger(_KIS_BALANCE_LEDGER_NAME, result)
             return result
-        result = await _mcp_call_tool_remote(
-            transport=config.mcp_transport,
-            url=config.mcp_url,
-            tool_name=tool_name,
-            arguments=arguments,
-            timeout_sec=config.timeout_sec,
-        )
-        _record_to_ledger(_KIS_BALANCE_LEDGER_NAME, result)
-        return result
+        return await _call_kis_mcp_and_record(tool_name, arguments, config)
 
-    base_desc = (get_account_balance_readonly.__doc__ or "").strip()
-    remote = await _fetch_mcp_tool_documentation(config)
-    merged = (
-        f"{base_desc}\n\n{_KIS_TRADING_TOOL_GUIDE}\n\n{remote}"
-        if remote
-        else f"{base_desc}\n\n{_KIS_TRADING_TOOL_GUIDE}"
-    )
+    description = await _build_kis_mcp_description(get_account_balance_readonly.__doc__ or "", config)
     yield FunctionInfo.from_fn(
         get_account_balance_readonly,
-        description=_langchain_escape_braces(merged),
+        description=description,
         input_schema=KisTradingMcpCallInput,
     )
 
@@ -1263,21 +1319,11 @@ async def finus_account_balance(config: FinusAccountBalanceConfig, _builder: Bui
             _record_to_ledger(_KIS_BALANCE_LEDGER_NAME, prepared)
             return prepared
         tool_name, arguments = prepared
-        result = await _mcp_call_tool_remote(
-            transport=config.mcp_transport,
-            url=config.mcp_url,
-            tool_name=tool_name,
-            arguments=arguments,
-            timeout_sec=config.timeout_sec,
-        )
-        _record_to_ledger(_KIS_BALANCE_LEDGER_NAME, result)
-        return result
+        return await _call_kis_mcp_and_record(tool_name, arguments, config)
 
-    base_desc = (get_account_balance.__doc__ or "").strip()
-    remote = await _fetch_mcp_tool_documentation(config)
-    merged = f"{base_desc}\n\n{_KIS_TRADING_TOOL_GUIDE}\n\n{remote}" if remote else f"{base_desc}\n\n{_KIS_TRADING_TOOL_GUIDE}"
+    description = await _build_kis_mcp_description(get_account_balance.__doc__ or "", config)
     yield FunctionInfo.from_fn(
         get_account_balance,
-        description=_langchain_escape_braces(merged),
+        description=description,
         input_schema=KisTradingMcpCallInput,
     )
