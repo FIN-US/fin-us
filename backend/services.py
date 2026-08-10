@@ -283,13 +283,11 @@ def _analysis_from_toolless_text(raw: str) -> dict[str, Any]:
     미사용) — Improvement #2 (#162 리뷰).
     """
     text = (raw or "").strip()
-    # #218: summary 키를 가진 후보를 우선 시도한다.
-    # _json_objects_from_text는 텍스트 내 마지막 JSON을 먼저 반환하도록
-    # reversed 순서를 쓰는데, 중첩 JSON이 있으면 안쪽 객체가 바깥 객체보다
-    # 나중 위치에서 발견되어 reversed 후 선두에 온다. 안쪽 객체엔 summary 키가
-    # 없으므로 data.get("summary") or text[:8000]이 원본 JSON 전체를 요약으로
-    # 채워버린다. 안정 정렬로 summary 키 보유 여부를 먼저 분리하면, 바깥 객체를
-    # 먼저 시도하면서도 summary를 모두 가진 후보들 사이에서는 기존 reversed 순서
+    # #222: 중첩 JSON 객체 문제는 _json_objects_from_text의 span 기반 필터로
+    # 근본 해결되었다(최상위 객체만 후보에 오른다).
+    # sort는 추가 방어선으로 남긴다 — 텍스트에 복수의 독립적인 최상위 JSON이
+    # 있고 summary 없는 객체가 뒤에 위치해 reversed 후 선두에 올 경우를 대비한다.
+    # 안정 정렬이므로 summary를 모두 가진 후보들 사이에서는 기존 reversed 순서
     # (텍스트 내 마지막 우선)가 유지된다.
     _candidates = _json_objects_from_text(text)
     _candidates.sort(key=lambda d: "summary" not in d)
@@ -473,9 +471,16 @@ async def _collect_morning_context(
         return f"{tool_name} 조회 실패: {exc}"
 
 
+_BRIEFING_KEYS = ("market_summary", "watchlist", "trading_ideas", "catalysts")
+
+
 def _morning_briefing_from_text(raw: str) -> dict[str, Any]:
     text = (raw or "").strip()
     for data in _json_objects_from_text(text):
+        # 브리핑 키를 하나도 갖지 않은 후보(래퍼 객체, 무관한 JSON)는 건너뛴다.
+        # 그대로 반환하면 브리핑 전체가 빈 값이 되고 아래 원문 폴백도 도달하지 못한다.
+        if not any(key in data for key in _BRIEFING_KEYS):
+            continue
         return {
             "market_summary": str(data.get("market_summary") or ""),
             "watchlist": _string_list(data.get("watchlist")),
@@ -792,18 +797,30 @@ def analysis_from_nat_text(raw: str, stock: str) -> dict[str, Any]:
 
 
 def _json_objects_from_text(text: str) -> list[dict[str, Any]]:
+    """텍스트에서 JSON 객체를 최상위 우선 순서로 추출한다.
+
+    raw_decode의 종료 인덱스로 최상위 객체의 span을 추적해, 그 안에서 발견된
+    중첩 객체는 후보에서 버리지 않고 '후순위'로 내린다 (#222).
+    최상위 객체가 실제 페이로드를 감싸기만 한 래퍼일 때 안쪽으로 폴백하기 위함이다.
+    각 그룹 안에서는 텍스트 내 마지막 객체가 먼저 오는 reversed 순서를 유지한다.
+    """
     decoder = json.JSONDecoder()
-    objects: list[dict[str, Any]] = []
+    top: list[dict[str, Any]] = []
+    nested: list[dict[str, Any]] = []
+    consumed_until = 0  # 직전에 디코드한 최상위 객체의 끝(exclusive)
     for index, char in enumerate(text):
         if char != "{":
             continue
         try:
-            value, _ = decoder.raw_decode(text[index:])
+            value, end = decoder.raw_decode(text, index)  # 슬라이스 없이 idx 지정
         except json.JSONDecodeError:
             continue
-        if isinstance(value, dict):
-            objects.append(value)
-    return list(reversed(objects))
+        if index < consumed_until:
+            nested.append(value)  # 이미 디코드한 최상위 객체 내부 → 후순위
+            continue
+        top.append(value)
+        consumed_until = end
+    return list(reversed(top)) + list(reversed(nested))
 
 
 def normalize_llm_provider(
