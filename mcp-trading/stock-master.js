@@ -98,6 +98,6 @@ export function resolveStock(stockName, stocks) {
 
   throw new Error(
     `'${input}'의 종목 코드를 찾을 수 없습니다. ` +
-      "6~7자리 종목코드로 직접 입력하거나 mcp-trading/data/stocks.json을 갱신하세요.",
+      "6·7·9자리 종목코드로 직접 입력하거나 mcp-trading/data/stocks.json을 갱신하세요.",
   );
 }

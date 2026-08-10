@@ -44,10 +44,10 @@ test("resolveStock keeps alphanumeric KIS stock codes available without master e
   });
 });
 
-test("resolveStock guides users to 6~7 digit stock codes when a name is missing", () => {
+test("resolveStock guides users to 6/7/9 digit stock codes when a name is missing", () => {
   assert.throws(
     () => resolveStock("없는종목"),
-    /6~7자리 종목코드로 직접 입력/,
+    /6·7·9자리 종목코드로 직접 입력/,
   );
 });
 

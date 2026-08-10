@@ -3,7 +3,12 @@
 services.py와 telegram_commands.py가 각자 중복 구현하던 정규식과 함수를
 이 모듈로 통합한다. 두 파일에서 import해 사용한다.
 """
+import json
+import logging
 import re
+from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 # ──────────────────────────────────────────────────────────────────────────
 # MCP 응답에서 종목코드 추출
@@ -52,6 +57,63 @@ _STOCK_CODE_RE = re.compile(r"\A(?:[0-9A-Z]{6,7}|[0-9A-Z]{9})\Z")
 _ORDERABLE_STOCK_CODE_RE = re.compile(r"\A[0-9]{6,7}\Z")
 
 
+# ──────────────────────────────────────────────────────────────────────────
+# 종목마스터 코드 존재 검증 (#151) — _looks_like_stock_code 지름길이 MCP 존재
+# 확인 없이 코드를 확정해 버리는 문제를 로컬 코드 집합 대조로 막는다.
+# ──────────────────────────────────────────────────────────────────────────
+# mcp-trading/stock-master.js:8의 DEFAULT_STOCKS_PATH와
+# mcp-trading/scripts/update_stock_master.py:12가 쓰는 경로가 동일하므로,
+# 백엔드가 이 파일을 직접 읽어도 MCP가 보는 마스터와 어긋날 수 없다(같은 파일).
+_MASTER_STOCKS_PATH = Path(__file__).resolve().parents[1] / "mcp-trading" / "data" / "stocks.json"
+
+# 마스터 로드 실패(fail-open)를 "성공했지만 빈 집합"과 구분하기 위한 센티널.
+_MASTER_LOAD_FAILED = object()
+
+# 지연 로딩 캐시: None=아직 로드 안 함, frozenset=로드 성공, _MASTER_LOAD_FAILED=로드 실패.
+# 요청마다 489K짜리 stocks.json을 다시 파싱하면 지름길을 둔 이유(MCP 왕복 생략)가
+# 사라지므로, 프로세스 수명 동안 한 번만 읽고 캐시한다.
+_master_codes_cache: object = None
+
+
+def _load_master_codes():
+    """종목마스터 코드 집합을 지연 로딩해 프로세스 메모리에 캐시합니다.
+
+    파일이 없거나 파싱에 실패하면 예외를 던지지 않고 _MASTER_LOAD_FAILED를
+    캐시해 반환합니다(fail-open) — 이 경로는 리포트 저장 판정에 쓰이지
+    주문에는 쓰이지 않으므로, 마스터를 못 읽는다고 분석 기능 전체가 죽으면
+    안 됩니다.
+    """
+    global _master_codes_cache
+    if _master_codes_cache is not None:
+        return _master_codes_cache
+    try:
+        raw = _MASTER_STOCKS_PATH.read_text(encoding="utf-8")
+        stocks = json.loads(raw)
+        codes = frozenset(str(stock["code"]).upper() for stock in stocks)
+    except Exception as exc:
+        logger.warning(
+            "종목마스터 로드 실패, 지름길 존재 검증을 건너뜁니다(fail-open): path=%s, error=%s",
+            _MASTER_STOCKS_PATH,
+            exc,
+        )
+        _master_codes_cache = _MASTER_LOAD_FAILED
+        return _master_codes_cache
+    _master_codes_cache = codes
+    return codes
+
+
+def _is_known_master_code(code: str) -> bool:
+    """code(이미 upper() 정규화된 값)가 종목마스터에 실재하는 코드인지 확인합니다.
+
+    마스터를 읽을 수 없으면(fail-open) 검증을 생략하고 True를 반환해 #151
+    이전의 지름길 동작(검증 없이 통과)을 유지합니다.
+    """
+    codes = _load_master_codes()
+    if codes is _MASTER_LOAD_FAILED:
+        return True
+    return code in codes
+
+
 def _has_code_digit(value: str) -> bool:
     """실제 종목코드는 항상 숫자를 포함한다(종목마스터 4,353종 전수 확인, 0건 예외).
 
@@ -80,8 +142,9 @@ def _looks_like_stock_code(stock: str) -> bool:
     이 함수를 재검토해야 한다.
 
     #140 영향: {6,7} → {6,7}|{9} 확대로 F70100026 같은 9자 펀드 코드가 이제 지름길을 탄다.
-    이 코드들은 MCP 검증 없이 통과하므로, 실재하지 않는 9자 코드를 직접 입력하면
-    존재 확인 없이 저장된다(#151 — 별도 이슈로 다룸).
+    이 함수 자체는 마스터를 보지 않으므로 실재 여부를 가리지 못한다 — 그 존재
+    검증은 이 함수의 True를 소비하는 쪽(services._resolve_stock_code의
+    _is_known_master_code 호출)이 담당한다(#151).
     """
     value = stock.strip().upper()
     return bool(_STOCK_CODE_RE.match(value)) and _has_code_digit(value)

@@ -5,12 +5,15 @@ _STOCK_CODE_EXTRACT_RE, _STOCK_CODE_RE / _looks_like_stock_code, _ORDERABLE_STOC
 telegram_commands.py의 조기 거절)은 각자의 테스트 파일에 남아 있다.
 """
 import json
+import logging
 from pathlib import Path
 
+from backend import stock_code
 from backend.stock_code import (
     _ORDERABLE_STOCK_CODE_RE,
     _STOCK_CODE_EXTRACT_RE,
     _has_code_digit,
+    _is_known_master_code,
     _looks_like_stock_code,
 )
 
@@ -193,6 +196,70 @@ class TestOrderableStockCodeRe:
         Python의 `\d`는 전각 숫자를 포함하므로 `[0-9]`로 명시한 이유를 고정한다.
         """
         assert not _ORDERABLE_STOCK_CODE_RE.fullmatch("００５９３０")
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# _is_known_master_code — 지름길 코드가 종목마스터에 실재하는지 대조 (#151)
+# ──────────────────────────────────────────────────────────────────────────
+
+class TestIsKnownMasterCode:
+    """_looks_like_stock_code 지름길이 MCP 존재 확인 없이 코드를 확정해 버리던
+    문제(#151)를 로컬 종목마스터 코드 집합과 대조해 막는다.
+    """
+
+    def test_known_numeric_code_returns_true(self):
+        """실측: 005930(삼성전자)은 종목마스터에 실재한다."""
+        assert _is_known_master_code("005930") is True
+
+    def test_known_nine_char_fund_code_returns_true(self):
+        """#140 회귀 가드: 마스터에 실재하는 9자 펀드 코드는 계속 지름길을 통과해야 한다."""
+        assert _is_known_master_code("F70100026") is True
+
+    def test_unknown_numeric_code_returns_false(self):
+        """#151 재현 케이스: 마스터에 없는 숫자 6자는 존재하지 않는다고 판정해야 한다."""
+        assert _is_known_master_code("999999") is False
+
+    def test_unknown_alphanumeric_code_returns_false(self):
+        assert _is_known_master_code("ZZZZ99") is False
+
+    def test_fail_open_when_master_file_missing(self, tmp_path, monkeypatch, caplog):
+        """마스터 파일을 읽을 수 없으면 예외를 던지지 않고 검증을 생략(True)한다.
+
+        이 경로는 리포트 저장 판정이지 주문이 아니므로, 마스터를 못 읽는다고
+        분석 기능 전체가 죽으면 안 된다(fail-open).
+        뮤테이션 ③: fail-open을 예외 전파로 바꾸면 이 테스트가 예외로 red가 되어야 한다.
+        """
+        monkeypatch.setattr(stock_code, "_MASTER_STOCKS_PATH", tmp_path / "missing.json")
+        with caplog.at_level(logging.WARNING, logger=stock_code.logger.name):
+            assert _is_known_master_code("999999") is True
+        assert "종목마스터 로드 실패" in caplog.text
+
+    def test_fail_open_when_master_file_malformed(self, tmp_path, monkeypatch):
+        """마스터 파일이 있어도 JSON 파싱에 실패하면 마찬가지로 fail-open한다."""
+        broken_path = tmp_path / "broken.json"
+        broken_path.write_text("이것은 JSON이 아닙니다", encoding="utf-8")
+        monkeypatch.setattr(stock_code, "_MASTER_STOCKS_PATH", broken_path)
+        assert _is_known_master_code("999999") is True
+
+    def test_master_codes_loaded_from_disk_at_most_once(self, monkeypatch):
+        """지름길 경로가 요청마다 stocks.json(489K)을 다시 파싱하면 지름길을 둔
+        이유(MCP 왕복 생략)가 무색해진다 — 첫 호출 이후로는 캐시만 써야 한다.
+        """
+        read_calls = []
+        original_read_text = Path.read_text
+
+        def counting_read_text(self, *args, **kwargs):
+            if self == stock_code._MASTER_STOCKS_PATH:
+                read_calls.append(1)
+            return original_read_text(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", counting_read_text)
+
+        assert _is_known_master_code("005930") is True
+        assert _is_known_master_code("999999") is False
+        assert _is_known_master_code("F70100026") is True
+
+        assert len(read_calls) == 1
 
 
 # ──────────────────────────────────────────────────────────────────────────

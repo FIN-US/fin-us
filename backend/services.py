@@ -22,7 +22,12 @@ from .config import (
 )
 from .schemas import TradingSignal, AnalysisReport
 from .models import AgentReport
-from .stock_code import _STOCK_CODE_EXTRACT_RE, _has_code_digit, _looks_like_stock_code
+from .stock_code import (
+    _STOCK_CODE_EXTRACT_RE,
+    _has_code_digit,
+    _is_known_master_code,
+    _looks_like_stock_code,
+)
 
 logger = logging.getLogger(__name__)
 _NAT_RESPONSE_LOG_PREVIEW_CHARS = 800
@@ -79,12 +84,23 @@ def _normalize_stock_input(stock: str) -> str:
 async def _resolve_stock_code(stock: str) -> str:
     """종목명(또는 이미 종목코드인 값)을 종목코드로 변환합니다.
 
-    이미 종목코드 형태이면 MCP 호출 없이 그대로 사용합니다.
+    이미 종목코드 형태이면서 종목마스터(mcp-trading/data/stocks.json)에 실재하면
+    MCP 호출 없이 그대로 사용합니다(#151). 코드 형태이지만 마스터에 없으면
+    지름길을 포기하고 아래 MCP 경로로 흘려보내 이름·별칭 매칭을 시도합니다.
     조회 실패/예외 시 리포트 저장을 막지 않도록 빈 문자열로 폴백합니다.
     """
     stock = _normalize_stock_input(stock)
     if _looks_like_stock_code(stock):
-        return stock.upper()
+        shortcut_code = stock.upper()
+        if _is_known_master_code(shortcut_code):
+            return shortcut_code
+        # 마스터에 없는 코드 형태 입력(#151): 지름길을 포기하고 아래 MCP 경로로
+        # 흘려보낸다. 백엔드와 MCP가 같은 stocks.json을 보므로(모듈 상단 주석
+        # 참고) MCP의 Step 1(코드 일치)도 결국 실패하지만, Step 2(이름·별칭
+        # 매칭)는 이 코드 형태 입력이 우연히 실제 종목명과 같은 경우를 잡아낼
+        # 수 있어 그대로 흘려보낸다. Step 2도 실패하면 stock-master.js Step 3가
+        # market="UNKNOWN"으로 존재 검증 없이 에코하므로, 아래에서 그 에코를
+        # 감지해 실패로 취급하고 ''로 폴백한다.
 
     cached = _stock_code_cache.get(stock)
     if cached is not None:
@@ -99,21 +115,24 @@ async def _resolve_stock_code(stock: str) -> str:
         resolved_text = str(resolved)
         match = _STOCK_CODE_EXTRACT_RE.search(resolved_text)
         code = match.group(1) if match else None
-        if code is None or not _has_code_digit(code):
+        # stock-master.js Step 3는 코드 형태 입력이 마스터에 코드로도 이름·별칭으로도
+        # 없을 때 market="UNKNOWN"으로 그대로 에코한다("SIMPAC (SIMPAC, UNKNOWN)",
+        # "999999 (999999, UNKNOWN)") — 존재 검증이 아니라 그저 되돌려주는 것이므로
+        # 이걸 성공으로 오인하면 안 된다. 실제 마스터의 market은 KOSPI/KOSDAQ뿐이라
+        # (mcp-trading/data/stocks.json 전수 확인) "UNKNOWN" 접미사는 이 에코의
+        # 신뢰 가능한 신호다. #151 이전에는 _looks_like_stock_code가 숫자를 포함한
+        # 코드 형태 입력을 MCP로 보내지 않아 이 에코가 도달할 일이 없었지만, #151에서
+        # 마스터에 없는 코드 형태 입력을 이 MCP 경로로 흘려보내게 되면서 숫자가 있는
+        # 에코("999999")도 여기 도달할 수 있다 — _has_code_digit만으로는 걸러지지
+        # 않으므로 아래에서 별도로 감지한다.
+        is_unresolved_echo = resolved_text.rstrip().endswith(", UNKNOWN)")
+        if code is None or not _has_code_digit(code) or is_unresolved_echo:
             logger.warning(
                 "종목코드 추출 실패, 빈 문자열로 폴백: stock=%s, response=%s",
                 stock,
                 resolved,
             )
             return ""
-        # Step 3 에코("SIMPAC (SIMPAC, UNKNOWN)")는 숫자가 없어 위 _has_code_digit
-        # 가드에서 이미 걸러진다.
-        # 에코(stock-master.js Step 3)는 코드 형태 입력이 마스터에 코드로도 이름·별칭
-        # 으로도 없을 때만 나므로, 마스터에 실재하는 종목명·코드 입력으로는 발생하지
-        # 않는다(오타처럼 마스터에 없는 코드 형태 입력이면 실제로 발생한다). #174에서
-        # 코드 완전일치가 이름·별칭 매칭보다 먼저로 바뀐 뒤에도 이 결론은 그대로다.
-        # 게다가 위 _looks_like_stock_code가 숫자를 포함한 6·7·9자 입력을 MCP에 보내지
-        # 않아, 여기 도달할 수 있는 에코는 숫자 없는 코드뿐이라 _has_code_digit이 잡는다.
         # 상한 도달은 정상 조건이 아니다 — 종목마스터 4,353종 규모에서는 일어나지
         # 않아야 하며, 발생했다면 입력 정규화가 stock-master.js와 다시 어긋났다는
         # 신호다. dict는 자동으로 비우지 않으므로 침묵한 채 자라기만 하면 상한을

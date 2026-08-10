@@ -1,6 +1,6 @@
 import pytest
 
-from backend import services
+from backend import services, stock_code
 
 
 @pytest.fixture(autouse=True)
@@ -12,3 +12,14 @@ def _clear_stock_code_cache():
     services._stock_code_cache.clear()
     yield
     services._stock_code_cache.clear()
+
+
+@pytest.fixture(autouse=True)
+def _clear_master_code_cache():
+    # #151: _is_known_master_code의 지연 로딩 캐시도 테스트 간에 새면 안 된다 —
+    # 한 테스트가 _MASTER_STOCKS_PATH를 몽키패치해 로드 실패(fail-open)를
+    # 캐시해 버리면, 몽키패치가 되돌아간 뒤에도 다음 테스트가 그 실패 상태를
+    # 그대로 물려받아 실제 마스터 대조를 건너뛰게 된다.
+    stock_code._master_codes_cache = None
+    yield
+    stock_code._master_codes_cache = None
