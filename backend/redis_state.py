@@ -153,6 +153,7 @@ class RedisSchedulerState:
         await self.redis.set(self.keys.telegram_alert_mode(), mode)
         return True
 
+
 class InMemoryPendingOrderStore:
     """테스트 전용 인메모리 pending_order 저장소.
 
@@ -180,6 +181,17 @@ class InMemoryPendingOrderStore:
     async def has(self, chat_id: str) -> bool:
         return chat_id in self._store
 
+    async def claim(self, chat_id: str) -> Any:
+        """주문을 원자적으로 꺼내며 삭제한다. 재전송 update의 중복 체결을 방지한다."""
+        return self._store.pop(chat_id, None)
+
+    async def set_if_absent(self, chat_id: str, order: Any) -> bool:
+        """이미 대기 주문이 있으면 False. 경합하는 /buy 요청 중 승자를 하나로 고정한다."""
+        if chat_id in self._store:
+            return False
+        self._store[chat_id] = order
+        return True
+
     # 동기 dict 인터페이스: 기존 테스트의 handler.pending_orders[...] 접근용
     def __getitem__(self, chat_id: str) -> Any:
         return self._store[chat_id]
@@ -193,6 +205,8 @@ class InMemoryPendingOrderStore:
         if isinstance(other, InMemoryPendingOrderStore):
             return self._store == other._store
         return NotImplemented
+
+    __hash__ = object.__hash__  # __eq__ 정의로 사라진 기본 해시를 복원
 
     def __repr__(self) -> str:
         return f"InMemoryPendingOrderStore({self._store!r})"
@@ -213,21 +227,56 @@ class RedisPendingOrderStore:
     TTL: PENDING_ORDER_TTL_SEC (600초 = 10분)
     """
 
-    def __init__(self, redis: Any, ttl_sec: int = PENDING_ORDER_TTL_SEC) -> None:
+    def __init__(
+        self,
+        redis: Any,
+        *,
+        keys: RedisKeys | None = None,
+        ttl_sec: int = PENDING_ORDER_TTL_SEC,
+    ) -> None:
         self.redis = redis
         self.ttl_sec = ttl_sec
-        self._keys = RedisKeys()
+        self._keys = keys or RedisKeys()
 
-    async def get(self, chat_id: str) -> Any:
-        """PendingOrder를 반환하거나, 없으면(TTL 만료 포함) None을 반환한다."""
+    def _deserialize(self, raw: str | bytes) -> Any:
+        """raw JSON → PendingOrder. ValueError/TypeError/KeyError는 호출자가 처리한다."""
         from .trading_orders import PendingOrder
 
-        raw = await self.redis.get(self._keys.pending_order(chat_id))
-        if raw is None:
-            return None
         data: dict[str, Any] = json.loads(raw if isinstance(raw, str) else raw.decode())
         data["created_at"] = datetime.fromisoformat(data["created_at"])
         return PendingOrder(**data)
+
+    async def get(self, chat_id: str) -> Any:
+        """PendingOrder를 반환하거나, 없으면(TTL 만료 포함) None을 반환한다.
+
+        역직렬화 오류(스키마 변경·손상 키)는 해당 키를 삭제하고 None을 반환한다.
+        남겨두면 /cancel까지 같은 예외로 막혀 사용자가 스스로 복구할 수 없다.
+        Redis 연결 오류 등 저장소 자체 장애는 여전히 위로 전파된다(fail-closed 유지).
+        """
+        raw = await self.redis.get(self._keys.pending_order(chat_id))
+        if raw is None:
+            return None
+        try:
+            return self._deserialize(raw)
+        except (ValueError, TypeError, KeyError) as exc:
+            logger.error("pending_order 역직렬화 실패, 키 삭제: %s", exc)
+            await self.delete(chat_id)
+            return None
+
+    async def claim(self, chat_id: str) -> Any:
+        """주문을 원자적으로 읽으며 삭제한다(GETDEL). 재전송된 Telegram update가
+        같은 주문을 두 번 체결하는 것을 방지한다. 경합하는 두 호출 중 정확히 하나만
+        order를 받고, 나머지는 None을 받는다.
+        """
+        raw = await self.redis.getdel(self._keys.pending_order(chat_id))
+        if raw is None:
+            return None
+        try:
+            return self._deserialize(raw)
+        except (ValueError, TypeError, KeyError) as exc:
+            # getdel로 이미 삭제됨 — 복원 없이 None 반환
+            logger.error("pending_order 역직렬화 실패 (claim): %s", exc)
+            return None
 
     async def set(self, chat_id: str, order: Any) -> None:
         """PendingOrder를 JSON 직렬화하여 TTL과 함께 저장한다."""
@@ -238,6 +287,20 @@ class RedisPendingOrderStore:
             json.dumps(data, ensure_ascii=False),
             ex=self.ttl_sec,
         )
+
+    async def set_if_absent(self, chat_id: str, order: Any) -> bool:
+        """이미 대기 주문이 있으면 False. 경합하는 /buy 요청 중 승자를 하나로 고정한다.
+        RedisSchedulerState.acquire_*_lock과 같은 NX 관용구를 따른다.
+        """
+        data = asdict(order)
+        data["created_at"] = data["created_at"].isoformat()
+        result = await self.redis.set(
+            self._keys.pending_order(chat_id),
+            json.dumps(data, ensure_ascii=False),
+            ex=self.ttl_sec,
+            nx=True,
+        )
+        return bool(result)
 
     async def delete(self, chat_id: str) -> None:
         await self.redis.delete(self._keys.pending_order(chat_id))

@@ -8,7 +8,7 @@
   Redis 장애 시 handler 오류 메시지 전달
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -71,6 +71,10 @@ class FakeRedis:
     async def exists(self, key):
         self._check_error()
         return 1 if key in self.store else 0
+
+    async def getdel(self, key):
+        self._check_error()
+        return self.store.pop(key, None)
 
 
 # ---------------------------------------------------------------------------
@@ -372,6 +376,7 @@ async def test_confirm_after_ttl_expiry_gives_explicit_error():
     handler = TelegramCommandHandler(
         notifier=notifier,
         pending_order_store=store,
+        order_gateway=FakeOrderGateway(),
         now_factory=lambda: datetime(2026, 5, 20, 10, 2, tzinfo=KST),
     )
 
@@ -434,6 +439,7 @@ async def test_confirm_redis_failure_sends_error_message():
     handler = TelegramCommandHandler(
         notifier=notifier,
         pending_order_store=store,
+        order_gateway=FakeOrderGateway(),
         now_factory=lambda: datetime(2026, 5, 20, 10, 0, tzinfo=KST),
     )
 
@@ -486,6 +492,7 @@ async def test_app_level_expiry_drops_order_before_confirm():
     handler = TelegramCommandHandler(
         notifier=notifier,
         pending_order_store=store,
+        order_gateway=FakeOrderGateway(),
         now_factory=lambda: confirm_at,
     )
 
@@ -520,3 +527,71 @@ async def test_confirm_cancel_flow_with_redis_store():
 
     assert "취소" in notifier.messages[-1]
     assert await store.has("123") is False
+
+
+# ---------------------------------------------------------------------------
+# Critical 회귀: claim 원자성으로 중복 체결 방지 (이슈 #63)
+# ---------------------------------------------------------------------------
+
+from backend.trading_orders import OrderExecutionResult  # noqa: E402
+
+
+class FakeOrderGateway:
+    def __init__(self) -> None:
+        self.orders: list = []
+
+    async def place_order(self, order):
+        self.orders.append(order)
+        return OrderExecutionResult(
+            stock_code=order.stock_code,
+            stock_name=order.stock_name,
+            side=order.side,
+            quantity=order.quantity,
+            price=order.price,
+            message="주문 접수",
+            raw_result="{}",
+        )
+
+
+@pytest.mark.asyncio
+async def test_duplicate_confirm_calls_place_order_only_once():
+    """같은 confirm을 두 번 처리해도 place_order는 한 번만 호출된다.
+
+    재시작 후 동일한 Telegram update가 재전송될 때 중복 체결을 방지하는
+    claim(GETDEL) 원자성을 검증한다(이슈 #63 Critical 회귀 테스트).
+    """
+    redis = FakeRedis()
+    store = RedisPendingOrderStore(redis)
+    notifier = FakeNotifier()
+    gateway = FakeOrderGateway()
+
+    order = PendingOrder(
+        chat_id="123",
+        stock_name="삼성전자",
+        stock_code="005930",
+        side="BUY",
+        quantity=1,
+        price=75000,
+        created_at=datetime(2026, 5, 20, 10, 0, 0, tzinfo=KST),
+        callback_token="tok",
+    )
+    await store.set("123", order)
+
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        pending_order_store=store,
+        order_gateway=gateway,
+        now_factory=lambda: datetime(2026, 5, 20, 10, 0, 30, tzinfo=KST),
+    )
+
+    # 첫 번째 confirm: 정상 체결
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/confirm"}})
+    # 두 번째 confirm: 재시작 후 재전송된 update 시뮬레이션
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/confirm"}})
+
+    # place_order는 정확히 한 번만 호출되어야 한다
+    assert len(gateway.orders) == 1, (
+        f"place_order가 {len(gateway.orders)}번 호출됨 — 중복 체결 회귀"
+    )
+    assert "주문 완료" in notifier.messages[0]
+    assert notifier.messages[-1] == "확정할 대기 주문이 없습니다."
