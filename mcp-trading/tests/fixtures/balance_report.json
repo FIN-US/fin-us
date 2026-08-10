@@ -1,0 +1,68 @@
+{
+  "_comment": "이슈 #137: mcp-trading/balance.js formatBalanceReport()의 출력 계약을 backend/scheduler.py 파서와 공유하는 픽스처입니다. JS 테스트(balance.test.js)는 formatBalanceReport(input) === expected_text 를 검증하고, Python 테스트(test_balance_parser.py)는 expected_text 를 파서에 직접 넣어 검증합니다. 형식이 바뀌면 이 파일도 함께 수정해야 하며, 수정하지 않으면 양쪽 스위트 중 하나가 반드시 실패합니다.",
+  "normal": {
+    "_comment": "formatBalanceReport(input) 의 기대 출력. balance.test.js 'formatBalanceReport displays unsettled cash fields and account return rate' 테스트와 동일한 입력·기대값. Python의 REAL_BALANCE_TEXT 도 이 값에서 로드합니다.",
+    "input": {
+      "output1": [
+        {
+          "prdt_name": "삼성전자",
+          "pdno": "005930",
+          "hldg_qty": "3",
+          "pchs_avg_pric": "67000",
+          "evlu_amt": "210000",
+          "evlu_pfls_amt": "9000",
+          "evlu_pfls_rt": "4.48"
+        },
+        {
+          "prdt_name": "NAVER",
+          "pdno": "035420",
+          "hldg_qty": "1",
+          "pchs_avg_pric": "201000",
+          "evlu_amt": "200500",
+          "evlu_pfls_amt": "-500",
+          "evlu_pfls_rt": "-0.25"
+        }
+      ],
+      "output2": [
+        {
+          "tot_evlu_amt": "1210000",
+          "nass_amt": "1210000",
+          "evlu_pfls_smtl_amt": "9000",
+          "asst_icdc_erng_rt": "0.75",
+          "dnca_tot_amt": "1000000",
+          "nxdy_excc_amt": "790000",
+          "prvs_rcdl_excc_amt": "1009000",
+          "thdt_buy_amt": "210000",
+          "thdt_sll_amt": "0"
+        }
+      ]
+    },
+    "expected_text": "[계좌 잔고 현황]\n- 총 평가금액: 1,210,000원\n- 순자산금액: 1,210,000원\n- 총 손익: 9,000원 (수익률: 🔴 ▲ +2.23%)\n- 거래가능금액: 1,000,000원\n- 정산중 금액(가수도): 1,009,000원\n- 익일 정산예정금액: 790,000원\n- 금일 매수/매도: 210,000원 / 0원\n\n[보유 종목 리스트]\n- 삼성전자 (005930) · 3주\n  평단가 67,000원 → 평가금액 210,000원\n  손익 +9,000원 · 수익률 🔴 ▲ +4.48%\n\n- NAVER (035420) · 1주\n  평단가 201,000원 → 평가금액 200,500원\n  손익 -500원 · 수익률 🔵 ▼ -0.25%"
+  },
+  "truncated": {
+    "_comment": "formatBalanceReport(input, format_meta) 의 기대 출력(잘림 안내 포함). Python 파서가 [안내] 줄을 종목으로 오인식하지 않는지, is_balance_truncated()가 True를 반환하는지 양쪽을 고정합니다.",
+    "input": {
+      "output1": [
+        {
+          "prdt_name": "삼성전자",
+          "pdno": "005930",
+          "hldg_qty": "3",
+          "pchs_avg_pric": "67000",
+          "evlu_amt": "210000",
+          "evlu_pfls_amt": "9000",
+          "evlu_pfls_rt": "4.48"
+        }
+      ],
+      "output2": [
+        {
+          "tot_evlu_amt": "210000"
+        }
+      ]
+    },
+    "format_meta": {
+      "pages": 20,
+      "truncated": "max_pages"
+    },
+    "expected_text": "[계좌 잔고 현황]\n- 총 평가금액: 210,000원\n- 순자산금액: -\n- 총 손익: - (수익률: -)\n- 거래가능금액: -\n- 정산중 금액(가수도): -\n- 익일 정산예정금액: -\n- 금일 매수/매도: - / -\n\n[보유 종목 리스트]\n- 삼성전자 (005930) · 3주\n  평단가 67,000원 → 평가금액 210,000원\n  손익 +9,000원 · 수익률 🔴 ▲ +4.48%\n\n[안내] 페이지 상한(20회)에 도달하여 조회가 중단되어 일부 보유 종목이 위 목록에서 누락되었을 수 있습니다. 실제 잔고는 별도로 확인하세요."
+  }
+}

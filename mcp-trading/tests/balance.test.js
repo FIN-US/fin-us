@@ -1,7 +1,15 @@
 import assert from "node:assert/strict";
 import util from "node:util";
 import test from "node:test";
+import { readFileSync } from "node:fs";
 import { buildBalanceParams, fetchAllBalance, formatBalanceReport, formatPercent } from "../balance.js";
+
+// 이슈 #137: mcp-trading·backend 공유 픽스처. 이 파일을 로드해 JS와 Python 테스트가
+// 같은 expected_text를 사용하게 함으로써, formatBalanceReport() 형식 변경 시 한쪽만
+// 갱신하는 드리프트를 방지합니다. 아래 픽스처 테스트가 깨지면 fixtures/ 파일도 함께 수정하세요.
+const _fixture = JSON.parse(
+  readFileSync(new URL("fixtures/balance_report.json", import.meta.url), "utf-8"),
+);
 
 test("buildBalanceParams includes required KIS inquire-balance fields", () => {
   assert.deepEqual(buildBalanceParams("1234567801"), {
@@ -684,4 +692,19 @@ test("formatBalanceReport highlights negative return rates", () => {
   평단가 66,666.67원 → 평가금액 190,000원
   손익 -10,000원 · 수익률 🔵 ▼ -5.00%`,
   );
+});
+
+// 이슈 #137: 공유 픽스처 기반 계약 테스트.
+// 이 두 테스트가 깨지면 mcp-trading/tests/fixtures/balance_report.json 도 함께 수정해야 합니다.
+// Python 테스트(test_balance_parser.py)는 같은 파일의 expected_text 를 파서에 넣어 검증하므로,
+// 픽스처 수정 시 Python 쪽에서 파서 계약이 유지되는지 확인하세요.
+
+test("formatBalanceReport output matches shared fixture — normal case (fixtures/balance_report.json)", () => {
+  const { input, expected_text } = _fixture.normal;
+  assert.equal(formatBalanceReport(input), expected_text);
+});
+
+test("formatBalanceReport output matches shared fixture — truncated/max_pages case (fixtures/balance_report.json)", () => {
+  const { input, format_meta, expected_text } = _fixture.truncated;
+  assert.equal(formatBalanceReport(input, format_meta), expected_text);
 });
