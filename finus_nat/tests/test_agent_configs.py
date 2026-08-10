@@ -163,18 +163,228 @@ def test_system_prompt_only_names_real_tools(config_path: Path, function_name: s
     assert quoted <= tools, f"프롬프트가 보유하지 않은 도구를 안내함: {sorted(quoted - tools)}"
 
 
-# monitoring/strategy/trading은 tool_names가 완전히 같아(kis-trading-mcp-tool,
+# monitoring/trading은 tool_names가 완전히 같아(kis-trading-mcp-tool,
 # mcp-news-get-market-news, mcp-dart-get-disclosure-signal, add_user_memory, get_user_memory)
-# system_prompt를 의도적으로 바이트 단위로 동일하게 유지한다. recommend_agent는 DART 도구가
-# 없는 다른 tool_names를 가지고 있어(#152 리뷰 Improvement 2로 Action Input에 mcp-news 안내를
-# 추가하면서) 더 이상 나머지 셋과 동일하지 않다 - 그래서 이 셋만 비교한다. 파일이 나뉘어 있어
-# YAML 앵커로 공유할 수 없으니 복제 자체는 불가피하지만, 한 파일만 고치고 나머지를 빠뜨리는
-# 드리프트는 이 테스트가 잡는다.
+# system_prompt를 의도적으로 바이트 단위로 동일하게 유지한다.
+# #66 수정으로 strategy_agent는 kis-trading-mcp-tool-readonly를 tool_names에 쓰게 되어
+# system_prompt가 이 둘과 분기했으므로 비교 대상에서 제외한다.
+# 파일이 나뉘어 있어 YAML 앵커로 공유할 수 없으니 복제 자체는 불가피하지만, 한 파일만
+# 고치고 나머지를 빠뜨리는 드리프트는 이 테스트가 잡는다.
 _IDENTICAL_SYSTEM_PROMPT_AGENTS = [
     ("monitoring_agent.yml", "monitoring_agent"),
-    ("strategy_agent.yml", "strategy_agent"),
     ("trading_agent.yml", "trading_agent_react"),
 ]
+
+
+# ---------------------------------------------------------------------------
+# #66 회귀 가드 — 두 KIS 함수의 타입과 에이전트별 tool_names 참조를 고정
+# ---------------------------------------------------------------------------
+
+_ROUTER_PATHS = (CONFIGS_ROOT / "router.yml", CONFIGS_ROOT / "router_nomemory.yml")
+
+# kis-trading-mcp-tool-readonly(조회 전용)가 scope에 있어야 하는 설정.
+# diary_agent는 tool_names에 포함하지 않지만 scope에 정의되어 있으므로 타입을 고정한다.
+# 단독 로드 + 프로덕션 라우터 양쪽에서 검사한다 — 이름을 분리했으므로 라우터 deep-merge가
+# trading/monitoring의 kis-trading-mcp-tool(전체 권한)을 덮어쓰지 않음을 함께 보증한다.
+_NON_TRADING_KIS_CONFIGS = [
+    AGENTS_DIR / "news_agent.yml",
+    AGENTS_DIR / "recommend_agent.yml",
+    AGENTS_DIR / "strategy_agent.yml",
+    AGENTS_DIR / "diary_agent.yml",
+    *_ROUTER_PATHS,
+]
+
+# kis-trading-mcp-tool(전체 권한 finus_account_balance)이어야 하는 설정.
+# 단독 로드뿐 아니라 프로덕션 라우터도 포함 — 이름 분리로 news_agent.yml의 readonly 함수가
+# 이 함수를 덮어쓰지 않음을 라우터 병합 결과에서 직접 확인한다.
+_TRADING_KIS_CONFIGS = [
+    AGENTS_DIR / "trading_agent.yml",
+    AGENTS_DIR / "monitoring_agent.yml",
+    *_ROUTER_PATHS,
+]
+
+_NON_TRADING_KIS_IDS = [p.name for p in _NON_TRADING_KIS_CONFIGS]
+_TRADING_KIS_IDS = [p.name for p in _TRADING_KIS_CONFIGS]
+
+
+@pytest.mark.parametrize("config_path", _NON_TRADING_KIS_CONFIGS, ids=_NON_TRADING_KIS_IDS)
+def test_non_trading_agents_kis_tool_is_readonly(config_path: Path):
+    """#66: kis-trading-mcp-tool-readonly는 어떤 설정에서 로드해도 finus_account_balance_readonly여야 한다.
+
+    news_agent.yml이 별도 이름(kis-trading-mcp-tool-readonly)으로 조회 전용 래퍼를 등록하므로,
+    라우터 deep-merge 결과에서도 전체 권한 kis-trading-mcp-tool을 건드리지 않는다.
+    """
+    import nat_finus_nat.register  # noqa: F401
+    from nat.runtime.loader import load_config
+    from nat_finus_nat.finus_api import FinusAccountBalanceReadonlyConfig
+
+    config = load_config(config_path)
+    tool_config = config.functions["kis-trading-mcp-tool-readonly"]
+    assert isinstance(tool_config, FinusAccountBalanceReadonlyConfig), (
+        f"{config_path.name}: kis-trading-mcp-tool-readonly는 finus_account_balance_readonly여야 합니다. "
+        f"실제 타입: {type(tool_config).__name__}"
+    )
+
+
+@pytest.mark.parametrize("config_path", _TRADING_KIS_CONFIGS, ids=_TRADING_KIS_IDS)
+def test_trading_agents_kis_tool_is_full(config_path: Path):
+    """#66: kis-trading-mcp-tool은 어떤 설정에서 로드해도 전체 권한(finus_account_balance)이어야 한다.
+
+    이름 분리 후에는 news_agent.yml의 readonly 함수가 별도 키(kis-trading-mcp-tool-readonly)에
+    등록되므로 kis-trading-mcp-tool(전체 권한)이 라우터 병합으로 덮이지 않는다.
+    """
+    import nat_finus_nat.register  # noqa: F401
+    from nat.runtime.loader import load_config
+    from nat_finus_nat.finus_api import FinusAccountBalanceConfig, FinusAccountBalanceReadonlyConfig
+
+    config = load_config(config_path)
+    tool_config = config.functions["kis-trading-mcp-tool"]
+    assert not isinstance(tool_config, FinusAccountBalanceReadonlyConfig), (
+        f"{config_path.name}: kis-trading-mcp-tool은 readonly가 아닌 finus_account_balance여야 합니다."
+    )
+    assert isinstance(tool_config, FinusAccountBalanceConfig), (
+        f"{config_path.name}: kis-trading-mcp-tool은 finus_account_balance여야 합니다. "
+        f"실제 타입: {type(tool_config).__name__}"
+    )
+
+
+# 각 에이전트의 tool_names가 권한에 맞는 KIS 도구를 참조하는지 고정한다.
+# 타입만 검사하면 tool_names 드리프트(예: news_agent가 kis-trading-mcp-tool-readonly 대신
+# kis-trading-mcp-tool을 참조)를 놓칠 수 있다 — 참조 고정으로 이중 보증한다.
+_AGENT_KIS_TOOL_REFS = [
+    # (config_path, agent_fn, expected_tool_name_in_tool_names)
+    (AGENTS_DIR / "trading_agent.yml", "trading_agent_react", "kis-trading-mcp-tool"),
+    (AGENTS_DIR / "monitoring_agent.yml", "monitoring_agent", "kis-trading-mcp-tool"),
+    (AGENTS_DIR / "news_agent.yml", "news_agent", "kis-trading-mcp-tool-readonly"),
+    (AGENTS_DIR / "recommend_agent.yml", "recommend_agent", "kis-trading-mcp-tool-readonly"),
+    (AGENTS_DIR / "strategy_agent.yml", "strategy_agent", "kis-trading-mcp-tool-readonly"),
+    (CONFIGS_ROOT / "router.yml", "trading_agent_react", "kis-trading-mcp-tool"),
+    (CONFIGS_ROOT / "router.yml", "monitoring_agent", "kis-trading-mcp-tool"),
+    (CONFIGS_ROOT / "router.yml", "news_agent", "kis-trading-mcp-tool-readonly"),
+    (CONFIGS_ROOT / "router.yml", "recommend_agent", "kis-trading-mcp-tool-readonly"),
+    (CONFIGS_ROOT / "router.yml", "strategy_agent", "kis-trading-mcp-tool-readonly"),
+    (CONFIGS_ROOT / "router_nomemory.yml", "trading_agent_react", "kis-trading-mcp-tool"),
+    (CONFIGS_ROOT / "router_nomemory.yml", "monitoring_agent", "kis-trading-mcp-tool"),
+    (CONFIGS_ROOT / "router_nomemory.yml", "news_agent", "kis-trading-mcp-tool-readonly"),
+    (CONFIGS_ROOT / "router_nomemory.yml", "recommend_agent", "kis-trading-mcp-tool-readonly"),
+    (CONFIGS_ROOT / "router_nomemory.yml", "strategy_agent", "kis-trading-mcp-tool-readonly"),
+]
+_AGENT_KIS_TOOL_REF_IDS = [f"{p.name}::{a}::{t}" for p, a, t in _AGENT_KIS_TOOL_REFS]
+
+
+@pytest.mark.parametrize("config_path,agent_fn,expected_tool", _AGENT_KIS_TOOL_REFS, ids=_AGENT_KIS_TOOL_REF_IDS)
+def test_agent_references_expected_kis_tool(config_path: Path, agent_fn: str, expected_tool: str):
+    """#66: 에이전트 tool_names가 권한에 맞는 KIS 도구를 참조하는지 고정한다.
+
+    kis-trading-mcp-tool(전체 권한)은 trading/monitoring만, kis-trading-mcp-tool-readonly는
+    news/recommend/strategy만 참조해야 한다. 라우터 설정에서도 동일하게 검사한다.
+    """
+    import nat_finus_nat.register  # noqa: F401
+    from nat.runtime.loader import load_config
+
+    config = load_config(config_path)
+    tool_names = [str(t) for t in config.functions[agent_fn].tool_names]
+    kis_tools = [t for t in tool_names if t.startswith("kis-trading-mcp-tool")]
+    assert kis_tools == [expected_tool], (
+        f"{config_path.name}::{agent_fn}: KIS 도구 참조는 [{expected_tool!r}] 하나여야 합니다. 실제: {kis_tools}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# #66 allowlist 단위 테스트 — _is_readonly_api_type 판정 고정
+# fail-closed 검증: allowlist 판정을 무조건 True로 뒤집으면 이 테스트가 red.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("api_type", [
+    "inquire_balance",
+    "inquire_price",
+    "inquire_account_balance",
+    "inquire_daily_itemchartprice",
+    "inquire_investor",
+    "search_stock_info",
+    "find_api_detail",
+], ids=lambda x: x)
+def test_readonly_api_type_allows_read_only(api_type: str):
+    """#66: 조회 계열 api_type은 _is_readonly_api_type이 True를 반환해야 한다."""
+    from nat_finus_nat.finus_api import _is_readonly_api_type
+    assert _is_readonly_api_type(api_type) is True, (
+        f"{api_type!r}는 조회 전용 허용 목록에 포함되어야 합니다."
+    )
+
+
+@pytest.mark.parametrize("api_type", [
+    "order_cash",
+    "order_sell",
+    "modify_order",
+    "cancel_order",
+    "overseas_stock_order",   # order_ 접두사 없는 가상의 주문 TR — fail-closed 핵심 케이스
+    "unknown_operation",      # 목록에 없는 임의 api_type — fail-closed 핵심 케이스
+    "",                       # 빈 문자열
+], ids=lambda x: x or "<empty>")
+def test_readonly_api_type_blocks_non_allowlisted(api_type: str):
+    """#66: 허용 목록에 없는 api_type은 _is_readonly_api_type이 False를 반환해야 한다.
+
+    ``unknown_operation``, ``overseas_stock_order`` 케이스가 fail-closed 핵심이다.
+    allowlist 판정을 무조건 True로 교체하면 이 테스트들이 red가 된다.
+    """
+    from nat_finus_nat.finus_api import _is_readonly_api_type
+    assert _is_readonly_api_type(api_type) is False, (
+        f"{api_type!r}는 조회 전용 허용 목록에서 차단되어야 합니다."
+    )
+
+
+# ---------------------------------------------------------------------------
+# #66 allowlist 단위 테스트 — _is_readonly_tool_name 판정 고정
+# fail-closed 검증: allowlist 판정을 무조건 True로 뒤집으면 이 테스트가 red.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("tool_name", [
+    "domestic_stock",
+    "overseas_stock",
+    "domestic_bond",
+    "domestic_futureoption",
+    "overseas_futureoption",
+    "elw",
+    "etfetn",
+], ids=lambda x: x)
+def test_readonly_tool_name_allows_asset_classes(tool_name: str):
+    """#66: 허용 자산군 7종은 _is_readonly_tool_name이 True를 반환해야 한다."""
+    from nat_finus_nat.finus_api import _is_readonly_tool_name
+    assert _is_readonly_tool_name(tool_name) is True, (
+        f"{tool_name!r}는 조회 전용 tool_name 허용 목록에 포함되어야 합니다."
+    )
+
+
+@pytest.mark.parametrize("tool_name", [
+    "auth",     # 인증 상태 변경 가능 — 핵심 차단 케이스
+    "foo_bar",  # 알 수 없는 tool_name — fail-closed 핵심 케이스
+    "",         # 빈 문자열
+], ids=lambda x: x or "<empty>")
+def test_readonly_tool_name_blocks_non_allowlisted(tool_name: str):
+    """#66: 허용 목록 밖의 tool_name은 _is_readonly_tool_name이 False를 반환해야 한다.
+
+    ``auth`` 케이스가 핵심: 인증 상태를 바꿀 수 있어 조회 전용 래퍼에서 제외한다.
+    allowlist 판정을 무조건 True로 교체하면 이 테스트들이 red가 된다.
+    """
+    from nat_finus_nat.finus_api import _is_readonly_tool_name
+    assert _is_readonly_tool_name(tool_name) is False, (
+        f"{tool_name!r}는 조회 전용 허용 목록에서 차단되어야 합니다."
+    )
+
+
+@pytest.mark.parametrize("tool_name,expected", [
+    ("DOMESTIC_STOCK", True),    # 대문자 → 허용 (대소문자 무시)
+    ("Overseas_Stock", True),    # 혼합 대소문자 → 허용
+    ("  etfetn  ", True),        # 앞뒤 공백 → 허용 (strip 처리)
+    ("AUTH", False),             # 대문자 auth → 차단
+    ("DOMESTIC_BOND ", True),    # 뒤 공백 있어도 strip 후 허용
+], ids=lambda x: repr(x) if isinstance(x, str) else str(x))
+def test_readonly_tool_name_case_and_whitespace(tool_name: str, expected: bool):
+    """#66: _is_readonly_tool_name은 대소문자·앞뒤 공백을 정규화해 판정해야 한다."""
+    from nat_finus_nat.finus_api import _is_readonly_tool_name
+    assert _is_readonly_tool_name(tool_name) is expected, (
+        f"{tool_name!r}: expected={expected}"
+    )
 
 
 def test_kis_agents_share_identical_system_prompt():
