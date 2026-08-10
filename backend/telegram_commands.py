@@ -21,7 +21,13 @@ from .config import (
 )
 from .catalyst_repo import SqliteCatalystEventRepo
 from .database import engine
-from .redis_state import RedisSchedulerState, redis_state
+from .redis_state import (
+    InMemoryPendingOrderStore,
+    RedisSchedulerState,
+    RedisPendingOrderStore,
+    create_redis_client,
+    redis_state,
+)
 from .services import llm_chat, run_mcp_tool
 from .watchlist_repo import SqliteWatchlistRepo
 from .telegram_notifier import TELEGRAM_ALERT_MODES, TelegramNotifier, telegram_notifier
@@ -177,6 +183,15 @@ def _create_trade_recorder() -> TradeRecorder:
     return TradeRecorder(lambda: Session(engine))
 
 
+def _create_pending_order_store() -> RedisPendingOrderStore:
+    """프로덕션 Redis pending_order 저장소를 생성한다.
+
+    단일 Redis 클라이언트 인스턴스를 생성해 커넥션 풀을 재사용한다.
+    핸들러 인스턴스당 한 번만 호출되므로 클라이언트 누적 없음.
+    """
+    return RedisPendingOrderStore(create_redis_client())
+
+
 def _default_watchlist_repo() -> SqliteWatchlistRepo:
     return SqliteWatchlistRepo(lambda: Session(engine))
 
@@ -199,6 +214,7 @@ class TelegramCommandHandler:
         trade_recorder: Any | None = None,
         now_factory: Callable[[], datetime] | None = None,
         visualization_url: str = VISUALIZATION_URL,
+        pending_order_store: Any | None = None,
     ):
         self.notifier = notifier
         self.state_factory = state_factory
@@ -210,7 +226,16 @@ class TelegramCommandHandler:
         self.trade_recorder = trade_recorder
         self.now_factory = now_factory or (lambda: datetime.now(KST))
         self.visualization_url = visualization_url.strip()
-        self.pending_orders: dict[str, PendingOrder] = {}
+        # pending_orders: 기존 테스트 코드(handler.pending_orders['123'] 등)와
+        # 호환되도록 InMemoryPendingOrderStore가 동기 dict 인터페이스를 제공한다.
+        # 프로덕션에서는 TelegramCommandPoller가 RedisPendingOrderStore를 주입한다.
+        if pending_order_store is None:
+            logger.warning(
+                "pending_order_store 미주입 — InMemoryPendingOrderStore 사용. "
+                "멀티워커 환경에서는 주문이 프로세스 간 격리된다(#63)."
+            )
+            pending_order_store = InMemoryPendingOrderStore()
+        self.pending_orders: Any = pending_order_store
         self.market_callbacks: dict[str, tuple[str, str]] = {}
 
     async def handle_update(self, update: dict[str, Any]) -> None:
@@ -381,7 +406,15 @@ class TelegramCommandHandler:
         action: str,
         data: str,
     ) -> None:
-        order = self.pending_orders.get(chat_id)
+        try:
+            order = await self.pending_orders.get(chat_id)
+        except Exception as exc:
+            logger.error("pending_order 조회 실패 (callback): %s", exc)
+            await self._answer_callback_query(
+                callback_query_id,
+                text="주문 저장소 오류로 처리할 수 없습니다. 잠시 후 다시 시도하세요.",
+            )
+            return
         token = self._extract_order_callback_token(data)
         if order is None or not token or token != order.callback_token:
             await self._answer_callback_query(
@@ -673,8 +706,13 @@ class TelegramCommandHandler:
             )
             return
 
-        self._drop_expired_pending_order(chat_id, now)
-        if chat_id in self.pending_orders:
+        try:
+            await self._drop_expired_pending_order(chat_id, now)
+            has_pending = await self.pending_orders.has(chat_id)
+        except Exception as exc:
+            await self._send_text_or_raise(f"주문 저장소 오류: {_short_error(exc)}")
+            return
+        if has_pending:
             await self._send_text_or_raise(
                 "이미 대기 중인 주문이 있습니다. /confirm 또는 /cancel로 먼저 처리하세요."
             )
@@ -730,29 +768,54 @@ class TelegramCommandHandler:
             order_type=order_type,
             callback_token=secrets.token_urlsafe(8),
         )
-        self.pending_orders[chat_id] = order
+        try:
+            stored = await self.pending_orders.set_if_absent(chat_id, order)
+        except Exception as exc:
+            await self._send_text_or_raise(f"주문 저장 실패: {_short_error(exc)}")
+            return
+        if not stored:
+            # MCP 호출 사이에 같은 chat에서 /buy가 먼저 체결된 경우
+            await self._send_text_or_raise(
+                "이미 대기 중인 주문이 있습니다. /confirm 또는 /cancel로 먼저 처리하세요."
+            )
+            return
         await self._send_text_or_raise(
             self._format_order_prompt(order, str(quote_result), str(balance_result)),
             reply_markup=self._order_reply_markup(order),
         )
 
     async def _handle_cancel(self, chat_id: str) -> None:
-        self._drop_expired_pending_order(chat_id, self.now_factory())
-        if chat_id not in self.pending_orders:
+        try:
+            await self._drop_expired_pending_order(chat_id, self.now_factory())
+            has_pending = await self.pending_orders.has(chat_id)
+        except Exception as exc:
+            await self._send_text_or_raise(f"주문 저장소 오류: {_short_error(exc)}")
+            return
+        if not has_pending:
             await self._send_text_or_raise("취소할 대기 주문이 없습니다.")
             return
-
-        self.pending_orders.pop(chat_id, None)
+        try:
+            await self.pending_orders.delete(chat_id)
+        except Exception as exc:
+            await self._send_text_or_raise(f"주문 저장소 오류: {_short_error(exc)}")
+            return
         await self._send_text_or_raise("대기 주문을 취소했습니다.")
 
     async def _handle_confirm(self, chat_id: str) -> None:
-        self._drop_expired_pending_order(chat_id, self.now_factory())
-        order = self.pending_orders.get(chat_id)
-        if order is None:
-            await self._send_text_or_raise("확정할 대기 주문이 없습니다.")
-            return
+        # order_gateway 부재 체크를 claim 전에 수행해 주문이 소비되지 않게 한다.
         if self.order_gateway is None:
             await self._send_text_or_raise("주문 실행 설정이 준비되지 않았습니다.")
+            return
+        try:
+            await self._drop_expired_pending_order(chat_id, self.now_factory())
+            # claim(GETDEL): 원자적 읽기+삭제. 재시작 후 재전송된 Telegram update나
+            # 멀티워커 경합에서 정확히 하나의 호출만 order를 받고 나머지는 None을 받는다.
+            order = await self.pending_orders.claim(chat_id)
+        except Exception as exc:
+            await self._send_text_or_raise(f"주문 저장소 오류: {_short_error(exc)}")
+            return
+        if order is None:
+            await self._send_text_or_raise("확정할 대기 주문이 없습니다.")
             return
 
         await self.notifier.send_chat_action("typing")
@@ -760,10 +823,22 @@ class TelegramCommandHandler:
             result = await self.order_gateway.place_order(order)
         except Exception as exc:
             if isinstance(exc, HTTPException) and exc.status_code == 403:
+                # 403 = 실계좌 가드 미충족: 주문 미실행이 확실하므로 대기 주문 복원.
+                # created_at을 유지하므로 앱 레벨 60초 만료는 그대로 적용된다.
+                # set_if_absent: 복원 도중 새 /buy가 들어온 경우 새 주문을 보호한다.
+                try:
+                    restored = await self.pending_orders.set_if_absent(chat_id, order)
+                except Exception as put_exc:
+                    logger.error("pending_order 복원 실패 (403 후): %s", put_exc)
+                else:
+                    if not restored:
+                        logger.warning(
+                            "403 복원 생략 — 그 사이 새 대기 주문이 생성됨: %s", chat_id
+                        )
                 await self._send_text_or_raise(f"주문 실패: {_short_error(exc)}")
                 return
 
-            self.pending_orders.pop(chat_id, None)
+            # 주문 실행 결과 불명확: claim으로 이미 삭제됨 — 추가 delete 불필요
             await self._send_text_or_raise(
                 "주문 실패 또는 상태 확인 필요: "
                 f"{_short_error(exc)}\n"
@@ -771,7 +846,7 @@ class TelegramCommandHandler:
             )
             return
 
-        self.pending_orders.pop(chat_id, None)
+        # 주문 성공: claim으로 이미 삭제됨 — 추가 delete 불필요
         record_warning = ""
         if self.trade_recorder is not None:
             try:
@@ -858,8 +933,8 @@ class TelegramCommandHandler:
             return None
         return value if value > 0 else None
 
-    def _drop_expired_pending_order(self, chat_id: str, now: datetime) -> None:
-        order = self.pending_orders.get(chat_id)
+    async def _drop_expired_pending_order(self, chat_id: str, now: datetime) -> None:
+        order = await self.pending_orders.get(chat_id)
         if order is None:
             return
         created_at = order.created_at
@@ -868,7 +943,7 @@ class TelegramCommandHandler:
         if now.tzinfo is None:
             now = now.replace(tzinfo=KST)
         if now.astimezone(KST) - created_at.astimezone(KST) > ORDER_EXPIRES_AFTER:
-            self.pending_orders.pop(chat_id, None)
+            await self.pending_orders.delete(chat_id)
 
     def _extract_stock_code(self, text: str) -> str | None:
         match = _STOCK_CODE_EXTRACT_RE.search(text)
@@ -1258,6 +1333,7 @@ class TelegramCommandPoller:
                 notifier=notifier,
                 order_gateway=_create_order_gateway(),
                 trade_recorder=_create_trade_recorder(),
+                pending_order_store=_create_pending_order_store(),
             )
         self.handler = handler
         self.offset: int | None = None
