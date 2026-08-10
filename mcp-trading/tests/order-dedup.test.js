@@ -987,6 +987,103 @@ test("OrderDedupStore keeps sweeping after one orphan fails to unlink", (t) => {
   );
 });
 
+// 스윕이 인스턴스당 1회만 실행되는지 검증한다(#181).
+// 잡는 뮤테이션 A(가드 제거): `if (!this.sweptOrphans)` 조건 없이 항상 스윕하면
+// reserve·markSucceeded·release 각 호출마다 readdirSync가 불려 callCount가 3이
+// 되어야 한다 — 이 테스트가 빨간불이 된다.
+test("OrderDedupStore calls readdirSync for the sweep exactly once across multiple writes", (t) => {
+  const filePath = tempLedgerPath(t);
+  const dir = path.dirname(filePath);
+
+  let sweepReaddirCalls = 0;
+  const originalReaddirSync = fs.readdirSync;
+  t.mock.method(fs, "readdirSync", (targetPath, ...args) => {
+    if (targetPath === dir) sweepReaddirCalls += 1;
+    return originalReaddirSync(targetPath, ...args);
+  });
+
+  const store = new OrderDedupStore({ filePath, ttlMs: 60_000, now: () => 1_000 });
+
+  // 주문 1건당 2~3회 쓰기(reserve → markSucceeded → release)가 발생한다.
+  store.reserve("k", { stockCode: "005930" });
+  store.markSucceeded("k", { ODNO: "1" });
+  store.release("k");
+
+  assert.equal(
+    sweepReaddirCalls,
+    1,
+    "여러 번 쓰기해도 스윕(readdirSync)은 정확히 1회만 호출되어야 합니다",
+  );
+});
+
+// 스윕 플래그가 모듈 스코프가 아닌 인스턴스 스코프임을 검증한다(#181).
+// 같은 프로세스에서 인스턴스를 여러 개 만들면 각각 첫 쓰기에 한 번씩 스윕해야
+// 한다. 잡는 뮤테이션: 플래그를 모듈 스코프 변수로 두면 두 번째 인스턴스는
+// 스윕하지 않아 callCount가 1에 그쳐 실패한다.
+test("each OrderDedupStore instance sweeps independently (instance-scoped flag, not module-scoped)", (t) => {
+  const filePathA = tempLedgerPath(t);
+  const filePathB = tempLedgerPath(t);
+  const dirA = path.dirname(filePathA);
+  const dirB = path.dirname(filePathB);
+
+  let sweepReaddirCalls = 0;
+  const originalReaddirSync = fs.readdirSync;
+  t.mock.method(fs, "readdirSync", (targetPath, ...args) => {
+    if (targetPath === dirA || targetPath === dirB) sweepReaddirCalls += 1;
+    return originalReaddirSync(targetPath, ...args);
+  });
+
+  const storeA = new OrderDedupStore({ filePath: filePathA, ttlMs: 60_000, now: () => 1_000 });
+  storeA.reserve("k1", { stockCode: "005930" });
+
+  const storeB = new OrderDedupStore({ filePath: filePathB, ttlMs: 60_000, now: () => 2_000_000 });
+  storeB.reserve("k2", { stockCode: "000660" });
+
+  assert.equal(
+    sweepReaddirCalls,
+    2,
+    "인스턴스마다 독립적으로 1회씩 스윕해야 합니다 (모듈 스코프가 아닌 인스턴스 스코프)",
+  );
+});
+
+// 첫 쓰기에서 고아가 실제로 정리되는지(기존 동작 유지)와 이후 쓰기에서는
+// readdirSync를 호출하지 않는지를 함께 검증한다(#181 회귀 방지).
+// 잡는 뮤테이션 B(스윕 자체 제거): 고아 파일이 그대로 남아야 하므로
+// 기존 "sweeps stale orphan tmp files" 테스트와 이 테스트 모두 실패한다.
+test("OrderDedupStore sweeps orphans on first write and skips readdirSync on subsequent writes", (t) => {
+  const filePath = tempLedgerPath(t);
+  const dir = path.dirname(filePath);
+
+  // 낡은 고아 tmp 파일을 명명 규칙에 맞게 생성한다.
+  const orphanPath = path.join(dir, `.${path.basename(filePath)}.77777.facade.tmp`);
+  fs.writeFileSync(orphanPath, "orphan");
+  const past = (Date.now() - 61_000) / 1000;
+  fs.utimesSync(orphanPath, past, past);
+
+  let sweepReaddirCalls = 0;
+  const originalReaddirSync = fs.readdirSync;
+  t.mock.method(fs, "readdirSync", (targetPath, ...args) => {
+    if (targetPath === dir) sweepReaddirCalls += 1;
+    return originalReaddirSync(targetPath, ...args);
+  });
+
+  const store = new OrderDedupStore({ filePath, ttlMs: 60_000 });
+
+  // 첫 번째 쓰기: 스윕으로 고아 정리
+  store.reserve("k", { stockCode: "005930" });
+  assert.equal(fs.existsSync(orphanPath), false, "첫 번째 쓰기에서 고아 파일이 정리되어야 합니다");
+  assert.equal(sweepReaddirCalls, 1, "첫 번째 쓰기에서 readdirSync가 1회 호출되어야 합니다");
+
+  // 두 번째·세 번째 쓰기: 스윕 없음
+  store.markSucceeded("k", { ODNO: "1" });
+  store.release("k");
+  assert.equal(
+    sweepReaddirCalls,
+    1,
+    "두 번째·세 번째 쓰기에서 readdirSync가 추가로 호출되면 안 됩니다",
+  );
+});
+
 test("OrderDedupStore stays silent when KIS_ORDER_DEDUP_TTL_MS is set but blank", (t) => {
   const originalEnvValue = process.env.KIS_ORDER_DEDUP_TTL_MS;
   t.after(() => {
