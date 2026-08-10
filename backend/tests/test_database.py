@@ -361,7 +361,7 @@ def test_get_catalysts_limit_boundary(client: TestClient, session: Session):
     response = client.get("/api/v1/db/catalysts", params={"limit": 3})
     assert response.status_code == 200
     data = response.json()["data"]
-    assert len(data) == 3
+    assert [row["stock_name"] for row in data] == ["종목0", "종목1", "종목2"]
 
 
 def test_get_catalysts_sorted_by_event_date_ascending(client: TestClient, session: Session):
@@ -377,13 +377,37 @@ def test_get_catalysts_sorted_by_event_date_ascending(client: TestClient, sessio
     assert names == ["가장이름", "중간", "가장늦음"]
 
 
-def test_get_catalysts_defaults_to_today_excluding_past(client: TestClient, session: Session):
-    # from_date를 생략했을 때의 기본값(오늘)을 고정한다. 위 from_date 테스트는 값을
-    # 명시해서 호출하므로 기본값이 date.min 등으로 바뀌어도 통과한다 — 지난 촉매가
-    # 시간 링에 섞여 들어오는 회귀를 이 테스트가 잡는다.
+def test_get_catalysts_ties_break_by_event_type_then_id(client: TestClient, session: Session):
+    # event_date만으로 정렬하면 같은 날짜 이벤트 간 순서가 SQL상 보장되지 않아 limit
+    # 절단이 비결정적일 수 있다. event_type을 오름차순 tie-break로 추가했는지 확인한다.
+    # 삽입 순서(C, A, B)를 event_type 오름차순(A, B, C)과 반대로 둬, id(삽입 순서)로만
+    # 정렬되는 경우와 구분되게 한다.
     today = date.today()
-    session.add(_make_catalyst(stock_name="지난주", event_date=today - timedelta(days=7)))
-    session.add(_make_catalyst(stock_name="오늘", event_date=today))
+    session.add(_make_catalyst(stock_name="C", event_date=today, event_type="c_type"))
+    session.add(_make_catalyst(stock_name="A", event_date=today, event_type="a_type"))
+    session.add(_make_catalyst(stock_name="B", event_date=today, event_type="b_type"))
+    session.commit()
+
+    response = client.get("/api/v1/db/catalysts")
+    assert response.status_code == 200
+    names = [row["stock_name"] for row in response.json()["data"]]
+    assert names == ["A", "B", "C"]
+
+
+def test_get_catalysts_defaults_to_today_excluding_past(
+    client: TestClient, session: Session, monkeypatch: pytest.MonkeyPatch
+):
+    # from_date를 생략했을 때의 기본값(KST 기준 오늘)을 고정한다. 위 from_date 테스트는
+    # 값을 명시해서 호출하므로 기본값이 date.min 등으로 바뀌어도 통과한다 — 지난 촉매가
+    # 시간 링에 섞여 들어오는 회귀를 이 테스트가 잡는다.
+    #
+    # today_kst()를 고정값으로 monkeypatch한다: 서버가 date.today()(로컬 타임존)로
+    # 되돌아가도 이 테스트를 실행하는 개발자 머신이 KST라면 우연히 통과해버려
+    # 회귀를 못 잡는다. 고정 날짜로 기대값과 서버 계산을 분리해야 그 회귀가 드러난다.
+    fixed = date(2026, 5, 20)
+    monkeypatch.setattr("backend.main.today_kst", lambda: fixed)
+    session.add(_make_catalyst(stock_name="지난주", event_date=fixed - timedelta(days=7)))
+    session.add(_make_catalyst(stock_name="오늘", event_date=fixed))
     session.commit()
 
     response = client.get("/api/v1/db/catalysts")
@@ -396,6 +420,39 @@ def test_get_catalysts_defaults_to_today_excluding_past(client: TestClient, sess
 def test_get_catalysts_rejects_out_of_range_limit(client: TestClient, limit: int):
     response = client.get("/api/v1/db/catalysts", params={"limit": limit})
     assert response.status_code == 422
+
+
+def test_get_catalysts_rejects_empty_stock_name(client: TestClient):
+    # 빈 문자열은 "필터 없음"이 아니라 "빈 종목명" 필터로 잘못 해석되어 항상 0건을
+    # 반환할 수 있다. 프론트가 "필터 없음"을 빈 문자열로 보내는 실수를 422로 조기에
+    # 드러낸다.
+    response = client.get("/api/v1/db/catalysts", params={"stock_name": ""})
+    assert response.status_code == 422
+
+
+def test_get_catalysts_not_truncated_when_within_limit(client: TestClient, session: Session):
+    today = date.today()
+    session.add(_make_catalyst(stock_name="종목0", event_date=today))
+    session.commit()
+
+    response = client.get("/api/v1/db/catalysts", params={"limit": 3})
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["data"]) == 1
+    assert body["message"] is None
+
+
+def test_get_catalysts_signals_truncation_when_over_limit(client: TestClient, session: Session):
+    today = date.today()
+    for i in range(4):
+        session.add(_make_catalyst(stock_name=f"종목{i}", event_date=today + timedelta(days=i)))
+    session.commit()
+
+    response = client.get("/api/v1/db/catalysts", params={"limit": 3})
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["data"]) == 3
+    assert body["message"] == "truncated"
 
 
 @pytest.mark.asyncio
