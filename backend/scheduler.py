@@ -120,6 +120,8 @@ def extract_stocks_from_balance(balance_text: str) -> list[str]:
 
     [보유 종목 리스트] 섹션이 없으면 [] 반환(마커 부재 === 파싱 불가).
     잘림 안내 문구는 STOCK_LINE_RE에 매치되지 않아 파싱 단계에서 걸러집니다.
+
+    현재는 테스트에서만 사용하며 프로덕션 경로는 _parse_balance_holdings를 직접 호출한다.
     """
     return [h.name for h in _parse_balance_holdings(balance_text)]
 
@@ -314,6 +316,7 @@ def _sync_portfolio_from_balance(
             len(balance_text),
         )
         return
+
 
     # 호출처에서 이미 파싱한 결과가 있으면 재파싱을 건너뛴다(경고 중복 방지).
     if holdings is None:
@@ -604,8 +607,8 @@ async def _monitor_market_task(
             # extract_stocks_from_balance도 내부에서 _parse_balance_holdings를 호출하는데,
             # _sync_portfolio_from_balance가 같은 텍스트를 또 파싱하면 경고가 두 번씩
             # 찍히고 "저장합니다"라는 문구가 실제로 저장하지 않는 호출에서도 나옵니다.
-            _holdings = _parse_balance_holdings(balance_text)
-            owned_stocks = [h.name for h in _holdings]
+            holdings = _parse_balance_holdings(balance_text)
+            owned_stocks = [h.name for h in holdings]
 
             # Portfolio 테이블 동기화 — 잔고 조회 성공 시에만 실행.
             # 잘린 잔고에서 전량 교체하면 보유 종목이 사라지므로,
@@ -613,7 +616,7 @@ async def _monitor_market_task(
             # 동기화 실패는 감시 루프에 영향을 주지 않아야 하므로 예외를 격리합니다.
             try:
                 with Session(engine) as sync_session:
-                    _sync_portfolio_from_balance(balance_text, sync_session, holdings=_holdings)
+                    _sync_portfolio_from_balance(balance_text, sync_session, holdings=holdings)
             except Exception as e:
                 logger.error("Portfolio 동기화 중 오류 (감시는 계속): %s", e, exc_info=True)
 

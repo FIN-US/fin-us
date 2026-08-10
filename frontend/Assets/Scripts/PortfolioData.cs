@@ -11,25 +11,23 @@ public class Holding
     public float return_rate;
     public int quantity;
     // Unity JsonUtility는 nullable 값 타입을 지원하지 않아 null → 0으로 처리한다.
-    // API가 current_price·return_rate를 모를 때 0이 아니라 "알 수 없음"임을 나타내는 플래그.
-    // price_known=false이면 current_price·return_rate는 0이 아니라 미확인 값이다.
+    // price_known=false이면 current_price는 0이 아니라 미확인 값이다.
     public bool price_known;
+    // return_rate_known=false이면 return_rate는 0이 아니라 계산 불가 상태다.
+    // current_price는 알지만 avg_price <= 0이면 price_known=true·return_rate_known=false가 된다.
+    public bool return_rate_known;
 
     public float GetWeight(double total_asset)
     {
         if (total_asset == 0)
             return 0f;
-        if (!price_known)
-        {
-            // 현재가 미상 종목: total_asset도 avg_price × quantity 기준 근사값을 포함하므로
-            // 같은 기준으로 비중을 계산한다. avg_price=0이면 기여분이 없으므로 0을 반환.
-            return (float)((double)avg_price * quantity / total_asset * 100.0);
-        }
-        // 정수 오버플로 방지: current_price(float)를 double로 승격한 뒤 계산한다.
-        return (float)((double)current_price * quantity / total_asset * 100.0);
+        // 비중은 현재가만 알면 계산된다 — 수익률을 모르는 것과 무관하다.
+        // 현재가 미상이면 total_asset도 avg_price × quantity 기준 근사값을 포함하므로
+        // 같은 기준으로 비중을 계산한다. avg_price=0이면 기여분이 없으므로 0을 반환.
+        double basis = price_known ? (double)current_price : (double)avg_price;
+        return (float)(basis * quantity / total_asset * 100.0);
     }
 }
-
 
 [System.Serializable]
 public class PortfolioData

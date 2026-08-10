@@ -166,13 +166,14 @@ public class PanelController : MonoBehaviour
             return;
 
         stockName.text = holding.name;
-        // price_known=false이면 API가 현재가·수익률을 알 수 없다고 명시한 것이다.
+        // price_known=false이면 current_price를 알 수 없다.
+        // return_rate_known=false이면 return_rate를 알 수 없다(현재가는 알더라도 avg_price <= 0이면 수익률 계산 불가).
         // JsonUtility가 JSON null을 0으로 변환하므로 플래그로 구분해 "—"를 표시한다.
         currentPrice.text = holding.price_known
             ? $"현재가: {holding.current_price:N0}원"
             : "현재가: —";
         avgPrice.text = $"평단가: {holding.avg_price:N0}원";
-        returnRate.text = holding.price_known
+        returnRate.text = holding.return_rate_known
             ? $"수익률: {holding.return_rate:F2}%"
             : "수익률: —";
         quantity.text = $"보유 수량: {holding.quantity:N0}주";

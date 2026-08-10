@@ -1749,6 +1749,9 @@ def test_portfolio_endpoint_includes_price_known_flag(client):
         assert "price_known" in holding, "price_known 플래그가 응답에 없습니다"
         # current_price가 None이므로 price_known은 False여야 한다
         assert holding["price_known"] is False
+        assert "return_rate_known" in holding, "return_rate_known 플래그가 응답에 없습니다"
+        # current_price가 None이면 수익률도 계산 불가
+        assert holding["return_rate_known"] is False
         assert "total_asset_is_estimate" in data
         assert data["total_asset_is_estimate"] is True
         assert "total_return_rate_known" in data

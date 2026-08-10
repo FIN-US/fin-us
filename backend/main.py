@@ -115,7 +115,9 @@ async def get_visualization_portfolio(session: Session = Depends(get_session)):
     Unity는 JsonUtility로 파싱하므로 nullable 값 타입(int?, float?)을 지원하지
     않습니다. JSON null은 JsonUtility에서 예외 없이 기본값(0)으로 처리됩니다.
     이를 방지하기 위해 각 nullable 필드에 대응하는 bool 플래그를 함께 내립니다:
-      - price_known: current_price와 return_rate가 실제 값인지 여부(이슈 #122)
+      - price_known: current_price가 실제 값인지 여부(이슈 #122)
+      - return_rate_known: return_rate가 실제 계산된 값인지 여부(이슈 #122)
+        ※ current_price는 알지만 avg_price <= 0이면 price_known=True·return_rate_known=False
       - total_asset_is_estimate: total_asset이 현재가 없는 종목의 매입가 기준 추정값인지
       - total_return_rate_known: total_return_rate가 실제 계산된 값인지 여부
     """
@@ -134,7 +136,7 @@ async def get_visualization_portfolio(session: Session = Depends(get_session)):
             # 현재가가 있는 종목: 평가금액과 수익률을 정확히 계산합니다.
             current_price: float | None = float(portfolio.current_price)
             return_rate = _portfolio_return_rate(current_price, avg_price)
-            price_known = return_rate is not None
+            price_known = True  # current_price가 실제 값임을 보장 — 수익률 계산 가능 여부와 독립
             market_value = current_price * quantity
             total_asset += market_value
             if avg_price > 0:
@@ -157,8 +159,11 @@ async def get_visualization_portfolio(session: Session = Depends(get_session)):
             "return_rate": return_rate,
             "quantity": quantity,
             # Unity JsonUtility가 null을 0으로 읽는 문제를 우회하기 위한 명시 플래그.
-            # price_known=False 이면 current_price·return_rate는 0이 아니라 "알 수 없음"이다.
+            # price_known=False 이면 current_price는 0이 아니라 "알 수 없음"이다.
+            # return_rate_known=False 이면 return_rate는 0이 아니라 "알 수 없음"이다.
+            # current_price는 알지만 avg_price <= 0이면 price_known=True·return_rate_known=False.
             "price_known": price_known,
+            "return_rate_known": return_rate is not None,
         })
 
     # 종목별 return_rate와 같은 이유로 총수익률도 "모름"과 "실제 0%"를 구분한다(이슈 #122).
