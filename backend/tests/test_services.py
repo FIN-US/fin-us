@@ -1340,3 +1340,27 @@ def test_morning_briefing_from_text_nested_object_fields_filled():
     assert result["watchlist"] == ["삼성전자"]
     assert result["trading_ideas"] == ["눌림목 관찰"]
     assert result["catalysts"] == ["CPI 발표"]
+
+
+# ── #222: sort 방어선 — span 필터로도 못 막는 독립 최상위 JSON 순서 ────────────
+
+
+def test_analysis_from_toolless_text_sort_guard_for_independent_top_level_jsons():
+    """독립적인 최상위 JSON 2개에서 summary 없는 객체가 reversed 선두에 올 때 sort가 막는다.
+
+    span 기반 필터는 중첩 객체만 제거한다 — 텍스트에서 공백으로 분리된 두 JSON은
+    둘 다 최상위 객체이므로 둘 다 후보에 남는다. summary 없는 {"count":3}이
+    텍스트 뒤에 위치하면 reversed 후 candidates[0]이 되고, sort 없이는
+    data.get("summary") or text[:8000] 폴백이 원문 전체를 summary로 채운다.
+
+    이 테스트가 잡는 mutation: `_candidates.sort(key=lambda d: "summary" not in d)` 제거.
+    sort를 지우면 {"count":3}이 먼저 시도되어 summary가 원문 전체로,
+    source_news가 []로 나와 두 단정 모두 실패한다.
+    """
+    # summary 있는 객체가 앞, summary 없는 객체가 뒤 → reversed 후 summary 없는 쪽이 선두
+    raw = '{"summary":"유효 요약","source_news":["뉴스1"]} {"count":3}'
+    result = services._analysis_from_toolless_text(raw)
+    assert result["summary"] == "유효 요약", (
+        "summary 없는 후보가 reversed 선두에 와도 sort가 summary 있는 후보를 먼저 시도해야 한다"
+    )
+    assert result["source_news"] == ["뉴스1"]
