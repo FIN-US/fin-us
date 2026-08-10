@@ -825,10 +825,16 @@ class TelegramCommandHandler:
             if isinstance(exc, HTTPException) and exc.status_code == 403:
                 # 403 = 실계좌 가드 미충족: 주문 미실행이 확실하므로 대기 주문 복원.
                 # created_at을 유지하므로 앱 레벨 60초 만료는 그대로 적용된다.
+                # set_if_absent: 복원 도중 새 /buy가 들어온 경우 새 주문을 보호한다.
                 try:
-                    await self.pending_orders.set(chat_id, order)
+                    restored = await self.pending_orders.set_if_absent(chat_id, order)
                 except Exception as put_exc:
                     logger.error("pending_order 복원 실패 (403 후): %s", put_exc)
+                else:
+                    if not restored:
+                        logger.warning(
+                            "403 복원 생략 — 그 사이 새 대기 주문이 생성됨: %s", chat_id
+                        )
                 await self._send_text_or_raise(f"주문 실패: {_short_error(exc)}")
                 return
 

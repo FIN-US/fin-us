@@ -238,6 +238,12 @@ class RedisPendingOrderStore:
         self.ttl_sec = ttl_sec
         self._keys = keys or RedisKeys()
 
+    def _serialize(self, order: Any) -> str:
+        """PendingOrder → JSON 문자열. set/set_if_absent가 공유한다."""
+        data = asdict(order)
+        data["created_at"] = data["created_at"].isoformat()
+        return json.dumps(data, ensure_ascii=False)
+
     def _deserialize(self, raw: str | bytes) -> Any:
         """raw JSON → PendingOrder. ValueError/TypeError/KeyError는 호출자가 처리한다."""
         from .trading_orders import PendingOrder
@@ -280,11 +286,9 @@ class RedisPendingOrderStore:
 
     async def set(self, chat_id: str, order: Any) -> None:
         """PendingOrder를 JSON 직렬화하여 TTL과 함께 저장한다."""
-        data = asdict(order)
-        data["created_at"] = data["created_at"].isoformat()
         await self.redis.set(
             self._keys.pending_order(chat_id),
-            json.dumps(data, ensure_ascii=False),
+            self._serialize(order),
             ex=self.ttl_sec,
         )
 
@@ -292,11 +296,9 @@ class RedisPendingOrderStore:
         """이미 대기 주문이 있으면 False. 경합하는 /buy 요청 중 승자를 하나로 고정한다.
         RedisSchedulerState.acquire_*_lock과 같은 NX 관용구를 따른다.
         """
-        data = asdict(order)
-        data["created_at"] = data["created_at"].isoformat()
         result = await self.redis.set(
             self._keys.pending_order(chat_id),
-            json.dumps(data, ensure_ascii=False),
+            self._serialize(order),
             ex=self.ttl_sec,
             nx=True,
         )

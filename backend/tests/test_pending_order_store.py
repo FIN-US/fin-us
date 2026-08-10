@@ -18,7 +18,7 @@ from backend.redis_state import (
     InMemoryPendingOrderStore,
     RedisPendingOrderStore,
 )
-from backend.trading_orders import PendingOrder
+from backend.trading_orders import OrderExecutionResult, PendingOrder
 from backend.telegram_commands import TelegramCommandHandler
 
 KST = ZoneInfo("Asia/Seoul")
@@ -364,6 +364,23 @@ class FakeNotifier:
         return True
 
 
+class FakeOrderGateway:
+    def __init__(self) -> None:
+        self.orders: list = []
+
+    async def place_order(self, order):
+        self.orders.append(order)
+        return OrderExecutionResult(
+            stock_code=order.stock_code,
+            stock_name=order.stock_name,
+            side=order.side,
+            quantity=order.quantity,
+            price=order.price,
+            message="주문 접수",
+            raw_result="{}",
+        )
+
+
 @pytest.mark.asyncio
 async def test_confirm_after_ttl_expiry_gives_explicit_error():
     """/confirm 시 Redis TTL 만료(키 없음)이면 '확정할 대기 주문이 없습니다.' 응답.
@@ -532,26 +549,6 @@ async def test_confirm_cancel_flow_with_redis_store():
 # ---------------------------------------------------------------------------
 # Critical 회귀: claim 원자성으로 중복 체결 방지 (이슈 #63)
 # ---------------------------------------------------------------------------
-
-from backend.trading_orders import OrderExecutionResult  # noqa: E402
-
-
-class FakeOrderGateway:
-    def __init__(self) -> None:
-        self.orders: list = []
-
-    async def place_order(self, order):
-        self.orders.append(order)
-        return OrderExecutionResult(
-            stock_code=order.stock_code,
-            stock_name=order.stock_name,
-            side=order.side,
-            quantity=order.quantity,
-            price=order.price,
-            message="주문 접수",
-            raw_result="{}",
-        )
-
 
 @pytest.mark.asyncio
 async def test_duplicate_confirm_calls_place_order_only_once():
