@@ -667,6 +667,10 @@ _KIS_TRADING_TOOL_GUIDE = """
 
 # ---- 조회 전용 KIS Trading MCP 래퍼 (#66) ----
 
+# #205/#209 원장 판정 키 — finus_account_balance(전체 권한)와 readonly 래퍼 양쪽이 공유한다.
+# 변경 시 #205/#209 원장 판정 로직과 함께 반드시 동기화할 것.
+_KIS_BALANCE_LEDGER_NAME: str = "finus_account_balance"
+
 # 허용 목록(allowlist) 방식 — fail-closed: 목록에 없는 api_type은 기본 차단.
 #
 # 설계 근거:
@@ -686,6 +690,11 @@ _KIS_TRADING_TOOL_GUIDE = """
 # _READONLY_API_ALLOWLIST_EXACT에 추가하거나 접두사를 확장하세요.
 _READONLY_API_ALLOWLIST_PREFIXES: tuple[str, ...] = ("inquire_", "search_")
 _READONLY_API_ALLOWLIST_EXACT: frozenset[str] = frozenset({"find_api_detail"})
+
+# 조회 전용 래퍼가 허용하는 MCP tool_name 허용 목록. fail-closed: 목록 밖의 tool_name은 차단.
+# 비-trading 에이전트 프롬프트가 실제로 지정하는 값은 domestic_stock 하나이나,
+# 해외 주식 조회를 위해 overseas_stock도 포함한다.
+_READONLY_TOOL_ALLOWLIST: frozenset[str] = frozenset({"domestic_stock", "overseas_stock"})
 
 
 def _is_readonly_api_type(api_type: str) -> bool:
@@ -718,30 +727,44 @@ class FinusAccountBalanceReadonlyConfig(FinusAccountBalanceConfig, name="finus_a
 async def finus_account_balance_readonly(config: FinusAccountBalanceReadonlyConfig, _builder: Builder):
 
     async def get_account_balance_readonly(inp: KisTradingMcpCallInput) -> str:
-        """Kis Trading MCP 조회 전용 래퍼 — 허용 목록에 없는 api_type은 차단된다 (#66).
+        """Kis Trading MCP 조회 전용 래퍼 — tool_name·api_type 허용 목록으로 이중 차단 (#66).
 
-        허용(pass-through): inquire_*(잔고·시세·체결 등), search_*, find_api_detail.
-        차단(fail-closed): order_*, modify_order, cancel_order, 및 목록에 없는 모든 api_type.
+        허용 tool_name: domestic_stock, overseas_stock.
+        허용 api_type(pass-through): inquire_*(잔고·시세·체결 등), search_*, find_api_detail.
+        차단(fail-closed): 목록 밖의 tool_name 또는 api_type(order_* 계열 포함).
         """
         prepared = _prepare_kis_trading_mcp_call(inp, config)
         if isinstance(prepared, str):
-            _record_to_ledger("finus_account_balance", prepared)
+            _record_to_ledger(_KIS_BALANCE_LEDGER_NAME, prepared)
             return prepared
         tool_name, arguments = prepared
+        if tool_name.lower() not in _READONLY_TOOL_ALLOWLIST:
+            logger.warning("readonly gate blocked tool_name=%r", tool_name)
+            result = _err_json(
+                "kis_tool_name_not_allowed_readonly",
+                tool_name=tool_name,
+                hint=(
+                    "이 도구는 조회 전용입니다. domestic_stock 또는 overseas_stock만 사용하세요. "
+                    "주문 실행은 이 에이전트의 권한이 아니므로 재시도하지 말고 사용자에게 안내하세요."
+                ),
+            )
+            _record_to_ledger(_KIS_BALANCE_LEDGER_NAME, result)
+            return result
         api_type = str(arguments.get("api_type", ""))
         if not _is_readonly_api_type(api_type):
+            logger.warning(
+                "readonly gate blocked api_type=%r (allowlist prefixes: %s, exact: %s)",
+                api_type, _READONLY_API_ALLOWLIST_PREFIXES, sorted(_READONLY_API_ALLOWLIST_EXACT),
+            )
             result = _err_json(
                 "kis_api_type_not_allowed_readonly",
                 api_type=api_type,
                 hint=(
-                    "조회 전용 에이전트에서 허용되지 않은 api_type입니다. "
-                    f"차단된 값: {api_type!r}. "
-                    "허용 목록: inquire_* 접두사, search_* 접두사, find_api_detail. "
-                    "운영자: finus_api.py의 _READONLY_API_ALLOWLIST_EXACT 또는 "
-                    "_READONLY_API_ALLOWLIST_PREFIXES에 추가하세요."
+                    "이 도구는 조회 전용입니다. inquire_*/search_*/find_api_detail 만 사용하세요. "
+                    "주문 실행은 이 에이전트의 권한이 아니므로 재시도하지 말고 사용자에게 안내하세요."
                 ),
             )
-            _record_to_ledger("finus_account_balance", result)
+            _record_to_ledger(_KIS_BALANCE_LEDGER_NAME, result)
             return result
         result = await _mcp_call_tool_remote(
             transport=config.mcp_transport,
@@ -750,7 +773,7 @@ async def finus_account_balance_readonly(config: FinusAccountBalanceReadonlyConf
             arguments=arguments,
             timeout_sec=config.timeout_sec,
         )
-        _record_to_ledger("finus_account_balance", result)
+        _record_to_ledger(_KIS_BALANCE_LEDGER_NAME, result)
         return result
 
     base_desc = (get_account_balance_readonly.__doc__ or "").strip()
@@ -1132,7 +1155,7 @@ async def finus_account_balance(config: FinusAccountBalanceConfig, _builder: Bui
         """
         prepared = _prepare_kis_trading_mcp_call(inp, config)
         if isinstance(prepared, str):
-            _record_to_ledger("finus_account_balance", prepared)
+            _record_to_ledger(_KIS_BALANCE_LEDGER_NAME, prepared)
             return prepared
         tool_name, arguments = prepared
         result = await _mcp_call_tool_remote(
@@ -1142,7 +1165,7 @@ async def finus_account_balance(config: FinusAccountBalanceConfig, _builder: Bui
             arguments=arguments,
             timeout_sec=config.timeout_sec,
         )
-        _record_to_ledger("finus_account_balance", result)
+        _record_to_ledger(_KIS_BALANCE_LEDGER_NAME, result)
         return result
 
     base_desc = (get_account_balance.__doc__ or "").strip()

@@ -8,10 +8,11 @@ llms:
     model_name: ${NEWS_OPENAI_CHAT_MODEL:-gpt-5.4-mini}
 
 functions:
-  # #66: news/recommend/strategy/diary 에이전트에서 주문 실행 api_type을 차단한다.
-  # trading_agent.yml의 finus_account_balance(전체 권한)를 조회 전용 래퍼로 대체.
-  # 이 오버라이드는 base 상속 체인(recommend_agent → strategy_agent → diary_agent)에 자동 전파된다.
-  kis-trading-mcp-tool:
+  # #66: news/recommend/strategy 에이전트용 조회 전용 래퍼를 별도 이름으로 등록한다.
+  # 병합된 라우터 설정에서 functions 딕셔너리는 이름이 전역인 평평한 네임스페이스이므로,
+  # 한 이름에 인스턴스는 하나뿐이다. 따라서 trading/monitoring의 kis-trading-mcp-tool
+  # (전체 권한 finus_account_balance)을 건드리지 않고 별도 이름으로 분리해야 한다.
+  kis-trading-mcp-tool-readonly:
     _type: finus_account_balance_readonly
     mcp_transport: sse
     mcp_url: ${FINUS_KIS_TRADING_MCP_URL:-http://host.docker.internal:3300/sse}
@@ -21,7 +22,7 @@ functions:
     _type: react_agent
     llm_name: news_openai_llm
     tool_names:
-      - kis-trading-mcp-tool
+      - kis-trading-mcp-tool-readonly
       # news agent가 실수로 주식거래를 해버리는 위험을 막기 위해 향후에 다른 것으로 변경
       - mcp-news-get-market-news
       - mcp-dart-get-disclosure-signal
@@ -48,7 +49,7 @@ functions:
       Action: 여기에는 위 도구 이름 중 하나만 그대로 적습니다(대괄호나 "중 하나" 문구를 넣지 마세요).
 
       Action Input:
-      - Kis Trading MCP(``kis-trading-mcp-tool``): {{"tool_name":"domestic_stock","api_type":"...","params":{{...}}}}
+      - Kis Trading MCP(``kis-trading-mcp-tool-readonly``): {{"tool_name":"domestic_stock","api_type":"...","params":{{...}}}}
       - ``mcp-news-get-market-news`` / ``mcp-dart-get-disclosure-signal`` / ``mcp-dart-get-earnings-report``: {{"stock_name":"삼성전자"}} (``mcp-dart-get-earnings-report``만 ``period`` 선택 추가 가능, 예: {{"stock_name":"삼성전자","period":"2025Q1"}})
 
       그 다음 줄부터는 Observation이 옵니다(모델이 직접 쓰지 않음).
@@ -74,9 +75,9 @@ functions:
       - DART 실적 리포트: `mcp-dart-get-earnings-report` (stock_name, period 선택). 실적·분기보고서·사업보고서·earnings 질문에는 이 도구와 최신 뉴스를 함께 사용합니다.
       - 실적 분석 모드에서는 매출/영업이익/순이익 YoY, 실적 서프라이즈/미스 여부, 주요 뉴스 기반 정성 코멘트, 다음 분기 전망을 구조화해 답하십시오.
         컨센서스 또는 시장 기대치 데이터가 도구 Observation에 없으면 추정하지 말고 "컨센서스 데이터 없음"으로 명시하십시오.
-      - `kis-trading-mcp-tool`: 보유종목/포트폴리오 확인이 필요할 때 사용합니다.
+      - `kis-trading-mcp-tool-readonly`: 보유종목/포트폴리오 확인이 필요할 때 사용합니다.
         기본 잔고 조회는 `api_type:"inquire_balance"`, `params:{{"env_dv":"real","inqr_dvsn":"01"}}`로 시작하십시오.
-      - 최근 대화에 종목명이 이미 있으면 그 종목명을 그대로 사용해도 됩니다. 그렇지 않다면 kis-trading-mcp-tool을 사용하여 직접 조회하고 종목명을 가져옵니다.
+      - 최근 대화에 종목명이 이미 있으면 그 종목명을 그대로 사용해도 됩니다. 그렇지 않다면 kis-trading-mcp-tool-readonly를 사용하여 직접 조회하고 종목명을 가져옵니다.
         예: 사용자가 "내 포트폴리오는 삼성전자와 네이버야"라고 말한 뒤 포트폴리오 관련 뉴스를 물으면 삼성전자와 NAVER 각각에 대해 `mcp-news-get-market-news`를 호출합니다.
 
       도구 Observation을 받기 전에는 Final Answer를 쓰지 마십시오.
