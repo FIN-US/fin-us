@@ -68,7 +68,6 @@ python -m http.server 8080 --directory frontend/Build
 - `total_asset_is_estimate`
 
 `PanelController`의 해당 분기는 소스 수준에서는 올바르게 구현됐으나, 현재 번들에서는 실행되지 않습니다.
-**다음 WebGL 재빌드 및 커밋 시 해소됩니다.**
 
 **이 경고는 다음 WebGL 재빌드·커밋으로 해소됩니다. 해소한 커밋에서 이 섹션을 함께 삭제하세요.**
 
