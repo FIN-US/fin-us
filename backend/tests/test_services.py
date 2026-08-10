@@ -1151,6 +1151,9 @@ def test_analysis_from_toolless_text_urgency_dict_does_not_raise():
     result = services._analysis_from_toolless_text(raw)
     assert isinstance(result, dict), "dict urgency여도 예외 없이 dict를 반환해야 한다"
     assert result["urgency"] == "normal"
+    # #218: 중첩된 urgency dict가 후보로 선택되어 summary를 오염시키면 안 된다
+    assert result["summary"] == "삼성전자 요약"
+    assert result["source_news"] == ["뉴스1"]
 
 
 # ── #211 리뷰 반영: urgency 하향 시 urgency_reason·telegram_alert 모순 방지 ──
@@ -1236,15 +1239,33 @@ def test_analysis_from_toolless_text_nested_json_uses_outer_summary():
 
 
 def test_analysis_from_toolless_text_no_summary_json_still_falls_back():
-    """관련 없는 JSON(summary 키 없음)만 있으면 여전히 원문 폴백을 사용한다.
+    """관련 없는 JSON(summary 키 없음)만 있으면 원문 전체가 summary로 사용된다.
 
-    summary 키 우선 정렬이 except ValidationError: continue 의도를 깨지 않는지 확인한다.
-    {"count":3} 같은 객체는 summary 후보에 없고 ValidationError로 건너뛰어
-    결국 폴백 경로로 간다.
+    {"count":3} 같은 객체는 summary 키가 없으므로 루프 안에서
+    `data.get("summary") or text[:8000]` 폴백이 동작해 원본 텍스트를 summary로 채운다.
+    ValidationError는 발생하지 않는다 — AnalysisReport 생성 인수가 모두 강제 변환되기 때문이다.
     """
     raw = '{"count":3,"items":["a","b","c"]}'
     result = services._analysis_from_toolless_text(raw)
-    # 폴백: 원문 전체가 summary
+    # 루프 내 폴백: data.get("summary") or text[:8000] → 원문 전체가 summary
     assert result["summary"] == raw
     assert result["source_news"] == []
     assert result["details"] is None
+
+
+def test_analysis_from_toolless_text_invalid_candidate_is_skipped():
+    """스키마 검증에 실패하는 후보는 건너뛰고 유효한 후보를 쓴다.
+
+    summary 우선 정렬이 `except ValidationError: continue` 의도를 깨지 않는지 확인한다.
+    trading_trend는 `str | None`이라 정수를 넣으면 ValidationError가 난다.
+
+    이 테스트가 잡는 mutation: `except ValidationError: continue` 제거.
+    건너뛰기가 없으면 정수 trading_trend로 ValidationError가 전파되어 실패한다.
+    """
+    raw = (
+        '{"summary":"유효 요약","source_news":["뉴스1"],"trading_trend":"상승"} '
+        '{"summary":"깨진 후보","trading_trend":12}'
+    )
+    result = services._analysis_from_toolless_text(raw)
+    assert result["summary"] == "유효 요약"
+    assert result["trading_trend"] == "상승"
