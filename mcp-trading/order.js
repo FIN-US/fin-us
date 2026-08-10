@@ -77,7 +77,7 @@ export function buildCashOrderBody({ accountNo, stockCode, quantity, price, orde
   if (/^[0-9A-Z]{6,7}$/i.test(code) && !/^\d{6,7}$/.test(code)) {
     throw new Error("이 종목은 현재 주문을 지원하지 않습니다.");
   }
-  // 이 범위가 backend/telegram_commands.py의 _ORDERABLE_STOCK_CODE_RE(`\A[0-9]{6,7}\Z`)와
+  // 이 범위가 backend/stock_code.py의 _ORDERABLE_STOCK_CODE_RE(`\A[0-9]{6,7}\Z`)와
   // 쌍을 이룬다. 백엔드가 같은 정책을 복제해 조기 거절하므로, 영숫자 코드 주문 지원을
   // 검토할 때(#138) 위 두 가드와 백엔드 상수를 **모두** 함께 바꿔야 한다. 하나라도 남기면
   // 그 계층에서 조용히 계속 막힌다.

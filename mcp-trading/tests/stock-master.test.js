@@ -304,9 +304,12 @@ test("exactly 3 master stock names match the code-shaped pattern, and 0 aliases 
   // CODE_SHAPE_PATTERN, this test documents the change and forces a
   // conscious re-check of the Step 3 echo's position (it must stay behind
   // name/alias matching) rather than a silent reintroduction of the
-  // shadowing bug for a new listing. It is also the signal backend/
-  // services.py:_looks_like_stock_code depends on: that helper is safe only
-  // while every code-shaped master name is digit-free.
+  // shadowing bug for a new listing. It is also a partial signal for backend/
+  // stock_code.py:_looks_like_stock_code — that helper is safe only while every
+  // code-shaped master name is digit-free, but CODE_SHAPE_PATTERN only covers
+  // 6-7 char shapes and can't catch a digit-bearing 9-char name. The full
+  // 6/7/9 range is covered by backend/tests/test_stock_code.py::
+  // test_no_master_name_is_shadowed_by_looks_like_stock_code.
   // Uses the implementation's own exported pattern (rather than a hardcoded
   // copy) so this guard can never drift out of sync with what resolveStock
   // actually treats as code-shaped.
