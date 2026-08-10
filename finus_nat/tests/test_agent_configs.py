@@ -387,6 +387,69 @@ def test_readonly_tool_name_case_and_whitespace(tool_name: str, expected: bool):
     )
 
 
+# ---------------------------------------------------------------------------
+# #220 정규화 일원화 — _prepare_kis_trading_mcp_call 이 tool_name을 소문자로 반환하는지 고정
+# ---------------------------------------------------------------------------
+
+def test_prepare_kis_normalizes_tool_name_to_lowercase():
+    """#220: _prepare_kis_trading_mcp_call은 대소문자·앞뒤 공백을 정규화해 소문자 tool_name을 반환해야 한다.
+
+    _is_readonly_tool_name 게이트 통과 여부만이 아니라 실제로 MCP 에 전달되는 값을 검증한다.
+    정규화가 없으면 "DOMESTIC_STOCK"은 게이트를 통과하지만 MCP 서버가 unknown tool로 거부한다.
+    """
+    from nat_finus_nat.finus_api import (
+        FinusAccountBalanceConfig,
+        KisTradingMcpCallInput,
+        _prepare_kis_trading_mcp_call,
+    )
+
+    config = FinusAccountBalanceConfig()
+    for raw, expected_lower in [
+        ("DOMESTIC_STOCK", "domestic_stock"),
+        ("Overseas_Stock", "overseas_stock"),
+        ("  ETFETN  ", "etfetn"),
+    ]:
+        inp = KisTradingMcpCallInput(tool_name=raw, api_type="inquire_balance", params={})
+        result = _prepare_kis_trading_mcp_call(inp, config)
+        assert isinstance(result, tuple), (
+            f"{raw!r} → 에러 문자열이 아닌 (tool_name, arguments) 튜플이어야 한다: {result!r}"
+        )
+        actual_tool_name, _ = result
+        assert actual_tool_name == expected_lower, (
+            f"{raw!r} → {expected_lower!r} 정규화 기대, 실제: {actual_tool_name!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# #220 trading_tool_name 설정 시점 검증 — 허용 목록 밖의 값은 ValidationError
+# ---------------------------------------------------------------------------
+
+def test_trading_tool_name_invalid_raises_validation_error():
+    """#220: trading_tool_name에 허용 목록 밖의 값을 넣으면 Config 로드 시점에 ValidationError가 발생해야 한다.
+
+    FINUS_KIS_TRADING_TOOL_NAME 환경변수 오설정으로 readonly 에이전트가 전면 차단되는 사고를
+    런타임 첫 호출 전에 잡는다. allowlist 판정을 항상 통과로 뒤집으면 이 테스트가 red가 된다.
+    """
+    import pytest
+    from pydantic import ValidationError
+    from nat_finus_nat.finus_api import FinusAccountBalanceConfig
+
+    with pytest.raises(ValidationError, match="trading_tool_name"):
+        FinusAccountBalanceConfig(trading_tool_name="invalid_tool_xyz")
+
+
+@pytest.mark.parametrize("name", [
+    "domestic_stock", "overseas_stock", "domestic_bond",
+    "domestic_futureoption", "overseas_futureoption", "elw", "etfetn", "auth",
+], ids=lambda x: x)
+def test_trading_tool_name_valid_values_accepted(name: str):
+    """#220: 허용 목록 8종은 trading_tool_name에 지정해도 ValidationError 없이 로드된다."""
+    from nat_finus_nat.finus_api import FinusAccountBalanceConfig
+
+    config = FinusAccountBalanceConfig(trading_tool_name=name)
+    assert config.trading_tool_name == name
+
+
 def test_kis_agents_share_identical_system_prompt():
     """monitoring/strategy/trading 프롬프트는 의도적으로 동일하다 - 한 곳만 수정되는 드리프트를 막는다."""
     import nat_finus_nat.register  # noqa: F401 - 등록 트리거만 필요
