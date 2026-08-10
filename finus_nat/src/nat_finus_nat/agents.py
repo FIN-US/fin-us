@@ -137,6 +137,14 @@ _TOOL_ENFORCEMENT_REJECTION = (
     "다시 질문해 주세요."
 )
 
+# Returned when every read tool executed but returned an empty result set.
+# Skips the retry — the second attempt cannot produce rows either.
+# Must NOT be model-generated text.
+_EMPTY_RESULT_REJECTION = (
+    "[조회 결과 없음] 요청하신 조건으로 조회했으나 데이터가 없습니다. "
+    "조회 기간이나 종목을 바꿔 다시 질문해 주세요."
+)
+
 # Prepended to the query on the second attempt to force tool usage.
 # Changes the input rather than repeating the same system-prompt instruction
 # (which the model already ignored on the first attempt).
@@ -195,6 +203,17 @@ async def _run_with_gate(
             inner_name,
         )
         return _TOOL_ENFORCEMENT_REJECTION
+
+    # Empty-result guard: all read tools executed but returned empty data.
+    # Retrying is futile — the tools will return the same empty result again.
+    # Return an honest "no data" message instead of the misleading _TOOL_ENFORCEMENT_REJECTION.
+    if ledger.only_empty_reads():
+        logger.info(
+            "Gate tripped but every read tool returned an empty result (%s) — "
+            "skipping retry; the retry cannot produce rows.",
+            inner_name,
+        )
+        return _EMPTY_RESULT_REJECTION
 
     # --- Second attempt with changed input ---
     corrective_query = _CORRECTIVE_TOOL_PREFIX + query
