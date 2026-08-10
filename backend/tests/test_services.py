@@ -1139,11 +1139,9 @@ def test_analysis_from_toolless_text_urgency_non_string_does_not_raise(urgency_v
 def test_analysis_from_toolless_text_urgency_dict_does_not_raise():
     """urgency가 dict여도 TypeError 없이 정상 반환된다.
 
-    dict urgency는 _json_objects_from_text의 reversed 순서 때문에
-    내부 객체가 먼저 후보로 선택되어 summary가 원본 JSON이 되는 선행 문제
-    (Improvement #3)가 있다. 이는 이 PR 이전부터 존재하는 문제이므로
-    이 테스트는 summary 내용이 아닌 '예외 없이 반환된다'만 고정한다.
-    urgency 결과는 내부 객체에 urgency 키가 없어 'normal'이 된다.
+    #218 수정 후: summary 키를 가진 바깥 객체가 우선 선택된다.
+    urgency는 {"level":"high"} dict를 받고, isinstance(..., str) 검사를
+    통과하지 못해 "normal"로 정규화된다. summary·source_news는 보존된다.
     """
     import json
 
@@ -1212,3 +1210,41 @@ def test_analysis_from_toolless_text_absent_urgency_preserves_reason_and_alert(r
     assert result["telegram_alert"] is True, (
         "urgency 키 부재·null은 하향이 아니므로 telegram_alert을 보존해야 한다"
     )
+
+
+# ── #218: 중첩 JSON 객체 — summary 키 우선 선택 ───────────────────────────────
+
+
+def test_analysis_from_toolless_text_nested_json_uses_outer_summary():
+    """중첩 JSON 객체가 있어도 summary 키를 가진 바깥 객체에서 올바른 요약을 뽑는다. (#218)
+
+    _json_objects_from_text는 reversed 순서로 후보를 반환하므로, 안쪽 {"pe":12}가
+    바깥 객체보다 먼저 온다. 안쪽 객체엔 summary 키가 없어
+    data.get("summary") or text[:8000]이 원본 JSON 전체를 summary로 채우고,
+    source_news는 []가 된다. summary 키 우선 정렬로 바깥 객체를 먼저 시도해 이를 막는다.
+
+    이 테스트가 잡는 mutation: 후보 정렬 로직(_candidates.sort(...)) 제거.
+    정렬을 지우면 안쪽 {"pe":12}가 먼저 시도돼 summary가 원본 JSON 전체로,
+    source_news가 []로 나와 두 단정 모두 실패한다.
+    """
+    raw = '{"summary":"삼성전자 요약","source_news":["뉴스1"],"detail":{"pe":12}}'
+    result = services._analysis_from_toolless_text(raw)
+    assert result["summary"] == "삼성전자 요약", (
+        "중첩 JSON이 있을 때 원본 JSON 전체가 summary로 노출되어서는 안 된다"
+    )
+    assert result["source_news"] == ["뉴스1"]
+
+
+def test_analysis_from_toolless_text_no_summary_json_still_falls_back():
+    """관련 없는 JSON(summary 키 없음)만 있으면 여전히 원문 폴백을 사용한다.
+
+    summary 키 우선 정렬이 except ValidationError: continue 의도를 깨지 않는지 확인한다.
+    {"count":3} 같은 객체는 summary 후보에 없고 ValidationError로 건너뛰어
+    결국 폴백 경로로 간다.
+    """
+    raw = '{"count":3,"items":["a","b","c"]}'
+    result = services._analysis_from_toolless_text(raw)
+    # 폴백: 원문 전체가 summary
+    assert result["summary"] == raw
+    assert result["source_news"] == []
+    assert result["details"] is None

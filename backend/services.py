@@ -283,7 +283,17 @@ def _analysis_from_toolless_text(raw: str) -> dict[str, Any]:
     미사용) — Improvement #2 (#162 리뷰).
     """
     text = (raw or "").strip()
-    for data in _json_objects_from_text(text):
+    # #218: summary 키를 가진 후보를 우선 시도한다.
+    # _json_objects_from_text는 텍스트 내 마지막 JSON을 먼저 반환하도록
+    # reversed 순서를 쓰는데, 중첩 JSON이 있으면 안쪽 객체가 바깥 객체보다
+    # 나중 위치에서 발견되어 reversed 후 선두에 온다. 안쪽 객체엔 summary 키가
+    # 없으므로 data.get("summary") or text[:8000]이 원본 JSON 전체를 요약으로
+    # 채워버린다. 안정 정렬로 summary 키 보유 여부를 먼저 분리하면, 바깥 객체를
+    # 먼저 시도하면서도 summary를 모두 가진 후보들 사이에서는 기존 reversed 순서
+    # (텍스트 내 마지막 우선)가 유지된다.
+    _candidates = _json_objects_from_text(text)
+    _candidates.sort(key=lambda d: "summary" not in d)
+    for data in _candidates:
         # ValidationError를 유발하는 AnalysisReport() 생성만 try 안에 둔다.
         # 정규화는 TypeError를 낼 수 있어 except ValidationError에 잡히지 않으므로
         # try 밖에서 먼저 처리한다 (Nitpick #2).
