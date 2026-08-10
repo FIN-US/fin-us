@@ -42,8 +42,10 @@ python -m http.server 8080 --directory frontend/Build
 
 ### 재빌드 규칙 — 반드시 지켜야 합니다
 
-**`frontend/Assets/Scripts/`의 C# 소스를 수정한 경우, Unity 에디터에서 WebGL 재빌드 후 `frontend/Build/`를 함께 커밋해야 합니다.**
-소스만 커밋하고 빌드를 갱신하지 않으면, 추적 중인 번들과 C# 소스가 어긋납니다.
+**`frontend/Assets/`의 소스를 수정한 경우 — C# 스크립트(`Scripts/`)든 WebGL 템플릿
+(`WebGLTemplates/`)이든 — Unity 에디터에서 WebGL 재빌드 후 `frontend/Build/`를 함께
+커밋해야 합니다.**
+소스만 커밋하고 빌드를 갱신하지 않으면, 추적 중인 번들과 소스가 어긋납니다.
 
 재빌드 절차:
 
