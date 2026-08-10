@@ -1027,3 +1027,188 @@ def test_analysis_from_toolless_text_always_returns_none_details():
     result = services._analysis_from_toolless_text("plain text response")
     assert result["details"] is None
     assert result["summary"] == "plain text response"
+
+
+# ── #211: urgency 정규화 — 재현 케이스 4종 ───────────────────────────────────
+
+
+def test_analysis_from_toolless_text_urgency_valid_high_preserves_summary_and_news():
+    """urgency가 유효값("high")이면 summary·source_news가 그대로 보존된다.
+
+    urgency 정규화를 제거(원래대로 data.get("urgency","normal"))해도 이 케이스는
+    통과하므로, 뮤테이션 가드로서 아래 null/medium 케이스와 함께 동작한다.
+
+    부수 가드: 이 테스트가 urgency=="high"를 단언하므로,
+    _URGENCY_LEVELS 파생이 깨지면(Literal 변경 등) 이 테스트가 red가 된다.
+    즉 이 테스트를 지우면 _URGENCY_LEVELS 스키마-파생의 안전망도 함께 사라진다.
+    """
+    raw = '{"summary":"삼성전자 요약","source_news":["뉴스1"],"urgency":"high"}'
+    result = services._analysis_from_toolless_text(raw)
+    assert result["summary"] == "삼성전자 요약"
+    assert result["source_news"] == ["뉴스1"]
+    assert result["urgency"] == "high"
+
+
+def test_analysis_from_toolless_text_urgency_null_preserves_summary_and_news():
+    """urgency=null 이면 summary·source_news를 버리지 않고, urgency는 "normal"로 정규화한다.
+
+    urgency 정규화를 제거하면 ValidationError → continue → 폴백으로 원본 JSON이
+    summary에 노출되어 이 테스트가 red가 된다.
+    """
+    raw = '{"summary":"삼성전자 요약","source_news":["뉴스1"],"urgency":null}'
+    result = services._analysis_from_toolless_text(raw)
+    assert result["summary"] == "삼성전자 요약", "urgency=null이 원본 JSON을 summary에 노출해서는 안 된다"
+    assert result["source_news"] == ["뉴스1"]
+    assert result["urgency"] == "normal"
+
+
+def test_analysis_from_toolless_text_urgency_unsupported_string_preserves_summary_and_news():
+    """urgency가 미지원 문자열("medium")이면 "normal"로 정규화하고 summary·source_news를 보존한다.
+
+    urgency 정규화를 제거하면 ValidationError → continue → 폴백으로 원본 JSON이
+    summary에 노출되어 이 테스트가 red가 된다.
+    """
+    raw = '{"summary":"삼성전자 요약","source_news":["뉴스1"],"urgency":"medium"}'
+    result = services._analysis_from_toolless_text(raw)
+    assert result["summary"] == "삼성전자 요약", "urgency=medium이 원본 JSON을 summary에 노출해서는 안 된다"
+    assert result["source_news"] == ["뉴스1"]
+    assert result["urgency"] == "normal"
+
+
+def test_analysis_from_toolless_text_urgency_key_absent_defaults_to_normal():
+    """urgency 키가 없으면 기본값 "normal"이 적용되고 summary·source_news가 보존된다."""
+    raw = '{"summary":"삼성전자 요약","source_news":["뉴스1"]}'
+    result = services._analysis_from_toolless_text(raw)
+    assert result["summary"] == "삼성전자 요약"
+    assert result["source_news"] == ["뉴스1"]
+    assert result["urgency"] == "normal"
+
+
+def test_analysis_from_toolless_text_fallback_source_signals_is_empty_list():
+    """JSON 파싱 실패 시 폴백의 source_signals는 None이 아니라 []여야 한다.
+
+    이 테스트가 잡는 mutation: 폴백에서 `source_signals=[]` 제거.
+    source_signals를 명시하지 않으면 AnalysisReport 기본값 None이 나가고,
+    NAT 경로(source_signals=None → source_news 되채움 보정)와 비대칭이 생긴다.
+    """
+    result = services._analysis_from_toolless_text("JSON이 없는 순수 텍스트 응답")
+    assert result["source_signals"] == [], (
+        "폴백 경로의 source_signals는 None이 아니라 []여야 한다"
+    )
+
+
+# ── #211 리뷰 반영: 비문자열 urgency TypeError 회귀 방지 ────────────────────────
+
+
+import pytest
+
+
+@pytest.mark.parametrize(
+    "urgency_value",
+    [
+        ["high"],  # list — frozenset 멤버십 검사에서 TypeError 유발 (핵심 버그)
+        3,         # int
+        True,      # bool
+        False,     # bool
+        None,      # null (urgency 키 값이 null인 경우, 키 부재와 구분)
+    ],
+)
+def test_analysis_from_toolless_text_urgency_non_string_does_not_raise(urgency_value):
+    """urgency가 list/int/bool/null이어도 TypeError 없이 normal로 정규화되고 summary가 보존된다.
+
+    이 테스트가 잡는 mutation: `isinstance(raw_urgency, str)` 가드 제거.
+    가드 없이 `raw_urgency in _URGENCY_LEVELS`만 쓰면 list가 frozenset
+    멤버십 검사에서 TypeError: unhashable type: 'list'를 일으켜
+    /api/v1/analyze가 500이 된다. origin/main에서는 같은 입력이 폴백으로
+    열화될 뿐 살아남으므로 이 TypeError는 이 PR이 만든 회귀다.
+    """
+    import json
+
+    raw = json.dumps(
+        {"summary": "삼성전자 요약", "source_news": ["뉴스1"], "urgency": urgency_value}
+    )
+    result = services._analysis_from_toolless_text(raw)
+    assert result["urgency"] == "normal", (
+        f"urgency={urgency_value!r}는 비문자열이므로 'normal'로 정규화되어야 한다"
+    )
+    assert result["summary"] == "삼성전자 요약", (
+        "비문자열 urgency가 summary를 원본 JSON으로 오염시켜서는 안 된다"
+    )
+
+
+def test_analysis_from_toolless_text_urgency_dict_does_not_raise():
+    """urgency가 dict여도 TypeError 없이 정상 반환된다.
+
+    dict urgency는 _json_objects_from_text의 reversed 순서 때문에
+    내부 객체가 먼저 후보로 선택되어 summary가 원본 JSON이 되는 선행 문제
+    (Improvement #3)가 있다. 이는 이 PR 이전부터 존재하는 문제이므로
+    이 테스트는 summary 내용이 아닌 '예외 없이 반환된다'만 고정한다.
+    urgency 결과는 내부 객체에 urgency 키가 없어 'normal'이 된다.
+    """
+    import json
+
+    raw = json.dumps(
+        {"summary": "삼성전자 요약", "source_news": ["뉴스1"], "urgency": {"level": "high"}}
+    )
+    result = services._analysis_from_toolless_text(raw)
+    assert isinstance(result, dict), "dict urgency여도 예외 없이 dict를 반환해야 한다"
+    assert result["urgency"] == "normal"
+
+
+# ── #211 리뷰 반영: urgency 하향 시 urgency_reason·telegram_alert 모순 방지 ──
+
+
+def test_analysis_from_toolless_text_normalized_urgency_clears_reason_and_alert():
+    """urgency가 정규화(하향)되면 urgency_reason·telegram_alert도 함께 버린다.
+
+    urgency="medium"(미지원)→"normal" 정규화 시 urgency_reason·telegram_alert를
+    그대로 두면 "Urgency: normal - 즉시 대응 필요"처럼 모순된 문구가 나간다.
+    이 테스트가 잡는 mutation: `normalized` 조건 제거(reason/alert 무조건 통과).
+    """
+    raw = (
+        '{"summary":"삼성전자 요약","source_news":["뉴스1"],'
+        '"urgency":"medium","urgency_reason":"delisting imminent","telegram_alert":true}'
+    )
+    result = services._analysis_from_toolless_text(raw)
+    assert result["urgency"] == "normal"
+    assert result["urgency_reason"] is None, (
+        "urgency 하향 시 urgency_reason도 None이어야 한다"
+    )
+    assert result["telegram_alert"] is False, (
+        "urgency 하향 시 telegram_alert도 False여야 한다"
+    )
+
+
+def test_analysis_from_toolless_text_valid_urgency_preserves_reason_and_alert():
+    """urgency가 유효값이면 urgency_reason·telegram_alert을 그대로 통과시킨다."""
+    raw = (
+        '{"summary":"삼성전자 요약","source_news":["뉴스1"],'
+        '"urgency":"high","urgency_reason":"거래정지 위험","telegram_alert":true}'
+    )
+    result = services._analysis_from_toolless_text(raw)
+    assert result["urgency"] == "high"
+    assert result["urgency_reason"] == "거래정지 위험"
+    assert result["telegram_alert"] is True
+
+
+@pytest.mark.parametrize("raw_json", [
+    # urgency 키 자체가 없는 경우
+    '{"summary":"삼성전자 요약","source_news":["뉴스1"],"urgency_reason":"거래정지 위험","telegram_alert":true}',
+    # urgency=null (키는 있지만 값이 null)인 경우
+    '{"summary":"삼성전자 요약","source_news":["뉴스1"],"urgency":null,"urgency_reason":"거래정지 위험","telegram_alert":true}',
+])
+def test_analysis_from_toolless_text_absent_urgency_preserves_reason_and_alert(raw_json):
+    """urgency 키가 없거나 null이면 하향이 아니므로 urgency_reason·telegram_alert을 보존한다.
+
+    이 테스트가 잡는 regression: `normalized = urgency != raw_urgency`에서
+    `raw_urgency is not None` 가드가 빠지면, urgency 키가 없을 때도 normalized=True가
+    되어 urgency_reason·telegram_alert이 부당하게 버려진다.
+    """
+    result = services._analysis_from_toolless_text(raw_json)
+    assert result["urgency"] == "normal"
+    assert result["urgency_reason"] == "거래정지 위험", (
+        "urgency 키 부재·null은 하향이 아니므로 urgency_reason을 보존해야 한다"
+    )
+    assert result["telegram_alert"] is True, (
+        "urgency 키 부재·null은 하향이 아니므로 telegram_alert을 보존해야 한다"
+    )

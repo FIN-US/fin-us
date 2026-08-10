@@ -3,7 +3,7 @@ import httpx
 import logging
 import re
 from datetime import date
-from typing import Any, Literal, Optional
+from typing import Any, Literal, Optional, get_args
 from urllib.parse import quote as _url_quote
 from fastapi import HTTPException
 from anthropic import AsyncAnthropic
@@ -11,6 +11,7 @@ from openai import AsyncOpenAI
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
+from pydantic import ValidationError
 from sqlmodel import Session
 from .config import (
     OPENAI_API_KEY, OPENAI_CHAT_MODEL,
@@ -19,7 +20,6 @@ from .config import (
     NAT_BASE_URL, NAT_CHAT_MODEL, NAT_CONVERSATION_ID,
     NEWS_MCP_PARAMS, TRADING_MCP_PARAMS,
 )
-from pydantic import ValidationError
 from .schemas import TradingSignal, AnalysisReport
 from .models import AgentReport
 
@@ -31,6 +31,12 @@ _NAT_RESPONSE_LOG_PREVIEW_CHARS = 800
 # 악의적이거나 비정상적인 LLM 출력이 이 값들을 주입할 수 있으므로 파싱 단계에서
 # 걷어낸다. 실제 값은 perform_stock_analysis가 provider_supports_tools()로 채운다.
 _DERIVED_PROVENANCE_FIELDS = frozenset({"provider", "provider_supports_tools"})
+
+# schemas.AnalysisReport.urgency의 Literal 값에서 파생 — 스키마와 두 곳이 갈라지는 것을 막는다.
+# AnalysisReport.urgency: Literal["low", "normal", "high", "critical"]
+_URGENCY_LEVELS: frozenset[str] = frozenset(
+    get_args(AnalysisReport.model_fields["urgency"].annotation)
+)
 
 # 입력이 이미 종목코드 형태인지 판정하는 범위. mcp-trading/stock-master.js의
 # resolveStock() Step 3 에코 판정(CODE_SHAPE_PATTERN — 마스터에 없는 6~7자 영숫자를
@@ -278,6 +284,32 @@ def _analysis_from_toolless_text(raw: str) -> dict[str, Any]:
     """
     text = (raw or "").strip()
     for data in _json_objects_from_text(text):
+        # ValidationError를 유발하는 AnalysisReport() 생성만 try 안에 둔다.
+        # 정규화는 TypeError를 낼 수 있어 except ValidationError에 잡히지 않으므로
+        # try 밖에서 먼저 처리한다 (Nitpick #2).
+        raw_urgency = data.get("urgency")
+        # JSON 후보의 값은 임의 타입이다 — list/dict를 frozenset에 넣으면
+        # TypeError로 죽으므로 str로 좁힌 뒤 비교한다. 문자열이 아니면 알 수 없는 값이다.
+        # 도구 없는 경로는 판단을 만들지 않으므로, 알 수 없는 urgency는 후보 전체를
+        # 버리는 대신 안전한 방향(normal)으로 낮춘다. 필드 하나 때문에
+        # summary·source_news까지 잃고 원본 JSON이 화면에 노출되는 것을 막는다.
+        urgency = (
+            raw_urgency
+            if isinstance(raw_urgency, str) and raw_urgency in _URGENCY_LEVELS
+            else "normal"
+        )
+        # 알 수 없는 urgency를 버릴 때 로그를 남겨 프롬프트 드리프트를 감지할 수 있게 한다.
+        if raw_urgency is not None and urgency != raw_urgency:
+            logger.warning(
+                "toolless 응답의 urgency=%r가 스키마 값이 아니라 %r로 정규화했습니다. "
+                "프롬프트 드리프트를 의심하세요.",
+                raw_urgency,
+                urgency,
+            )
+        # urgency를 신뢰할 수 없어 낮춘 경우, 그 값을 설명하던 reason도 함께 버린다.
+        # 남기면 "Urgency: normal - 즉시 대응 필요" 같은 모순된 문구가 소비자에게 나간다.
+        # raw_urgency is None 은 "키가 없거나 null" — 하향이 아니므로 normalized=False.
+        normalized = raw_urgency is not None and urgency != raw_urgency
         try:
             report = AnalysisReport(
                 summary=str(data.get("summary") or text[:8000] or "빈 응답"),
@@ -287,18 +319,19 @@ def _analysis_from_toolless_text(raw: str) -> dict[str, Any]:
                     data.get("source_signals") or data.get("source_news")
                 ),
                 trading_trend=data.get("trading_trend"),
-                urgency=data.get("urgency", "normal"),
-                urgency_reason=data.get("urgency_reason"),
-                telegram_alert=bool(data.get("telegram_alert", False)),
+                urgency=urgency,
+                urgency_reason=None if normalized else data.get("urgency_reason"),
+                telegram_alert=bool(data.get("telegram_alert", False)) and not normalized,
             )
         except ValidationError:
-            continue  # 관련 없는 JSON 객체(urgency 리터럴 위반 등) — 다음 후보로
+            continue  # 관련 없는 JSON 객체 — 다음 후보로
         return report.model_dump()
     # JSON 파싱 실패 또는 유효한 후보 없음: 원문을 요약으로 사용
     return AnalysisReport(
         summary=text[:8000] if text else "빈 응답",
         details=None,
         source_news=[],
+        source_signals=[],
     ).model_dump()
 
 
