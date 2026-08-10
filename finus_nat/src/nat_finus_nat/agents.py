@@ -137,6 +137,14 @@ _TOOL_ENFORCEMENT_REJECTION = (
     "다시 질문해 주세요."
 )
 
+# Returned when every read tool executed but returned an empty result set.
+# Skips the retry — the second attempt cannot produce rows either.
+# Must NOT be model-generated text.
+_EMPTY_RESULT_REJECTION = (
+    "[조회 결과 없음] 요청하신 조건으로 조회했으나 데이터가 없습니다. "
+    "조회 기간이나 종목을 바꿔 다시 질문해 주세요."
+)
+
 # Prepended to the query on the second attempt to force tool usage.
 # Changes the input rather than repeating the same system-prompt instruction
 # (which the model already ignored on the first attempt).
@@ -194,7 +202,20 @@ async def _run_with_gate(
             "tool ran — skipping retry to avoid duplicate writes",
             inner_name,
         )
-        return _TOOL_ENFORCEMENT_REJECTION
+        # 재시도는 어느 쪽이든 건너뛴다. 메시지만 실제 상황에 맞춘다:
+        # 쓰기 도구와 함께 빈 조회가 실행됐다면 "도구 없이"는 사실이 아니다.
+        return _EMPTY_RESULT_REJECTION if ledger.only_empty_reads() else _TOOL_ENFORCEMENT_REJECTION
+
+    # Empty-result guard: all read tools executed but returned empty data.
+    # Retrying is futile — the tools will return the same empty result again.
+    # Return an honest "no data" message instead of the misleading _TOOL_ENFORCEMENT_REJECTION.
+    if ledger.only_empty_reads():
+        logger.info(
+            "Gate tripped but every read tool returned an empty result (%s) — "
+            "skipping retry; the retry cannot produce rows.",
+            inner_name,
+        )
+        return _EMPTY_RESULT_REJECTION
 
     # --- Second attempt with changed input ---
     corrective_query = _CORRECTIVE_TOOL_PREFIX + query
@@ -208,6 +229,17 @@ async def _run_with_gate(
 
     if not _check_tool_enforcement(answer2, ledger2, chat_request):
         return answer2
+
+    # 1차와 동일: 2차에서 도구는 실행됐고 결과가 비었을 뿐이라면
+    # "도구 없이"라고 말하는 _TOOL_ENFORCEMENT_REJECTION은 사실과 다르다.
+    # 교정 프리픽스가 2차의 도구 호출을 유도하므로 흔한 경로다.
+    if ledger2.only_empty_reads():
+        logger.info(
+            "Gate tripped twice (%s) but the retry's read tools all returned "
+            "empty results — returning the honest no-data message.",
+            inner_name,
+        )
+        return _EMPTY_RESULT_REJECTION
 
     logger.error(
         "Tool enforcement gate tripped twice (%s) — returning deterministic rejection",
