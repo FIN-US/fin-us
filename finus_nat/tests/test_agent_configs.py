@@ -391,7 +391,12 @@ def test_readonly_tool_name_case_and_whitespace(tool_name: str, expected: bool):
 # #220 정규화 일원화 — _prepare_kis_trading_mcp_call 이 tool_name을 소문자로 반환하는지 고정
 # ---------------------------------------------------------------------------
 
-def test_prepare_kis_normalizes_tool_name_to_lowercase():
+@pytest.mark.parametrize("raw,expected", [
+    ("DOMESTIC_STOCK", "domestic_stock"),
+    ("Overseas_Stock", "overseas_stock"),
+    ("  ETFETN  ", "etfetn"),
+], ids=lambda x: repr(x) if isinstance(x, str) else str(x))
+def test_prepare_kis_normalizes_tool_name_to_lowercase(raw: str, expected: str):
     """#220: _prepare_kis_trading_mcp_call은 대소문자·앞뒤 공백을 정규화해 소문자 tool_name을 반환해야 한다.
 
     _is_readonly_tool_name 게이트 통과 여부만이 아니라 실제로 MCP 에 전달되는 값을 검증한다.
@@ -404,20 +409,15 @@ def test_prepare_kis_normalizes_tool_name_to_lowercase():
     )
 
     config = FinusAccountBalanceConfig()
-    for raw, expected_lower in [
-        ("DOMESTIC_STOCK", "domestic_stock"),
-        ("Overseas_Stock", "overseas_stock"),
-        ("  ETFETN  ", "etfetn"),
-    ]:
-        inp = KisTradingMcpCallInput(tool_name=raw, api_type="inquire_balance", params={})
-        result = _prepare_kis_trading_mcp_call(inp, config)
-        assert isinstance(result, tuple), (
-            f"{raw!r} → 에러 문자열이 아닌 (tool_name, arguments) 튜플이어야 한다: {result!r}"
-        )
-        actual_tool_name, _ = result
-        assert actual_tool_name == expected_lower, (
-            f"{raw!r} → {expected_lower!r} 정규화 기대, 실제: {actual_tool_name!r}"
-        )
+    inp = KisTradingMcpCallInput(tool_name=raw, api_type="inquire_balance", params={})
+    result = _prepare_kis_trading_mcp_call(inp, config)
+    assert isinstance(result, tuple), (
+        f"{raw!r} → 에러 문자열이 아닌 (tool_name, arguments) 튜플이어야 한다: {result!r}"
+    )
+    actual_tool_name, _ = result
+    assert actual_tool_name == expected, (
+        f"{raw!r} → {expected!r} 정규화 기대, 실제: {actual_tool_name!r}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -430,7 +430,6 @@ def test_trading_tool_name_invalid_raises_validation_error():
     FINUS_KIS_TRADING_TOOL_NAME 환경변수 오설정으로 readonly 에이전트가 전면 차단되는 사고를
     런타임 첫 호출 전에 잡는다. allowlist 판정을 항상 통과로 뒤집으면 이 테스트가 red가 된다.
     """
-    import pytest
     from pydantic import ValidationError
     from nat_finus_nat.finus_api import FinusAccountBalanceConfig
 
@@ -447,6 +446,31 @@ def test_trading_tool_name_valid_values_accepted(name: str):
     from nat_finus_nat.finus_api import FinusAccountBalanceConfig
 
     config = FinusAccountBalanceConfig(trading_tool_name=name)
+    assert config.trading_tool_name == name
+
+
+def test_readonly_config_rejects_auth():
+    """#225: FinusAccountBalanceReadonlyConfig은 auth를 설정 시점에 ValidationError로 차단해야 한다.
+
+    readonly 래퍼는 런타임에 auth를 차단하므로, 설정 시점에도 받지 않는다.
+    두 YAML이 같은 환경변수(FINUS_KIS_TRADING_TOOL_NAME)를 공유하므로 실제로 발생 가능한 경로다.
+    """
+    from pydantic import ValidationError
+    from nat_finus_nat.finus_api import FinusAccountBalanceReadonlyConfig
+
+    with pytest.raises(ValidationError, match="trading_tool_name"):
+        FinusAccountBalanceReadonlyConfig(trading_tool_name="auth")
+
+
+@pytest.mark.parametrize("name", [
+    "domestic_stock", "overseas_stock", "domestic_bond",
+    "domestic_futureoption", "overseas_futureoption", "elw", "etfetn",
+], ids=lambda x: x)
+def test_readonly_config_accepts_asset_classes(name: str):
+    """#225: readonly Config는 자산군 7종을 설정 시점에 허용해야 한다."""
+    from nat_finus_nat.finus_api import FinusAccountBalanceReadonlyConfig
+
+    config = FinusAccountBalanceReadonlyConfig(trading_tool_name=name)
     assert config.trading_tool_name == name
 
 

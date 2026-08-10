@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal, NamedTuple, TypeAlias
+from typing import Any, ClassVar, Literal, NamedTuple, TypeAlias
 
 import httpx
 from mcp import ClientSession
@@ -654,16 +654,17 @@ def _coerce_api_type_params_payload(tool_input: Any, kwargs: dict[str, Any]) -> 
     return None
 
 
-# Kis Trading MCP list_tools에 실제로 존재하는 도구 이름 전체 집합.
-# FinusAccountBalanceConfig.trading_tool_name 검증에 사용한다 — 설정 시점에
-# 허용 목록 밖의 값을 빠르게 감지해 readonly 래퍼 전면 차단 사고를 예방한다.
-# _READONLY_TOOL_ALLOWLIST와 달리 auth를 포함한다:
-#   readonly 래퍼는 auth를 차단하지만, 전체 권한 래퍼(finus_account_balance)는 허용한다.
-_KIS_TRADING_TOOL_NAMES: frozenset[str] = frozenset({
+# 조회 전용 래퍼(finus_account_balance_readonly)가 허용하는 MCP tool_name 허용 목록 (fail-closed).
+# auth는 조회 목적이 없고 인증 상태를 바꿀 수 있어 제외한다.
+_READONLY_TOOL_ALLOWLIST: frozenset[str] = frozenset({
     "domestic_stock", "overseas_stock", "domestic_bond",
     "domestic_futureoption", "overseas_futureoption", "elw", "etfetn",
-    "auth",
 })
+
+# Kis Trading MCP list_tools에 실제로 존재하는 도구 이름 전체 집합.
+# readonly 허용 목록 + auth — 전체 권한 래퍼(finus_account_balance)만 auth를 허용한다.
+# FinusAccountBalanceConfig._ALLOWED_TOOL_NAMES의 기본값으로 사용한다.
+_KIS_TRADING_TOOL_NAMES: frozenset[str] = _READONLY_TOOL_ALLOWLIST | {"auth"}
 
 
 class FinusAccountBalanceConfig(FunctionBaseConfig, name="finus_account_balance"):
@@ -671,6 +672,10 @@ class FinusAccountBalanceConfig(FunctionBaseConfig, name="finus_account_balance"
 
     `tool_name` 생략 시 YAML `trading_tool_name`. Upstream: `open-trading-api`/`MCP/Kis Trading MCP`.
     """
+
+    # 이 Config가 허용하는 trading_tool_name 집합 — 서브클래스가 좁힐 수 있다.
+    # FinusAccountBalanceReadonlyConfig는 _READONLY_TOOL_ALLOWLIST로 오버라이드해 auth를 제외한다.
+    _ALLOWED_TOOL_NAMES: ClassVar[frozenset[str]] = _KIS_TRADING_TOOL_NAMES
 
     timeout_sec: float = Field(default=180.0, ge=5.0, le=600.0)
     mcp_transport: Literal["sse", "streamable-http"] = Field(
@@ -693,15 +698,17 @@ class FinusAccountBalanceConfig(FunctionBaseConfig, name="finus_account_balance"
     def _validate_trading_tool_name(self) -> "FinusAccountBalanceConfig":
         """FINUS_KIS_TRADING_TOOL_NAME 환경변수 등으로 잘못된 값이 들어올 때 설정 시점에 감지한다.
 
-        허용 목록 밖의 값이면 readonly 래퍼가 전면 차단되므로, 런타임 첫 호출까지 기다리지 않고
-        Config 로드 시점에 ValidationError를 발생시켜 조기에 알린다.
+        허용 목록 밖의 값이면 Config 로드 시점에 ValidationError를 발생시켜 조기에 알린다.
+        서브클래스는 _ALLOWED_TOOL_NAMES를 오버라이드해 허용 범위를 좁힌다
+        (예: readonly 래퍼는 auth를 제외한 7종만 허용).
         빈 문자열은 런타임에 ``kis_tool_name_missing`` 에러로 처리되므로 여기서는 허용한다.
         """
         name = (self.trading_tool_name or "").strip().lower()
-        if name and name not in _KIS_TRADING_TOOL_NAMES:
+        if name and name not in self._ALLOWED_TOOL_NAMES:
             raise ValueError(
-                f"trading_tool_name={self.trading_tool_name!r}는 허용하지 않는 Kis MCP 도구 이름입니다. "
-                f"허용 목록: {sorted(_KIS_TRADING_TOOL_NAMES)}"
+                f"trading_tool_name={self.trading_tool_name!r}는 이 래퍼가 허용하지 않는 "
+                f"Kis MCP 도구 이름입니다. 허용 목록: {sorted(self._ALLOWED_TOOL_NAMES)}. "
+                f"MCP 서버에 새 도구가 추가되었다면 finus_api.py의 _KIS_TRADING_TOOL_NAMES에 등록하세요."
             )
         return self
 
@@ -808,14 +815,8 @@ _KIS_BALANCE_LEDGER_NAME: str = "finus_account_balance"
 _READONLY_API_ALLOWLIST_PREFIXES: tuple[str, ...] = ("inquire_", "search_")
 _READONLY_API_ALLOWLIST_EXACT: frozenset[str] = frozenset({"find_api_detail"})
 
-# 조회 전용 래퍼가 허용하는 MCP tool_name 허용 목록. fail-closed: 목록 밖의 tool_name은 차단.
-# api_type 게이트가 주문을 막으므로, tool_name은 조회 대상 자산군을 넓게 허용한다.
-# auth는 조회 목적이 없고 인증 상태를 바꿀 수 있어 제외한다.
-# trading_agent.yml·KisTradingMcpCallInput에 나열된 자산군 8종 중 auth만 제외한 7종.
-_READONLY_TOOL_ALLOWLIST: frozenset[str] = frozenset({
-    "domestic_stock", "overseas_stock", "domestic_bond",
-    "domestic_futureoption", "overseas_futureoption", "elw", "etfetn",
-})
+# _READONLY_TOOL_ALLOWLIST는 _KIS_TRADING_TOOL_NAMES와 함께 위에서 정의되어 있다.
+# (FinusAccountBalanceConfig 클래스 정의 직전 — 단일 출처 유지를 위해 이동)
 
 
 def _is_readonly_api_type(api_type: str) -> bool:
@@ -874,7 +875,7 @@ async def _call_kis_mcp_and_record(
 async def _build_kis_mcp_description(doc: str, config: FinusAccountBalanceConfig) -> str:
     """description 문자열 조립 — finus_account_balance·readonly 공유 (#220).
 
-    base_doc + _KIS_TRADING_TOOL_GUIDE + (원격 MCP list_tools 문서) 를 합쳐
+    doc + _KIS_TRADING_TOOL_GUIDE + (원격 MCP list_tools 문서) 를 합쳐
     LangChain 중괄호 이스케이프 적용 후 반환한다.
     """
     base = doc.strip()
@@ -893,6 +894,9 @@ class FinusAccountBalanceReadonlyConfig(FinusAccountBalanceConfig, name="finus_a
     비-trading 에이전트(news/recommend/strategy/diary)가 잔고·시세 조회 능력은 유지하되
     허용 목록(inquire_*, search_*, find_api_detail)에 없는 api_type은 fail-closed로 차단한다.
     """
+
+    # readonly 래퍼는 auth를 런타임에 차단하므로, 설정 시점에도 받지 않는다.
+    _ALLOWED_TOOL_NAMES: ClassVar[frozenset[str]] = _READONLY_TOOL_ALLOWLIST
 
 
 @register_function(config_type=FinusAccountBalanceReadonlyConfig)
