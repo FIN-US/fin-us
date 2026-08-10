@@ -284,12 +284,32 @@ def _analysis_from_toolless_text(raw: str) -> dict[str, Any]:
     """
     text = (raw or "").strip()
     for data in _json_objects_from_text(text):
+        # ValidationError를 유발하는 AnalysisReport() 생성만 try 안에 둔다.
+        # 정규화는 TypeError를 낼 수 있어 except ValidationError에 잡히지 않으므로
+        # try 밖에서 먼저 처리한다 (Nitpick #2).
+        raw_urgency = data.get("urgency")
+        # JSON 후보의 값은 임의 타입이다 — list/dict를 frozenset에 넣으면
+        # TypeError로 죽으므로 str로 좁힌 뒤 비교한다. 문자열이 아니면 알 수 없는 값이다.
+        # 도구 없는 경로는 판단을 만들지 않으므로, 알 수 없는 urgency는 후보 전체를
+        # 버리는 대신 안전한 방향(normal)으로 낮춘다. 필드 하나 때문에
+        # summary·source_news까지 잃고 원본 JSON이 화면에 노출되는 것을 막는다.
+        urgency = (
+            raw_urgency
+            if isinstance(raw_urgency, str) and raw_urgency in _URGENCY_LEVELS
+            else "normal"
+        )
+        # 알 수 없는 urgency를 버릴 때 로그를 남겨 프롬프트 드리프트를 감지할 수 있게 한다.
+        if raw_urgency is not None and urgency != raw_urgency:
+            logger.warning(
+                "toolless 응답의 urgency=%r가 스키마 값이 아니라 %r로 정규화했습니다. "
+                "프롬프트 드리프트를 의심하세요.",
+                raw_urgency,
+                urgency,
+            )
+        # urgency를 신뢰할 수 없어 낮춘 경우, 그 값을 설명하던 reason도 함께 버린다.
+        # 남기면 "Urgency: normal - 즉시 대응 필요" 같은 모순된 문구가 소비자에게 나간다.
+        normalized = urgency != raw_urgency
         try:
-            raw_urgency = data.get("urgency")
-            # 도구 없는 경로는 애초에 판단을 만들지 않으므로, 알 수 없는 urgency는
-            # 후보 전체를 버리는 대신 안전한 방향(normal)으로 낮춘다. 필드 하나 때문에
-            # summary·source_news까지 잃고 원본 JSON이 화면에 노출되는 것을 막는다.
-            urgency = raw_urgency if raw_urgency in _URGENCY_LEVELS else "normal"
             report = AnalysisReport(
                 summary=str(data.get("summary") or text[:8000] or "빈 응답"),
                 details=None,  # 도구 없는 provider는 매매 판단을 생성하지 않는다
@@ -299,8 +319,8 @@ def _analysis_from_toolless_text(raw: str) -> dict[str, Any]:
                 ),
                 trading_trend=data.get("trading_trend"),
                 urgency=urgency,
-                urgency_reason=data.get("urgency_reason"),
-                telegram_alert=bool(data.get("telegram_alert", False)),
+                urgency_reason=None if normalized else data.get("urgency_reason"),
+                telegram_alert=bool(data.get("telegram_alert", False)) and not normalized,
             )
         except ValidationError:
             continue  # 관련 없는 JSON 객체 — 다음 후보로
