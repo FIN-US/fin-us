@@ -1319,12 +1319,12 @@ def test_analysis_from_nat_text_nested_inner_summary_no_drift():
 def test_morning_briefing_from_text_nested_object_fields_filled():
     """_morning_briefing_from_text 경로에서 중첩 객체가 있어도 브리핑 필드가 채워진다. (#222)
 
-    _morning_briefing_from_text는 ValidationError 안전망이 없어 첫 후보를
-    무조건 반환한다. span 수정 전에는 안쪽 {"pe":12}가 candidates[0]이 돼
-    market_summary=""·watchlist=[]·... 로 브리핑 전체가 빈 값이 됐다.
+    _json_objects_from_text의 top/nested 우선순위 방식으로 최상위 브리핑 객체가
+    먼저 시도된다. 브리핑 키를 가진 최상위 객체가 선택되고 내부 {"pe":12}는 무시된다.
 
-    이 테스트가 잡는 mutation: _json_objects_from_text의 중첩 건너뛰기 제거.
-    제거하면 안쪽 객체가 먼저 선택돼 모든 필드가 빈 값으로 반환된다.
+    이 테스트가 잡는 mutation: `_BRIEFING_KEYS` 검사 제거와 함께 중첩 객체가
+    먼저 오도록 순서를 뒤집는 경우. 검사 없이 {"pe":12}가 먼저 선택되면
+    모든 브리핑 필드가 빈 값으로 반환된다.
     """
     raw = (
         '{"market_summary":"오늘 시장 요약",'
@@ -1364,3 +1364,96 @@ def test_analysis_from_toolless_text_sort_guard_for_independent_top_level_jsons(
         "summary 없는 후보가 reversed 선두에 와도 sort가 summary 있는 후보를 먼저 시도해야 한다"
     )
     assert result["source_news"] == ["뉴스1"]
+
+
+# ── #224 리뷰 반영: envelope(래퍼) 회귀 — 중첩 후순위 방식으로 폴백 ──────────────
+
+
+def test_analysis_from_toolless_text_envelope_wrapper_fallback():
+    """래퍼 JSON 안에 실제 페이로드가 있을 때 안쪽 객체로 폴백한다. (#224)
+
+    _json_objects_from_text가 최상위를 top·중첩을 nested로 분리해
+    [reversed(top) + reversed(nested)] 순으로 반환한다.
+    sort가 summary 없는 래퍼를 뒤로 밀어 안쪽 후보가 먼저 시도된다.
+
+    수정 전(제거 방식): 중첩 객체가 후보에서 사라져 래퍼만 남았고
+    summary가 원본 JSON 전체 문자열, source_news=[]가 됐다.
+
+    이 테스트가 잡는 mutation: top/nested 분리 제거(전부 top으로 처리) +
+    sort 제거. 둘 다 지우면 래퍼가 선두에 남아 summary가 원문 전체가 된다.
+    """
+    raw = '{"response":{"summary":"삼성전자 요약","source_news":["뉴스1"]}}'
+    result = services._analysis_from_toolless_text(raw)
+    assert result["summary"] == "삼성전자 요약", (
+        "래퍼 JSON 안의 summary가 올바르게 추출되어야 한다"
+    )
+    assert result["source_news"] == ["뉴스1"]
+
+
+def test_analysis_from_nat_text_envelope_wrapper_fallback():
+    """analysis_from_nat_text 경로에서 래퍼 JSON 안의 페이로드로 폴백한다. (#224)
+
+    analysis_from_nat_text는 except ValueError로 재시도하므로 래퍼 객체(summary·
+    source_news 미포함)가 ValidationError를 내고 안쪽 후보로 넘어간다.
+
+    이 테스트가 잡는 mutation: top/nested 분리 제거. 제거하면 안쪽 객체가
+    후보에 오르지 않아 except ValueError 폴백이 래퍼만 시도하고 결국
+    원문 전체를 summary로 쓰는 텍스트 폴백 경로로 떨어진다.
+    """
+    raw = (
+        '{"response":{"summary":"NAT 요약",'
+        '"details":{"decision":"BUY","confidence_score":0.8,'
+        '"reason":"수급 개선","target_stock":"삼성전자"},'
+        '"source_news":["헤드라인"]}}'
+    )
+    result = services.analysis_from_nat_text(raw, "삼성전자")
+    assert result["summary"] == "NAT 요약", (
+        "래퍼 JSON 안의 summary가 올바르게 추출되어야 한다"
+    )
+    assert result["details"]["decision"] == "BUY"
+    assert result["source_news"] == ["헤드라인"]
+
+
+def test_morning_briefing_from_text_envelope_wrapper_fallback():
+    """_morning_briefing_from_text 경로에서 래퍼 JSON 안의 브리핑으로 폴백한다. (#224)
+
+    _BRIEFING_KEYS 검사가 래퍼 객체(브리핑 키 미포함)를 건너뛰고
+    nested의 안쪽 객체로 폴백한다.
+
+    이 테스트가 잡는 mutation: `if not any(key in data for key in _BRIEFING_KEYS): continue`
+    제거. 검사가 없으면 래퍼 객체가 선택돼 모든 브리핑 필드가 빈 값이 된다.
+    """
+    raw = (
+        '{"briefing":{"market_summary":"오늘 시장 요약",'
+        '"watchlist":["삼성전자"],'
+        '"trading_ideas":["눌림목 관찰"],'
+        '"catalysts":["CPI 발표"]}}'
+    )
+    result = services._morning_briefing_from_text(raw)
+    assert result["market_summary"] == "오늘 시장 요약", (
+        "래퍼 JSON 안의 market_summary가 올바르게 추출되어야 한다"
+    )
+    assert result["watchlist"] == ["삼성전자"]
+    assert result["trading_ideas"] == ["눌림목 관찰"]
+    assert result["catalysts"] == ["CPI 발표"]
+
+
+def test_morning_briefing_from_text_skips_non_briefing_candidates():
+    """브리핑 키를 하나도 갖지 않은 후보는 건너뛰고 유효한 후보를 반환한다. (#224)
+
+    독립 최상위 JSON이 2개인 상황에서 무관한 JSON({"count":3})이 reversed
+    선두에 와도 _BRIEFING_KEYS 검사가 건너뛰어 올바른 브리핑 후보를 선택한다.
+
+    이 테스트가 잡는 mutation: `if not any(key in data for key in _BRIEFING_KEYS): continue`
+    제거. 검사가 없으면 {"count":3}이 선택돼 모든 브리핑 필드가 빈 값이 된다.
+    """
+    # 브리핑 키 없는 객체가 앞, 브리핑 있는 객체가 뒤 → reversed 후 무관한 쪽이 선두
+    raw = (
+        '{"market_summary":"시장 요약","watchlist":["삼성전자"],'
+        '"trading_ideas":[],"catalysts":[]} {"count":3}'
+    )
+    result = services._morning_briefing_from_text(raw)
+    assert result["market_summary"] == "시장 요약", (
+        "브리핑 키 없는 후보가 reversed 선두에 와도 건너뛰고 올바른 후보를 써야 한다"
+    )
+    assert result["watchlist"] == ["삼성전자"]

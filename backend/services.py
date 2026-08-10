@@ -471,9 +471,16 @@ async def _collect_morning_context(
         return f"{tool_name} 조회 실패: {exc}"
 
 
+_BRIEFING_KEYS = ("market_summary", "watchlist", "trading_ideas", "catalysts")
+
+
 def _morning_briefing_from_text(raw: str) -> dict[str, Any]:
     text = (raw or "").strip()
     for data in _json_objects_from_text(text):
+        # 브리핑 키를 하나도 갖지 않은 후보(래퍼 객체, 무관한 JSON)는 건너뛴다.
+        # 그대로 반환하면 브리핑 전체가 빈 값이 되고 아래 원문 폴백도 도달하지 못한다.
+        if not any(key in data for key in _BRIEFING_KEYS):
+            continue
         return {
             "market_summary": str(data.get("market_summary") or ""),
             "watchlist": _string_list(data.get("watchlist")),
@@ -790,29 +797,30 @@ def analysis_from_nat_text(raw: str, stock: str) -> dict[str, Any]:
 
 
 def _json_objects_from_text(text: str) -> list[dict[str, Any]]:
-    """텍스트에서 최상위 JSON 객체만 추출한다.
+    """텍스트에서 JSON 객체를 최상위 우선 순서로 추출한다.
 
-    raw_decode가 반환하는 종료 인덱스(end)를 consumed_until에 기록해,
-    이미 디코드한 객체의 내부에 있는 중첩 '{' 는 건너뛴다.
-    이로써 {"outer": 1, "inner": {"nested": 2}} 형태의 입력이
-    후보로 {"outer":1,"inner":{...}} 하나만 남는다. (#222)
-
-    반환 순서는 텍스트 내 마지막 객체가 먼저 오는 reversed 순서를 유지한다.
+    raw_decode의 종료 인덱스로 최상위 객체의 span을 추적해, 그 안에서 발견된
+    중첩 객체는 후보에서 버리지 않고 '후순위'로 내린다 (#222).
+    최상위 객체가 실제 페이로드를 감싸기만 한 래퍼일 때 안쪽으로 폴백하기 위함이다.
+    각 그룹 안에서는 텍스트 내 마지막 객체가 먼저 오는 reversed 순서를 유지한다.
     """
     decoder = json.JSONDecoder()
-    objects: list[dict[str, Any]] = []
-    consumed_until = -1  # 직전에 디코드한 최상위 객체의 끝 위치
+    top: list[dict[str, Any]] = []
+    nested: list[dict[str, Any]] = []
+    consumed_until = 0  # 직전에 디코드한 최상위 객체의 끝(exclusive)
     for index, char in enumerate(text):
-        if char != "{" or index < consumed_until:
-            continue  # 이미 디코드한 객체 내부 → 중첩 객체이므로 건너뛴다
+        if char != "{":
+            continue
         try:
-            value, end = decoder.raw_decode(text[index:])
+            value, end = decoder.raw_decode(text, index)  # 슬라이스 없이 idx 지정
         except json.JSONDecodeError:
             continue
-        if isinstance(value, dict):
-            objects.append(value)
-            consumed_until = index + end
-    return list(reversed(objects))
+        if index < consumed_until:
+            nested.append(value)  # 이미 디코드한 최상위 객체 내부 → 후순위
+            continue
+        top.append(value)
+        consumed_until = end
+    return list(reversed(top)) + list(reversed(nested))
 
 
 def normalize_llm_provider(
