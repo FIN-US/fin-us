@@ -314,6 +314,17 @@ def _make_catalyst(
     )
 
 
+@pytest.fixture(name="frozen_today")
+def frozen_today_fixture(monkeypatch: pytest.MonkeyPatch) -> date:
+    # 서버(backend.main.today_kst)와 테스트 픽스처가 같은 "오늘"을 보게 고정한다.
+    # 픽스처를 date.today()(테스트 실행 머신의 로컬 타임존)로 만들고 서버는
+    # today_kst()(KST)를 쓰면, 두 시계가 KST 00:00~08:59에 하루 어긋나 CI(UTC 러너)에서
+    # 픽스처가 필터에서 통째로 빠지는 회귀가 생긴다. 이 픽스처로 그 어긋남을 없앤다.
+    fixed = date(2026, 5, 20)
+    monkeypatch.setattr("backend.main.today_kst", lambda: fixed)
+    return fixed
+
+
 def test_get_catalysts_empty(client: TestClient):
     response = client.get("/api/v1/db/catalysts")
     assert response.status_code == 200
@@ -321,8 +332,8 @@ def test_get_catalysts_empty(client: TestClient):
     assert response.json()["data"] == []
 
 
-def test_get_catalysts_filters_by_stock_name(client: TestClient, session: Session):
-    today = date.today()
+def test_get_catalysts_filters_by_stock_name(client: TestClient, session: Session, frozen_today: date):
+    today = frozen_today
     session.add(_make_catalyst(stock_name="삼성전자", event_date=today))
     session.add(_make_catalyst(stock_name="SK하이닉스", event_date=today))
     session.commit()
@@ -347,8 +358,8 @@ def test_get_catalysts_from_date_excludes_past_events(client: TestClient, sessio
     assert names == ["오늘", "미래"]
 
 
-def test_get_catalysts_limit_boundary(client: TestClient, session: Session):
-    today = date.today()
+def test_get_catalysts_limit_boundary(client: TestClient, session: Session, frozen_today: date):
+    today = frozen_today
     for i in range(5):
         session.add(
             _make_catalyst(
@@ -364,8 +375,8 @@ def test_get_catalysts_limit_boundary(client: TestClient, session: Session):
     assert [row["stock_name"] for row in data] == ["종목0", "종목1", "종목2"]
 
 
-def test_get_catalysts_sorted_by_event_date_ascending(client: TestClient, session: Session):
-    today = date.today()
+def test_get_catalysts_sorted_by_event_date_ascending(client: TestClient, session: Session, frozen_today: date):
+    today = frozen_today
     session.add(_make_catalyst(stock_name="가장늦음", event_date=today + timedelta(days=10)))
     session.add(_make_catalyst(stock_name="가장이름", event_date=today))
     session.add(_make_catalyst(stock_name="중간", event_date=today + timedelta(days=5)))
@@ -377,21 +388,60 @@ def test_get_catalysts_sorted_by_event_date_ascending(client: TestClient, sessio
     assert names == ["가장이름", "중간", "가장늦음"]
 
 
-def test_get_catalysts_ties_break_by_event_type_then_id(client: TestClient, session: Session):
+def test_get_catalysts_ties_break_by_event_type_then_id(
+    client: TestClient, session: Session, frozen_today: date
+):
     # event_date만으로 정렬하면 같은 날짜 이벤트 간 순서가 SQL상 보장되지 않아 limit
-    # 절단이 비결정적일 수 있다. event_type을 오름차순 tie-break로 추가했는지 확인한다.
-    # 삽입 순서(C, A, B)를 event_type 오름차순(A, B, C)과 반대로 둬, id(삽입 순서)로만
-    # 정렬되는 경우와 구분되게 한다.
-    today = date.today()
+    # 절단이 비결정적일 수 있다. event_type 오름차순 tie-break와, event_type까지 같을 때
+    # id(삽입 순서) tie-break가 둘 다 동작하는지 확인한다.
+    today = frozen_today
+    # event_type이 다른 경우: 삽입 순서(C, A, B)를 event_type 오름차순(A, B, C)과
+    # 반대로 둬, id로만 정렬되는 경우와 구분되게 한다.
     session.add(_make_catalyst(stock_name="C", event_date=today, event_type="c_type"))
     session.add(_make_catalyst(stock_name="A", event_date=today, event_type="a_type"))
     session.add(_make_catalyst(stock_name="B", event_date=today, event_type="b_type"))
+    # event_date, event_type이 모두 같은 경우: id(삽입 순서)로 tie-break되는지 확인.
+    # stock_name은 삽입 순서와 반대로 둬, id가 아닌 다른 기준으로 정렬되면 실패하게 한다.
+    session.add(_make_catalyst(stock_name="First", event_date=today, event_type="a_type"))
+    session.add(_make_catalyst(stock_name="Second", event_date=today, event_type="a_type"))
     session.commit()
 
     response = client.get("/api/v1/db/catalysts")
     assert response.status_code == 200
     names = [row["stock_name"] for row in response.json()["data"]]
-    assert names == ["A", "B", "C"]
+    assert names == ["A", "First", "Second", "B", "C"]
+
+
+def test_get_catalysts_order_by_includes_id_as_final_tie_break(
+    client: TestClient, session: Session, monkeypatch: pytest.MonkeyPatch
+):
+    # SQLite는 이 테이블(rowid 테이블, id가 곧 rowid)에서 물리적 저장 순서가 이미
+    # id 오름차순이고 정렬기도 안정적이라, id를 order_by에서 빼도 지금 규모의 인메모리
+    # 테스트 데이터로는 "우연히" 같은 결과가 나와 동작 테스트로는 그 뮤테이션을 잡지
+    # 못한다(위 tie-break 테스트가 실제로 보여준 한계). 그래서 실행 결과 대신 쿼리가
+    # id까지 명시적으로 order_by에 넣도록 "요청"하는지를 화이트박스로 고정한다 —
+    # 우연한 안정성이 아니라 계약으로 결정성을 보장한다.
+    captured_sql: list[str] = []
+    original_exec = session.exec
+
+    def spy_exec(statement, *args, **kwargs):
+        captured_sql.append(str(statement))
+        return original_exec(statement, *args, **kwargs)
+
+    monkeypatch.setattr(session, "exec", spy_exec)
+
+    response = client.get("/api/v1/db/catalysts")
+    assert response.status_code == 200
+    assert captured_sql, "session.exec가 호출되지 않았다"
+
+    order_by_clause = captured_sql[0].split("ORDER BY", 1)[1]
+    assert "catalystevent.event_date" in order_by_clause
+    assert "catalystevent.event_type" in order_by_clause
+    assert "catalystevent.id" in order_by_clause
+    # id가 마지막 tie-break여야 한다: event_type보다 뒤에 나와야 한다.
+    assert order_by_clause.index("catalystevent.event_type") < order_by_clause.index(
+        "catalystevent.id"
+    )
 
 
 def test_get_catalysts_defaults_to_today_excluding_past(
@@ -430,8 +480,10 @@ def test_get_catalysts_rejects_empty_stock_name(client: TestClient):
     assert response.status_code == 422
 
 
-def test_get_catalysts_not_truncated_when_within_limit(client: TestClient, session: Session):
-    today = date.today()
+def test_get_catalysts_not_truncated_when_within_limit(
+    client: TestClient, session: Session, frozen_today: date
+):
+    today = frozen_today
     session.add(_make_catalyst(stock_name="종목0", event_date=today))
     session.commit()
 
@@ -442,8 +494,10 @@ def test_get_catalysts_not_truncated_when_within_limit(client: TestClient, sessi
     assert body["message"] is None
 
 
-def test_get_catalysts_signals_truncation_when_over_limit(client: TestClient, session: Session):
-    today = date.today()
+def test_get_catalysts_signals_truncation_when_over_limit(
+    client: TestClient, session: Session, frozen_today: date
+):
+    today = frozen_today
     for i in range(4):
         session.add(_make_catalyst(stock_name=f"종목{i}", event_date=today + timedelta(days=i)))
     session.commit()
