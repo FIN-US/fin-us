@@ -1,7 +1,7 @@
 import pytest
 import asyncio
 from contextlib import asynccontextmanager
-from datetime import date
+from datetime import date, datetime
 from types import SimpleNamespace
 from fastapi.testclient import TestClient
 from unittest.mock import MagicMock
@@ -229,17 +229,21 @@ async def test_monitor_market_task_filtering(monkeypatch):
     monkeypatch.setattr("backend.scheduler.redis_state", unavailable_redis_state)
     
     # 1. 첫 번째 실행: 뉴스가 처음이므로 분석 수행
+    # 마커가 있고 잘리지 않은 잔고이므로 _sync_portfolio_from_balance(mock되지 않음)가
+    # 매 호출마다 실제로 성공해 PORTFOLIO_UPDATE 1건이 항상 추가된다(이슈 #229).
+    # 종목별 AGENT_ANALYSIS 3건 + PORTFOLIO_UPDATE 1건 = 4건.
     await monitor_market_task(watchlist_repo=FakeWatchlistRepo())
     assert mock_perform_analysis.call_count == 3 # 삼성전자, SK하이닉스, 현대차
-    assert mock_broadcast.call_count == 3
-    
-    # 2. 두 번째 실행: 뉴스가 동일하므로 분석 스킵
+    assert mock_broadcast.call_count == 4
+
+    # 2. 두 번째 실행: 뉴스가 동일하므로 분석 스킵. Portfolio 동기화는 뉴스 변경 여부와
+    # 무관하게 매 주기 실행되므로 PORTFOLIO_UPDATE 1건은 그대로 나간다.
     mock_perform_analysis.reset_mock()
     mock_broadcast.reset_mock()
     await monitor_market_task(watchlist_repo=FakeWatchlistRepo())
     assert mock_perform_analysis.call_count == 0
-    assert mock_broadcast.call_count == 0
-    
+    assert mock_broadcast.call_count == 1
+
     # 3. 세 번째 실행: 뉴스가 변경된 종목이 있으면 해당 종목만 분석
     async def mock_run_mcp_tool_changed(params, name, args):
         if name == "get_balance":
@@ -247,11 +251,14 @@ async def test_monitor_market_task_filtering(monkeypatch):
         if args.get('stock_name') == "삼성전자":
             return "NEW NEWS for Samsung"
         return f"Latest news for {args.get('stock_name')}"
-        
+
     monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool_changed)
+    mock_perform_analysis.reset_mock()
+    mock_broadcast.reset_mock()
     await monitor_market_task(watchlist_repo=FakeWatchlistRepo())
     assert mock_perform_analysis.call_count == 1
-    assert mock_broadcast.call_count == 1
+    # AGENT_ANALYSIS 1건 + PORTFOLIO_UPDATE 1건 = 2건.
+    assert mock_broadcast.call_count == 2
     assert mock_perform_analysis.call_args[0][0] == "삼성전자"
 
 
@@ -510,7 +517,9 @@ async def test_monitor_market_task_uses_default_stocks_when_balance_empty(monkey
     assert len(DEFAULT_MONITOR_STOCKS) == 4
     assert monitored_stocks == DEFAULT_MONITOR_STOCKS
     assert mock_perform_analysis.call_count == 0
-    assert mock_broadcast.call_count == 0
+    # 뉴스 분석 브로드캐스트는 없지만, 잔고 응답에 마커가 있고 잘리지 않았으므로
+    # Portfolio 동기화(mock되지 않음)가 성공해 PORTFOLIO_UPDATE 1건이 나간다(이슈 #229).
+    assert mock_broadcast.call_count == 1
 
 
 @pytest.mark.asyncio
@@ -551,7 +560,10 @@ async def test_monitor_market_task_uses_redis_hash_to_skip_duplicate_news(monkey
     await monitor_market_task(watchlist_repo=FakeWatchlistRepo())
 
     assert mock_perform_analysis.call_count == 1
-    assert mock_broadcast.call_count == 1
+    # AGENT_ANALYSIS는 첫 호출에서만 1건 나가지만, Portfolio 동기화(mock되지 않음)는
+    # 뉴스 중복 여부와 무관하게 두 호출 모두 성공해 PORTFOLIO_UPDATE가 2건 나간다
+    # (이슈 #229). 1(분석) + 2(동기화) = 3건.
+    assert mock_broadcast.call_count == 3
 
 
 @pytest.mark.asyncio
@@ -597,7 +609,14 @@ async def test_monitor_market_task_processes_multiple_signal_sources_independent
         "get_market_news: 삼성전자",
         "get_stock_mentions: 삼성전자",
     ]
-    assert [call.args[0]["source"] for call in mock_broadcast.call_args_list] == ["news", "sns"]
+    # PORTFOLIO_UPDATE(이슈 #229)에는 "source" 키가 없으므로 AGENT_ANALYSIS 브로드캐스트만
+    # 걸러서 검사한다. 잔고 응답에 마커가 있고 잘리지 않아 Portfolio 동기화도 성공하지만
+    # (mock되지 않음), 이 테스트의 관심사는 신호 소스별 분석 브로드캐스트 순서다.
+    analysis_broadcasts = [
+        call.args[0] for call in mock_broadcast.call_args_list
+        if call.args[0].get("type") == "AGENT_ANALYSIS"
+    ]
+    assert [payload["source"] for payload in analysis_broadcasts] == ["news", "sns"]
 
 
 @pytest.mark.asyncio
@@ -668,7 +687,9 @@ async def test_concurrent_monitor_market_task_runs_once_with_scheduler_lock(monk
     )
 
     assert mock_perform_analysis.call_count == 1
-    assert mock_broadcast.call_count == 1
+    # 스케줄러 락으로 실제 실행되는 것은 한 쪽뿐이라 AGENT_ANALYSIS 1건 + Portfolio
+    # 동기화(mock되지 않음) 성공에 따른 PORTFOLIO_UPDATE 1건 = 2건이다(이슈 #229).
+    assert mock_broadcast.call_count == 2
 
 
 @pytest.mark.asyncio
@@ -700,7 +721,12 @@ async def test_monitor_market_task_includes_watchlist_stocks(monkeypatch):
     )
     monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
     monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
-    monkeypatch.setattr("backend.scheduler.manager.broadcast", MagicMock(return_value=asyncio.Future()))
+    # 이슈 #229: Portfolio 동기화 성공 시 실제로 await manager.broadcast(...)가 호출될 수
+    # 있으므로, 이 mock의 반환 Future는 반드시 resolve되어야 한다. resolve하지 않으면
+    # (과거에는 broadcast가 전혀 호출되지 않아 무해했지만) 이제는 await가 영원히 멈춘다.
+    _resolved_broadcast = MagicMock(return_value=asyncio.Future())
+    _resolved_broadcast.return_value.set_result(None)
+    monkeypatch.setattr("backend.scheduler.manager.broadcast", _resolved_broadcast)
 
     await monitor_market_task(watchlist_repo=FakeWatchlistRepo(["NAVER"]))
 
@@ -737,7 +763,12 @@ async def test_monitor_market_task_continues_owned_stock_when_watchlist_fails(mo
     )
     monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
     monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
-    monkeypatch.setattr("backend.scheduler.manager.broadcast", MagicMock(return_value=asyncio.Future()))
+    # 이슈 #229: Portfolio 동기화 성공 시 실제로 await manager.broadcast(...)가 호출될 수
+    # 있으므로, 이 mock의 반환 Future는 반드시 resolve되어야 한다. resolve하지 않으면
+    # (과거에는 broadcast가 전혀 호출되지 않아 무해했지만) 이제는 await가 영원히 멈춘다.
+    _resolved_broadcast = MagicMock(return_value=asyncio.Future())
+    _resolved_broadcast.return_value.set_result(None)
+    monkeypatch.setattr("backend.scheduler.manager.broadcast", _resolved_broadcast)
 
     await monitor_market_task(watchlist_repo=FailingWatchlistRepo())
 
@@ -773,7 +804,12 @@ async def test_monitor_market_task_deduplicates_watchlist_and_owned_stocks(monke
     )
     monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
     monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
-    monkeypatch.setattr("backend.scheduler.manager.broadcast", MagicMock(return_value=asyncio.Future()))
+    # 이슈 #229: Portfolio 동기화 성공 시 실제로 await manager.broadcast(...)가 호출될 수
+    # 있으므로, 이 mock의 반환 Future는 반드시 resolve되어야 한다. resolve하지 않으면
+    # (과거에는 broadcast가 전혀 호출되지 않아 무해했지만) 이제는 await가 영원히 멈춘다.
+    _resolved_broadcast = MagicMock(return_value=asyncio.Future())
+    _resolved_broadcast.return_value.set_result(None)
+    monkeypatch.setattr("backend.scheduler.manager.broadcast", _resolved_broadcast)
 
     await monitor_market_task(watchlist_repo=FakeWatchlistRepo(["삼성전자"]))
 
@@ -809,7 +845,12 @@ async def test_monitor_market_task_uses_default_stocks_only_when_both_empty(monk
     )
     monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
     monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
-    monkeypatch.setattr("backend.scheduler.manager.broadcast", MagicMock(return_value=asyncio.Future()))
+    # 이슈 #229: Portfolio 동기화 성공 시 실제로 await manager.broadcast(...)가 호출될 수
+    # 있으므로, 이 mock의 반환 Future는 반드시 resolve되어야 한다. resolve하지 않으면
+    # (과거에는 broadcast가 전혀 호출되지 않아 무해했지만) 이제는 await가 영원히 멈춘다.
+    _resolved_broadcast = MagicMock(return_value=asyncio.Future())
+    _resolved_broadcast.return_value.set_result(None)
+    monkeypatch.setattr("backend.scheduler.manager.broadcast", _resolved_broadcast)
 
     await monitor_market_task(watchlist_repo=FakeWatchlistRepo())
 
@@ -845,7 +886,12 @@ async def test_monitor_market_task_watchlist_alone_skips_default_fallback(monkey
     )
     monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
     monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
-    monkeypatch.setattr("backend.scheduler.manager.broadcast", MagicMock(return_value=asyncio.Future()))
+    # 이슈 #229: Portfolio 동기화 성공 시 실제로 await manager.broadcast(...)가 호출될 수
+    # 있으므로, 이 mock의 반환 Future는 반드시 resolve되어야 한다. resolve하지 않으면
+    # (과거에는 broadcast가 전혀 호출되지 않아 무해했지만) 이제는 await가 영원히 멈춘다.
+    _resolved_broadcast = MagicMock(return_value=asyncio.Future())
+    _resolved_broadcast.return_value.set_result(None)
+    monkeypatch.setattr("backend.scheduler.manager.broadcast", _resolved_broadcast)
 
     await monitor_market_task(watchlist_repo=FakeWatchlistRepo(["카카오"]))
 
@@ -1043,7 +1089,12 @@ async def test_monitor_market_task_logs_warning_when_balance_truncated(monkeypat
     )
     monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
     monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
-    monkeypatch.setattr("backend.scheduler.manager.broadcast", MagicMock(return_value=asyncio.Future()))
+    # 이슈 #229: Portfolio 동기화 성공 시 실제로 await manager.broadcast(...)가 호출될 수
+    # 있으므로, 이 mock의 반환 Future는 반드시 resolve되어야 한다. resolve하지 않으면
+    # (과거에는 broadcast가 전혀 호출되지 않아 무해했지만) 이제는 await가 영원히 멈춘다.
+    _resolved_broadcast = MagicMock(return_value=asyncio.Future())
+    _resolved_broadcast.return_value.set_result(None)
+    monkeypatch.setattr("backend.scheduler.manager.broadcast", _resolved_broadcast)
 
     with caplog.at_level(logging.WARNING, logger=scheduler_module.logger.name):
         await monitor_market_task(watchlist_repo=FakeWatchlistRepo())
@@ -1086,7 +1137,12 @@ async def test_monitor_market_task_no_warning_when_balance_not_truncated(monkeyp
     )
     monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
     monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
-    monkeypatch.setattr("backend.scheduler.manager.broadcast", MagicMock(return_value=asyncio.Future()))
+    # 이슈 #229: Portfolio 동기화 성공 시 실제로 await manager.broadcast(...)가 호출될 수
+    # 있으므로, 이 mock의 반환 Future는 반드시 resolve되어야 한다. resolve하지 않으면
+    # (과거에는 broadcast가 전혀 호출되지 않아 무해했지만) 이제는 await가 영원히 멈춘다.
+    _resolved_broadcast = MagicMock(return_value=asyncio.Future())
+    _resolved_broadcast.return_value.set_result(None)
+    monkeypatch.setattr("backend.scheduler.manager.broadcast", _resolved_broadcast)
 
     with caplog.at_level(logging.WARNING, logger=scheduler_module.logger.name):
         await monitor_market_task(watchlist_repo=FakeWatchlistRepo())
@@ -1129,7 +1185,12 @@ async def test_monitor_market_task_still_watches_stocks_returned_despite_truncat
     )
     monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
     monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
-    monkeypatch.setattr("backend.scheduler.manager.broadcast", MagicMock(return_value=asyncio.Future()))
+    # 이슈 #229: Portfolio 동기화 성공 시 실제로 await manager.broadcast(...)가 호출될 수
+    # 있으므로, 이 mock의 반환 Future는 반드시 resolve되어야 한다. resolve하지 않으면
+    # (과거에는 broadcast가 전혀 호출되지 않아 무해했지만) 이제는 await가 영원히 멈춘다.
+    _resolved_broadcast = MagicMock(return_value=asyncio.Future())
+    _resolved_broadcast.return_value.set_result(None)
+    monkeypatch.setattr("backend.scheduler.manager.broadcast", _resolved_broadcast)
 
     await monitor_market_task(watchlist_repo=FakeWatchlistRepo())
 
@@ -1167,7 +1228,12 @@ def _make_balance_failure_mocks(monkeypatch, mock_run_mcp_tool_fn):
     )
     monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool_fn)
     monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
-    monkeypatch.setattr("backend.scheduler.manager.broadcast", MagicMock(return_value=asyncio.Future()))
+    # 이슈 #229: Portfolio 동기화 성공 시 실제로 await manager.broadcast(...)가 호출될 수
+    # 있으므로, 이 mock의 반환 Future는 반드시 resolve되어야 한다. resolve하지 않으면
+    # (과거에는 broadcast가 전혀 호출되지 않아 무해했지만) 이제는 await가 영원히 멈춘다.
+    _resolved_broadcast = MagicMock(return_value=asyncio.Future())
+    _resolved_broadcast.return_value.set_result(None)
+    monkeypatch.setattr("backend.scheduler.manager.broadcast", _resolved_broadcast)
 
     return state
 
@@ -1551,7 +1617,12 @@ async def test_monitor_market_task_syncs_portfolio_when_balance_succeeds(monkeyp
     monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
     monkeypatch.setattr("backend.scheduler._sync_portfolio_from_balance", mock_sync_portfolio)
     monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
-    monkeypatch.setattr("backend.scheduler.manager.broadcast", MagicMock(return_value=asyncio.Future()))
+    # 이슈 #229: Portfolio 동기화 성공 시 실제로 await manager.broadcast(...)가 호출될 수
+    # 있으므로, 이 mock의 반환 Future는 반드시 resolve되어야 한다. resolve하지 않으면
+    # (과거에는 broadcast가 전혀 호출되지 않아 무해했지만) 이제는 await가 영원히 멈춘다.
+    _resolved_broadcast = MagicMock(return_value=asyncio.Future())
+    _resolved_broadcast.return_value.set_result(None)
+    monkeypatch.setattr("backend.scheduler.manager.broadcast", _resolved_broadcast)
 
     await monitor_market_task(watchlist_repo=FakeWatchlistRepo())
 
@@ -1594,11 +1665,207 @@ async def test_monitor_market_task_does_not_sync_when_balance_fails(monkeypatch)
     monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
     monkeypatch.setattr("backend.scheduler._sync_portfolio_from_balance", mock_sync_portfolio)
     monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
-    monkeypatch.setattr("backend.scheduler.manager.broadcast", MagicMock(return_value=asyncio.Future()))
+    # 이슈 #229: Portfolio 동기화 성공 시 실제로 await manager.broadcast(...)가 호출될 수
+    # 있으므로, 이 mock의 반환 Future는 반드시 resolve되어야 한다. resolve하지 않으면
+    # (과거에는 broadcast가 전혀 호출되지 않아 무해했지만) 이제는 await가 영원히 멈춘다.
+    _resolved_broadcast = MagicMock(return_value=asyncio.Future())
+    _resolved_broadcast.return_value.set_result(None)
+    monkeypatch.setattr("backend.scheduler.manager.broadcast", _resolved_broadcast)
 
     await monitor_market_task(watchlist_repo=FakeWatchlistRepo(["카카오"]))
 
     assert sync_calls == []
+
+
+# ---------------------------------------------------------------------------
+# 이슈 #229: Portfolio 동기화 성공 시 WebSocket PORTFOLIO_UPDATE 브로드캐스트
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_monitor_market_task_broadcasts_portfolio_update_on_sync_success(monkeypatch):
+    """Portfolio 동기화 성공 시 PORTFOLIO_UPDATE가 정확히 1회, 올바른 형태로 브로드캐스트됩니다.
+
+    _sync_portfolio_from_balance 자체의 동기화 로직은 test_sync_portfolio_writes_holdings
+    등에서 이미 검증하므로, 여기서는 그 함수를 mock_broadcast 패턴과 동일하게
+    monkeypatch해 호출처(monitor_market_task)의 브로드캐스트 판단만 격리해서 검증한다
+    (실 DB의 portfolio 테이블 존재 여부에 테스트 결과가 좌우되지 않게 하기 위함).
+
+    이 테스트가 잡는 mutation: 호출처가 PORTFOLIO_UPDATE 브로드캐스트를 하지 않거나
+    holdings_count/updated_at 형태를 잘못 실으면 아래 단언이 실패한다.
+    """
+    from ..scheduler import SignalSource, monitor_market_task
+
+    @asynccontextmanager
+    async def unavailable_redis_state():
+        raise ConnectionError("redis unavailable")
+        yield
+
+    async def mock_run_mcp_tool(params, name, args):
+        if name == "get_balance":
+            return _make_balance_text(("삼성전자", "005930", 10, 70000))
+        return "news"
+
+    def mock_sync_portfolio(balance_text, session, **kwargs):
+        return 3
+
+    async def mock_check_significance(stock, current, last, *, source, provider):
+        return False
+
+    mock_broadcast = MagicMock(return_value=asyncio.Future())
+    mock_broadcast.return_value.set_result(None)
+
+    monkeypatch.setattr("backend.scheduler.redis_state", unavailable_redis_state)
+    monkeypatch.setattr(
+        "backend.scheduler.SIGNAL_SOURCES",
+        [SignalSource(name="news", mcp_params=object(), tool_name="get_market_news")],
+    )
+    monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
+    monkeypatch.setattr("backend.scheduler._sync_portfolio_from_balance", mock_sync_portfolio)
+    monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
+    monkeypatch.setattr("backend.scheduler.manager.broadcast", mock_broadcast)
+
+    await monitor_market_task(watchlist_repo=FakeWatchlistRepo())
+
+    mock_broadcast.assert_called_once()
+    payload = mock_broadcast.call_args[0][0]
+    assert payload["type"] == "PORTFOLIO_UPDATE"
+    assert payload["holdings_count"] == 3
+    # updated_at은 ISO 8601로 파싱 가능해야 한다.
+    datetime.fromisoformat(payload["updated_at"])
+    # 보유 내역 원본(종목명·수량 등)은 인증 없는 WebSocket으로 나가면 안 된다(#65).
+    assert "holdings" not in payload
+    assert "stocks" not in payload
+
+
+@pytest.mark.asyncio
+async def test_monitor_market_task_no_portfolio_broadcast_when_balance_truncated(monkeypatch):
+    """잔고 연속조회가 잘린 경우 PORTFOLIO_UPDATE를 브로드캐스트하지 않습니다.
+
+    _sync_portfolio_from_balance를 mock하지 않고 실제 함수를 그대로 태워, 잘림
+    가드가 DB 접근 이전에 None을 반환해 브로드캐스트로 이어지지 않음을 검증한다.
+
+    이 테스트가 잡는 mutation: 호출처가 sync_result 값과 무관하게 항상 브로드캐스트하면
+    잘린 잔고에서도 PORTFOLIO_UPDATE가 나가 아래 단언이 실패한다.
+    """
+    from ..scheduler import SignalSource, monitor_market_task
+
+    @asynccontextmanager
+    async def unavailable_redis_state():
+        raise ConnectionError("redis unavailable")
+        yield
+
+    truncated_text = (
+        _make_balance_text(("삼성전자", "005930", 10, 70000)).rstrip()
+        + TRUNCATION_NOTES_BY_REASON["max_pages"]
+    )
+
+    async def mock_run_mcp_tool(params, name, args):
+        if name == "get_balance":
+            return truncated_text
+        return "news"
+
+    async def mock_check_significance(stock, current, last, *, source, provider):
+        return False
+
+    mock_broadcast = MagicMock(return_value=asyncio.Future())
+    mock_broadcast.return_value.set_result(None)
+
+    monkeypatch.setattr("backend.scheduler.redis_state", unavailable_redis_state)
+    monkeypatch.setattr(
+        "backend.scheduler.SIGNAL_SOURCES",
+        [SignalSource(name="news", mcp_params=object(), tool_name="get_market_news")],
+    )
+    monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
+    monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
+    monkeypatch.setattr("backend.scheduler.manager.broadcast", mock_broadcast)
+
+    await monitor_market_task(watchlist_repo=FakeWatchlistRepo())
+
+    broadcast_types = [call.args[0].get("type") for call in mock_broadcast.call_args_list]
+    assert "PORTFOLIO_UPDATE" not in broadcast_types
+
+
+@pytest.mark.asyncio
+async def test_monitor_market_task_no_portfolio_broadcast_when_marker_absent(monkeypatch):
+    """잔고 응답에 [보유 종목 리스트] 마커가 없으면 PORTFOLIO_UPDATE를 브로드캐스트하지 않습니다.
+
+    이 테스트가 잡는 mutation: 마커 부재 가드를 우회해 브로드캐스트하면
+    아래 단언이 실패한다.
+    """
+    from ..scheduler import SignalSource, monitor_market_task
+
+    @asynccontextmanager
+    async def unavailable_redis_state():
+        raise ConnectionError("redis unavailable")
+        yield
+
+    async def mock_run_mcp_tool(params, name, args):
+        if name == "get_balance":
+            return "응답을 가져왔지만 종목 섹션이 없습니다."
+        return "news"
+
+    async def mock_check_significance(stock, current, last, *, source, provider):
+        return False
+
+    mock_broadcast = MagicMock(return_value=asyncio.Future())
+    mock_broadcast.return_value.set_result(None)
+
+    monkeypatch.setattr("backend.scheduler.redis_state", unavailable_redis_state)
+    monkeypatch.setattr(
+        "backend.scheduler.SIGNAL_SOURCES",
+        [SignalSource(name="news", mcp_params=object(), tool_name="get_market_news")],
+    )
+    monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
+    monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
+    monkeypatch.setattr("backend.scheduler.manager.broadcast", mock_broadcast)
+
+    await monitor_market_task(watchlist_repo=FakeWatchlistRepo())
+
+    broadcast_types = [call.args[0].get("type") for call in mock_broadcast.call_args_list]
+    assert "PORTFOLIO_UPDATE" not in broadcast_types
+
+
+@pytest.mark.asyncio
+async def test_monitor_market_task_survives_portfolio_broadcast_failure(monkeypatch):
+    """PORTFOLIO_UPDATE 브로드캐스트가 예외를 던져도 monitor_market_task는 계속 진행합니다.
+
+    기존 동기화 예외 격리(logger.error(..., "감시는 계속"))와 같은 수준으로 브로드캐스트
+    예외도 격리해야 한다. 이 테스트가 잡는 mutation: 브로드캐스트 예외를 격리하지 않으면
+    monitor_market_task가 예외를 전파해 await 자체가 실패한다.
+    """
+    from ..scheduler import SignalSource, monitor_market_task
+
+    @asynccontextmanager
+    async def unavailable_redis_state():
+        raise ConnectionError("redis unavailable")
+        yield
+
+    async def mock_run_mcp_tool(params, name, args):
+        if name == "get_balance":
+            return _make_balance_text(("삼성전자", "005930", 10, 70000))
+        return "news"
+
+    def mock_sync_portfolio(balance_text, session, **kwargs):
+        return 1
+
+    async def mock_check_significance(stock, current, last, *, source, provider):
+        return False
+
+    async def failing_broadcast(payload):
+        raise RuntimeError("websocket down")
+
+    monkeypatch.setattr("backend.scheduler.redis_state", unavailable_redis_state)
+    monkeypatch.setattr(
+        "backend.scheduler.SIGNAL_SOURCES",
+        [SignalSource(name="news", mcp_params=object(), tool_name="get_market_news")],
+    )
+    monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
+    monkeypatch.setattr("backend.scheduler._sync_portfolio_from_balance", mock_sync_portfolio)
+    monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
+    monkeypatch.setattr("backend.scheduler.manager.broadcast", failing_broadcast)
+
+    # 예외 없이 완료되어야 한다.
+    await monitor_market_task(watchlist_repo=FakeWatchlistRepo())
 
 
 # ---------------------------------------------------------------------------
