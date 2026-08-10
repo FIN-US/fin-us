@@ -132,6 +132,15 @@ class TestLooksLikeStockCode:
         """10자 이상은 종목코드가 아니다(현재 마스터 최장 9자)."""
         assert not _looks_like_stock_code("F701000260")  # 10자
 
+    def test_rejects_eight_char(self):
+        """8자는 종목마스터 4,353종 전수(mcp-trading/data/stocks.json)에 0건이라 거절한다.
+
+        뮤테이션 ①: _STOCK_CODE_RE를 {6,9} 단순 상한 확대로 되돌리면 이 케이스가
+        red가 된다. 실재하지 않는 8자 입력이 코드 형태로 통과하면 MCP 존재 검증을
+        생략하고 그대로 코드로 확정돼 버리므로(#151), 8자는 명시적으로 막아야 한다.
+        """
+        assert not _looks_like_stock_code("12345678")
+
     def test_rejects_string_with_space_inside(self):
         """내부 공백이 있으면 strip() 후에도 코드 형태가 아니다."""
         assert not _looks_like_stock_code("005 930")
