@@ -377,6 +377,27 @@ def test_get_catalysts_sorted_by_event_date_ascending(client: TestClient, sessio
     assert names == ["가장이름", "중간", "가장늦음"]
 
 
+def test_get_catalysts_defaults_to_today_excluding_past(client: TestClient, session: Session):
+    # from_date를 생략했을 때의 기본값(오늘)을 고정한다. 위 from_date 테스트는 값을
+    # 명시해서 호출하므로 기본값이 date.min 등으로 바뀌어도 통과한다 — 지난 촉매가
+    # 시간 링에 섞여 들어오는 회귀를 이 테스트가 잡는다.
+    today = date.today()
+    session.add(_make_catalyst(stock_name="지난주", event_date=today - timedelta(days=7)))
+    session.add(_make_catalyst(stock_name="오늘", event_date=today))
+    session.commit()
+
+    response = client.get("/api/v1/db/catalysts")
+    assert response.status_code == 200
+    names = [row["stock_name"] for row in response.json()["data"]]
+    assert names == ["오늘"]
+
+
+@pytest.mark.parametrize("limit", [0, 501])
+def test_get_catalysts_rejects_out_of_range_limit(client: TestClient, limit: int):
+    response = client.get("/api/v1/db/catalysts", params={"limit": limit})
+    assert response.status_code == 422
+
+
 @pytest.mark.asyncio
 async def test_analyze_stock_saves_report(client: TestClient, session: Session, monkeypatch):
     # A (#162): openai는 도구 없는 경로(_build_toolless_prompt + _analysis_from_toolless_text)를
