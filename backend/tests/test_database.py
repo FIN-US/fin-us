@@ -1,10 +1,12 @@
+from datetime import date, timedelta
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlmodel import Session, SQLModel, create_engine
 from sqlmodel.pool import StaticPool
 
 from ..main import app, get_session
-from ..models import Diary, AgentReport, Portfolio
+from ..models import Diary, AgentReport, Portfolio, CatalystEvent
 
 # 테스트용 인메모리 SQLite 엔진 설정
 @pytest.fixture(name="session")
@@ -293,6 +295,86 @@ def test_get_trades_empty(client: TestClient):
     assert response.status_code == 200
     assert response.json()["status"] == "success"
     assert response.json()["data"] == []
+
+
+def _make_catalyst(
+    *,
+    stock_name: str,
+    event_date: date,
+    stock_code: str = "005930",
+    event_type: str = "earnings",
+    description: str = "실적 발표",
+) -> CatalystEvent:
+    return CatalystEvent(
+        stock_name=stock_name,
+        stock_code=stock_code,
+        event_type=event_type,
+        event_date=event_date,
+        description=description,
+    )
+
+
+def test_get_catalysts_empty(client: TestClient):
+    response = client.get("/api/v1/db/catalysts")
+    assert response.status_code == 200
+    assert response.json()["status"] == "success"
+    assert response.json()["data"] == []
+
+
+def test_get_catalysts_filters_by_stock_name(client: TestClient, session: Session):
+    today = date.today()
+    session.add(_make_catalyst(stock_name="삼성전자", event_date=today))
+    session.add(_make_catalyst(stock_name="SK하이닉스", event_date=today))
+    session.commit()
+
+    response = client.get("/api/v1/db/catalysts", params={"stock_name": "삼성전자"})
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert len(data) == 1
+    assert data[0]["stock_name"] == "삼성전자"
+
+
+def test_get_catalysts_from_date_excludes_past_events(client: TestClient, session: Session):
+    today = date.today()
+    session.add(_make_catalyst(stock_name="과거", event_date=today - timedelta(days=1)))
+    session.add(_make_catalyst(stock_name="오늘", event_date=today))
+    session.add(_make_catalyst(stock_name="미래", event_date=today + timedelta(days=1)))
+    session.commit()
+
+    response = client.get("/api/v1/db/catalysts", params={"from_date": today.isoformat()})
+    assert response.status_code == 200
+    names = [row["stock_name"] for row in response.json()["data"]]
+    assert names == ["오늘", "미래"]
+
+
+def test_get_catalysts_limit_boundary(client: TestClient, session: Session):
+    today = date.today()
+    for i in range(5):
+        session.add(
+            _make_catalyst(
+                stock_name=f"종목{i}",
+                event_date=today + timedelta(days=i),
+            )
+        )
+    session.commit()
+
+    response = client.get("/api/v1/db/catalysts", params={"limit": 3})
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert len(data) == 3
+
+
+def test_get_catalysts_sorted_by_event_date_ascending(client: TestClient, session: Session):
+    today = date.today()
+    session.add(_make_catalyst(stock_name="가장늦음", event_date=today + timedelta(days=10)))
+    session.add(_make_catalyst(stock_name="가장이름", event_date=today))
+    session.add(_make_catalyst(stock_name="중간", event_date=today + timedelta(days=5)))
+    session.commit()
+
+    response = client.get("/api/v1/db/catalysts")
+    assert response.status_code == 200
+    names = [row["stock_name"] for row in response.json()["data"]]
+    assert names == ["가장이름", "중간", "가장늦음"]
 
 
 @pytest.mark.asyncio
