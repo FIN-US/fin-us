@@ -1215,20 +1215,18 @@ def test_analysis_from_toolless_text_absent_urgency_preserves_reason_and_alert(r
     )
 
 
-# ── #218: 중첩 JSON 객체 — summary 키 우선 선택 ───────────────────────────────
+# ── #218/#222: 중첩 JSON 객체 — span 기반 필터 + summary 키 우선 선택 ──────────
 
 
 def test_analysis_from_toolless_text_nested_json_uses_outer_summary():
-    """중첩 JSON 객체가 있어도 summary 키를 가진 바깥 객체에서 올바른 요약을 뽑는다. (#218)
+    """중첩 JSON 객체가 있어도 바깥 객체에서 올바른 요약을 뽑는다. (#218, #222)
 
-    _json_objects_from_text는 reversed 순서로 후보를 반환하므로, 안쪽 {"pe":12}가
-    바깥 객체보다 먼저 온다. 안쪽 객체엔 summary 키가 없어
-    data.get("summary") or text[:8000]이 원본 JSON 전체를 summary로 채우고,
-    source_news는 []가 된다. summary 키 우선 정렬로 바깥 객체를 먼저 시도해 이를 막는다.
+    #222 span 기반 수정 이후: _json_objects_from_text의 consumed_until 가드가
+    안쪽 {"pe":12}를 후보 목록에서 제외하므로 바깥 객체만 시도된다.
 
-    이 테스트가 잡는 mutation: 후보 정렬 로직(_candidates.sort(...)) 제거.
-    정렬을 지우면 안쪽 {"pe":12}가 먼저 시도돼 summary가 원본 JSON 전체로,
-    source_news가 []로 나와 두 단정 모두 실패한다.
+    이 테스트가 잡는 mutation: _json_objects_from_text의 중첩 건너뛰기 제거
+    (index < consumed_until 조건 삭제). 제거하면 안쪽 {"pe":12}가 다시 후보로
+    올라와 summary가 원본 JSON 전체로, source_news가 []로 나와 두 단정 모두 실패한다.
     """
     raw = '{"summary":"삼성전자 요약","source_news":["뉴스1"],"detail":{"pe":12}}'
     result = services._analysis_from_toolless_text(raw)
@@ -1269,3 +1267,76 @@ def test_analysis_from_toolless_text_invalid_candidate_is_skipped():
     result = services._analysis_from_toolless_text(raw)
     assert result["summary"] == "유효 요약"
     assert result["trading_trend"] == "상승"
+
+
+# ── #222: span 기반 수정 — 세 호출부 각각 중첩 케이스 고정 ─────────────────────
+
+
+def test_analysis_from_toolless_text_inner_summary_drift_prevented():
+    """안쪽 객체에도 summary가 있으면 sort 방어선을 뚫는 드리프트 증상을 재현한다. (#222)
+
+    PR #219의 sort는 summary 보유 여부만 보므로, 안쪽 객체도 summary를 가지면
+    reversed 순서(안쪽 우선)를 그대로 살린다. span 수정으로 안쪽 객체 자체가
+    후보에 오르지 않아 이 경로가 완전히 차단된다.
+
+    이 테스트가 잡는 mutation: _json_objects_from_text의 중첩 건너뛰기 제거
+    (index < consumed_until 조건 삭제). 제거하면 안쪽 {"summary":"INNER"}가
+    candidates 선두에 오고 sort로도 걸러지지 않아 summary="INNER", source_news=[]가
+    된다.
+    """
+    raw = '{"summary":"OUTER","source_news":["뉴스1"],"detail":{"summary":"INNER"}}'
+    result = services._analysis_from_toolless_text(raw)
+    assert result["summary"] == "OUTER", (
+        "안쪽 summary가 바깥 summary를 덮어써서는 안 된다"
+    )
+    assert result["source_news"] == ["뉴스1"], (
+        "안쪽 객체가 선택되면 source_news가 []로 유실된다"
+    )
+
+
+def test_analysis_from_nat_text_nested_inner_summary_no_drift():
+    """analysis_from_nat_text 경로에서도 안쪽 summary가 바깥을 덮어쓰지 않는다. (#222)
+
+    이 테스트가 잡는 mutation: _json_objects_from_text의 중첩 건너뛰기 제거.
+    제거하면 details 없는 안쪽 {"summary":"INNER"} 객체가 먼저 선택돼
+    details=None이 되거나 summary="INNER"가 된다.
+    """
+    raw = (
+        '{"summary":"OUTER NAT 요약",'
+        '"details":{"decision":"BUY","confidence_score":0.7,'
+        '"reason":"수급 개선","target_stock":"삼성전자"},'
+        '"source_news":["헤드라인"],'
+        '"detail":{"summary":"INNER","pe":12}}'
+    )
+    result = services.analysis_from_nat_text(raw, "삼성전자")
+    assert result["summary"] == "OUTER NAT 요약", (
+        "안쪽 summary가 바깥 summary를 덮어써서는 안 된다"
+    )
+    assert result["details"]["decision"] == "BUY"
+    assert result["source_news"] == ["헤드라인"]
+
+
+def test_morning_briefing_from_text_nested_object_fields_filled():
+    """_morning_briefing_from_text 경로에서 중첩 객체가 있어도 브리핑 필드가 채워진다. (#222)
+
+    _morning_briefing_from_text는 ValidationError 안전망이 없어 첫 후보를
+    무조건 반환한다. span 수정 전에는 안쪽 {"pe":12}가 candidates[0]이 돼
+    market_summary=""·watchlist=[]·... 로 브리핑 전체가 빈 값이 됐다.
+
+    이 테스트가 잡는 mutation: _json_objects_from_text의 중첩 건너뛰기 제거.
+    제거하면 안쪽 객체가 먼저 선택돼 모든 필드가 빈 값으로 반환된다.
+    """
+    raw = (
+        '{"market_summary":"오늘 시장 요약",'
+        '"watchlist":["삼성전자"],'
+        '"trading_ideas":["눌림목 관찰"],'
+        '"catalysts":["CPI 발표"],'
+        '"detail":{"pe":12}}'
+    )
+    result = services._morning_briefing_from_text(raw)
+    assert result["market_summary"] == "오늘 시장 요약", (
+        "중첩 객체가 있을 때 market_summary가 빈 문자열이 되어서는 안 된다"
+    )
+    assert result["watchlist"] == ["삼성전자"]
+    assert result["trading_ideas"] == ["눌림목 관찰"]
+    assert result["catalysts"] == ["CPI 발표"]

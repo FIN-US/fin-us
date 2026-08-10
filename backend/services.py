@@ -283,13 +283,11 @@ def _analysis_from_toolless_text(raw: str) -> dict[str, Any]:
     미사용) — Improvement #2 (#162 리뷰).
     """
     text = (raw or "").strip()
-    # #218: summary 키를 가진 후보를 우선 시도한다.
-    # _json_objects_from_text는 텍스트 내 마지막 JSON을 먼저 반환하도록
-    # reversed 순서를 쓰는데, 중첩 JSON이 있으면 안쪽 객체가 바깥 객체보다
-    # 나중 위치에서 발견되어 reversed 후 선두에 온다. 안쪽 객체엔 summary 키가
-    # 없으므로 data.get("summary") or text[:8000]이 원본 JSON 전체를 요약으로
-    # 채워버린다. 안정 정렬로 summary 키 보유 여부를 먼저 분리하면, 바깥 객체를
-    # 먼저 시도하면서도 summary를 모두 가진 후보들 사이에서는 기존 reversed 순서
+    # #222: 중첩 JSON 객체 문제는 _json_objects_from_text의 span 기반 필터로
+    # 근본 해결되었다(최상위 객체만 후보에 오른다).
+    # sort는 추가 방어선으로 남긴다 — 텍스트에 복수의 독립적인 최상위 JSON이
+    # 있고 summary 없는 객체가 뒤에 위치해 reversed 후 선두에 올 경우를 대비한다.
+    # 안정 정렬이므로 summary를 모두 가진 후보들 사이에서는 기존 reversed 순서
     # (텍스트 내 마지막 우선)가 유지된다.
     _candidates = _json_objects_from_text(text)
     _candidates.sort(key=lambda d: "summary" not in d)
@@ -792,17 +790,28 @@ def analysis_from_nat_text(raw: str, stock: str) -> dict[str, Any]:
 
 
 def _json_objects_from_text(text: str) -> list[dict[str, Any]]:
+    """텍스트에서 최상위 JSON 객체만 추출한다.
+
+    raw_decode가 반환하는 종료 인덱스(end)를 consumed_until에 기록해,
+    이미 디코드한 객체의 내부에 있는 중첩 '{' 는 건너뛴다.
+    이로써 {"outer": 1, "inner": {"nested": 2}} 형태의 입력이
+    후보로 {"outer":1,"inner":{...}} 하나만 남는다. (#222)
+
+    반환 순서는 텍스트 내 마지막 객체가 먼저 오는 reversed 순서를 유지한다.
+    """
     decoder = json.JSONDecoder()
     objects: list[dict[str, Any]] = []
+    consumed_until = -1  # 직전에 디코드한 최상위 객체의 끝 위치
     for index, char in enumerate(text):
-        if char != "{":
-            continue
+        if char != "{" or index < consumed_until:
+            continue  # 이미 디코드한 객체 내부 → 중첩 객체이므로 건너뛴다
         try:
-            value, _ = decoder.raw_decode(text[index:])
+            value, end = decoder.raw_decode(text[index:])
         except json.JSONDecodeError:
             continue
         if isinstance(value, dict):
             objects.append(value)
+            consumed_until = index + end
     return list(reversed(objects))
 
 
