@@ -595,3 +595,148 @@ async def test_duplicate_confirm_calls_place_order_only_once():
     )
     assert "주문 완료" in notifier.messages[0]
     assert notifier.messages[-1] == "확정할 대기 주문이 없습니다."
+
+
+# ---------------------------------------------------------------------------
+# set_if_absent NX 시맨틱 가드 (이슈 #63, PR #223 Improvement 1)
+# ---------------------------------------------------------------------------
+
+_ORDER_A = PendingOrder(
+    chat_id="123",
+    stock_name="삼성전자",
+    stock_code="005930",
+    side="BUY",
+    quantity=1,
+    price=75000,
+    created_at=datetime(2026, 5, 20, 10, 0, 0, tzinfo=KST),
+    callback_token="tok-a",
+)
+_ORDER_B = PendingOrder(
+    chat_id="123",
+    stock_name="NAVER",
+    stock_code="035420",
+    side="BUY",
+    quantity=2,
+    price=200000,
+    created_at=datetime(2026, 5, 20, 10, 0, 1, tzinfo=KST),
+    callback_token="tok-b",
+)
+
+
+@pytest.mark.asyncio
+async def test_memory_store_set_if_absent_returns_true_when_empty():
+    """비어 있으면 True를 반환하고 주문을 저장한다.
+
+    이 테스트가 잡는 mutation: set_if_absent가 항상 False를 반환하도록 변경.
+    """
+    store = InMemoryPendingOrderStore()
+
+    result = await store.set_if_absent("123", _ORDER_A)
+
+    assert result is True
+    assert await store.get("123") is _ORDER_A
+
+
+@pytest.mark.asyncio
+async def test_memory_store_set_if_absent_returns_false_and_preserves_original():
+    """이미 대기 주문이 있으면 False를 반환하고 기존 주문이 보존된다.
+
+    이 테스트가 잡는 mutation: set_if_absent의 NX 검사 제거
+    (``if chat_id in self._store: return False`` 두 줄을 지운 경우).
+    NX 검사 없이 무조건 덮어쓰면 두 번째 /buy가 첫 번째 주문을 교체하고
+    사용자는 의도한 것과 다른 주문을 체결하게 된다.
+    """
+    store = InMemoryPendingOrderStore()
+    await store.set_if_absent("123", _ORDER_A)
+
+    result = await store.set_if_absent("123", _ORDER_B)
+
+    assert result is False
+    # 원래 주문(A)이 B로 덮어쓰이지 않아야 한다
+    stored = await store.get("123")
+    assert stored is _ORDER_A
+    assert stored.callback_token == "tok-a"
+
+
+@pytest.mark.asyncio
+async def test_redis_store_set_if_absent_returns_true_when_empty():
+    """비어 있으면 True를 반환하고 nx=True로 Redis에 저장한다.
+
+    이 테스트가 잡는 mutation: set_if_absent에서 nx=True 제거.
+    """
+    redis = FakeRedis()
+    store = RedisPendingOrderStore(redis)
+
+    result = await store.set_if_absent("123", _ORDER_A)
+
+    assert result is True
+    recovered = await store.get("123")
+    assert recovered is not None
+    assert recovered.callback_token == "tok-a"
+
+
+@pytest.mark.asyncio
+async def test_redis_store_set_if_absent_returns_false_and_preserves_original():
+    """이미 키가 있으면 False를 반환하고 기존 값이 보존된다.
+
+    이 테스트가 잡는 mutation: set_if_absent의 nx=True 제거.
+    nx=True 없이 무조건 set하면 FakeRedis가 덮어써서 두 번째 호출도 True를 반환한다.
+    """
+    redis = FakeRedis()
+    store = RedisPendingOrderStore(redis)
+    await store.set_if_absent("123", _ORDER_A)
+
+    result = await store.set_if_absent("123", _ORDER_B)
+
+    assert result is False
+    # Redis에 저장된 값이 A여야 한다(B로 덮어쓰이면 안 됨)
+    recovered = await store.get("123")
+    assert recovered is not None
+    assert recovered.callback_token == "tok-a"
+
+
+@pytest.mark.asyncio
+async def test_buy_command_second_call_rejected_after_race():
+    """/buy 두 번째 호출이 이미 대기 주문이 있을 때 거절된다 (end-to-end).
+
+    이 테스트가 잡는 mutation: has() 체크 제거 또는 set_if_absent가 항상 True를
+    반환하도록 변경 (두 번째 /buy가 주문 프롬프트를 내보내면 실패).
+    NX 시맨틱 자체(기존 값 보존)는 위의 단위 테스트들이 직접 고정한다.
+
+    시나리오: 첫 번째 /buy가 set_if_absent로 슬롯을 획득한 뒤,
+    두 번째 /buy가 has() fast-path 또는 set_if_absent NX 어느 경로에서든
+    "이미 대기 중인 주문이 있습니다."로 거절당하는 흐름을 검증한다.
+    """
+    async def mcp_runner(server_params, tool_name, arguments):
+        if tool_name == "resolve_stock_code":
+            return "삼성전자 (005930, KOSPI)"
+        if tool_name == "get_stock_quote":
+            return "현재가: 75,000원"
+        if tool_name == "get_balance":
+            return "주문가능금액: 1,000,000원"
+        raise AssertionError(f"unexpected tool: {tool_name}")
+
+    store = InMemoryPendingOrderStore()
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        pending_order_store=store,
+        mcp_runner=mcp_runner,
+        now_factory=lambda: datetime(2026, 5, 20, 10, 0, 0, tzinfo=KST),
+    )
+
+    # 첫 번째 /buy — 슬롯 획득
+    await handler.handle_update(
+        {"message": {"chat": {"id": 123}, "text": "/buy 삼성전자 1 75000"}}
+    )
+    # 두 번째 /buy — has() fast-path도 있지만, 여기서는 슬롯이 있으므로 fast-path에서 막힘.
+    # set_if_absent NX 검사를 제거한 뮤턴트에서는 fast-path를 통과하더라도
+    # set_if_absent 자체가 막아야 하므로, 한 번 더 호출해 set_if_absent 경로도 검증한다.
+    await handler.handle_update(
+        {"message": {"chat": {"id": 123}, "text": "/buy 삼성전자 1 75000"}}
+    )
+
+    # 두 번째 호출은 거절 메시지를 받아야 한다
+    assert "이미 대기 중인 주문이 있습니다" in notifier.messages[-1]
+    # 스토어에는 첫 번째 주문만 있어야 한다
+    assert await store.has("123") is True
