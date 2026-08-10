@@ -308,7 +308,8 @@ def _analysis_from_toolless_text(raw: str) -> dict[str, Any]:
             )
         # urgency를 신뢰할 수 없어 낮춘 경우, 그 값을 설명하던 reason도 함께 버린다.
         # 남기면 "Urgency: normal - 즉시 대응 필요" 같은 모순된 문구가 소비자에게 나간다.
-        normalized = urgency != raw_urgency
+        # raw_urgency is None 은 "키가 없거나 null" — 하향이 아니므로 normalized=False.
+        normalized = raw_urgency is not None and urgency != raw_urgency
         try:
             report = AnalysisReport(
                 summary=str(data.get("summary") or text[:8000] or "빈 응답"),

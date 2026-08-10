@@ -1189,3 +1189,26 @@ def test_analysis_from_toolless_text_valid_urgency_preserves_reason_and_alert():
     assert result["urgency"] == "high"
     assert result["urgency_reason"] == "거래정지 위험"
     assert result["telegram_alert"] is True
+
+
+@pytest.mark.parametrize("raw_json", [
+    # urgency 키 자체가 없는 경우
+    '{"summary":"삼성전자 요약","source_news":["뉴스1"],"urgency_reason":"거래정지 위험","telegram_alert":true}',
+    # urgency=null (키는 있지만 값이 null)인 경우
+    '{"summary":"삼성전자 요약","source_news":["뉴스1"],"urgency":null,"urgency_reason":"거래정지 위험","telegram_alert":true}',
+])
+def test_analysis_from_toolless_text_absent_urgency_preserves_reason_and_alert(raw_json):
+    """urgency 키가 없거나 null이면 하향이 아니므로 urgency_reason·telegram_alert을 보존한다.
+
+    이 테스트가 잡는 regression: `normalized = urgency != raw_urgency`에서
+    `raw_urgency is not None` 가드가 빠지면, urgency 키가 없을 때도 normalized=True가
+    되어 urgency_reason·telegram_alert이 부당하게 버려진다.
+    """
+    result = services._analysis_from_toolless_text(raw_json)
+    assert result["urgency"] == "normal"
+    assert result["urgency_reason"] == "거래정지 위험", (
+        "urgency 키 부재·null은 하향이 아니므로 urgency_reason을 보존해야 한다"
+    )
+    assert result["telegram_alert"] is True, (
+        "urgency 키 부재·null은 하향이 아니므로 telegram_alert을 보존해야 한다"
+    )
