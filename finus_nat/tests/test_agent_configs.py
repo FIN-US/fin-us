@@ -192,10 +192,16 @@ _NON_TRADING_KIS_CONFIGS = [
     (AGENTS_DIR / "diary_agent.yml", "diary_agent"),
 ]
 
-# kis-trading-mcp-tool이 전체 권한(finus_account_balance)을 유지해야 하는 에이전트
+# kis-trading-mcp-tool이 전체 권한(finus_account_balance)을 유지해야 하는 에이전트.
+# 단독 로드뿐 아니라 프로덕션 라우터 설정도 포함한다 — base 체인 deep-merge 결과에서
+# news_agent.yml의 오버라이드가 trading/monitoring 권한을 빼앗는 회귀를 잡기 위해서다.
 _TRADING_KIS_CONFIGS = [
     (AGENTS_DIR / "trading_agent.yml", "trading_agent_react"),
     (AGENTS_DIR / "monitoring_agent.yml", "monitoring_agent"),
+    (CONFIGS_ROOT / "router.yml", "trading_agent_react"),
+    (CONFIGS_ROOT / "router_nomemory.yml", "trading_agent_react"),
+    (CONFIGS_ROOT / "router.yml", "monitoring_agent"),
+    (CONFIGS_ROOT / "router_nomemory.yml", "monitoring_agent"),
 ]
 
 _NON_TRADING_KIS_IDS = [f"{p.name}::{a}" for p, a in _NON_TRADING_KIS_CONFIGS]
