@@ -4,36 +4,31 @@
 mcp-trading/data/stocks.json`으로 직접 확인할 수 있다.
 """
 
+import json
+import pathlib
 import unittest
 from backend.scheduler import extract_stocks_from_balance, is_balance_truncated
 
-# 아래 픽스처는 mcp-trading/balance.js의 formatBalanceReport()가 실제로 생성하는
-# 문자열을 그대로 재현한 것입니다. 근거(줄 번호 대신 심볼/테스트명으로 고정 — 이 저장소
-# 안의 mcp-trading/ 디렉터리를 대상으로 git grep 으로 바로 확인 가능합니다):
-#   - 생성부: mcp-trading/balance.js 의 formatBalanceReport() — 종목 줄 템플릿과
-#     종목 사이 구분자 .join("\n\n")
-#   - 검증부: mcp-trading/tests/order.test.js 의
-#     "formatBalanceReport displays unsettled cash fields and account return rate" 테스트
-# REAL_BALANCE_TEXT는 그 테스트의 기대값 리터럴을 그대로 복사한 것이므로, balance.js의
-# 종목 줄 템플릿을 바꾸면 이 픽스처와 그 테스트의 기대값 양쪽을 함께 수정해야 합니다.
-# 종목 한 건은 3줄 블록(헤더 줄 + 공백 2칸 들여쓰기 2줄)이며, 종목 사이에는 빈 줄이 하나 있습니다.
-REAL_BALANCE_TEXT = """[계좌 잔고 현황]
-- 총 평가금액: 1,210,000원
-- 순자산금액: 1,210,000원
-- 총 손익: 9,000원 (수익률: 🔴 ▲ +2.23%)
-- 거래가능금액: 1,000,000원
-- 정산중 금액(가수도): 1,009,000원
-- 익일 정산예정금액: 790,000원
-- 금일 매수/매도: 210,000원 / 0원
+# 이슈 #137: mcp-trading·backend 공유 픽스처.
+# formatBalanceReport() 출력 계약을 한 파일로 고정해, JS 쪽만 갱신하고 Python 픽스처가
+# 낡은 채로 남는 드리프트를 방지합니다. 경로는 __file__ 기준 절대 경로라 worktree·CI
+# 양쪽에서 동일하게 해석됩니다.
+_FIXTURE_PATH = (
+    pathlib.Path(__file__).parent.parent.parent
+    / "mcp-trading" / "tests" / "fixtures" / "balance_report.json"
+)
+_FIXTURE = json.loads(_FIXTURE_PATH.read_text(encoding="utf-8"))
 
-[보유 종목 리스트]
-- 삼성전자 (005930) · 3주
-  평단가 67,000원 → 평가금액 210,000원
-  손익 +9,000원 · 수익률 🔴 ▲ +4.48%
-
-- NAVER (035420) · 1주
-  평단가 201,000원 → 평가금액 200,500원
-  손익 -500원 · 수익률 🔵 ▼ -0.25%"""
+# REAL_BALANCE_TEXT는 이제 공유 픽스처에서 로드합니다(이슈 #137).
+# 이전에는 손으로 복사한 리터럴이었으나, 이제 balance.js의 변경이 balance.test.js 픽스처
+# 테스트를 깨뜨리므로, 아래 TestBalanceExtraction 테스트들도 드리프트를 일으키지 않고
+# 자동으로 새 형식을 검증합니다.
+#
+# 이 심볼은 test_scheduler.py::test_parse_balance_holdings_with_real_fixture 가
+# 크로스모듈 import 해 사용합니다. 수량·평단가 커버리지는
+# TestSharedFixture::test_fixture_normal_round_trips_qty_and_avg_price 에서도
+# 독립적으로 제공되므로, 이 export 를 제거할 때는 해당 테스트를 함께 확인하세요.
+REAL_BALANCE_TEXT = _FIXTURE["normal"]["expected_text"]
 
 
 class TestBalanceExtraction(unittest.TestCase):
@@ -323,6 +318,66 @@ class TestBalanceTruncationDetection(unittest.TestCase):
         self.assertTrue(is_balance_truncated(balance_text))
         stocks = extract_stocks_from_balance(balance_text)
         self.assertEqual(stocks, ["삼성전자"])
+
+
+class TestSharedFixture(unittest.TestCase):
+    """이슈 #137: mcp-trading/tests/fixtures/balance_report.json 공유 픽스처를 사용해
+    formatBalanceReport() 출력과 파서 입력이 한 파일로 고정되는지 검증합니다.
+
+    픽스처의 expected_text 는 JS 테스트(balance.test.js)가 formatBalanceReport(input)
+    와 비교하는 것과 동일한 문자열입니다. 형식이 바뀌면 JS 픽스처 테스트가 먼저 깨지고,
+    픽스처를 수정하면 이 테스트들도 새 형식을 자동으로 검증하게 됩니다.
+    """
+
+    def test_fixture_normal_extracts_correct_stocks(self):
+        """픽스처 normal.expected_text 를 파서에 직접 넣어 종목이 올바르게 추출되는지 확인합니다.
+        이 텍스트는 JS formatBalanceReport() 가 실제 생성하는 문자열과 동일합니다.
+        """
+        text = _FIXTURE["normal"]["expected_text"]
+        result = extract_stocks_from_balance(text)
+        self.assertEqual(result, ["삼성전자", "NAVER"])
+
+    def test_fixture_normal_is_not_truncated(self):
+        """픽스처 normal.expected_text 에는 잘림 안내 문구가 없어야 합니다."""
+        text = _FIXTURE["normal"]["expected_text"]
+        self.assertFalse(is_balance_truncated(text))
+
+    def test_fixture_normal_round_trips_qty_and_avg_price(self):
+        """expected_text 를 파싱한 결과가 픽스처 input 의 원본 KIS 값과 일치해야 합니다.
+        기대값을 input 에서 파생시켜, 형식이 바뀌면 이 테스트가 직접 red 가 되게 합니다.
+
+        이 테스트는 test_scheduler.py::test_parse_balance_holdings_with_real_fixture 의
+        수량·평단가 커버리지를 TestSharedFixture 안에서 독립적으로 제공합니다.
+        크로스모듈 import 가 제거되거나 test_parse_balance_holdings_with_real_fixture 가
+        삭제되더라도, 이 테스트가 avg_price=0.0 회귀를 잡습니다.
+        """
+        from backend.scheduler import _parse_balance_holdings
+
+        case = _FIXTURE["normal"]
+        holdings = _parse_balance_holdings(case["expected_text"])
+        expected = case["input"]["output1"]
+
+        self.assertEqual(len(holdings), len(expected))
+        for parsed, raw in zip(holdings, expected):
+            self.assertEqual(parsed.code, raw["pdno"])
+            self.assertEqual(parsed.name, raw["prdt_name"])
+            self.assertEqual(parsed.quantity, int(raw["hldg_qty"]))
+            self.assertAlmostEqual(parsed.avg_price, float(raw["pchs_avg_pric"]), places=2)
+
+    def test_fixture_truncated_extracts_stocks_without_notice_line(self):
+        """픽스처 truncated.expected_text 에서 [안내] 잘림 문구는 종목으로 추출되지 않고,
+        실제 보유 종목(삼성전자)만 추출되어야 합니다. JS 테스트가 잘림 문구를 [보유 종목
+        리스트] 바깥에 배치하는 계약을 고정하며, 이 테스트는 Python 파서가 그 계약을
+        올바르게 소비하는지 공유 픽스처로 고정합니다.
+        """
+        text = _FIXTURE["truncated"]["expected_text"]
+        result = extract_stocks_from_balance(text)
+        self.assertEqual(result, ["삼성전자"])
+
+    def test_fixture_truncated_is_detected_as_truncated(self):
+        """픽스처 truncated.expected_text 는 is_balance_truncated() 에서 True 여야 합니다."""
+        text = _FIXTURE["truncated"]["expected_text"]
+        self.assertTrue(is_balance_truncated(text))
 
 
 if __name__ == "__main__":

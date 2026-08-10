@@ -1415,6 +1415,10 @@ def test_parse_balance_holdings_extracts_name_code_qty_avg():
 def test_parse_balance_holdings_with_real_fixture():
     """REAL_BALANCE_TEXT(balance.js 실제 출력 픽스처)에서 올바르게 파싱됩니다."""
     from ..scheduler import _parse_balance_holdings
+    # 크로스모듈 import 이유: test_balance_parser 가 공유 픽스처를 로드하는 유일한
+    # 진입점임을 명시해, 양쪽 모듈이 같은 expected_text 를 사용함을 보장합니다.
+    # 수량·평단가 커버리지는 test_balance_parser.TestSharedFixture.
+    # test_fixture_normal_round_trips_qty_and_avg_price 에서도 독립적으로 제공됩니다.
     from .test_balance_parser import REAL_BALANCE_TEXT
 
     holdings = _parse_balance_holdings(REAL_BALANCE_TEXT)
