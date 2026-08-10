@@ -22,6 +22,7 @@ from .config import (
 )
 from .schemas import TradingSignal, AnalysisReport
 from .models import AgentReport
+from .stock_code import _STOCK_CODE_EXTRACT_RE, _has_code_digit, _looks_like_stock_code
 
 logger = logging.getLogger(__name__)
 _NAT_RESPONSE_LOG_PREVIEW_CHARS = 800
@@ -38,27 +39,7 @@ _URGENCY_LEVELS: frozenset[str] = frozenset(
     get_args(AnalysisReport.model_fields["urgency"].annotation)
 )
 
-# 입력이 이미 종목코드 형태인지 판정하는 범위. mcp-trading/stock-master.js의
-# resolveStock() Step 3 에코 판정(CODE_SHAPE_PATTERN — 마스터에 없는 6~7자 영숫자를
-# 그대로 코드로 인정)과 상한을 맞춘다. Step 1의 코드 완전일치는 길이 무관이라 무관하다.
-# KIS 국내 종목코드는 6자리 숫자(005930)만이 아니다. 코스닥 스팩·리츠 등 약 18%가
-# 영문이 섞인 형태(0001A0)이고, 펀드는 더 길다(F70100026). 숫자 6자리만 인정하면
-# MCP가 정확히 돌려준 코드를 백엔드가 스스로 버리게 된다.
-_STOCK_CODE_RE = re.compile(r"^[0-9A-Z]{6,7}$")
-# resolve_stock_code 응답 형식: "종목명 (코드, 시장)" — mcp-trading/index.js
-# 종목명 자체에 괄호가 들어가는 경우가 있어(예: "...테이블1(A)") 코드+쉼표 조합에 앵커한다.
-# 입력 판정(_STOCK_CODE_RE)과 달리 상한을 두지 않는다({6,}) — 이건 MCP *응답*에서 코드를
-# 뽑아내는 정규식이라 6자(3,889종목)·7자 ETN(389종목)·9자 펀드(75종목, 전체 4,353종목 중)가
-# 모두 나올 수 있다. {6,7}로 좁히면 펀드 코드 75종 전부가 조용히 빠진다.
-# 숫자 불변식(_has_code_digit 적용)은 이 파일에만 있다 — telegram_commands.py의
-# 같은 정규식은 이 검사가 없다. #140에서 두 곳을 통합할 때 함께 옮겨야 한다.
-_STOCK_CODE_EXTRACT_RE = re.compile(r"\(([0-9A-Z]{6,}),")
-# 비대칭 주의: 위 두 정규식의 상한이 다르다. _looks_like_stock_code의 {6,7}이 9자 입력을
-# 코드로 보지 않아 MCP를 호출한다. #174 이전에는 stock-master.js의 지름길도 똑같이 {6,7}이라
-# 이 입력을 코드로 인정하지 않고 정확한 종목명 매칭으로 넘어가 "찾을 수 없음" 예외로 끝났다.
-# #174에서 resolveStock의 코드 완전일치가 길이 무관으로 바뀌어(stock-master.js Step 1)
-# 9자 펀드 코드도 마스터에서 해결되므로, 지금은 사용자가 9자 코드를 직접 입력하면 MCP를
-# 왕복해 이 추출 정규식으로 돌아온다 — {6,}으로 넓혀둔 상한이 실제로 쓰이는 경로가 됐다.
+# _STOCK_CODE_EXTRACT_RE, _has_code_digit, _looks_like_stock_code → backend/stock_code.py (#140)
 
 # 종목명 -> 종목코드 프로세스 메모리 캐시.
 # resolve_stock_code MCP 호출은 매번 새 stdio 서브프로세스를 띄우는 비용이 있고
@@ -93,32 +74,6 @@ def _normalize_stock_input(stock: str) -> str:
     문자열을 공유해야 세 곳이 서로 어긋나지 않는다.
     """
     return re.sub(r"^[\s\ufeff]+|[\s\ufeff]+$", "", stock)
-
-
-def _has_code_digit(value: str) -> bool:
-    """실제 종목코드는 항상 숫자를 포함한다(종목마스터 4,353종 전수 확인, 0건 예외).
-
-    입력 판정과 MCP 추출 결과 검증이 같은 불변식을 쓰도록 한 곳에 둔다.
-    """
-    return any(ch in "0123456789" for ch in value)
-
-
-def _looks_like_stock_code(stock: str) -> bool:
-    """이미 종목코드 형태여서 MCP 조회를 생략해도 되는지 판정합니다.
-
-    주의(#174 이후): stock-master.js의 resolveStock은 #150과 반대로 코드 완전일치를
-    이름·별칭 매칭보다 *먼저* 시도한다. 다만 Step 1은 stock.code만 비교하므로, 마스터에
-    *이름·별칭*으로 존재하는 코드 형태 입력은 여전히 Step 2가 잡아 다른 코드를 돌려준다.
-    이 함수는 마스터를 볼 수 없어 존재 검증 없이 코드로 확정하므로(#151), 그런 입력에
-    대해서는 순서 반전 이후에도 JS보다 공격적이다.
-    지금은 _has_code_digit이 안전망 역할을 한다 — 코드 형태 이름 3종(SIMPAC/INVENI/
-    WISCOM)이 모두 숫자를 포함하지 않아 여기서 걸러지고 MCP로 넘어간다.
-    숫자를 포함한 6~7자 이름이 신규 상장되면 이 안전망이 뚫린다. mcp-trading/tests/
-    stock-master.test.js의 "exactly 3 master stock names..." 테스트가 그 신호이며,
-    그 테스트가 깨지면 이 함수도 함께 재검토해야 한다.
-    """
-    value = stock.strip().upper()
-    return bool(_STOCK_CODE_RE.match(value)) and _has_code_digit(value)
 
 
 async def _resolve_stock_code(stock: str) -> str:

@@ -39,6 +39,7 @@ from .trading_orders import (
     TradeRecorder,
     is_korean_market_open,
 )
+from .stock_code import _ORDERABLE_STOCK_CODE_RE, _STOCK_CODE_EXTRACT_RE
 
 logger = logging.getLogger(__name__)
 
@@ -54,21 +55,7 @@ NATURAL_ORDER_HELP = "자연어 주문을 해석할 수 없습니다. /buy 또�
 UNRESOLVED_STOCK_WARNING = (
     "⚠️ 종목명을 확인하지 못했습니다. 입력한 코드가 맞는지 다시 확인하세요."
 )
-# resolve_stock_code 응답 형식: "종목명 (코드, 시장)" — mcp-trading/index.js
-# 종목명에 괄호가 들어가고 닫히지 않는 종목이 있어(예: "KIWOOM 엔비디아미국30년국채혼합액티브(H")
-# 단순 괄호 매칭 대신 코드+쉼표 조합에 앵커한다. 종목명에 쉼표가 들어가는 종목은 없다.
-# 코드 길이는 6자(3,889종목)·7자 ETN(389종목)·9자 펀드(75종목)가 섞여 있어 상한을 두지 않는다.
-# PR #133(이슈 #125)이 services.py에 같은 정규식을 추가 중이다. 두 PR이 동시에 열려 있어
-# 머지 컨플릭트를 피하려고 공용 헬퍼 추출은 미뤘고, 둘 다 머지된 뒤 정리한다(#140).
-_STOCK_CODE_EXTRACT_RE = re.compile(r"\(([0-9A-Z]{6,}),")
-# 추출 가능한 코드 전부가 주문 가능한 건 아니다. mcp-trading/order.js의
-# buildCashOrderBody()가 적용하는 허용 범위(`/^\d{6,7}$/`)와 일치시킨다.
-# 이 상수와 order.js의 가드는 쌍을 이루므로 한쪽만 바꾸면 안 된다(#138 참조).
-# 영숫자 코드 주문 미지원은 #73에서 확정된 정책이다.
-# 앵커를 호출부가 아니라 패턴에 넣어 order.js와 형태를 맞춘다. 나중에 누가 fullmatch를
-# match/search로 바꿔도 방어가 무너지지 않는다. `\d`는 파이썬에서 전각 숫자까지 매치하므로
-# JS의 ASCII 전용 `\d`와 어긋나지 않도록 `[0-9]`로 명시한다.
-_ORDERABLE_STOCK_CODE_RE = re.compile(r"\A[0-9]{6,7}\Z")
+# _STOCK_CODE_EXTRACT_RE, _ORDERABLE_STOCK_CODE_RE → backend/stock_code.py (#140)
 ORDER_EXPIRES_AFTER = timedelta(seconds=60)
 ORDER_CONFIRM_CALLBACK = "order:confirm"
 ORDER_CANCEL_CALLBACK = "order:cancel"

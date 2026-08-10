@@ -336,13 +336,7 @@ async def test_perform_stock_analysis_resolves_alphanumeric_stock_code(monkeypat
     assert mcp_calls == [("resolve_stock_code", {"stock_name": "덕양에너젠"})]
 
 
-def test_looks_like_stock_code_accepts_alphanumeric_and_rejects_plain_names():
-    assert services._looks_like_stock_code("005930")
-    assert services._looks_like_stock_code("0001A0")
-    # 숫자가 없는 6~7자 영문은 종목명일 가능성이 높으므로 코드로 보지 않는다.
-    assert not services._looks_like_stock_code("SAMSUNG")
-    assert not services._looks_like_stock_code("삼성전자")
-
+# test_looks_like_stock_code_* → backend/tests/test_stock_code.py (#140)
 
 def test_normalize_stock_input_handles_interleaved_bom_and_whitespace():
     """공백과 BOM(U+FEFF)이 번갈아 나오는 입력도 JS String.trim()처럼 끝까지 벗겨낸다.
