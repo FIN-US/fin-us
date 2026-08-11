@@ -281,7 +281,7 @@ def _sync_portfolio_from_balance(
     session: Session,
     *,
     holdings: list[_BalanceHolding] | None = None,
-) -> None:
+) -> int | None:
     """get_balance 응답을 바탕으로 Portfolio 테이블을 동기화합니다.
 
     전략: 전량 교체 (기존 행 전체 삭제 후 신규 삽입). 매 잔고 조회마다 실행되어
@@ -298,12 +298,19 @@ def _sync_portfolio_from_balance(
     holdings: 호출처에서 이미 _parse_balance_holdings를 실행한 경우 그 결과를 전달하면
     재파싱을 건너뜁니다. None이면 balance_text에서 직접 파싱합니다.
     잘림·마커 가드는 holdings 인자 유무에 관계없이 항상 balance_text를 검사합니다.
+
+    반환값(이슈 #229): 동기화를 실제로 수행했으면 삽입한 종목 수(int, 0 이상)를,
+    잘림·마커 부재로 건너뛰었으면 None을 반환합니다. bool 대신 개수를 반환하는 이유는
+    호출처(monitor_market_task)가 WebSocket으로 PORTFOLIO_UPDATE를 브로드캐스트할 때
+    holdings_count를 함께 실어야 하는데, bool만으로는 호출처가 그 값을 얻기 위해
+    holdings 리스트를 별도로 들고 있거나 다시 세야 하기 때문입니다. int 반환값 자체가
+    "동기화 성공 여부"와 "성공 시 종목 수"를 한 번에 전달합니다.
     """
     if is_balance_truncated(balance_text):
         logger.warning(
             "잔고 연속조회가 잘려 Portfolio 동기화를 건너뜁니다. 기존 데이터를 유지합니다."
         )
-        return
+        return None
 
     # 마커가 없으면 "보유 0건"이 아니라 "응답을 읽지 못함"이다.
     # balance.js는 보유 종목이 없어도 마커와 "보유 종목이 없습니다."를 항상 출력한다
@@ -317,7 +324,7 @@ def _sync_portfolio_from_balance(
             _BALANCE_HOLDINGS_MARKER,
             len(balance_text),
         )
-        return
+        return None
 
 
     # 호출처에서 이미 파싱한 결과가 있으면 재파싱을 건너뛴다(경고 중복 방지).
@@ -344,6 +351,7 @@ def _sync_portfolio_from_balance(
 
     session.commit()
     logger.info("Portfolio 동기화 완료: %d개 종목", len(holdings))
+    return len(holdings)
 
 
 def _infer_catalyst_event_type(description: str) -> str:
@@ -618,7 +626,27 @@ async def _monitor_market_task(
             # 동기화 실패는 감시 루프에 영향을 주지 않아야 하므로 예외를 격리합니다.
             try:
                 with Session(engine) as sync_session:
-                    _sync_portfolio_from_balance(balance_text, sync_session, holdings=holdings)
+                    sync_result = _sync_portfolio_from_balance(balance_text, sync_session, holdings=holdings)
+                # 잘림·마커 부재로 동기화를 건너뛴 경우(None)에는 테이블이 그대로이므로
+                # 브로드캐스트하지 않는다. 동기화가 수행된 경우 전량 교체 특성상 내용이
+                # 직전과 동일해도 신호가 나간다 — 즉 정상 주기마다 1건이다.
+                # payload에는 보유 종목 개수만 싣고 종목명·수량 등 실제 보유 내역은 담지
+                # 않는다. WebSocket에는 인증이 없어(#65) 계좌 보유 현황이 인증 없는
+                # 채널로 유출될 수 있으므로, 신호만 보내고 클라이언트가
+                # /api/v1/db/portfolio를 재조회하도록 한다.
+                if sync_result is not None:
+                    try:
+                        await manager.broadcast({
+                            "type": "PORTFOLIO_UPDATE",
+                            "holdings_count": sync_result,
+                            "broadcast_at": datetime.now(timezone.utc).isoformat(),
+                        })
+                    except Exception as e:
+                        logger.error(
+                            "Portfolio 업데이트 브로드캐스트 중 오류 (감시는 계속): %s",
+                            e,
+                            exc_info=True,
+                        )
             except Exception as e:
                 logger.error("Portfolio 동기화 중 오류 (감시는 계속): %s", e, exc_info=True)
 
