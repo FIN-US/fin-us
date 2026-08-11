@@ -75,7 +75,7 @@ export function resolveStock(stockName, stocks) {
     const candidates = matches
       .map((stock) => `${stock.name}(${stock.code}, ${stock.market})`)
       .join(", ");
-    throw new Error(`'${input}'의 종목 매칭이 모호합니다: ${candidates}. 6~7자리 종목코드를 직접 입력하세요.`);
+    throw new Error(`'${input}'의 종목 매칭이 모호합니다: ${candidates}. 6·7·9자리 종목코드를 직접 입력하세요.`);
   }
 
   if (matches.length === 1) {
