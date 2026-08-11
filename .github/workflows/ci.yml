@@ -156,38 +156,45 @@ jobs:
       - name: 프로덕션 빌드
         run: npm run build
 
-  # frontend/Assets/Scripts(Unity 소스)를 고치고도 frontend/Build(WebGL 번들)를 재빌드하지
-  # 않으면 git이 추적하는 번들과 소스가 조용히 어긋난다(이슈 #212·PR #226에서 재빌드 절차를
+  # frontend/Assets(Unity 소스)를 고치고도 frontend/Build(WebGL 번들)를 재빌드하지 않으면
+  # git이 추적하는 번들과 소스가 조용히 어긋난다(이슈 #212·PR #226에서 재빌드 절차를
   # frontend/README.md에 문서화했으나 강제 장치는 없었다). 이 잡은 그 강제 장치다.
   unity-build-drift:
     name: Unity 소스/번들 드리프트 검사
-    # github.base_ref·github.event.pull_request.base.sha는 pull_request 이벤트에서만
-    # 채워진다. main push(=머지 시점) 트리거에서는 비교 대상이 없어(빈 문자열) 아래
-    # 스크립트가 오작동하므로 PR에서만 돈다. 어차피 이 검사가 보는 건 "이 PR이
-    # Assets/Scripts와 Build를 함께 건드렸는가"이므로 머지된 뒤 다시 볼 이유도 없다.
+    # pull_request에서만 돈다. push(=머지 시점) 트리거는 체크아웃 대상이 머지 커밋이
+    # 아니라 푸시된 커밋이라 아래 HEAD^1 기준이 다른 것을 가리킨다. 어차피 이 검사가
+    # 보는 건 "이 PR이 Assets와 Build를 함께 건드렸는가"라 머지 후 다시 볼 이유도 없다.
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        # fetch-depth: 0(전체 이력)은 받지 않는다. 이 저장소를 실측하면 전체 이력 pack이
-        # 약 56MB로 크지는 않지만(Build/ 산출물이 매 커밋 66MB씩 쌓이는 게 아니라 git이
-        # 동일 blob을 공유하기 때문), 그래도 이 잡 하나만을 위해 매 PR마다 전체 이력을
-        # 끌어올 이유는 없다. 아래에서 base 커밋 하나만 별도로 얕게 fetch해 두 커밋을
-        # two-dot(`A B`) diff로 직접 비교한다 — two-dot diff는 공통 조상(merge-base)을
-        # 요구하지 않으므로 기본 얕은 체크아웃(depth 1) 그대로도 동작한다.
-        # (three-dot `A...B`는 merge-base가 필요해 얕은 클론에서 "no merge base"로 실패함을
-        # 로컬에서 확인했다.)
+        with:
+          # pull_request의 체크아웃 대상은 PR head가 아니라 머지 커밋(refs/pull/N/merge)이고,
+          # 그 1번 부모가 곧 비교 기준(base)이다. depth 2면 이벤트 payload의 base.sha에
+          # 의존하지 않고 체크아웃과 항상 자기일관적인 기준을 얻는다 — 재실행으로 payload는
+          # 낡고 머지 ref만 재계산된 경우에도 둘이 어긋나지 않는다.
+          # depth 1에서는 shallow graft가 부모를 가려 HEAD^1이 해석되지 않는다.
+          # fetch-depth: 0(전체 이력)은 이 잡 하나를 위해 과하고, depth 2는 머지 커밋과
+          # blob을 대부분 공유하는 델타만 받는다.
+          fetch-depth: 2
 
-      - name: base 커밋만 얕게 fetch
-        run: git fetch --depth=1 origin ${{ github.event.pull_request.base.sha }}
-
-      - name: Assets/Scripts 변경 시 Build 동반 커밋 여부 확인
+      - name: Assets 변경 시 Build 동반 커밋 여부 확인
+        # Actions의 `run:` 기본 셸은 `bash -e {0}`이라 pipefail이 꺼져 있다. 아래는 파이프를
+        # 쓰지 않아 set -e가 git 실패를 직접 잡지만, 셸을 명시해 두면(-eo pipefail) 나중에
+        # 파이프가 추가돼도 이 검사가 fail-open으로 무너지지 않는다.
+        shell: bash
         run: |
-          BASE="${{ github.event.pull_request.base.sha }}"
-          SRC=$(git diff --name-only "$BASE" HEAD -- frontend/Assets/Scripts/ | wc -l)
-          BUILD=$(git diff --name-only "$BASE" HEAD -- frontend/Build/ | wc -l)
-          if [ "$SRC" -gt 0 ] && [ "$BUILD" -eq 0 ]; then
-            echo "::error::frontend/Assets/Scripts/ 를 수정했으나 frontend/Build/ 가 갱신되지 않았습니다. Unity WebGL 재빌드 후 frontend/Build/를 함께 커밋하세요 (frontend/README.md의 재빌드 규칙 참고)."
+          BASE=$(git rev-parse HEAD^1)
+          # 감시 대상은 Scripts/가 아니라 Assets/ 전체다. frontend/README.md의 재빌드 규칙
+          # 원문이 Assets/ 전체를 대상으로 하고, WebGLTemplates/·Scenes/·Resources/·
+          # Plugins/WebGL/*.jslib 모두 WebGL 번들에 구워진다. .meta도 제외하지 않는다 —
+          # 새 에셋 추가는 .meta 동반이면서 실제로 재빌드가 필요하다.
+          SRC=$(git diff --name-only "$BASE" HEAD -- frontend/Assets/)
+          BUILD=$(git diff --name-only "$BASE" HEAD -- frontend/Build/)
+          if [ -n "$SRC" ] && [ -z "$BUILD" ]; then
+            echo "::error::frontend/Assets/ 를 수정했으나 frontend/Build/ 가 갱신되지 않았습니다. Unity WebGL 재빌드 후 frontend/Build/를 함께 커밋하세요 (frontend/README.md의 재빌드 규칙 참고)."
+            echo "변경된 소스 파일:"
+            printf '  %s\n' $SRC
             exit 1
           fi
 
