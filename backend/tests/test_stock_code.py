@@ -4,16 +4,18 @@ _STOCK_CODE_EXTRACT_RE, _STOCK_CODE_RE / _looks_like_stock_code, _ORDERABLE_STOC
 순수 단위 테스트. 각 호출부 고유 동작(services.py의 빈 문자열 폴백,
 telegram_commands.py의 조기 거절)은 각자의 테스트 파일에 남아 있다.
 """
+import importlib
 import json
 import logging
 from pathlib import Path
 
-from backend import stock_code
+from backend import config, stock_code
 from backend.stock_code import (
     _ORDERABLE_STOCK_CODE_RE,
     _STOCK_CODE_EXTRACT_RE,
     _has_code_digit,
     _is_known_master_code,
+    _is_unresolved_echo,
     _looks_like_stock_code,
 )
 
@@ -241,6 +243,58 @@ class TestIsKnownMasterCode:
         monkeypatch.setattr(stock_code, "_MASTER_STOCKS_PATH", broken_path)
         assert _is_known_master_code("999999") is True
 
+    def test_entry_without_code_does_not_disable_validation(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """code 키가 빠진 항목 하나가 마스터 전체 검증을 꺼뜨리면 안 된다.
+
+        마스터는 외부 KIS 파일에서 생성되므로 형태가 변할 수 있다. 항목 전체를 한
+        try로 묶으면 결손 1건의 KeyError가 4,353건 전부를 fail-open으로 만들고,
+        실패는 캐시되므로 경고조차 프로세스 수명 동안 한 번만 찍힌다.
+        """
+        master = tmp_path / "stocks.json"
+        master.write_text(
+            json.dumps(
+                [
+                    {"code": "005930", "name": "삼성전자", "market": "KOSPI"},
+                    {"name": "코드 없는 항목", "market": "KOSPI"},
+                    {"code": "", "name": "빈 코드", "market": "KOSPI"},
+                    "리스트가 아닌 항목",
+                ],
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(stock_code, "_MASTER_STOCKS_PATH", master)
+
+        with caplog.at_level(logging.WARNING, logger=stock_code.logger.name):
+            # 읽어낸 항목은 정상 대조되고, 못 읽은 항목 때문에 fail-open되지 않는다.
+            assert _is_known_master_code("005930") is True
+            assert _is_known_master_code("999999") is False
+
+        assert "종목마스터 로드 실패" not in caplog.text
+        assert "일부 항목에서 코드를 읽지 못했습니다" in caplog.text
+        assert "1/4건" in caplog.text
+
+    def test_fail_open_when_no_code_could_be_read(self, tmp_path, monkeypatch, caplog):
+        """코드를 하나도 못 읽으면(마스터 형태가 통째로 바뀜) 로드 실패로 취급한다.
+
+        빈 집합을 성공으로 캐시하면 _is_known_master_code가 *모든* 코드를 조용히
+        거부한다 — 실재하는 종목까지 저장이 막히므로 fail-open보다 나쁘다.
+        뮤테이션: `if not codes: raise`를 지우면 아래 True 단정이 red가 된다.
+        """
+        master = tmp_path / "stocks.json"
+        master.write_text(
+            json.dumps({"stocks": [{"code": "005930"}]}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(stock_code, "_MASTER_STOCKS_PATH", master)
+
+        with caplog.at_level(logging.WARNING, logger=stock_code.logger.name):
+            assert _is_known_master_code("005930") is True
+
+        assert "종목마스터 로드 실패" in caplog.text
+
     def test_master_codes_loaded_from_disk_at_most_once(self, monkeypatch):
         """지름길 경로가 요청마다 stocks.json(489K)을 다시 파싱하면 지름길을 둔
         이유(MCP 왕복 생략)가 무색해진다 — 첫 호출 이후로는 캐시만 써야 한다.
@@ -260,6 +314,67 @@ class TestIsKnownMasterCode:
         assert _is_known_master_code("F70100026") is True
 
         assert len(read_calls) == 1
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# _MASTER_STOCKS_PATH — 백엔드가 읽는 마스터가 MCP가 보는 마스터와 같은가
+# ──────────────────────────────────────────────────────────────────────────
+
+def test_master_stocks_path_follows_trading_mcp_dir(tmp_path, monkeypatch):
+    """마스터 경로는 백엔드가 MCP를 띄우는 디렉터리(TRADING_MCP_DIR)에서 파생돼야 한다.
+
+    stock_code.py 위치에 고정하면 개발 환경에서는 두 경로가 우연히 같아 문제가
+    드러나지 않지만, backend/Dockerfile은 백엔드 소스(/app bind mount)와 MCP
+    디렉터리(/opt/mcp-trading 이미지 스냅샷)를 실제로 갈라놓는다. TRADING_MCP_DIR이
+    레포 바깥을 가리키면 backend 쪽 경로에 파일이 없어 fail-open으로 #151 검증이
+    조용히 꺼진다.
+
+    뮤테이션: `Path(__file__).resolve().parents[1] / "mcp-trading" / ...`로 되돌리면
+    이 테스트가 red가 된다.
+    """
+    mcp_dir = tmp_path / "opt" / "mcp-trading"
+    monkeypatch.setenv("TRADING_MCP_DIR", str(mcp_dir))
+    try:
+        importlib.reload(config)
+        reloaded = importlib.reload(stock_code)
+        assert reloaded._MASTER_STOCKS_PATH == mcp_dir.resolve() / "data" / "stocks.json"
+    finally:
+        # 다른 테스트가 실제 마스터를 대조하므로 환경변수와 모듈 상태를 되돌린다.
+        monkeypatch.undo()
+        importlib.reload(config)
+        importlib.reload(stock_code)
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# _is_unresolved_echo — stock-master.js Step 3 미해석 에코 판정 (#151)
+# ──────────────────────────────────────────────────────────────────────────
+
+class TestIsUnresolvedEcho:
+    """리포트 저장(services)과 주문 준비(telegram_commands)가 공유하는 판정."""
+
+    def test_detects_numeric_echo(self):
+        assert _is_unresolved_echo("999999 (999999, UNKNOWN)") is True
+
+    def test_detects_alphanumeric_echo(self):
+        assert _is_unresolved_echo("ZZZZ99 (ZZZZ99, UNKNOWN)") is True
+        assert _is_unresolved_echo("Q999999 (Q999999, UNKNOWN)") is True
+
+    def test_rejects_resolved_master_entry(self):
+        assert _is_unresolved_echo("삼성전자 (005930, KOSPI)") is False
+        assert _is_unresolved_echo("한투글로벌넥스트웨이브1(A) (F70100026, KOSPI)") is False
+
+    def test_detects_echo_with_trailing_text(self):
+        """문자열 끝이 아니라 _STOCK_CODE_EXTRACT_RE와 같은 지점에 앵커한다.
+
+        endswith(", UNKNOWN)")로 앵커하면 index.js:559가 응답 뒤에 무언가를 덧붙이는
+        순간 코드 추출은 계속 성공하는데 에코 감지만 조용히 멈춰 #151이 되돌아온다.
+        뮤테이션: 판정을 endswith로 되돌리면 이 케이스가 red가 된다.
+        """
+        assert _is_unresolved_echo("999999 (999999, UNKNOWN)\n(조회 시각: 10:00)") is True
+
+    def test_rejects_unknown_without_code_shape(self):
+        """"UNKNOWN"이 코드 자리 없이 등장하는 문장은 에코가 아니다."""
+        assert _is_unresolved_echo("시장 정보를 알 수 없습니다 (UNKNOWN)") is False
 
 
 # ──────────────────────────────────────────────────────────────────────────

@@ -6,7 +6,8 @@ services.py와 telegram_commands.py가 각자 중복 구현하던 정규식과 �
 import json
 import logging
 import re
-from pathlib import Path
+
+from .config import _TRADING_MCP_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -61,10 +62,15 @@ _ORDERABLE_STOCK_CODE_RE = re.compile(r"\A[0-9]{6,7}\Z")
 # 종목마스터 코드 존재 검증 (#151) — _looks_like_stock_code 지름길이 MCP 존재
 # 확인 없이 코드를 확정해 버리는 문제를 로컬 코드 집합 대조로 막는다.
 # ──────────────────────────────────────────────────────────────────────────
-# mcp-trading/stock-master.js:8의 DEFAULT_STOCKS_PATH와
-# mcp-trading/scripts/update_stock_master.py:12가 쓰는 경로가 동일하므로,
-# 백엔드가 이 파일을 직접 읽어도 MCP가 보는 마스터와 어긋날 수 없다(같은 파일).
-_MASTER_STOCKS_PATH = Path(__file__).resolve().parents[1] / "mcp-trading" / "data" / "stocks.json"
+# 경로를 config._TRADING_MCP_DIR에서 파생시킨다. 백엔드가 MCP를 띄우는 디렉터리와
+# 마스터를 읽는 디렉터리가 *같은 계산*에서 나오므로, 백엔드가 읽는 파일은 MCP가
+# stock-master.js:8(DEFAULT_STOCKS_PATH)로 읽는 파일과 정의상 같다.
+# 이 파일 위치(backend/)에 고정하면 안 된다 — TRADING_MCP_DIR로 MCP 디렉터리를 옮긴
+# 구성에서 둘이 갈라진다(backend/Dockerfile: 백엔드 소스는 /app에 bind mount,
+# MCP는 이미지 안 /opt/mcp-trading). 특히 레포 바깥을 가리키면 backend 쪽 경로에
+# 파일이 없어 fail-open으로 #151 검증이 조용히 꺼진다.
+# config는 stock_code를 import하지 않으므로 순환 import는 발생하지 않는다.
+_MASTER_STOCKS_PATH = _TRADING_MCP_DIR / "data" / "stocks.json"
 
 # 마스터 로드 실패(fail-open)를 "성공했지만 빈 집합"과 구분하기 위한 센티널.
 _MASTER_LOAD_FAILED = object()
@@ -82,6 +88,9 @@ def _load_master_codes():
     캐시해 반환합니다(fail-open) — 이 경로는 리포트 저장 판정에 쓰이지
     주문에는 쓰이지 않으므로, 마스터를 못 읽는다고 분석 기능 전체가 죽으면
     안 됩니다.
+
+    개별 항목의 결손은 그 항목만 건너뛰고 나머지로 계속하되, 코드를 하나도
+    읽지 못한 경우는 로드 실패로 취급합니다(빈 집합은 모든 코드를 거부하므로).
     """
     global _master_codes_cache
     if _master_codes_cache is not None:
@@ -89,7 +98,21 @@ def _load_master_codes():
     try:
         raw = _MASTER_STOCKS_PATH.read_text(encoding="utf-8")
         stocks = json.loads(raw)
-        codes = frozenset(str(stock["code"]).upper() for stock in stocks)
+        # 항목 단위로 건너뛴다. 마스터는 외부 KIS 파일에서 생성되므로 code 키가 빠진
+        # 항목이 섞일 수 있는데, 하나의 KeyError로 4,353건 전체 검증이 fail-open되면
+        # 그 한 건 때문에 #151이 통째로 꺼진다. stock-master.js도 String(s.code ?? "")로
+        # 항목 단위로 방어한다.
+        codes = frozenset(
+            str(stock["code"]).upper()
+            for stock in stocks
+            if isinstance(stock, dict) and stock.get("code")
+        )
+        total = len(stocks)
+        if not codes:
+            # 파일 형태가 통째로 바뀌어 코드를 하나도 못 읽으면 빈 집합이 되는데, 그러면
+            # _is_known_master_code가 모든 코드를 조용히 거부한다 — fail-open보다 나쁘다.
+            # 센티널과 구분되지 않으므로 여기서 로드 실패로 되돌린다.
+            raise ValueError("종목마스터에서 코드를 하나도 읽지 못했습니다")
     except Exception as exc:
         logger.warning(
             "종목마스터 로드 실패, 지름길 존재 검증을 건너뜁니다(fail-open): path=%s, error=%s",
@@ -98,6 +121,16 @@ def _load_master_codes():
         )
         _master_codes_cache = _MASTER_LOAD_FAILED
         return _master_codes_cache
+    if len(codes) < total:
+        # 캐시 때문에 이 경고는 프로세스 수명 동안 한 번만 찍힌다 — 얼마나 건졌는지를
+        # 함께 남겨야 "일부만 검증 중"인 상태를 나중에 알아볼 수 있다.
+        # 마스터의 코드는 유일하므로(stock-master.js Step 1의 전제) 차이는 곧 누락 건수다.
+        logger.warning(
+            "종목마스터 일부 항목에서 코드를 읽지 못했습니다: path=%s, %d/%d건만 사용합니다",
+            _MASTER_STOCKS_PATH,
+            len(codes),
+            total,
+        )
     _master_codes_cache = codes
     return codes
 
@@ -112,6 +145,31 @@ def _is_known_master_code(code: str) -> bool:
     if codes is _MASTER_LOAD_FAILED:
         return True
     return code in codes
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# 미해석 에코 판정 (#151) — stock-master.js Step 3
+# ──────────────────────────────────────────────────────────────────────────
+# resolveStock은 코드 형태 입력이 마스터에 코드로도 이름·별칭으로도 없으면
+# market="UNKNOWN"으로 입력을 그대로 되돌려준다(stock-master.js:91-93).
+# 존재 검증이 아니라 에코이므로 이걸 성공으로 오인하면 #151이 재발한다.
+# 실제 마스터의 market은 KOSPI/KOSDAQ뿐이라(mcp-trading/data/stocks.json 전수 확인)
+# "(코드, UNKNOWN)" 조합은 이 에코의 신뢰 가능한 신호다.
+#
+# _STOCK_CODE_EXTRACT_RE와 같은 "괄호+코드" 지점에 앵커한다. 문자열 끝에 앵커하면
+# index.js:559가 응답 뒤에 무언가를 덧붙이는 순간 코드 추출은 계속 성공하는데
+# 에코 감지만 조용히 멈춰 #151이 되돌아온다.
+_UNRESOLVED_ECHO_RE = re.compile(r"\([0-9A-Z]{6,}, UNKNOWN\)")
+
+
+def _is_unresolved_echo(resolved_text: str) -> bool:
+    """resolve_stock_code 응답이 stock-master.js Step 3의 미해석 에코인지 판정합니다.
+
+    리포트 저장(services._resolve_stock_code)과 주문 준비(telegram_commands)가
+    같은 판정을 쓰도록 여기 둔다 — 한쪽에만 적용하면 같은 미해석 입력이 위험도가
+    높은 주문 경로로만 통과한다.
+    """
+    return bool(_UNRESOLVED_ECHO_RE.search(resolved_text))
 
 
 def _has_code_digit(value: str) -> bool:
