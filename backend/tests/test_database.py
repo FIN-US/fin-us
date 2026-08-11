@@ -434,7 +434,11 @@ def test_get_catalysts_order_by_includes_id_as_final_tie_break(
     assert response.status_code == 200
     assert captured_sql, "session.exec가 호출되지 않았다"
 
-    order_by_clause = captured_sql[0].split("ORDER BY", 1)[1]
+    sql = captured_sql[0]
+    # ORDER BY가 통째로 사라진 뮤턴트에서는 split이 IndexError로 죽어 red의 원인이
+    # 드러나지 않는다. 먼저 단언해 실패 메시지에 실제 SQL이 남게 한다.
+    assert "ORDER BY" in sql, f"ORDER BY 절이 없다: {sql}"
+    order_by_clause = sql.split("ORDER BY", 1)[1]
     assert "catalystevent.event_date" in order_by_clause
     assert "catalystevent.event_type" in order_by_clause
     assert "catalystevent.id" in order_by_clause
@@ -507,6 +511,25 @@ def test_get_catalysts_signals_truncation_when_over_limit(
     body = response.json()
     assert len(body["data"]) == 3
     assert body["message"] == "truncated"
+
+
+def test_get_catalysts_not_truncated_at_exact_limit(
+    client: TestClient, session: Session, frozen_today: date
+):
+    # 정확히 limit개일 때가 유일하게 애매한 경계다. 위 두 테스트는 각각 경계에서
+    # 2 모자라고 1 넘어서 비켜 가므로, len(rows) > limit을 >= 로 바꾼 오프바이원
+    # 뮤턴트가 둘 다 통과한다. 이 경계가 깨지면 이벤트가 정확히 limit개일 때 프론트가
+    # "더 있음"으로 오해해 없는 다음 페이지를 그린다 — 데이터는 멀쩡한데 UI만 틀린다.
+    today = frozen_today
+    for i in range(3):
+        session.add(_make_catalyst(stock_name=f"종목{i}", event_date=today + timedelta(days=i)))
+    session.commit()
+
+    response = client.get("/api/v1/db/catalysts", params={"limit": 3})
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["data"]) == 3
+    assert body["message"] is None
 
 
 @pytest.mark.asyncio

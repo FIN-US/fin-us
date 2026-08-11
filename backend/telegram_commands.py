@@ -31,8 +31,8 @@ from .redis_state import (
 from .services import llm_chat, run_mcp_tool
 from .watchlist_repo import SqliteWatchlistRepo
 from .telegram_notifier import TELEGRAM_ALERT_MODES, TelegramNotifier, telegram_notifier
+from .timeutil import KST
 from .trading_orders import (
-    KST,
     McpTradingOrderGateway,
     OrderType,
     PendingOrder,
