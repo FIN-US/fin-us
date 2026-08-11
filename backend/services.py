@@ -26,6 +26,7 @@ from .stock_code import (
     _STOCK_CODE_EXTRACT_RE,
     _has_code_digit,
     _is_known_master_code,
+    _is_unresolved_echo,
     _looks_like_stock_code,
 )
 
@@ -115,18 +116,13 @@ async def _resolve_stock_code(stock: str) -> str:
         resolved_text = str(resolved)
         match = _STOCK_CODE_EXTRACT_RE.search(resolved_text)
         code = match.group(1) if match else None
-        # stock-master.js Step 3는 코드 형태 입력이 마스터에 코드로도 이름·별칭으로도
-        # 없을 때 market="UNKNOWN"으로 그대로 에코한다("SIMPAC (SIMPAC, UNKNOWN)",
-        # "999999 (999999, UNKNOWN)") — 존재 검증이 아니라 그저 되돌려주는 것이므로
-        # 이걸 성공으로 오인하면 안 된다. 실제 마스터의 market은 KOSPI/KOSDAQ뿐이라
-        # (mcp-trading/data/stocks.json 전수 확인) "UNKNOWN" 접미사는 이 에코의
-        # 신뢰 가능한 신호다. #151 이전에는 _looks_like_stock_code가 숫자를 포함한
-        # 코드 형태 입력을 MCP로 보내지 않아 이 에코가 도달할 일이 없었지만, #151에서
-        # 마스터에 없는 코드 형태 입력을 이 MCP 경로로 흘려보내게 되면서 숫자가 있는
-        # 에코("999999")도 여기 도달할 수 있다 — _has_code_digit만으로는 걸러지지
-        # 않으므로 아래에서 별도로 감지한다.
-        is_unresolved_echo = resolved_text.rstrip().endswith(", UNKNOWN)")
-        if code is None or not _has_code_digit(code) or is_unresolved_echo:
+        # stock-master.js Step 3의 미해석 에코("999999 (999999, UNKNOWN)")를 성공으로
+        # 오인하면 안 된다 — 판정 근거는 stock_code._is_unresolved_echo에 있다.
+        # #151 이전에는 _looks_like_stock_code가 숫자를 포함한 코드 형태 입력을 MCP로
+        # 보내지 않아 이 에코가 도달할 일이 없었지만, #151에서 마스터에 없는 코드 형태
+        # 입력을 이 MCP 경로로 흘려보내게 되면서 숫자가 있는 에코("999999")도 여기
+        # 도달할 수 있다 — _has_code_digit만으로는 걸러지지 않으므로 따로 감지한다.
+        if code is None or not _has_code_digit(code) or _is_unresolved_echo(resolved_text):
             logger.warning(
                 "종목코드 추출 실패, 빈 문자열로 폴백: stock=%s, response=%s",
                 stock,

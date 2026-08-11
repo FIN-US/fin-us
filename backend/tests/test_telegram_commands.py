@@ -1360,18 +1360,28 @@ async def test_buy_with_stock_code_resolves_name_and_shows_no_warning():
     assert UNRESOLVED_STOCK_WARNING not in notifier.messages[-1]
 
 
+@pytest.mark.parametrize("code", ["999999", "ZZZZ99", "Q999999"])
 @pytest.mark.asyncio
-async def test_buy_with_unregistered_code_shows_unresolved_warning():
-    """미등록 코드는 이름=코드로 echo되므로 미해석 경고가 붙는다."""
+async def test_buy_with_unresolved_echo_is_rejected(code):
+    """마스터에 없는 코드 형태 입력은 주문 준비 단계에서 끊는다 (#151).
+
+    stock-master.js Step 3는 이런 입력을 market="UNKNOWN"으로 그대로 에코하므로
+    코드 추출은 성공하고 숫자 6~7자 검사(999999)도 통과한다. 백엔드에 이 가드가
+    없으면 실재 확인이 KIS 왕복(get_stock_quote)이나 /confirm 시점 브로커 거절로
+    미뤄진다 — 리포트 저장 경로는 이미 같은 판정으로 막고 있는데 위험도가 더 높은
+    주문 경로만 통과하던 비대칭을 없앤다.
+
+    뮤테이션: _is_unresolved_echo 가드를 지우면 999999가 대기 주문으로 등록돼 red가
+    된다(ZZZZ99·Q999999는 영숫자라 _ORDERABLE_STOCK_CODE_RE가 뒤에서 잡지만, 거절
+    사유가 "ETN·펀드"로 바뀌므로 메시지 단정에서 red가 된다).
+    """
 
     async def mcp_runner(server_params, tool_name, arguments):
         if tool_name == "resolve_stock_code":
-            return "123456 (123456, UNKNOWN)"
-        if tool_name == "get_stock_quote":
-            return "현재가: 0원"
-        if tool_name == "get_balance":
-            return "주문가능금액: 1,000,000원"
-        raise AssertionError(f"unexpected tool: {tool_name}")
+            return f"{code} ({code}, UNKNOWN)"
+        raise AssertionError(
+            f"미해석 에코는 시세·잔고 조회 전에 끊어야 한다: {tool_name}"
+        )
 
     notifier = FakeNotifier()
     handler = TelegramCommandHandler(
@@ -1381,12 +1391,12 @@ async def test_buy_with_unregistered_code_shows_unresolved_warning():
     )
 
     await handler.handle_update(
-        {"message": {"chat": {"id": 123}, "text": "/buy 123456 10"}}
+        {"message": {"chat": {"id": 123}, "text": f"/buy {code} 10"}}
     )
 
-    assert handler.pending_orders["123"].stock_name == "123456"
-    assert handler.pending_orders["123"].stock_code == "123456"
-    assert UNRESOLVED_STOCK_WARNING in notifier.messages[-1]
+    assert handler.pending_orders == {}
+    assert "종목마스터에 없는 종목입니다" in notifier.messages[-1]
+    assert code in notifier.messages[-1]
 
 
 @pytest.mark.asyncio
