@@ -2039,6 +2039,56 @@ async def test_poller_handles_later_update_when_earlier_update_is_poison(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_poller_offset_stays_behind_poison_until_retries_exhausted(monkeypatch):
+    """poison 뒤의 update를 처리해도 offset은 poison이 해소되기 전엔 넘어가지 않는다 (#241)."""
+    notifier = FakeNotifier()
+    notifier.enabled = True
+    notifier.bot_token = "token"
+    handled = []
+
+    class PartialHandler:
+        async def handle_update(self, update):
+            if update["update_id"] == 41:
+                raise RuntimeError("poison update")
+            handled.append(update["update_id"])
+
+    poller = TelegramCommandPoller(notifier=notifier, handler=PartialHandler())
+    batch = [
+        {"update_id": 41, "message": {"chat": {"id": 123}, "text": "/alerts off"}},
+        {"update_id": 42, "message": {"chat": {"id": 123}, "text": "/help"}},
+    ]
+
+    async def fake_get_updates():
+        offset = poller.offset
+        return [u for u in batch if offset is None or u["update_id"] >= offset]
+
+    sleeps = 0
+
+    async def fake_sleep(delay):
+        # 배치 처리가 끝날 때마다 물막이를 확인한다: 41이 아직 상한에 못 미쳤으므로
+        # offset은 41을 넘어선 안 된다(넘으면 41이 조용히 버려진다).
+        nonlocal sleeps
+        sleeps += 1
+        assert poller.offset is None or poller.offset <= 41
+        assert poller._failure_counts == {41: sleeps}
+        if sleeps >= telegram_commands.MAX_UPDATE_RETRIES - 1:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(poller, "_get_updates", fake_get_updates)
+    monkeypatch.setattr("backend.telegram_commands.asyncio.sleep", fake_sleep)
+
+    with pytest.raises(asyncio.CancelledError):
+        await poller.run()
+
+    # 뒤의 update는 처리됐지만(중복 없이 1회), 41은 아직 재시도 중이라 버려지지 않았다.
+    assert handled == [42]
+    assert poller.offset is None
+    assert poller._handled_ahead == {42}
+    assert poller._failure_counts == {41: telegram_commands.MAX_UPDATE_RETRIES - 1}
+    assert notifier.messages == []
+
+
+@pytest.mark.asyncio
 async def test_poller_clears_failure_count_after_success(monkeypatch):
     """일시 장애로 실패한 update가 성공하면 실패 카운터가 남지 않는다 (#241)."""
     notifier = FakeNotifier()
