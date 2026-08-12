@@ -192,8 +192,7 @@ git -C "<REPO>" log --oneline -10          # 최근 커밋 이력
 ### 2. 프리플라이트 체크
 
 새 worktree에는 gitignore 대상인 의존성 디렉토리가 없습니다.
-이 레포의 해당 디렉토리는 `backend/.venv`, `finus_nat/.venv`, `frontend-react/node_modules`,
-`mcp-dart/node_modules` 입니다.
+이 레포의 해당 디렉토리는 `backend/.venv`, `finus_nat/.venv`, `mcp-dart/node_modules` 입니다.
 
 #### 절대 실행하지 않는 명령
 
@@ -225,23 +224,26 @@ uv run --no-sync --project "<WT_PATH>/backend" pytest
 참고: 이 레포의 CI가 쓰는 실제 명령은 `uv sync --project backend` / `uv run --project backend pytest`
 입니다. `pytest`나 `ruff check .`를 worktree에서 venv 활성화 없이 그냥 실행하면 해석되지 않습니다.
 
-#### Node 영역(`frontend-react`, `mcp-dart`)은 링크 후 실행 가능
+#### Node 영역(`mcp-dart`)은 링크 후 실행 가능
 
 `node_modules`는 실행만으로 재설치되지 않으므로 링크해도 안전합니다.
 
 ```bash
-ln -s "<REPO>/frontend-react/node_modules" "<WT_PATH>/frontend-react/node_modules" \
-  || cmd //c mklink //J "<WT_PATH>/frontend-react/node_modules" "<REPO>/frontend-react/node_modules"
+ln -s "<REPO>/mcp-dart/node_modules" "<WT_PATH>/mcp-dart/node_modules" \
+  || cmd //c mklink //J "<WT_PATH>/mcp-dart/node_modules" "<REPO>/mcp-dart/node_modules"
 # ln -s는 Windows에서 개발자 모드가 꺼져 있고 MSYS=winsymlinks도 미설정이면 실패한다.
 # 그 경우 junction(mklink //J)으로 폴백한다.
 
 # 링크가 실제로 디렉토리로 해석되는지 확인하고, 성공한 경우에만 검증을 실행한다.
 # 확인을 && 로 묶어 실패 시 npm이 실행되지 않도록 한다.
-[ -d "<WT_PATH>/frontend-react/node_modules" ] \
-  && npm --prefix "<WT_PATH>/frontend-react" test \
-  && npm --prefix "<WT_PATH>/frontend-react" run lint \
+[ -d "<WT_PATH>/mcp-dart/node_modules" ] \
+  && npm --prefix "<WT_PATH>/mcp-dart" test \
   || echo "PREFLIGHT SKIP: node_modules 링크 실패 — 리포트에 사유를 명시할 것"
 ```
+
+> `frontend/`는 Unity 프로젝트라 node 의존성이 없습니다. 프론트엔드 변경은 추적 중인
+> WebGL 번들(`frontend/Build/`)과 소스가 어긋나지 않았는지를 보는 것이 검증 지점입니다
+> (`frontend/README.md`의 재빌드 규칙 참고).
 
 > 6단계의 `git worktree remove --force`는 링크를 따라가지 않고 **링크 자체만** 제거합니다.
 > 원본 `node_modules`는 보존됩니다. 심볼릭 링크와 junction 모두 실측으로 확인했습니다.
@@ -325,7 +327,7 @@ git -C "<REPO>" worktree prune
 `<WT_PATH>`와 ref 이름은 **이 실행의 nonce가 붙은 것**입니다. 다른 실행의 것을 지우지 않도록
 1단계에서 기록한 리터럴을 그대로 씁니다.
 
-**`worktree remove`가 실패하면 반드시 폴백을 실행합니다.** Windows에서 node/vitest가 파일을
+**`worktree remove`가 실패하면 반드시 폴백을 실행합니다.** Windows에서 node 테스트 러너가 파일을
 잡고 있으면 흔히 실패합니다. `rmdir`은 디렉토리가 비어 있지 않아 실패하고(`Directory not empty`),
 `worktree prune`도 디렉토리가 남아 있는 한 등록을 유지하므로 회수하지 못합니다(실측 확인).
 디렉토리가 남으면 스윕이 그 ref를 "진행 중"으로 보고 **영원히 보존합니다.**

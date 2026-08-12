@@ -42,7 +42,7 @@ def _collect_signals(dir_path: Path) -> dict[str, bool]:
     joined = f"{' '.join(names)}\n{paths_text}".lower()
     return {
         "fastapi": "fastapi" in joined or "uvicorn" in joined,
-        "react": "vite.config.ts" in joined or "react" in joined or "tsx" in joined,
+        "unity": "projectsettings" in joined or ".unity" in joined or "build.wasm" in joined,
         "mcp": "modelcontextprotocol" in joined or "call_tool" in joined or "index.js" in joined,
         "yaml_agents": "configs/agents" in joined or "router.yml" in joined,
         "ops_scripts": "docker-compose" in joined or "run_stack.sh" in joined or "setup_deps.sh" in joined,
@@ -53,8 +53,8 @@ def _infer_role(dir_path: Path, signals: dict[str, bool]) -> str:
     name = dir_path.name
     if name == "backend":
         return "FastAPI 오케스트레이션 계층으로, MCP/LLM 호출을 조합해 분석 API를 제공합니다."
-    if name == "frontend-react":
-        return "React UI 계층으로, backend API를 호출해 분석 결과와 원천 데이터를 시각화합니다."
+    if name == "frontend":
+        return "Unity WebGL UI 계층으로, backend API를 호출해 포트폴리오와 분석 결과를 시각화합니다. 빌드 산출물(Build/)은 compose의 nginx가 정적 서빙합니다."
     if name == "finus_nat":
         return "NAT 워크플로 레이어로, 라우터/브랜치 에이전트와 MCP tool 래퍼를 통해 멀티 에이전트 실행을 담당합니다."
     if name == "mcp-news":
@@ -65,8 +65,8 @@ def _infer_role(dir_path: Path, signals: dict[str, bool]) -> str:
         return "로컬/도커 실행, 의존성 설치, 환경 점검 등 운영 자동화를 담당합니다."
     if signals["fastapi"]:
         return "API 서버 역할의 백엔드 모듈입니다."
-    if signals["react"]:
-        return "웹 프런트엔드 모듈입니다."
+    if signals["unity"]:
+        return "Unity 기반 프런트엔드 모듈입니다."
     if signals["mcp"]:
         return "외부 도구/데이터를 표준 인터페이스로 제공하는 MCP 모듈입니다."
     if signals["yaml_agents"]:
@@ -80,14 +80,14 @@ def _detect_relationships(start_path: str) -> list[tuple[str, str, str]]:
     root = Path(start_path).resolve()
     rels: list[tuple[str, str, str]] = []
 
-    frontend_hook = root / "frontend-react" / "src" / "hooks" / "useFinUsDashboard.ts"
+    frontend_api_client = root / "frontend" / "Assets" / "Scripts" / "ApiClient.cs"
     backend_main = root / "backend" / "main.py"
     finus_api = root / "finus_nat" / "src" / "nat_finus_nat" / "finus_api.py"
     scripts_dir = root / "scripts"
 
-    hook_text = _safe_read(frontend_hook)
-    if "/api/v1/analyze" in hook_text or "/api/v1/news" in hook_text:
-        rels.append(("frontend-react", "backend", "HTTP API 호출"))
+    api_client_text = _safe_read(frontend_api_client)
+    if "/api/v1/analyze" in api_client_text or "/api/v1/news" in api_client_text:
+        rels.append(("frontend", "backend", "HTTP API 호출"))
 
     backend_text = _safe_read(backend_main)
     if "mcp-news" in backend_text or "NEWS_MCP_PARAMS" in backend_text:
@@ -105,7 +105,7 @@ def _detect_relationships(start_path: str) -> list[tuple[str, str, str]]:
 
     if scripts_dir.is_dir():
         rels.append(("scripts", "backend", "실행/배포 스크립트"))
-        rels.append(("scripts", "frontend-react", "실행/배포 스크립트"))
+        rels.append(("scripts", "frontend", "실행/배포 스크립트"))
         rels.append(("scripts", "finus_nat", "실행/설치 스크립트"))
 
     # dedupe while preserving order

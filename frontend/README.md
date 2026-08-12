@@ -18,6 +18,7 @@ frontend/
 ├── ProjectSettings/ # Unity 프로젝트 설정 (git 추적)
 ├── Build/           # WebGL 빌드 산출물 — 아래 3개 경로만 선별 추적
 │                    #   index.html / Build/** / TemplateData/**
+├── nginx.conf       # docker-compose의 frontend 서비스가 Build/를 서빙할 때 쓰는 nginx 설정
 └── frontend.slnx    # Visual Studio 솔루션
 ```
 
@@ -75,13 +76,28 @@ python -m http.server 8080 --directory frontend/Build
 
 ### 배포 파이프라인 현황
 
-현재 레포 구성에는 `frontend/Build/`를 자동으로 서빙하는 경로가 없습니다 (이슈 #212 조사 결과).
+`docker-compose.yml`의 `frontend` 서비스가 `frontend/Build/`를 nginx로 정적 서빙합니다 (이슈 #236).
+과거에는 이 서비스가 별도의 React 백엔드 연동 테스트 대시보드를 띄웠고 Unity 번들을 서빙하는
+경로가 아예 없었습니다 (이슈 #212 조사 결과). 그 React 앱은 #236에서 제거됐습니다.
 
-| 확인 대상 | 결과 |
+```bash
+docker compose up frontend
+# → http://localhost:8080 접속
+```
+
+| 항목 | 값 |
 | --- | --- |
-| `docker-compose.yml`의 `frontend` 서비스 | `./frontend-react` 빌드(React 앱). Unity `frontend/`가 아님 |
-| `frontend-react` 소스·`index.html`·`public/` | `Build.loader`/`Build.data`/iframe 참조 **0건** |
-| `.github/workflows/ci.yml` | `frontend/Build`·`frontend/Assets`·unity 언급 **0건** |
-| 저장소 전체 `StaticFiles`/`mount(` grep | Unity 번들 서빙 지점 **0건** |
+| 이미지 | `nginx:alpine` |
+| 포트 | 호스트 `8080` → 컨테이너 `80` |
+| 문서 루트 | `./frontend/Build` → `/usr/share/nginx/html` (읽기 전용 `:ro`) |
+| nginx 설정 | `./frontend/nginx.conf` → `/etc/nginx/conf.d/default.conf` (읽기 전용) |
+| `.wasm` MIME | `application/wasm` (`nginx.conf`에서 명시) |
+| backend 의존 | 없음 — 정적 파일만 내보내고, 브라우저가 8000번 backend를 직접 호출합니다 |
 
-이는 "서빙하지 않으므로 추적 불필요"를 뜻하지 않습니다. 현재는 팀원 로컬 실행 목적으로 추적하며, 배포 파이프라인이 추가될 때 이 문서를 갱신하세요.
+브라우저가 8080에서 8000번 backend를 호출하므로 backend의 CORS 허용 오리진에
+`http://localhost:8080`이 포함돼야 합니다 (`backend/config.py`의 `ALLOW_ORIGINS` 기본값,
+`.env.example` 참고). 다른 호스트(예: Tailscale 주소)로 시연할 때는 해당 오리진을
+`ALLOW_ORIGINS`에 추가하세요.
+
+현재 번들은 비압축입니다(`Build/`에 `.br`·`.gz` 산출물 없음). Unity 빌드 설정을 압축 산출물로
+바꾸면 `nginx.conf`에 `Content-Encoding` 매핑을 함께 추가해야 합니다.
