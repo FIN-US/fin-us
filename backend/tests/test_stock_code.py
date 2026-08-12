@@ -231,16 +231,19 @@ class TestIsKnownMasterCode:
         분석 기능 전체가 죽으면 안 된다(fail-open).
         뮤테이션 ③: fail-open을 예외 전파로 바꾸면 이 테스트가 예외로 red가 되어야 한다.
         """
-        monkeypatch.setattr(stock_code, "_MASTER_STOCKS_PATH", tmp_path / "missing.json")
+        # 경로는 이제 _TRADING_MCP_DIR에서 매 호출 파생되므로(#151 리뷰 후속), 없는
+        # 파일을 가리키려면 마스터가 없는 빈 디렉터리로 _TRADING_MCP_DIR을 옮긴다.
+        monkeypatch.setattr(stock_code, "_TRADING_MCP_DIR", tmp_path)
         with caplog.at_level(logging.WARNING, logger=stock_code.logger.name):
             assert _is_known_master_code("999999") is True
         assert "종목마스터 로드 실패" in caplog.text
 
     def test_fail_open_when_master_file_malformed(self, tmp_path, monkeypatch):
         """마스터 파일이 있어도 JSON 파싱에 실패하면 마찬가지로 fail-open한다."""
-        broken_path = tmp_path / "broken.json"
+        broken_path = tmp_path / "data" / "stocks.json"
+        broken_path.parent.mkdir(parents=True)
         broken_path.write_text("이것은 JSON이 아닙니다", encoding="utf-8")
-        monkeypatch.setattr(stock_code, "_MASTER_STOCKS_PATH", broken_path)
+        monkeypatch.setattr(stock_code, "_TRADING_MCP_DIR", tmp_path)
         assert _is_known_master_code("999999") is True
 
     def test_entry_without_code_does_not_disable_validation(
@@ -252,7 +255,8 @@ class TestIsKnownMasterCode:
         try로 묶으면 결손 1건의 KeyError가 4,353건 전부를 fail-open으로 만들고,
         실패는 캐시되므로 경고조차 프로세스 수명 동안 한 번만 찍힌다.
         """
-        master = tmp_path / "stocks.json"
+        master = tmp_path / "data" / "stocks.json"
+        master.parent.mkdir(parents=True)
         master.write_text(
             json.dumps(
                 [
@@ -265,7 +269,7 @@ class TestIsKnownMasterCode:
             ),
             encoding="utf-8",
         )
-        monkeypatch.setattr(stock_code, "_MASTER_STOCKS_PATH", master)
+        monkeypatch.setattr(stock_code, "_TRADING_MCP_DIR", tmp_path)
 
         with caplog.at_level(logging.WARNING, logger=stock_code.logger.name):
             # 읽어낸 항목은 정상 대조되고, 못 읽은 항목 때문에 fail-open되지 않는다.
@@ -283,12 +287,13 @@ class TestIsKnownMasterCode:
         거부한다 — 실재하는 종목까지 저장이 막히므로 fail-open보다 나쁘다.
         뮤테이션: `if not codes: raise`를 지우면 아래 True 단정이 red가 된다.
         """
-        master = tmp_path / "stocks.json"
+        master = tmp_path / "data" / "stocks.json"
+        master.parent.mkdir(parents=True)
         master.write_text(
             json.dumps({"stocks": [{"code": "005930"}]}, ensure_ascii=False),
             encoding="utf-8",
         )
-        monkeypatch.setattr(stock_code, "_MASTER_STOCKS_PATH", master)
+        monkeypatch.setattr(stock_code, "_TRADING_MCP_DIR", tmp_path)
 
         with caplog.at_level(logging.WARNING, logger=stock_code.logger.name):
             assert _is_known_master_code("005930") is True
@@ -301,9 +306,10 @@ class TestIsKnownMasterCode:
         """
         read_calls = []
         original_read_text = Path.read_text
+        expected_path = stock_code._master_stocks_path(stock_code._TRADING_MCP_DIR)
 
         def counting_read_text(self, *args, **kwargs):
-            if self == stock_code._MASTER_STOCKS_PATH:
+            if self == expected_path:
                 read_calls.append(1)
             return original_read_text(self, *args, **kwargs)
 
@@ -342,6 +348,47 @@ def test_master_stocks_path_follows_trading_mcp_dir(tmp_path):
 
     other_dir = tmp_path / "another" / "mcp-trading"
     assert _master_stocks_path(other_dir) == other_dir / "data" / "stocks.json"
+
+
+def test_master_path_wiring_follows_trading_mcp_dir_without_reload(tmp_path, monkeypatch):
+    """_master_stocks_path 자체가 아니라, 그 함수를 *실제로 소비하는* _load_master_codes가
+    하드코딩 경로 대신 _TRADING_MCP_DIR에서 파생한 경로를 읽는지를 고정한다.
+
+    위 test_master_stocks_path_follows_trading_mcp_dir는 순수 함수의 계약만 고정할 뿐,
+    소비자(_load_master_codes)가 실제로 그 함수를 _TRADING_MCP_DIR로 호출하는지는
+    별도로 확인하지 않는다 — 소비자 쪽 배선이 `Path(__file__).resolve().parents[1] /
+    "mcp-trading"`처럼 하드코딩으로 되돌아가도 순수 함수 테스트는 계속 통과한다.
+    개발 환경에서는 두 경로가 우연히 같은 값으로 계산되므로 단순 경로 비교
+    (`_MASTER_STOCKS_PATH == _master_stocks_path(_TRADING_MCP_DIR)`)로도 이 배선
+    풀림을 못 잡는다 — 실제로 마스터를 갈아끼워 다른 내용을 읽는지까지 확인해야 한다.
+
+    reload 없이 stock_code._TRADING_MCP_DIR을 직접 몽키패치하는 것만으로 검증할 수
+    있다 — _load_master_codes가 매 호출 _master_stocks_path(_TRADING_MCP_DIR)를 그
+    자리에서 계산하도록 바뀌었기 때문이다(#151 리뷰 후속). _TRADING_MCP_DIR은 평범한
+    모듈 전역이라 몽키패치가 다음 호출에 곧바로 반영된다.
+
+    뮤테이션: _load_master_codes 안의 `_master_stocks_path(_TRADING_MCP_DIR)`를
+    `_master_stocks_path(Path(__file__).resolve().parents[1] / "mcp-trading")`처럼
+    하드코딩으로 되돌리면, 아래 두 단정 모두 실제 마스터(4,353종)를 읽게 되어 red가
+    된다 — "111111"은 실제 마스터에 없고 "005930"은 실제 마스터에 있으므로.
+    """
+    mcp_dir = tmp_path / "custom-mcp"
+    (mcp_dir / "data").mkdir(parents=True)
+    (mcp_dir / "data" / "stocks.json").write_text(
+        json.dumps(
+            [{"code": "111111", "name": "가짜종목", "market": "KOSPI"}],
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(stock_code, "_TRADING_MCP_DIR", mcp_dir)
+
+    # 커스텀 경로의 마스터에만 있는 코드는 알려진 코드로 판정된다.
+    assert _is_known_master_code("111111") is True
+    # 실제 마스터(mcp-trading/data/stocks.json)에만 있는 코드는 이 커스텀 경로에
+    # 없으므로 알려지지 않은 코드로 판정된다 — 하드코딩 경로로 되돌아가면 이 코드가
+    # 실제 마스터에서 발견돼 True가 되어 버린다.
+    assert _is_known_master_code("005930") is False
 
 
 # ──────────────────────────────────────────────────────────────────────────

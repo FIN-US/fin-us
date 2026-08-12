@@ -79,7 +79,16 @@ def _master_stocks_path(mcp_dir: Path) -> Path:
     return mcp_dir / "data" / "stocks.json"
 
 
-_MASTER_STOCKS_PATH = _master_stocks_path(_TRADING_MCP_DIR)
+# 경로를 모듈 상수로 한 번만 굳히지 않는다(과거 _MASTER_STOCKS_PATH 방식) — 그러면
+# _TRADING_MCP_DIR이 나중에 바뀌어도(예: 테스트가 몽키패치) 이미 계산된 값은 따라가지
+# 않아, importlib.reload 없이는 "마스터 경로가 TRADING_MCP_DIR을 따라가는가"라는
+# 배선 자체를 테스트로 고정할 방법이 없다. 대신 _load_master_codes가 매 호출
+# _master_stocks_path(_TRADING_MCP_DIR)를 그 자리에서 계산해 쓴다 — _TRADING_MCP_DIR은
+# 평범한 모듈 전역이라 매 호출 새로 조회되므로, 테스트가 reload 없이
+# stock_code._TRADING_MCP_DIR을 직접 몽키패치하는 것만으로 이 배선을 검증할 수
+# 있다(test_master_path_wiring_follows_trading_mcp_dir_without_reload).
+# _master_stocks_path 자체는 Path 조인뿐이라 매 호출 다시 계산해도 비용이 없다 —
+# 실제 디스크 I/O는 아래 캐시가 여전히 막는다.
 
 # 마스터 로드 실패(fail-open)를 "성공했지만 빈 집합"과 구분하기 위한 센티널.
 _MASTER_LOAD_FAILED = object()
@@ -87,7 +96,13 @@ _MASTER_LOAD_FAILED = object()
 # 지연 로딩 캐시: None=아직 로드 안 함, frozenset=로드 성공, _MASTER_LOAD_FAILED=로드 실패.
 # 요청마다 489K짜리 stocks.json을 다시 파싱하면 지름길을 둔 이유(MCP 왕복 생략)가
 # 사라지므로, 프로세스 수명 동안 한 번만 읽고 캐시한다.
+# _master_codes_cache_path는 캐시가 어느 경로에서 만들어졌는지 기록한다 — 경로 계산을
+# 매 호출로 바꾸면서 함께 필요해졌다. 경로가 바뀌면(_TRADING_MCP_DIR 변경) 캐시를
+# 무효화해야 한다 — 그러지 않으면 이전 경로에서 읽은 캐시를 새 경로에도 그대로
+# 돌려줘, 테스트 간 캐시 오염이나 실제 배포에서 경로가 바뀐 뒤에도 옛 마스터를
+# 계속 쓰는 문제가 생긴다.
 _master_codes_cache: object = None
+_master_codes_cache_path: Path | None = None
 
 
 def _load_master_codes():
@@ -101,11 +116,12 @@ def _load_master_codes():
     개별 항목의 결손은 그 항목만 건너뛰고 나머지로 계속하되, 코드를 하나도
     읽지 못한 경우는 로드 실패로 취급합니다(빈 집합은 모든 코드를 거부하므로).
     """
-    global _master_codes_cache
-    if _master_codes_cache is not None:
+    global _master_codes_cache, _master_codes_cache_path
+    path = _master_stocks_path(_TRADING_MCP_DIR)
+    if _master_codes_cache is not None and _master_codes_cache_path == path:
         return _master_codes_cache
     try:
-        raw = _MASTER_STOCKS_PATH.read_text(encoding="utf-8")
+        raw = path.read_text(encoding="utf-8")
         stocks = json.loads(raw)
         # 항목 단위로 건너뛴다. 마스터는 외부 KIS 파일에서 생성되므로 code 키가 빠진
         # 항목이 섞일 수 있는데, 하나의 KeyError로 4,353건 전체 검증이 fail-open되면
@@ -125,10 +141,11 @@ def _load_master_codes():
     except Exception as exc:
         logger.warning(
             "종목마스터 로드 실패, 지름길 존재 검증을 건너뜁니다(fail-open): path=%s, error=%s",
-            _MASTER_STOCKS_PATH,
+            path,
             exc,
         )
         _master_codes_cache = _MASTER_LOAD_FAILED
+        _master_codes_cache_path = path
         return _master_codes_cache
     if len(codes) < total:
         # 캐시 때문에 이 경고는 프로세스 수명 동안 한 번만 찍힌다 — 얼마나 건졌는지를
@@ -136,11 +153,12 @@ def _load_master_codes():
         # 마스터의 코드는 유일하므로(stock-master.js Step 1의 전제) 차이는 곧 누락 건수다.
         logger.warning(
             "종목마스터 일부 항목에서 코드를 읽지 못했습니다: path=%s, %d/%d건만 사용합니다",
-            _MASTER_STOCKS_PATH,
+            path,
             len(codes),
             total,
         )
     _master_codes_cache = codes
+    _master_codes_cache_path = path
     return codes
 
 
