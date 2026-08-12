@@ -391,6 +391,47 @@ def test_master_path_wiring_follows_trading_mcp_dir_without_reload(tmp_path, mon
     assert _is_known_master_code("005930") is False
 
 
+def test_master_code_cache_invalidates_when_path_changes(tmp_path, monkeypatch):
+    """캐시가 경로별로 무효화되는지 확인한다 — _load_master_codes의
+    `if _master_codes_cache is not None and _master_codes_cache_path == path:`에서
+    `and _master_codes_cache_path == path` 절이 실제로 지키는 계약이다.
+
+    conftest.py의 autouse 픽스처(_clear_master_code_cache)가 매 테스트 시작·종료마다
+    캐시를 비우므로, 테스트 사이에는 이 절이 있으나 없으나 차이가 드러나지 않는다 —
+    이 절이 지키는 건 "한 테스트 안에서 _TRADING_MCP_DIR이 바뀌는" 경우다. 그러지
+    않으면 경로가 바뀐 뒤에도 이전 경로에서 읽은 캐시를 그대로 돌려준다.
+
+    양방향을 모두 단언한다 — 새 경로의 코드가 보이는지(A의 캐시를 그대로 썼다면
+    안 보임)와 이전 경로의 코드가 더 이상 보이지 않는지(A의 캐시를 그대로 썼다면
+    계속 보임) 중 한쪽만 확인하면 반쪽짜리 계약이 된다.
+
+    뮤테이션: `and _master_codes_cache_path == path`를 지우면(캐시 유효성 검사를
+    `_master_codes_cache is not None`만으로 완화하면) 아래 두 단정 모두 red가 된다 —
+    경로 B로 바꾼 뒤에도 경로 A에서 읽은 캐시를 그대로 반환하기 때문이다.
+    """
+    dir_a = tmp_path / "mcp-a"
+    (dir_a / "data").mkdir(parents=True)
+    (dir_a / "data" / "stocks.json").write_text(
+        json.dumps([{"code": "111111", "name": "A마스터종목", "market": "KOSPI"}], ensure_ascii=False),
+        encoding="utf-8",
+    )
+    dir_b = tmp_path / "mcp-b"
+    (dir_b / "data").mkdir(parents=True)
+    (dir_b / "data" / "stocks.json").write_text(
+        json.dumps([{"code": "222222", "name": "B마스터종목", "market": "KOSPI"}], ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(stock_code, "_TRADING_MCP_DIR", dir_a)
+    assert _is_known_master_code("111111") is True
+
+    monkeypatch.setattr(stock_code, "_TRADING_MCP_DIR", dir_b)
+    # 캐시가 무효화되지 않으면 A의 캐시(111111만 포함)를 그대로 돌려줘 False가 된다.
+    assert _is_known_master_code("222222") is True
+    # 캐시가 무효화되지 않으면 A의 캐시를 그대로 돌려줘 True가 된다.
+    assert _is_known_master_code("111111") is False
+
+
 # ──────────────────────────────────────────────────────────────────────────
 # _is_unresolved_echo — stock-master.js Step 3 미해석 에코 판정 (#151)
 # ──────────────────────────────────────────────────────────────────────────
