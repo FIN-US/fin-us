@@ -70,6 +70,11 @@ MARKET_QUOTE_CALLBACK = "market:quote"
 MARKET_TREND_CALLBACK = "market:trend"
 MARKET_STALE_CALLBACK_TEXT = "이전 조회 버튼입니다. 최신 조회 메시지에서 다시 선택하세요."
 MARKET_CALLBACK_LIMIT = 100
+# 실패한 update는 offset을 유지해 재시도한다(일시 장애 때 명령을 버리지 않기 위함).
+# 다만 결정론적으로 실패하는 update는 영원히 재시도되며 뒤의 명령까지 막으므로
+# 이 횟수를 넘기면 건너뛴다 (#241).
+MAX_UPDATE_RETRIES = 3
+UPDATE_SKIPPED_NOTICE = "요청 처리에 실패했어요. 다시 시도해주세요."
 ALERT_MODE_EMOJIS = {
     "urgent": "🚨",
     "all": "📣",
@@ -1324,6 +1329,13 @@ class TelegramCommandPoller:
             )
         self.handler = handler
         self.offset: int | None = None
+        # update_id -> 연속 실패 횟수. 폴러는 단일 인스턴스로만 돌기 때문에
+        # 인메모리 dict로 충분하다 (#241).
+        self._failure_counts: dict[int, int] = {}
+        # 재시도 대기 중인 update보다 뒤에 있어서 먼저 처리해버린 update_id.
+        # offset은 실패 지점에서 멈추므로 이 update들은 다음 폴링에 다시 배달되는데,
+        # 그대로 재실행하면 주문 같은 부수효과가 중복된다 (#241).
+        self._handled_ahead: set[int] = set()
 
     async def run(self) -> None:
         if not self.notifier.enabled:
@@ -1333,16 +1345,103 @@ class TelegramCommandPoller:
         while True:
             try:
                 updates = await self._get_updates()
-                for update in updates:
-                    update_id = update.get("update_id")
-                    await self.handler.handle_update(update)
-                    if isinstance(update_id, int):
-                        self.offset = update_id + 1
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                # getUpdates 자체의 네트워크 오류는 기존대로 5초 후 재시도한다.
                 logger.error("Telegram command polling failed: %s", exc)
                 await asyncio.sleep(5)
+                continue
+
+            # 재시도 대기 중인 update가 앞에 있으면 offset을 더 전진시킬 수 없다.
+            # 그래도 배치의 나머지 update는 계속 처리해서, poison 1건이 뒤의 명령을
+            # 통째로 막지 않게 한다 (#241).
+            blocked = False
+            for update in updates:
+                update_id = update.get("update_id")
+                if isinstance(update_id, int) and update_id in self._handled_ahead:
+                    # 이미 처리한 update의 재배달이다. 다시 실행하면 부수효과가 중복되므로
+                    # 건너뛰되, offset은 전진시켜야 여기서 다시 막히지 않는다 (#241).
+                    settled = True
+                else:
+                    settled = await self._handle_one_update(update, update_id)
+                if not settled:
+                    blocked = True
+                    continue
+                if not isinstance(update_id, int):
+                    continue
+
+                self._failure_counts.pop(update_id, None)
+                if blocked:
+                    self._handled_ahead.add(update_id)
+                else:
+                    self.offset = update_id + 1
+                    self._forget_passed_updates(self.offset)
+
+            if blocked:
+                # 실패한 update를 곧바로 다시 받아 재시도 횟수를 순식간에 소진하지 않도록
+                # 기존 폴링 실패와 같은 간격으로 쉬어 간다 (#241).
+                await asyncio.sleep(5)
+
+    async def _handle_one_update(
+        self,
+        update: dict[str, Any],
+        update_id: Any,
+    ) -> bool:
+        """update 처리를 끝냈는지(= offset을 전진시켜도 되는지) 반환한다 (#241)."""
+        try:
+            await self.handler.handle_update(update)
+            return True
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            if not isinstance(update_id, int):
+                # update_id가 없으면 재시도 횟수도 offset도 추적할 수 없다.
+                # 재시도해도 같은 자리에 멈출 뿐이라 로그만 남기고 넘어간다.
+                logger.error("Telegram update handling failed without update_id: %s", exc)
+                return True
+
+            failures = self._failure_counts.get(update_id, 0) + 1
+            self._failure_counts[update_id] = failures
+            if failures < MAX_UPDATE_RETRIES:
+                logger.error(
+                    "Telegram update %s handling failed (%s/%s): %s",
+                    update_id,
+                    failures,
+                    MAX_UPDATE_RETRIES,
+                    exc,
+                )
+                return False
+
+            logger.error(
+                "Telegram update %s skipped after %s failures: %s",
+                update_id,
+                failures,
+                exc,
+            )
+            await self._notify_update_skipped(update)
+            return True
+
+    async def _notify_update_skipped(self, update: dict[str, Any]) -> None:
+        callback_query = update.get("callback_query") or {}
+        message = update.get("message") or callback_query.get("message") or {}
+        chat_id = str((message.get("chat") or {}).get("id", "")).strip()
+        # notifier는 자기 chat에만 보낼 수 있으므로 다른 chat이면 통지할 방법이 없다.
+        if not chat_id or chat_id != self.notifier.chat_id:
+            return
+        try:
+            await self.notifier.send_text(UPDATE_SKIPPED_NOTICE)
+        except Exception as exc:
+            # 통지 실패가 폴러를 다시 막으면 안 된다 (#241).
+            logger.error("Telegram skip notice send failed: %s", exc)
+
+    def _forget_passed_updates(self, offset: int) -> None:
+        """offset이 지나간 update_id 기록을 정리해 추적 dict가 무한히 커지지 않게 한다 (#241)."""
+        for update_id in [key for key in self._failure_counts if key < offset]:
+            self._failure_counts.pop(update_id, None)
+        self._handled_ahead = {
+            update_id for update_id in self._handled_ahead if update_id >= offset
+        }
 
     async def _setup_bot_profile(self) -> None:
         load_bot_username = getattr(self.notifier, "load_bot_username", None)
