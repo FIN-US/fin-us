@@ -194,7 +194,7 @@ jobs:
           if [ -n "$SRC" ] && [ -z "$BUILD" ]; then
             echo "::error::frontend/Assets/ 를 수정했으나 frontend/Build/ 가 갱신되지 않았습니다. Unity WebGL 재빌드 후 frontend/Build/를 함께 커밋하세요 (frontend/README.md의 재빌드 규칙 참고)."
             echo "변경된 소스 파일:"
-            printf '  %s\n' $SRC
+            echo "$SRC" | sed 's/^/  /'
             exit 1
           fi
 
