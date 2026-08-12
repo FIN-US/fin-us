@@ -1951,9 +1951,39 @@ async def test_poller_keeps_offset_when_nat_response_send_fails(monkeypatch):
     assert poller.offset is None
 
 
+class FakePollerClock:
+    """폴러의 _sleep/_now만 대체해 시간 기반 재시도 예산을 결정론적으로 진행시킨다 (#241).
+
+    전역 asyncio.sleep을 패치하면 핸들러 내부의 실제 sleep(_handle_watch의 조회 간격)까지
+    가로채므로 인스턴스 수준 간접층만 건드린다 (PR #242 리뷰).
+    """
+
+    def __init__(self, *, stop_after=None):
+        self.now = 0.0
+        self.sleeps = []
+        self._stop_after = stop_after
+
+    def install(self, monkeypatch, poller):
+        monkeypatch.setattr(poller, "_sleep", self._sleep)
+        monkeypatch.setattr(poller, "_now", lambda: self.now)
+
+    async def _sleep(self, delay):
+        self.sleeps.append(delay)
+        self.now += delay
+        if self._stop_after is not None and len(self.sleeps) >= self._stop_after:
+            raise asyncio.CancelledError
+
+
+def _poison_batch():
+    return [
+        {"update_id": 41, "message": {"chat": {"id": 123}, "text": "/alerts off"}},
+        {"update_id": 42, "message": {"chat": {"id": 123}, "text": "/help"}},
+    ]
+
+
 @pytest.mark.asyncio
-async def test_poller_skips_update_after_max_retries(monkeypatch):
-    """결정론적으로 실패하는 update는 재시도 상한에서 건너뛴다 (#241)."""
+async def test_poller_skips_update_after_retry_window(monkeypatch):
+    """복구 창을 넘긴 update는 건너뛰고, 통지에 실패한 명령을 함께 알린다 (#241)."""
     notifier = FakeNotifier()
     notifier.enabled = True
     notifier.bot_token = "token"
@@ -1965,29 +1995,58 @@ async def test_poller_skips_update_after_max_retries(monkeypatch):
             raise RuntimeError("poison update")
 
     poller = TelegramCommandPoller(notifier=notifier, handler=FailingHandler())
+    clock = FakePollerClock()
+    clock.install(monkeypatch, poller)
 
     async def fake_get_updates():
         if poller.offset is not None:
             raise asyncio.CancelledError
         return [{"update_id": 41, "message": {"chat": {"id": 123}, "text": "/alerts off"}}]
 
-    sleeps = []
-
-    async def fake_sleep(delay):
-        sleeps.append(delay)
-        if len(sleeps) > telegram_commands.MAX_UPDATE_RETRIES:
-            raise pytest.fail.Exception("poller kept retrying past MAX_UPDATE_RETRIES")
-
     monkeypatch.setattr(poller, "_get_updates", fake_get_updates)
-    monkeypatch.setattr("backend.telegram_commands.asyncio.sleep", fake_sleep)
 
     with pytest.raises(asyncio.CancelledError):
         await poller.run()
 
-    assert attempts == [41] * telegram_commands.MAX_UPDATE_RETRIES
+    # 5 + 15 + 45 = 65초 > 60초 창. 예산이 실질 10초가 아니라는 회귀 가드다.
+    assert clock.sleeps == list(telegram_commands.UPDATE_RETRY_BACKOFF_SECONDS)
+    assert clock.now > telegram_commands.UPDATE_RETRY_WINDOW_SECONDS
+    assert attempts == [41, 41, 41, 41]
     assert poller.offset == 42
-    assert notifier.messages == [telegram_commands.UPDATE_SKIPPED_NOTICE]
-    assert poller._failure_counts == {}
+    assert notifier.messages == [
+        f"{telegram_commands.UPDATE_SKIPPED_NOTICE}\n실패한 요청: /alerts off"
+    ]
+    assert poller._failures == {}
+
+
+@pytest.mark.asyncio
+async def test_poller_does_not_spend_poison_budget_on_send_failures(monkeypatch):
+    """전송 실패는 전역 장애라 update별 예산으로 세지 않는다 (#241, PR #242 리뷰)."""
+    notifier = FakeNotifier()
+    notifier.enabled = True
+    notifier.bot_token = "token"
+
+    class SendFailingHandler:
+        async def handle_update(self, update):
+            raise telegram_commands.TelegramSendError("telegram send failed")
+
+    poller = TelegramCommandPoller(notifier=notifier, handler=SendFailingHandler())
+    clock = FakePollerClock(stop_after=5)
+    clock.install(monkeypatch, poller)
+
+    async def fake_get_updates():
+        return [{"update_id": 41, "message": {"chat": {"id": 123}, "text": "/alerts off"}}]
+
+    monkeypatch.setattr(poller, "_get_updates", fake_get_updates)
+
+    with pytest.raises(asyncio.CancelledError):
+        await poller.run()
+
+    # 일반 창(60초)은 이미 지났지만 전송 실패는 더 긴 창을 쓰므로 아직 폐기되지 않는다.
+    assert clock.now > telegram_commands.UPDATE_RETRY_WINDOW_SECONDS
+    assert poller.offset is None
+    assert poller._failures[41].send_failure is True
+    assert notifier.messages == []
 
 
 @pytest.mark.asyncio
@@ -2005,10 +2064,9 @@ async def test_poller_handles_later_update_when_earlier_update_is_poison(monkeyp
             handled.append(update["update_id"])
 
     poller = TelegramCommandPoller(notifier=notifier, handler=PartialHandler())
-    batch = [
-        {"update_id": 41, "message": {"chat": {"id": 123}, "text": "/alerts off"}},
-        {"update_id": 42, "message": {"chat": {"id": 123}, "text": "/help"}},
-    ]
+    clock = FakePollerClock()
+    clock.install(monkeypatch, poller)
+    batch = _poison_batch()
 
     async def fake_get_updates():
         # 실제 Telegram처럼 offset 이후의 update만 다시 배달한다.
@@ -2017,15 +2075,7 @@ async def test_poller_handles_later_update_when_earlier_update_is_poison(monkeyp
             raise asyncio.CancelledError
         return [u for u in batch if offset is None or u["update_id"] >= offset]
 
-    sleeps = []
-
-    async def fake_sleep(delay):
-        sleeps.append(delay)
-        if len(sleeps) > telegram_commands.MAX_UPDATE_RETRIES:
-            raise pytest.fail.Exception("poller kept retrying past MAX_UPDATE_RETRIES")
-
     monkeypatch.setattr(poller, "_get_updates", fake_get_updates)
-    monkeypatch.setattr("backend.telegram_commands.asyncio.sleep", fake_sleep)
 
     with pytest.raises(asyncio.CancelledError):
         await poller.run()
@@ -2034,8 +2084,11 @@ async def test_poller_handles_later_update_when_earlier_update_is_poison(monkeyp
     assert handled == [42]
     assert poller.offset == 43
     assert poller._handled_ahead == set()
-    assert poller._failure_counts == {}
-    assert notifier.messages == [telegram_commands.UPDATE_SKIPPED_NOTICE]
+    assert poller._failures == {}
+    assert clock.sleeps == list(telegram_commands.UPDATE_RETRY_BACKOFF_SECONDS)
+    assert notifier.messages == [
+        f"{telegram_commands.UPDATE_SKIPPED_NOTICE}\n실패한 요청: /alerts off"
+    ]
 
 
 @pytest.mark.asyncio
@@ -2053,38 +2106,33 @@ async def test_poller_offset_stays_behind_poison_until_retries_exhausted(monkeyp
             handled.append(update["update_id"])
 
     poller = TelegramCommandPoller(notifier=notifier, handler=PartialHandler())
-    batch = [
-        {"update_id": 41, "message": {"chat": {"id": 123}, "text": "/alerts off"}},
-        {"update_id": 42, "message": {"chat": {"id": 123}, "text": "/help"}},
-    ]
+    batch = _poison_batch()
 
     async def fake_get_updates():
         offset = poller.offset
         return [u for u in batch if offset is None or u["update_id"] >= offset]
 
-    sleeps = 0
+    class WatermarkClock(FakePollerClock):
+        async def _sleep(self, delay):
+            # 배치 처리가 끝날 때마다 물막이를 확인한다: 41이 아직 창 안이므로
+            # offset은 41을 넘어선 안 된다(넘으면 41이 조용히 버려진다).
+            assert poller.offset is None or poller.offset <= 41
+            assert poller._failures[41].attempts == len(self.sleeps) + 1
+            await super()._sleep(delay)
 
-    async def fake_sleep(delay):
-        # 배치 처리가 끝날 때마다 물막이를 확인한다: 41이 아직 상한에 못 미쳤으므로
-        # offset은 41을 넘어선 안 된다(넘으면 41이 조용히 버려진다).
-        nonlocal sleeps
-        sleeps += 1
-        assert poller.offset is None or poller.offset <= 41
-        assert poller._failure_counts == {41: sleeps}
-        if sleeps >= telegram_commands.MAX_UPDATE_RETRIES - 1:
-            raise asyncio.CancelledError
-
+    clock = WatermarkClock(stop_after=2)
+    clock.install(monkeypatch, poller)
     monkeypatch.setattr(poller, "_get_updates", fake_get_updates)
-    monkeypatch.setattr("backend.telegram_commands.asyncio.sleep", fake_sleep)
 
     with pytest.raises(asyncio.CancelledError):
         await poller.run()
 
-    # 뒤의 update는 처리됐지만(중복 없이 1회), 41은 아직 재시도 중이라 버려지지 않았다.
+    # 뒤의 update는 처리됐지만(중복 없이 1회), 41은 아직 창 안이라 버려지지 않았다.
     assert handled == [42]
     assert poller.offset is None
     assert poller._handled_ahead == {42}
-    assert poller._failure_counts == {41: telegram_commands.MAX_UPDATE_RETRIES - 1}
+    assert poller._failures[41].attempts == 2
+    assert clock.now < telegram_commands.UPDATE_RETRY_WINDOW_SECONDS
     assert notifier.messages == []
 
 
@@ -2103,6 +2151,8 @@ async def test_poller_offset_stays_behind_poison_in_out_of_order_batch(monkeypat
             handled.append(update.get("update_id"))
 
     poller = TelegramCommandPoller(notifier=notifier, handler=PartialHandler())
+    clock = FakePollerClock(stop_after=1)
+    clock.install(monkeypatch, poller)
 
     async def fake_get_updates():
         # 정렬 전 순서가 정확성을 좌우하지 않아야 하므로 일부러 뒤집어 준다.
@@ -2113,24 +2163,112 @@ async def test_poller_offset_stays_behind_poison_in_out_of_order_batch(monkeypat
             {"update_id": 41, "message": {"chat": {"id": 123}, "text": "/alerts off"}},
         ]
 
-    async def fake_sleep(delay):
-        raise asyncio.CancelledError
-
     monkeypatch.setattr(poller, "_get_updates", fake_get_updates)
-    monkeypatch.setattr("backend.telegram_commands.asyncio.sleep", fake_sleep)
 
     with pytest.raises(asyncio.CancelledError):
         await poller.run()
 
     assert poller.offset is None
-    assert poller._failure_counts == {41: 1}
+    assert set(poller._failures) == {41}
     assert poller._handled_ahead == {42}
     assert handled == [None, 42]
 
 
 @pytest.mark.asyncio
-async def test_poller_clears_failure_count_after_success(monkeypatch):
-    """일시 장애로 실패한 update가 성공하면 실패 카운터가 남지 않는다 (#241)."""
+async def test_poller_batches_skip_notice_for_multiple_poison_updates(monkeypatch):
+    """한 배치에 poison이 여럿이어도 통지는 한 건으로 합친다 (#241, PR #242 리뷰)."""
+    notifier = FakeNotifier()
+    notifier.enabled = True
+    notifier.bot_token = "token"
+
+    class FailingHandler:
+        async def handle_update(self, update):
+            raise RuntimeError("poison update")
+
+    poller = TelegramCommandPoller(notifier=notifier, handler=FailingHandler())
+    clock = FakePollerClock()
+    clock.install(monkeypatch, poller)
+    batch = _poison_batch()
+
+    async def fake_get_updates():
+        offset = poller.offset
+        if offset is not None and offset > 42:
+            raise asyncio.CancelledError
+        return [u for u in batch if offset is None or u["update_id"] >= offset]
+
+    monkeypatch.setattr(poller, "_get_updates", fake_get_updates)
+
+    with pytest.raises(asyncio.CancelledError):
+        await poller.run()
+
+    assert poller.offset == 43
+    assert notifier.messages == [
+        f"{telegram_commands.UPDATE_SKIPPED_NOTICE}\n실패한 요청: /alerts off, /help"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_poller_logs_when_skip_notice_is_not_delivered(monkeypatch, caplog):
+    """send_text는 예외 대신 False를 돌려주므로 반환값을 확인해야 한다 (PR #242 리뷰)."""
+    notifier = FakeNotifier(send_text_result=False)
+    notifier.enabled = True
+    notifier.bot_token = "token"
+
+    class FailingHandler:
+        async def handle_update(self, update):
+            raise RuntimeError("poison update")
+
+    poller = TelegramCommandPoller(notifier=notifier, handler=FailingHandler())
+    clock = FakePollerClock()
+    clock.install(monkeypatch, poller)
+
+    async def fake_get_updates():
+        if poller.offset is not None:
+            raise asyncio.CancelledError
+        return [{"update_id": 41, "message": {"chat": {"id": 123}, "text": "/alerts off"}}]
+
+    monkeypatch.setattr(poller, "_get_updates", fake_get_updates)
+
+    with pytest.raises(asyncio.CancelledError):
+        await poller.run()
+
+    assert "skip notice not delivered" in caplog.text
+    # 통지가 실패해도 폴러는 계속 전진한다.
+    assert poller.offset == 42
+
+
+@pytest.mark.asyncio
+async def test_poller_skip_notice_skipped_for_other_chat(monkeypatch):
+    """notifier는 자기 chat에만 보낼 수 있으므로 다른 chat이면 통지하지 않는다 (#241)."""
+    notifier = FakeNotifier()
+    notifier.enabled = True
+    notifier.bot_token = "token"
+
+    class FailingHandler:
+        async def handle_update(self, update):
+            raise RuntimeError("poison update")
+
+    poller = TelegramCommandPoller(notifier=notifier, handler=FailingHandler())
+    clock = FakePollerClock()
+    clock.install(monkeypatch, poller)
+
+    async def fake_get_updates():
+        if poller.offset is not None:
+            raise asyncio.CancelledError
+        return [{"update_id": 41, "message": {"chat": {"id": 999}, "text": "/alerts off"}}]
+
+    monkeypatch.setattr(poller, "_get_updates", fake_get_updates)
+
+    with pytest.raises(asyncio.CancelledError):
+        await poller.run()
+
+    assert poller.offset == 42
+    assert notifier.messages == []
+
+
+@pytest.mark.asyncio
+async def test_poller_clears_failure_state_after_success(monkeypatch):
+    """일시 장애로 실패한 update가 성공하면 재시도 예산 기록이 남지 않는다 (#241)."""
     notifier = FakeNotifier()
     notifier.enabled = True
     notifier.bot_token = "token"
@@ -2147,23 +2285,28 @@ async def test_poller_clears_failure_count_after_success(monkeypatch):
     handler = FlakyHandler()
     poller = TelegramCommandPoller(notifier=notifier, handler=handler)
 
+    class AssertingClock(FakePollerClock):
+        async def _sleep(self, delay):
+            assert poller._failures[41].attempts == 1
+            await super()._sleep(delay)
+
+    clock = AssertingClock()
+    clock.install(monkeypatch, poller)
+
     async def fake_get_updates():
         if poller.offset is not None:
             raise asyncio.CancelledError
         return [{"update_id": 41, "message": {"chat": {"id": 123}, "text": "/alerts off"}}]
 
-    async def fake_sleep(delay):
-        assert poller._failure_counts == {41: 1}
-
     monkeypatch.setattr(poller, "_get_updates", fake_get_updates)
-    monkeypatch.setattr("backend.telegram_commands.asyncio.sleep", fake_sleep)
 
     with pytest.raises(asyncio.CancelledError):
         await poller.run()
 
     assert handler.calls == 2
     assert poller.offset == 42
-    assert poller._failure_counts == {}
+    assert poller._failures == {}
+    assert clock.sleeps == [telegram_commands.UPDATE_RETRY_BACKOFF_SECONDS[0]]
     assert notifier.messages == []
 
 
