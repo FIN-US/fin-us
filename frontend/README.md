@@ -99,5 +99,11 @@ docker compose up frontend
 `.env.example` 참고). 다른 호스트(예: Tailscale 주소)로 시연할 때는 해당 오리진을
 `ALLOW_ORIGINS`에 추가하세요.
 
-현재 번들은 비압축입니다(`Build/`에 `.br`·`.gz` 산출물 없음). Unity 빌드 설정을 압축 산출물로
-바꾸면 `nginx.conf`에 `Content-Encoding` 매핑을 함께 추가해야 합니다.
+현재 번들은 비압축입니다(`Build/`에 `.br`·`.gz` 산출물 없음).
+
+압축은 텍스트 자산(`.css`, `.js`)에만 겁니다. **`.wasm`과 `.data`는 일부러 제외했습니다** —
+nginx가 동적 gzip을 걸면 `Content-Length`를 지우고 chunked로 보내는데, `Build.loader.js`가
+그 헤더로 수신 버퍼를 잡기 때문에 로딩바가 멈춘 것처럼 보입니다(PR #243 리뷰 2번).
+대신 `gzip_static on`을 켜 두었으므로, Unity 빌드 설정을 압축 산출물로 바꿔 `.gz`를 함께
+커밋하면 `Content-Length`를 유지한 채 그대로 서빙됩니다. `.br`까지 쓰려면 `Content-Encoding`
+매핑을 별도로 추가해야 합니다.

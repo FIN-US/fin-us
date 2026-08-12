@@ -141,3 +141,18 @@ jobs:
           dockerfile: ${{ matrix.dockerfile }}
           # Dockerfile 부채(#52)가 정리됐으므로 warning까지 차단해 신규 부채 유입을 막는다.
           failure-threshold: warning
+
+  # frontend/nginx.conf는 컨테이너가 뜰 때만 파싱되므로, 문법이 깨져도 PR 단계에서는
+  # 아무 잡도 실패하지 않고 docker compose up에서야 드러난다. compose가 마운트하는
+  # 것과 같은 경로에 걸어 nginx -t로 검증한다.
+  nginx-config-check:
+    name: nginx.conf 문법 검증
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: nginx -t 실행
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}/frontend/nginx.conf:/etc/nginx/conf.d/default.conf:ro" \
+            nginx:alpine nginx -t
