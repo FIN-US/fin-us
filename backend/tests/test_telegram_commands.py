@@ -2089,6 +2089,46 @@ async def test_poller_offset_stays_behind_poison_until_retries_exhausted(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_poller_offset_stays_behind_poison_in_out_of_order_batch(monkeypatch):
+    """배치가 update_id 역순으로 와도 offset은 poison을 넘지 않는다 (#241)."""
+    notifier = FakeNotifier()
+    notifier.enabled = True
+    notifier.bot_token = "token"
+    handled = []
+
+    class PartialHandler:
+        async def handle_update(self, update):
+            if update.get("update_id") == 41:
+                raise RuntimeError("poison update")
+            handled.append(update.get("update_id"))
+
+    poller = TelegramCommandPoller(notifier=notifier, handler=PartialHandler())
+
+    async def fake_get_updates():
+        # 정렬 전 순서가 정확성을 좌우하지 않아야 하므로 일부러 뒤집어 준다.
+        # update_id 없는 update도 섞어 정렬 키의 나머지 절반을 함께 태운다.
+        return [
+            {"update_id": 42, "message": {"chat": {"id": 123}, "text": "/help"}},
+            {"message": {"chat": {"id": 123}, "text": "/help"}},
+            {"update_id": 41, "message": {"chat": {"id": 123}, "text": "/alerts off"}},
+        ]
+
+    async def fake_sleep(delay):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(poller, "_get_updates", fake_get_updates)
+    monkeypatch.setattr("backend.telegram_commands.asyncio.sleep", fake_sleep)
+
+    with pytest.raises(asyncio.CancelledError):
+        await poller.run()
+
+    assert poller.offset is None
+    assert poller._failure_counts == {41: 1}
+    assert poller._handled_ahead == {42}
+    assert handled == [None, 42]
+
+
+@pytest.mark.asyncio
 async def test_poller_clears_failure_count_after_success(monkeypatch):
     """일시 장애로 실패한 update가 성공하면 실패 카운터가 남지 않는다 (#241)."""
     notifier = FakeNotifier()

@@ -1312,6 +1312,18 @@ class TelegramCommandHandler:
             yield state
 
 
+def _update_sort_key(update: dict[str, Any]) -> tuple[int, int]:
+    """update_id 오름차순 정렬 키. update_id가 없는 update는 맨 앞으로 보낸다 (#241).
+
+    update_id가 없으면 재시도 추적도 offset 전진도 불가능해 로그만 남기고 즉시 소화되므로,
+    앞에 두어도 뒤에 오는 update의 재시도 판정에 영향을 주지 않는다.
+    """
+    update_id = update.get("update_id")
+    if isinstance(update_id, int):
+        return (1, update_id)
+    return (0, 0)
+
+
 class TelegramCommandPoller:
     def __init__(
         self,
@@ -1356,9 +1368,10 @@ class TelegramCommandPoller:
             # 재시도 대기 중인 update가 앞에 있으면 offset을 더 전진시킬 수 없다.
             # 그래도 배치의 나머지 update는 계속 처리해서, poison 1건이 뒤의 명령을
             # 통째로 막지 않게 한다 (#241).
-            # getUpdates는 update_id 오름차순으로 돌려주므로, 재시도 대기 중인 update는
-            # 매 배치에서 뒤의 update보다 먼저 나온다. 즉 이 플래그는 항상 제때 켜지고
-            # offset이 미해결 update를 넘어가는 일은 없다 (#241).
+            # blocked는 미해결 update를 먼저 만난다는 전제 위에서만 offset을 지켜준다.
+            # getUpdates가 오름차순을 보장한다는 외부 전제에 정확성을 걸지 않도록
+            # 여기서 직접 정렬해 전제를 없앤다 (#241).
+            updates = sorted(updates, key=_update_sort_key)
             blocked = False
             for update in updates:
                 update_id = update.get("update_id")
