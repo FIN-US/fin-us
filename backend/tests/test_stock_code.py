@@ -4,12 +4,11 @@ _STOCK_CODE_EXTRACT_RE, _STOCK_CODE_RE / _looks_like_stock_code, _ORDERABLE_STOC
 순수 단위 테스트. 각 호출부 고유 동작(services.py의 빈 문자열 폴백,
 telegram_commands.py의 조기 거절)은 각자의 테스트 파일에 남아 있다.
 """
-import importlib
 import json
 import logging
 from pathlib import Path
 
-from backend import config, stock_code
+from backend import stock_code
 from backend.stock_code import (
     _ORDERABLE_STOCK_CODE_RE,
     _STOCK_CODE_EXTRACT_RE,
@@ -17,6 +16,7 @@ from backend.stock_code import (
     _is_known_master_code,
     _is_unresolved_echo,
     _looks_like_stock_code,
+    _master_stocks_path,
 )
 
 # 종목마스터 실제 데이터(4,353종 전수) — 판정 함수가 이름·별칭을 코드로 오인하지
@@ -320,7 +320,7 @@ class TestIsKnownMasterCode:
 # _MASTER_STOCKS_PATH — 백엔드가 읽는 마스터가 MCP가 보는 마스터와 같은가
 # ──────────────────────────────────────────────────────────────────────────
 
-def test_master_stocks_path_follows_trading_mcp_dir(tmp_path, monkeypatch):
+def test_master_stocks_path_follows_trading_mcp_dir(tmp_path):
     """마스터 경로는 백엔드가 MCP를 띄우는 디렉터리(TRADING_MCP_DIR)에서 파생돼야 한다.
 
     stock_code.py 위치에 고정하면 개발 환경에서는 두 경로가 우연히 같아 문제가
@@ -329,20 +329,19 @@ def test_master_stocks_path_follows_trading_mcp_dir(tmp_path, monkeypatch):
     레포 바깥을 가리키면 backend 쪽 경로에 파일이 없어 fail-open으로 #151 검증이
     조용히 꺼진다.
 
-    뮤테이션: `Path(__file__).resolve().parents[1] / "mcp-trading" / ...`로 되돌리면
-    이 테스트가 red가 된다.
+    파생 규칙은 _master_stocks_path 순수 함수로 뽑혀 있어(#151 리뷰), 모듈을
+    importlib.reload하지 않고도 서로 다른 mcp_dir 입력에 대해 같은 계약을 고정할 수
+    있다 — reload는 다른 테스트가 붙잡은 config/stock_code 바인딩까지 영향권이라
+    다음 사람이 테스트를 추가할 때 밟기 쉬운 지뢰였다.
+
+    뮤테이션: _master_stocks_path가 mcp_dir 인자를 무시하고 하드코딩 경로를
+    반환하면 이 테스트가 red가 된다.
     """
     mcp_dir = tmp_path / "opt" / "mcp-trading"
-    monkeypatch.setenv("TRADING_MCP_DIR", str(mcp_dir))
-    try:
-        importlib.reload(config)
-        reloaded = importlib.reload(stock_code)
-        assert reloaded._MASTER_STOCKS_PATH == mcp_dir.resolve() / "data" / "stocks.json"
-    finally:
-        # 다른 테스트가 실제 마스터를 대조하므로 환경변수와 모듈 상태를 되돌린다.
-        monkeypatch.undo()
-        importlib.reload(config)
-        importlib.reload(stock_code)
+    assert _master_stocks_path(mcp_dir) == mcp_dir / "data" / "stocks.json"
+
+    other_dir = tmp_path / "another" / "mcp-trading"
+    assert _master_stocks_path(other_dir) == other_dir / "data" / "stocks.json"
 
 
 # ──────────────────────────────────────────────────────────────────────────

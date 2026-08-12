@@ -1399,6 +1399,34 @@ async def test_buy_with_unresolved_echo_is_rejected(code):
     assert code in notifier.messages[-1]
 
 
+def test_format_order_prompt_warns_when_name_equals_code():
+    """UNRESOLVED_STOCK_WARNING 방어선이 실제로 동작하는지 포맷터 단위로 고정한다.
+
+    주문 준비 단계(_is_unresolved_echo)가 먼저 끊으므로 현재 마스터로는 이 분기에
+    도달하지 않는다(#151) — 그래도 마스터에 name == code인 항목이 생기는 경우를 대비한
+    방어선이라면 실제로 경고를 붙이는지 확인할 수 있어야 한다.
+
+    뮤테이션: telegram_commands._format_order_prompt의
+    `if order.stock_name == order.stock_code:` 분기를 제거하면 이 단정이 red가 된다.
+    """
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(notifier=notifier)
+    order = PendingOrder(
+        chat_id="123",
+        stock_name="999999",
+        stock_code="999999",
+        side="BUY",
+        quantity=10,
+        price=0,
+        created_at=datetime(2026, 5, 20, 10, 0, tzinfo=KST),
+        order_type="MARKET",
+    )
+
+    prompt = handler._format_order_prompt(order, "현재가: 74,500원", "주문가능금액: 1,000,000원")
+
+    assert UNRESOLVED_STOCK_WARNING in prompt
+
+
 @pytest.mark.asyncio
 async def test_confirm_executes_gateway_and_records_trade():
     async def mcp_runner(server_params, tool_name, arguments):

@@ -6,6 +6,7 @@ services.py와 telegram_commands.py가 각자 중복 구현하던 정규식과 �
 import json
 import logging
 import re
+from pathlib import Path
 
 from .config import _TRADING_MCP_DIR
 
@@ -70,7 +71,15 @@ _ORDERABLE_STOCK_CODE_RE = re.compile(r"\A[0-9]{6,7}\Z")
 # MCP는 이미지 안 /opt/mcp-trading). 특히 레포 바깥을 가리키면 backend 쪽 경로에
 # 파일이 없어 fail-open으로 #151 검증이 조용히 꺼진다.
 # config는 stock_code를 import하지 않으므로 순환 import는 발생하지 않는다.
-_MASTER_STOCKS_PATH = _TRADING_MCP_DIR / "data" / "stocks.json"
+#
+# 파생 규칙을 순수 함수로 뽑아둔다 — importlib.reload(config) + reload(stock_code)로
+# 이 경로 계산을 검증하면 두 모듈의 전역 바인딩을 다른 테스트가 붙잡고 있는 채로
+# 영향을 준다. 함수 대상으로 테스트하면 reload 없이 같은 계약을 고정할 수 있다.
+def _master_stocks_path(mcp_dir: Path) -> Path:
+    return mcp_dir / "data" / "stocks.json"
+
+
+_MASTER_STOCKS_PATH = _master_stocks_path(_TRADING_MCP_DIR)
 
 # 마스터 로드 실패(fail-open)를 "성공했지만 빈 집합"과 구분하기 위한 센티널.
 _MASTER_LOAD_FAILED = object()
