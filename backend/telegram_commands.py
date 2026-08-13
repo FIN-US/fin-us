@@ -31,15 +31,19 @@ from .redis_state import (
 from .services import llm_chat, run_mcp_tool
 from .watchlist_repo import SqliteWatchlistRepo
 from .telegram_notifier import TELEGRAM_ALERT_MODES, TelegramNotifier, telegram_notifier
+from .timeutil import KST
 from .trading_orders import (
-    KST,
     McpTradingOrderGateway,
     OrderType,
     PendingOrder,
     TradeRecorder,
     is_korean_market_open,
 )
-from .stock_code import _ORDERABLE_STOCK_CODE_RE, _STOCK_CODE_EXTRACT_RE
+from .stock_code import (
+    _ORDERABLE_STOCK_CODE_RE,
+    _STOCK_CODE_EXTRACT_RE,
+    _is_unresolved_echo,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -719,6 +723,18 @@ class TelegramCommandHandler:
             if stock_code is None:
                 await self._send_text_or_raise("주문 준비 실패: 종목코드를 확인할 수 없습니다.")
                 return
+            # 추출 성공 != 존재 확인. stock-master.js Step 3는 마스터에 없는 코드 형태
+            # 입력을 market="UNKNOWN"으로 그대로 에코하므로("999999 (999999, UNKNOWN)")
+            # 코드 추출은 성공하고 아래 숫자 6~7자 검사도 통과한다. 백엔드가 여기서
+            # 끊지 않으면 실재 여부 확인이 KIS 왕복이나 /confirm 시점 브로커 거절로
+            # 미뤄진다 — 리포트 저장 경로(services._resolve_stock_code)는 이미 같은
+            # 판정으로 막고 있으므로, 위험도가 더 높은 주문 경로도 같은 선에서 막는다.
+            if _is_unresolved_echo(str(resolved)):
+                await self._send_text_or_raise(
+                    f"주문 불가: {stock_name}({stock_code}) — 종목마스터에 없는 종목입니다. "
+                    "종목코드를 확인하거나 mcp-trading/data/stocks.json을 갱신하세요."
+                )
+                return
             # 추출 성공 != 주문 가능. mcp-trading/order.js의 buildCashOrderBody()가
             # 숫자 코드만 주문을 받으므로(#73에서 확정된 정책), 시세·잔고 조회와 60초
             # 대기 슬롯을 쓰기 전에 여기서 끊는다. 이 검사가 없으면 /confirm 이후에야
@@ -1124,6 +1140,9 @@ class TelegramCommandHandler:
         if balance:
             lines.append(balance)
 
+        # 미해석 에코(name == code)는 이제 주문 준비 단계에서 _is_unresolved_echo가
+        # 끊으므로 여기까지 오지 않는다(#151). 마스터에 name == code인 항목이 생기는
+        # 경우에 대비한 방어선으로만 남긴다 — 현재 마스터 4,353종에는 0건이다.
         if order.stock_name == order.stock_code:
             lines.append(UNRESOLVED_STOCK_WARNING)
 

@@ -44,10 +44,25 @@ test("resolveStock keeps alphanumeric KIS stock codes available without master e
   });
 });
 
-test("resolveStock guides users to 6~7 digit stock codes when a name is missing", () => {
+test("resolveStock guides users to 6/7/9 digit stock codes when a name is missing", () => {
   assert.throws(
     () => resolveStock("없는종목"),
-    /6~7자리 종목코드로 직접 입력/,
+    /6·7·9자리 종목코드로 직접 입력/,
+  );
+});
+
+// The ambiguity message is a sibling of the not-found message above and drifted
+// apart from it: it still said "6~7자리" after the master gained 9-char fund
+// codes. Pin both so the next length change cannot update only one of them.
+test("resolveStock guides users to 6/7/9 digit stock codes when the match is ambiguous", () => {
+  const duplicated = [
+    { code: "111111", name: "중복종목", market: "KOSPI", aliases: [] },
+    { code: "222222", name: "중복종목", market: "KOSDAQ", aliases: [] },
+  ];
+
+  assert.throws(
+    () => resolveStock("중복종목", duplicated),
+    /6·7·9자리 종목코드를 직접 입력/,
   );
 });
 

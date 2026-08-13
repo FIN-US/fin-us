@@ -1,10 +1,12 @@
+from datetime import date, timedelta
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlmodel import Session, SQLModel, create_engine
 from sqlmodel.pool import StaticPool
 
 from ..main import app, get_session
-from ..models import Diary, AgentReport, Portfolio
+from ..models import Diary, AgentReport, Portfolio, CatalystEvent
 
 # 테스트용 인메모리 SQLite 엔진 설정
 @pytest.fixture(name="session")
@@ -293,6 +295,241 @@ def test_get_trades_empty(client: TestClient):
     assert response.status_code == 200
     assert response.json()["status"] == "success"
     assert response.json()["data"] == []
+
+
+def _make_catalyst(
+    *,
+    stock_name: str,
+    event_date: date,
+    stock_code: str = "005930",
+    event_type: str = "earnings",
+    description: str = "실적 발표",
+) -> CatalystEvent:
+    return CatalystEvent(
+        stock_name=stock_name,
+        stock_code=stock_code,
+        event_type=event_type,
+        event_date=event_date,
+        description=description,
+    )
+
+
+@pytest.fixture(name="frozen_today")
+def frozen_today_fixture(monkeypatch: pytest.MonkeyPatch) -> date:
+    # 서버(backend.main.today_kst)와 테스트 픽스처가 같은 "오늘"을 보게 고정한다.
+    # 픽스처를 date.today()(테스트 실행 머신의 로컬 타임존)로 만들고 서버는
+    # today_kst()(KST)를 쓰면, 두 시계가 KST 00:00~08:59에 하루 어긋나 CI(UTC 러너)에서
+    # 픽스처가 필터에서 통째로 빠지는 회귀가 생긴다. 이 픽스처로 그 어긋남을 없앤다.
+    fixed = date(2026, 5, 20)
+    monkeypatch.setattr("backend.main.today_kst", lambda: fixed)
+    return fixed
+
+
+def test_get_catalysts_empty(client: TestClient):
+    response = client.get("/api/v1/db/catalysts")
+    assert response.status_code == 200
+    assert response.json()["status"] == "success"
+    assert response.json()["data"] == []
+
+
+def test_get_catalysts_filters_by_stock_name(client: TestClient, session: Session, frozen_today: date):
+    today = frozen_today
+    session.add(_make_catalyst(stock_name="삼성전자", event_date=today))
+    session.add(_make_catalyst(stock_name="SK하이닉스", event_date=today))
+    session.commit()
+
+    response = client.get("/api/v1/db/catalysts", params={"stock_name": "삼성전자"})
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert len(data) == 1
+    assert data[0]["stock_name"] == "삼성전자"
+
+
+def test_get_catalysts_from_date_excludes_past_events(client: TestClient, session: Session):
+    today = date.today()
+    session.add(_make_catalyst(stock_name="과거", event_date=today - timedelta(days=1)))
+    session.add(_make_catalyst(stock_name="오늘", event_date=today))
+    session.add(_make_catalyst(stock_name="미래", event_date=today + timedelta(days=1)))
+    session.commit()
+
+    response = client.get("/api/v1/db/catalysts", params={"from_date": today.isoformat()})
+    assert response.status_code == 200
+    names = [row["stock_name"] for row in response.json()["data"]]
+    assert names == ["오늘", "미래"]
+
+
+def test_get_catalysts_limit_boundary(client: TestClient, session: Session, frozen_today: date):
+    today = frozen_today
+    for i in range(5):
+        session.add(
+            _make_catalyst(
+                stock_name=f"종목{i}",
+                event_date=today + timedelta(days=i),
+            )
+        )
+    session.commit()
+
+    response = client.get("/api/v1/db/catalysts", params={"limit": 3})
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert [row["stock_name"] for row in data] == ["종목0", "종목1", "종목2"]
+
+
+def test_get_catalysts_sorted_by_event_date_ascending(client: TestClient, session: Session, frozen_today: date):
+    today = frozen_today
+    session.add(_make_catalyst(stock_name="가장늦음", event_date=today + timedelta(days=10)))
+    session.add(_make_catalyst(stock_name="가장이름", event_date=today))
+    session.add(_make_catalyst(stock_name="중간", event_date=today + timedelta(days=5)))
+    session.commit()
+
+    response = client.get("/api/v1/db/catalysts")
+    assert response.status_code == 200
+    names = [row["stock_name"] for row in response.json()["data"]]
+    assert names == ["가장이름", "중간", "가장늦음"]
+
+
+def test_get_catalysts_ties_break_by_event_type_then_id(
+    client: TestClient, session: Session, frozen_today: date
+):
+    # event_date만으로 정렬하면 같은 날짜 이벤트 간 순서가 SQL상 보장되지 않아 limit
+    # 절단이 비결정적일 수 있다. event_type 오름차순 tie-break와, event_type까지 같을 때
+    # id(삽입 순서) tie-break가 둘 다 동작하는지 확인한다.
+    today = frozen_today
+    # event_type이 다른 경우: 삽입 순서(C, A, B)를 event_type 오름차순(A, B, C)과
+    # 반대로 둬, id로만 정렬되는 경우와 구분되게 한다.
+    session.add(_make_catalyst(stock_name="C", event_date=today, event_type="c_type"))
+    session.add(_make_catalyst(stock_name="A", event_date=today, event_type="a_type"))
+    session.add(_make_catalyst(stock_name="B", event_date=today, event_type="b_type"))
+    # event_date, event_type이 모두 같은 경우: id(삽입 순서)로 tie-break되는지 확인.
+    # stock_name은 삽입 순서와 반대로 둬, id가 아닌 다른 기준으로 정렬되면 실패하게 한다.
+    session.add(_make_catalyst(stock_name="First", event_date=today, event_type="a_type"))
+    session.add(_make_catalyst(stock_name="Second", event_date=today, event_type="a_type"))
+    session.commit()
+
+    response = client.get("/api/v1/db/catalysts")
+    assert response.status_code == 200
+    names = [row["stock_name"] for row in response.json()["data"]]
+    assert names == ["A", "First", "Second", "B", "C"]
+
+
+def test_get_catalysts_order_by_includes_id_as_final_tie_break(
+    client: TestClient, session: Session, monkeypatch: pytest.MonkeyPatch
+):
+    # SQLite는 이 테이블(rowid 테이블, id가 곧 rowid)에서 물리적 저장 순서가 이미
+    # id 오름차순이고 정렬기도 안정적이라, id를 order_by에서 빼도 지금 규모의 인메모리
+    # 테스트 데이터로는 "우연히" 같은 결과가 나와 동작 테스트로는 그 뮤테이션을 잡지
+    # 못한다(위 tie-break 테스트가 실제로 보여준 한계). 그래서 실행 결과 대신 쿼리가
+    # id까지 명시적으로 order_by에 넣도록 "요청"하는지를 화이트박스로 고정한다 —
+    # 우연한 안정성이 아니라 계약으로 결정성을 보장한다.
+    captured_sql: list[str] = []
+    original_exec = session.exec
+
+    def spy_exec(statement, *args, **kwargs):
+        captured_sql.append(str(statement))
+        return original_exec(statement, *args, **kwargs)
+
+    monkeypatch.setattr(session, "exec", spy_exec)
+
+    response = client.get("/api/v1/db/catalysts")
+    assert response.status_code == 200
+    assert captured_sql, "session.exec가 호출되지 않았다"
+
+    sql = captured_sql[0]
+    # ORDER BY가 통째로 사라진 뮤턴트에서는 split이 IndexError로 죽어 red의 원인이
+    # 드러나지 않는다. 먼저 단언해 실패 메시지에 실제 SQL이 남게 한다.
+    assert "ORDER BY" in sql, f"ORDER BY 절이 없다: {sql}"
+    order_by_clause = sql.split("ORDER BY", 1)[1]
+    assert "catalystevent.event_date" in order_by_clause
+    assert "catalystevent.event_type" in order_by_clause
+    assert "catalystevent.id" in order_by_clause
+    # id가 마지막 tie-break여야 한다: event_type보다 뒤에 나와야 한다.
+    assert order_by_clause.index("catalystevent.event_type") < order_by_clause.index(
+        "catalystevent.id"
+    )
+
+
+def test_get_catalysts_defaults_to_today_excluding_past(
+    client: TestClient, session: Session, monkeypatch: pytest.MonkeyPatch
+):
+    # from_date를 생략했을 때의 기본값(KST 기준 오늘)을 고정한다. 위 from_date 테스트는
+    # 값을 명시해서 호출하므로 기본값이 date.min 등으로 바뀌어도 통과한다 — 지난 촉매가
+    # 시간 링에 섞여 들어오는 회귀를 이 테스트가 잡는다.
+    #
+    # today_kst()를 고정값으로 monkeypatch한다: 서버가 date.today()(로컬 타임존)로
+    # 되돌아가도 이 테스트를 실행하는 개발자 머신이 KST라면 우연히 통과해버려
+    # 회귀를 못 잡는다. 고정 날짜로 기대값과 서버 계산을 분리해야 그 회귀가 드러난다.
+    fixed = date(2026, 5, 20)
+    monkeypatch.setattr("backend.main.today_kst", lambda: fixed)
+    session.add(_make_catalyst(stock_name="지난주", event_date=fixed - timedelta(days=7)))
+    session.add(_make_catalyst(stock_name="오늘", event_date=fixed))
+    session.commit()
+
+    response = client.get("/api/v1/db/catalysts")
+    assert response.status_code == 200
+    names = [row["stock_name"] for row in response.json()["data"]]
+    assert names == ["오늘"]
+
+
+@pytest.mark.parametrize("limit", [0, 501])
+def test_get_catalysts_rejects_out_of_range_limit(client: TestClient, limit: int):
+    response = client.get("/api/v1/db/catalysts", params={"limit": limit})
+    assert response.status_code == 422
+
+
+def test_get_catalysts_rejects_empty_stock_name(client: TestClient):
+    # 빈 문자열은 "필터 없음"이 아니라 "빈 종목명" 필터로 잘못 해석되어 항상 0건을
+    # 반환할 수 있다. 프론트가 "필터 없음"을 빈 문자열로 보내는 실수를 422로 조기에
+    # 드러낸다.
+    response = client.get("/api/v1/db/catalysts", params={"stock_name": ""})
+    assert response.status_code == 422
+
+
+def test_get_catalysts_not_truncated_when_within_limit(
+    client: TestClient, session: Session, frozen_today: date
+):
+    today = frozen_today
+    session.add(_make_catalyst(stock_name="종목0", event_date=today))
+    session.commit()
+
+    response = client.get("/api/v1/db/catalysts", params={"limit": 3})
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["data"]) == 1
+    assert body["message"] is None
+
+
+def test_get_catalysts_signals_truncation_when_over_limit(
+    client: TestClient, session: Session, frozen_today: date
+):
+    today = frozen_today
+    for i in range(4):
+        session.add(_make_catalyst(stock_name=f"종목{i}", event_date=today + timedelta(days=i)))
+    session.commit()
+
+    response = client.get("/api/v1/db/catalysts", params={"limit": 3})
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["data"]) == 3
+    assert body["message"] == "truncated"
+
+
+def test_get_catalysts_not_truncated_at_exact_limit(
+    client: TestClient, session: Session, frozen_today: date
+):
+    # 정확히 limit개일 때가 유일하게 애매한 경계다. 위 두 테스트는 각각 경계에서
+    # 2 모자라고 1 넘어서 비켜 가므로, len(rows) > limit을 >= 로 바꾼 오프바이원
+    # 뮤턴트가 둘 다 통과한다. 이 경계가 깨지면 이벤트가 정확히 limit개일 때 프론트가
+    # "더 있음"으로 오해해 없는 다음 페이지를 그린다 — 데이터는 멀쩡한데 UI만 틀린다.
+    today = frozen_today
+    for i in range(3):
+        session.add(_make_catalyst(stock_name=f"종목{i}", event_date=today + timedelta(days=i)))
+    session.commit()
+
+    response = client.get("/api/v1/db/catalysts", params={"limit": 3})
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["data"]) == 3
+    assert body["message"] is None
 
 
 @pytest.mark.asyncio

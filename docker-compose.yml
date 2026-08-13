@@ -1,18 +1,15 @@
 services:
+  # Unity WebGL 빌드(frontend/Build)를 정적 서빙한다. file://로는 로더가 동작하지 않아
+  # HTTP 서빙이 필수다(frontend/README.md 참고). 정적 파일만 내보내므로 backend에
+  # 의존하지 않는다 — 브라우저가 8000번의 backend를 따로 직접 호출한다.
   frontend:
-    build:
-      context: ./frontend-react
+    image: nginx:alpine
     ports:
-      - "5173:5173"
+      - "8080:80"
     volumes:
-      - ./frontend-react:/app
-      - /app/node_modules
-    environment:
-      - VITE_API_BASE_URL=http://localhost:8000/api/v1
-      - VITE_BACKEND_TARGET=http://backend:8000
-    depends_on:
-      backend:
-        condition: service_healthy
+      # 번들은 호스트의 Unity 빌드 산출물이 원본이므로 컨테이너에서는 읽기 전용으로만 쓴다.
+      - ./frontend/Build:/usr/share/nginx/html:ro
+      - ./frontend/nginx.conf:/etc/nginx/conf.d/default.conf:ro
     networks:
       - fin-us-network
 

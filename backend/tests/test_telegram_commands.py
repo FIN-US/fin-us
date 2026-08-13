@@ -1360,18 +1360,28 @@ async def test_buy_with_stock_code_resolves_name_and_shows_no_warning():
     assert UNRESOLVED_STOCK_WARNING not in notifier.messages[-1]
 
 
+@pytest.mark.parametrize("code", ["999999", "ZZZZ99", "Q999999"])
 @pytest.mark.asyncio
-async def test_buy_with_unregistered_code_shows_unresolved_warning():
-    """미등록 코드는 이름=코드로 echo되므로 미해석 경고가 붙는다."""
+async def test_buy_with_unresolved_echo_is_rejected(code):
+    """마스터에 없는 코드 형태 입력은 주문 준비 단계에서 끊는다 (#151).
+
+    stock-master.js Step 3는 이런 입력을 market="UNKNOWN"으로 그대로 에코하므로
+    코드 추출은 성공하고 숫자 6~7자 검사(999999)도 통과한다. 백엔드에 이 가드가
+    없으면 실재 확인이 KIS 왕복(get_stock_quote)이나 /confirm 시점 브로커 거절로
+    미뤄진다 — 리포트 저장 경로는 이미 같은 판정으로 막고 있는데 위험도가 더 높은
+    주문 경로만 통과하던 비대칭을 없앤다.
+
+    뮤테이션: _is_unresolved_echo 가드를 지우면 999999가 대기 주문으로 등록돼 red가
+    된다(ZZZZ99·Q999999는 영숫자라 _ORDERABLE_STOCK_CODE_RE가 뒤에서 잡지만, 거절
+    사유가 "ETN·펀드"로 바뀌므로 메시지 단정에서 red가 된다).
+    """
 
     async def mcp_runner(server_params, tool_name, arguments):
         if tool_name == "resolve_stock_code":
-            return "123456 (123456, UNKNOWN)"
-        if tool_name == "get_stock_quote":
-            return "현재가: 0원"
-        if tool_name == "get_balance":
-            return "주문가능금액: 1,000,000원"
-        raise AssertionError(f"unexpected tool: {tool_name}")
+            return f"{code} ({code}, UNKNOWN)"
+        raise AssertionError(
+            f"미해석 에코는 시세·잔고 조회 전에 끊어야 한다: {tool_name}"
+        )
 
     notifier = FakeNotifier()
     handler = TelegramCommandHandler(
@@ -1381,12 +1391,40 @@ async def test_buy_with_unregistered_code_shows_unresolved_warning():
     )
 
     await handler.handle_update(
-        {"message": {"chat": {"id": 123}, "text": "/buy 123456 10"}}
+        {"message": {"chat": {"id": 123}, "text": f"/buy {code} 10"}}
     )
 
-    assert handler.pending_orders["123"].stock_name == "123456"
-    assert handler.pending_orders["123"].stock_code == "123456"
-    assert UNRESOLVED_STOCK_WARNING in notifier.messages[-1]
+    assert handler.pending_orders == {}
+    assert "종목마스터에 없는 종목입니다" in notifier.messages[-1]
+    assert code in notifier.messages[-1]
+
+
+def test_format_order_prompt_warns_when_name_equals_code():
+    """UNRESOLVED_STOCK_WARNING 방어선이 실제로 동작하는지 포맷터 단위로 고정한다.
+
+    주문 준비 단계(_is_unresolved_echo)가 먼저 끊으므로 현재 마스터로는 이 분기에
+    도달하지 않는다(#151) — 그래도 마스터에 name == code인 항목이 생기는 경우를 대비한
+    방어선이라면 실제로 경고를 붙이는지 확인할 수 있어야 한다.
+
+    뮤테이션: telegram_commands._format_order_prompt의
+    `if order.stock_name == order.stock_code:` 분기를 제거하면 이 단정이 red가 된다.
+    """
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(notifier=notifier)
+    order = PendingOrder(
+        chat_id="123",
+        stock_name="999999",
+        stock_code="999999",
+        side="BUY",
+        quantity=10,
+        price=0,
+        created_at=datetime(2026, 5, 20, 10, 0, tzinfo=KST),
+        order_type="MARKET",
+    )
+
+    prompt = handler._format_order_prompt(order, "현재가: 74,500원", "주문가능금액: 1,000,000원")
+
+    assert UNRESOLVED_STOCK_WARNING in prompt
 
 
 @pytest.mark.asyncio

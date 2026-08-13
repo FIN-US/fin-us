@@ -40,8 +40,6 @@ _rm_if_exists() {
   fi
 }
 
-_rm_if_exists "${ROOT}/frontend-react/node_modules"
-_rm_if_exists "${ROOT}/frontend-react/dist"
 _rm_if_exists "${ROOT}/mcp-news/node_modules"
 _rm_if_exists "${ROOT}/mcp-trading/node_modules"
 _rm_if_exists "${ROOT}/backend/venv"

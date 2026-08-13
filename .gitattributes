@@ -1,2 +1,4 @@
 /.gitattributes text eol=lf
 *.sh text eol=lf
+# 리눅스 컨테이너(nginx:alpine)로 마운트되는 설정이라 CRLF로 체크아웃되지 않도록 고정한다.
+/frontend/nginx.conf text eol=lf

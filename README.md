@@ -64,8 +64,10 @@ Fin-Us는 단일 모델이 모든 일을 처리하지 않고, 역할이 분리�
     - **News Provider (`mcp-news/`)**: 네이버 뉴스 검색 API 기반 최신 뉴스 공급.
     - **Trading Provider (`mcp-trading/`)**: 한국투자증권 Open API 기반 정형 금융 데이터 공급 및 명령 집행.
     - **Disclosure Provider (`mcp-dart/`)**: OpenDART 공식 API 기반 5% 룰·임원/주요주주 지분공시 signal 및 실적 리포트 공급.
-4.  **Presentation Layer (`frontend-react/`)**: React (TypeScript)
-    - 실시간 투자 신호 및 분석 리포트를 시각화하여 사용자에게 제공합니다.
+4.  **Presentation Layer (`frontend/`)**: Unity WebGL + Telegram Bot
+    - Unity WebGL 대시보드가 포트폴리오 구성과 분석 결과를 시각화합니다. 빌드 산출물(`frontend/Build/`)은
+      Docker Compose의 `frontend`(nginx) 서비스가 정적 서빙합니다.
+    - 매매 확인·신호 알림 등 대화형 인터페이스는 Telegram Bot이 담당합니다.
 
 <a id="install" name="install"></a>
 
@@ -165,9 +167,13 @@ bash scripts/check_env.sh
 uv sync --project backend
 uv run --project backend uvicorn backend.main:app --host 0.0.0.0 --port 8000
 
-# 3. Frontend 실행
-cd frontend-react && npm ci && npm run dev
+# 3. Frontend(Unity WebGL 번들) 실행
+# file://로 직접 열면 로더가 동작하지 않으므로 반드시 HTTP로 서빙합니다.
+python -m http.server 8080 --directory frontend/Build
 ```
+
+> Docker Compose를 쓰면 `frontend` 서비스(nginx)가 같은 일을 대신합니다. 자세한 내용은
+> [`frontend/README.md`](frontend/README.md)를 참고하세요.
 
 <a id="docker" name="docker"></a>
 
@@ -188,7 +194,7 @@ bash scripts/run_stack.sh
 
 | 서비스 | 포트 | 역할 |
 | :--- | :--- | :--- |
-| `frontend` | 5173 | 웹 대시보드 |
+| `frontend` | 8080 | Unity WebGL 대시보드 (nginx 정적 서빙) |
 | `backend` | 8000 | API·스케줄러·텔레그램 봇 |
 | `finus-nat` | 8001 | 멀티 에이전트 엔진 |
 | `redis` | 6379 | 신호 중복 방지 캐시 |
@@ -319,6 +325,7 @@ Backend 스케줄러는 매 거래일 오전 8시 30분에 Telegram 모닝 브�
 `/earnings`는 OpenDART 실적 데이터와 Naver 뉴스를 NAT News Analyst에 전달합니다. OpenDART가 제공하지 않는 컨센서스/시장 기대치 데이터는 추정하지 않고 데이터 없음으로 표시합니다. Telegram 응답은 Markdown이 아닌 일반 텍스트이며 첫 줄에 `🟢 호재`, `🔴 악재`, `⚪ 중립` 판정을 표시합니다.
 
 `/visualize`는 홈서버나 Tailscale 시연 환경에서 접근 가능한 Unity WebGL URL을 그대로 안내합니다. 예: `VISUALIZATION_URL=http://100.x.y.z:8080/`
+이 주소는 Docker Compose의 `frontend`(nginx) 서비스가 서빙하는 8080 포트를 가리킵니다. 로컬에서 확인할 때는 `http://localhost:8080/`입니다.
 
 **매매**
 
@@ -462,10 +469,9 @@ docker compose logs -f finus-nat     # 실제 실패 원인 확인
 
 ![Python](https://img.shields.io/badge/Python-3.13-3776AB?logo=python&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.136-009688?logo=fastapi&logoColor=white)
-![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=20232A)
-![TypeScript](https://img.shields.io/badge/TypeScript-6-3178C6?logo=typescript&logoColor=white)
-![Vite](https://img.shields.io/badge/Vite-8-646CFF?logo=vite&logoColor=white)
+![Unity](https://img.shields.io/badge/Unity-WebGL-000000?logo=unity&logoColor=white)
 ![Node.js](https://img.shields.io/badge/Node.js-24-5FA04E?logo=nodedotjs&logoColor=white)
+![nginx](https://img.shields.io/badge/nginx-alpine-009639?logo=nginx&logoColor=white)
 ![MCP](https://img.shields.io/badge/MCP-1.29-000000)
 ![Redis](https://img.shields.io/badge/Redis-7-DC382D?logo=redis&logoColor=white)
 ![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)

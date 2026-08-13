@@ -1,6 +1,7 @@
 import os
 import logging
 from contextlib import asynccontextmanager
+from datetime import date
 from fastapi import FastAPI, Query, Depends, WebSocket, WebSocketDisconnect, Body
 from fastapi.middleware.cors import CORSMiddleware
 from sqlmodel import Session, select
@@ -18,7 +19,8 @@ from .services import (
     perform_stock_analysis
 )
 from .database import init_db, get_session
-from .models import Portfolio, TradeHistory, AgentReport, Diary
+from .models import Portfolio, TradeHistory, AgentReport, Diary, CatalystEvent
+from .timeutil import today_kst
 
 # 로깅 설정: 모든 모듈의 로그를 터미널에 출력하도록 설정
 logging.basicConfig(
@@ -221,6 +223,44 @@ async def get_db_diary(session: Session = Depends(get_session)):
     """저장된 투자 일지 목록을 조회합니다."""
     diaries = session.exec(select(Diary).order_by(Diary.created_at.desc())).all()
     return {"status": "success", "data": diaries}
+
+
+@app.get("/api/v1/db/catalysts", response_model=CommonResponse, tags=["Database"])
+async def get_db_catalysts(
+    stock_name: str | None = Query(None, min_length=1, description="종목명 정확 일치 필터. 생략 시 전체 종목 조회."),
+    # default_factory에 today_kst를 직접 넘기면 라우트 등록 시점의 함수 객체가
+    # 고정돼 테스트에서 backend.main.today_kst를 monkeypatch해도 반영되지 않는다.
+    # 람다로 감싸 요청마다 모듈 전역의 today_kst를 다시 조회하도록 한다.
+    from_date: date = Query(default_factory=lambda: today_kst(), description="이 날짜 이후(포함) 이벤트만 조회. 생략 시 KST 기준 오늘."),
+    # 이슈 #228: 프론트 시간 링(캘린더 시각화)이 한 번에 그릴 이벤트 수를 과도하게
+    # 받아 렌더링이 느려지는 것을 막기 위한 상한(500). 1건도 없이 호출되는 것을
+    # 막기 위한 하한(1). 기본값 100은 기존 catalyst_repo.list_upcoming의 기본값(20)보다
+    # 넉넉하게 잡아 여러 종목을 한 번에 다루는 전체 조회 용도에 맞춘다.
+    limit: int = Query(100, ge=1, le=500, description="결과 상한 (1~500, 기본 100)."),
+    session: Session = Depends(get_session),
+):
+    """저장된 촉매 이벤트(실적/배당/공시/주총 등)를 조회합니다."""
+    # catalyst_repo.SqliteCatalystEventRepo.list_upcoming은 stock_name이 필수 인자라
+    # 전체 종목 조회에 쓸 수 없다. 기존 /api/v1/db/* 4종과 동일하게 이 라우트에서
+    # session.exec(select(...))를 직접 실행한다(catalyst_repo.py는 수정하지 않는다).
+    query = select(CatalystEvent).where(CatalystEvent.event_date >= from_date)
+    if stock_name is not None:
+        query = query.where(CatalystEvent.stock_name == stock_name)
+    # event_date만으로는 동일 날짜 이벤트 간 순서가 SQL상 보장되지 않아 limit 절단이
+    # 비결정적일 수 있다. event_type, id까지 더해 완전히 결정적으로 정렬한다.
+    query = query.order_by(
+        CatalystEvent.event_date,
+        CatalystEvent.event_type,
+        CatalystEvent.id,
+    ).limit(limit + 1)
+
+    rows = session.exec(query).all()
+    truncated = len(rows) > limit
+    return {
+        "status": "success",
+        "data": rows[:limit],
+        "message": "truncated" if truncated else None,
+    }
 
 
 @app.post("/api/v1/db/diary", response_model=CommonResponse, tags=["Database"])
