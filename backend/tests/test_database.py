@@ -569,15 +569,43 @@ def test_get_catalysts_from_date_equals_to_date_single_day(
 def test_get_catalysts_rejects_to_date_before_from_date(
     client: TestClient, session: Session, frozen_today: date
 ):
+    # status_code == 422만 확인하면 부족하다: (1) detail을 평문 문자열로 바꿔도
+    # 여전히 422라 통과하고 — "이벤트 없음"과 "파라미터 오류"를 구분하려는 이 422의
+    # 근거 자체(구조화된 detail)가 무방비가 된다. (2) 같은 엔드포인트에
+    # min_length=1/ge=1/le=500 등 FastAPI 자체 검증도 422를 내므로, 우리 검사를
+    # 지우고 다른 경로로 422가 나도 구분하지 못한다. detail 내용까지 확인해 두 경우
+    # 모두 잡는다.
+    # 뮤테이션: detail을 평문 문자열(예: detail="...")로 바꾸면 이 단언이 red가 된다.
     today = frozen_today
+    to_date = today - timedelta(days=1)
     response = client.get(
         "/api/v1/db/catalysts",
         params={
             "from_date": today.isoformat(),
-            "to_date": (today - timedelta(days=1)).isoformat(),
+            "to_date": to_date.isoformat(),
         },
     )
     assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert isinstance(detail, dict)
+    assert detail["from_date"] == today.isoformat()
+    assert detail["to_date"] == to_date.isoformat()
+
+
+def test_get_catalysts_fastapi_native_422_has_different_detail_shape(
+    client: TestClient,
+):
+    # to_date < from_date 검사와 FastAPI 자체 검증(예: stock_name의 min_length=1)이
+    # 둘 다 422를 내지만 detail 형태가 달라야 한다. 위 테스트가 detail 내용만 보고
+    # "우리 검사가 통과했다"고 착각하지 않도록, FastAPI 자체 422는 우리 detail 구조
+    # (from_date/to_date 키를 가진 dict)를 갖지 않음을 실측으로 고정한다.
+    response = client.get("/api/v1/db/catalysts", params={"stock_name": ""})
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    # FastAPI 자체 검증 오류는 dict가 아니라 list(각 원소가 loc/msg/type을 담은 dict)다.
+    assert isinstance(detail, list)
+    for error in detail:
+        assert not ({"from_date", "to_date"} <= set(error.keys()))
 
 
 def test_get_catalysts_truncated_within_to_date_range(
