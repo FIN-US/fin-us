@@ -2,7 +2,10 @@ import asyncio
 import logging
 import re
 import secrets
+import time
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from enum import Enum
 from datetime import datetime, timedelta
 from typing import Any, Callable
 from urllib.parse import quote as _url_quote
@@ -74,6 +77,46 @@ MARKET_QUOTE_CALLBACK = "market:quote"
 MARKET_TREND_CALLBACK = "market:trend"
 MARKET_STALE_CALLBACK_TEXT = "이전 조회 버튼입니다. 최신 조회 메시지에서 다시 선택하세요."
 MARKET_CALLBACK_LIMIT = 100
+# 실패한 update는 offset을 유지해 재시도한다(일시 장애 때 명령을 버리지 않기 위함).
+# 다만 결정론적으로 실패하는 update는 영원히 재시도되며 뒤의 명령까지 막으므로
+# 예산을 넘기면 건너뛴다 (#241).
+#
+# 예산은 "횟수"가 아니라 "시간"이다. 고정 5초 × 3회는 실질 10초여서 redis 재시작·컨테이너
+# 재기동·배포 어느 것도 버티지 못한다 — 일시 장애에 명령을 버리지 않겠다는 원래 목적을
+# 달성하지 못한다 (PR #242 리뷰).
+UPDATE_RETRY_WINDOW_SECONDS = 60.0
+# 전송 실패는 그 update의 문제가 아니라 전역 장애(429 rate limit·5xx)다. 같은 예산을 쓰면
+# 429 몇 초 때문에 대기 중인 명령이 전부 폐기되는데, 폐기 통지도 같은 이유로 실패해
+# 사용자는 아무것도 못 받는다. 기존 동작(막히더라도 복구되면 전부 실행) 대비 회귀이므로
+# 전송 실패에는 훨씬 긴 창을 준다 (PR #242 리뷰).
+#
+# 이 값은 무한정 키우면 안 된다. handle_update가 던지는 지배적 경로가 전송 실패라서,
+# 영구적 전송 실패(특정 메시지의 Markdown 파싱 400)가 하나 들어오면 offset이 이 시간만큼
+# 얼어붙어 #241이 그대로 재발한다. 상한이 있다는 사실 자체를 테스트가 고정한다
+# (test_poller_eventually_skips_persistent_send_failures).
+SEND_FAILURE_RETRY_WINDOW_SECONDS = 300.0
+# 재시도 간격. 실패가 이어지면 폴링을 늦춰 텔레그램 rate limit을 자극하지 않는다.
+# 폴러는 단일 인스턴스라 동시 기상이 겹칠 일이 없어 jitter는 두지 않았다.
+#
+# 위 두 창과 맞물려 실제 예산은 이렇게 정해진다 (PR #242 리뷰):
+#   일반 실패   t=0, 5, 20, 65  → 4시도 / 65초 후 폐기
+#   전송 실패   t=0, 5, 20, 65, 110 … 335 → 10시도 / 335초 후 폐기 (마지막 간격 45초 반복)
+UPDATE_RETRY_BACKOFF_SECONDS = (5.0, 15.0, 45.0)
+UPDATE_SKIPPED_NOTICE = "요청 처리에 실패했어요. 다시 시도해주세요."
+# 통지에 붙일 실패 명령 요약의 최대 길이. 명령을 연달아 보낸 사용자가 무엇을 다시
+# 보내야 하는지 알 수 있어야 한다 (PR #242 리뷰).
+UPDATE_LABEL_LIMIT = 40
+
+
+class TelegramSendError(RuntimeError):
+    """텔레그램 전송 실패. handle_update가 던지는 예외 중 유일하게 update와 무관하다.
+
+    MCP·redis·저장소 오류는 전부 사용자 메시지로 변환되므로, handle_update가 실제로
+    던지는 지배적 경로는 전송 실패다. 이걸 update별 poison으로 세면 429 한 번에
+    대기 중인 명령이 전부 폐기되므로 폴러가 별도 예산으로 다뤄야 한다 (PR #242 리뷰).
+    """
+
+
 ALERT_MODE_EMOJIS = {
     "urgent": "🚨",
     "all": "📣",
@@ -330,7 +373,7 @@ class TelegramCommandHandler:
     ) -> None:
         sent = await self.notifier.send_text(text, reply_markup=reply_markup)
         if sent is False:
-            raise RuntimeError("telegram send failed")
+            raise TelegramSendError("telegram send failed")
 
     async def _handle_callback_query(self, callback_query: dict[str, Any]) -> None:
         message = callback_query.get("message") or {}
@@ -1326,6 +1369,62 @@ class TelegramCommandHandler:
             yield state
 
 
+def _update_sort_key(update: dict[str, Any]) -> tuple[int, int]:
+    """update_id 오름차순 정렬 키. update_id가 없는 update는 맨 앞으로 보낸다 (#241).
+
+    update_id가 없는 update는 재시도 예산도 offset도 추적할 수 없어 실패해도 그 자리에서
+    끝난다(= blocked를 만들지 않는다). 그래서 앞에 두어도 뒤에 오는 update의 재시도 판정에
+    영향을 주지 않는다. 다만 offset이 그걸 지나갈 수 없어 재배달될 때마다 다시 실행되고,
+    blocked가 아니라 sleep도 없으므로 getUpdates busy loop가 된다. 실제 Telegram은 항상
+    update_id를 주므로 이론적 경로다 (PR #242 리뷰).
+    """
+    update_id = update.get("update_id")
+    if isinstance(update_id, int):
+        return (1, update_id)
+    return (0, 0)
+
+
+class _UpdateOutcome(Enum):
+    """_handle_one_update의 결과 (#241).
+
+    offset을 전진시켜도 되는지(DONE/SKIPPED)와 스킵 통지가 필요한지(SKIPPED)를 한 값으로
+    구분한다. 평문 str이면 오타가 조용히 통과하므로 Enum으로 강제한다 (PR #242 리뷰).
+    """
+
+    DONE = "done"
+    RETRY = "retry"
+    SKIPPED = "skipped"
+
+
+def _update_chat_id(update: dict[str, Any]) -> str:
+    callback_query = update.get("callback_query") or {}
+    message = update.get("message") or callback_query.get("message") or {}
+    return str((message.get("chat") or {}).get("id", "")).strip()
+
+
+def _update_label(update: dict[str, Any]) -> str:
+    """실패 통지에 붙일 요약. 사용자가 무엇을 다시 보내야 하는지 알 수 있게 한다 (#241)."""
+    callback_query = update.get("callback_query") or {}
+    message = update.get("message") or callback_query.get("message") or {}
+    text = (message.get("text") or "").strip()
+    if not text:
+        text = str(callback_query.get("data") or "").strip()
+    if not text:
+        return f"update {update.get('update_id')}"
+    if len(text) > UPDATE_LABEL_LIMIT:
+        return text[:UPDATE_LABEL_LIMIT] + "…"
+    return text
+
+
+@dataclass
+class _UpdateFailure:
+    """update별 재시도 예산. 기준은 횟수가 아니라 첫 실패 이후 흐른 시간이다 (#241)."""
+
+    first_at: float
+    attempts: int
+    send_failure: bool
+
+
 class TelegramCommandPoller:
     def __init__(
         self,
@@ -1343,6 +1442,24 @@ class TelegramCommandPoller:
             )
         self.handler = handler
         self.offset: int | None = None
+        # update_id -> 재시도 예산. 폴러는 단일 인스턴스로만 돌기 때문에 인메모리로 충분하다 (#241).
+        self._failures: dict[int, _UpdateFailure] = {}
+        # 재시도 대기 중인 update보다 뒤에 있어서 먼저 처리해버린 update_id.
+        # offset은 실패 지점에서 멈추므로 이 update들은 다음 폴링에 다시 배달되는데,
+        # 그대로 재실행하면 주문 같은 부수효과가 중복된다 (#241).
+        #
+        # 주의: offset과 이 집합이 둘 다 인메모리라, blocked 구간에 프로세스가 죽으면
+        # 여기 기록된 update들은 "실행됐지만 서버에 미확정" 상태로 남아 재시작 후 재실행된다.
+        # origin/main은 poison에서 배치를 통째로 중단해 이 창이 없었으므로 이 PR이 새로
+        # 들이는 리스크다. 금전 경로는 별도로 막혀 있지만(/confirm은 GETDEL claim,
+        # /buy는 set_if_absent) LLM 재호출·중복 메시지는 발생한다. 근본 해결은 offset을
+        # redis에 영속화하는 것이고 별도 이슈로 다룬다 (PR #242 리뷰).
+        #
+        # 창의 길이는 재시도 예산과 같다: 일반 실패 65초, 전송 실패 335초.
+        # 시간 기반 예산으로 바꾸면서 기존 10초(고정 5초 × 3회)보다 크게 넓어졌고,
+        # 429와 재시작은 "배포"라는 공통 원인으로 상관관계가 있어 동시에 발생할 수 있다.
+        # 영속화 이슈의 우선순위를 매길 때 이 수치가 근거가 된다 (PR #242 리뷰).
+        self._handled_ahead: set[int] = set()
 
     async def run(self) -> None:
         if not self.notifier.enabled:
@@ -1352,16 +1469,181 @@ class TelegramCommandPoller:
         while True:
             try:
                 updates = await self._get_updates()
-                for update in updates:
-                    update_id = update.get("update_id")
-                    await self.handler.handle_update(update)
-                    if isinstance(update_id, int):
-                        self.offset = update_id + 1
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                # getUpdates 자체의 네트워크 오류는 기존대로 5초 후 재시도한다.
                 logger.error("Telegram command polling failed: %s", exc)
-                await asyncio.sleep(5)
+                await self._sleep(UPDATE_RETRY_BACKOFF_SECONDS[0])
+                continue
+
+            # 재시도 대기 중인 update가 앞에 있으면 offset을 더 전진시킬 수 없다.
+            # 그래도 배치의 나머지 update는 계속 처리해서, poison 1건이 뒤의 명령을
+            # 통째로 막지 않게 한다 (#241).
+            # blocked는 미해결 update를 먼저 만난다는 전제 위에서만 offset을 지켜준다.
+            # getUpdates가 오름차순을 보장한다는 외부 전제에 정확성을 걸지 않도록
+            # 여기서 직접 정렬해 전제를 없앤다 (#241).
+            updates = sorted(updates, key=_update_sort_key)
+            blocked = False
+            skipped: list[dict[str, Any]] = []
+            for update in updates:
+                update_id = update.get("update_id")
+                if isinstance(update_id, int) and update_id in self._handled_ahead:
+                    # 이미 처리한 update의 재배달이다. 다시 실행하면 부수효과가 중복되므로
+                    # 건너뛰되, offset은 전진시켜야 여기서 다시 막히지 않는다 (#241).
+                    outcome = _UpdateOutcome.DONE
+                else:
+                    outcome = await self._handle_one_update(update, update_id)
+                if outcome is _UpdateOutcome.RETRY:
+                    blocked = True
+                    continue
+                if outcome is _UpdateOutcome.SKIPPED:
+                    skipped.append(update)
+                if not isinstance(update_id, int):
+                    continue
+
+                self._failures.pop(update_id, None)
+                if blocked:
+                    self._handled_ahead.add(update_id)
+                else:
+                    self.offset = update_id + 1
+                    self._forget_passed_updates(self.offset)
+
+            if skipped:
+                # 배치 통지는 한 건으로 합친다. poison N건에 N번 발송하면 채팅당 초당 ~1건
+                # 제한에 걸려 429를 만들고, 429는 다시 전송 실패 = 새 poison이 된다 (PR #242 리뷰).
+                await self._notify_updates_skipped(skipped)
+            if blocked:
+                # 실패한 update를 곧바로 다시 받아 예산을 순식간에 소진하지 않도록 쉬어 간다.
+                # 실패가 이어지면 간격을 늘려 복구 창을 벌고 rate limit도 덜 자극한다 (#241).
+                await self._sleep(self._retry_delay())
+
+    async def _handle_one_update(
+        self,
+        update: dict[str, Any],
+        update_id: Any,
+    ) -> _UpdateOutcome:
+        """update 처리 결과를 반환한다: 완료 / 재시도 대기 / 예산 소진 후 스킵 (#241).
+
+        주의: 재시도는 handle_update가 멱등하다는 전제 위에 있다. 부수효과가 확정된 뒤
+        전송에서 실패하는 경로(/buy의 set_if_absent 후 프롬프트 전송, /confirm의 체결 후
+        결과 전송)는 재시도해도 원래 의도를 달성하지 못하고 다른 메시지로 끝난다.
+        이 PR 범위 밖이라 별도 이슈로 다룬다 (PR #242 리뷰).
+
+        그 경로의 재실행 횟수는 예산과 같다 — 일반 실패 4회, 전송 실패 10회다.
+        예산을 시간 기반으로 넓히면서 기존 3회보다 늘었다. 자연어 메시지처럼 부수효과가
+        LLM 호출인 경로는 429 구간에서 최대 10번 호출·과금된다(주문은 GETDEL·set_if_absent로
+        보호되어 금전 피해는 없다). 멱등성 이슈의 노출량 근거다 (PR #242 리뷰).
+        """
+        try:
+            await self.handler.handle_update(update)
+            return _UpdateOutcome.DONE
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            if not isinstance(update_id, int):
+                # update_id가 없으면 예산도 offset도 추적할 수 없다. 붙잡아 둘 방법이
+                # 없으므로 로그만 남기고 넘어간다.
+                logger.error("Telegram update handling failed without update_id: %s", exc)
+                return _UpdateOutcome.DONE
+
+            send_failure = isinstance(exc, TelegramSendError)
+            now = self._now()
+            failure = self._failures.get(update_id)
+            if failure is None:
+                failure = _UpdateFailure(first_at=now, attempts=1, send_failure=send_failure)
+                self._failures[update_id] = failure
+            else:
+                failure.attempts += 1
+                # 한 번이라도 전송 실패가 있었으면 긴 창을 유지한다. first_at은 첫 실패에
+                # 고정인데 창을 마지막 예외 종류로 매번 다시 고르면 두 값의 기준이 어긋난다:
+                # 429가 290초 이어지다 마지막에 redis 오류가 한 번 나면 창이 60초로 줄어
+                # 그 오류에 재시도가 0회 주어진 채 즉시 폐기된다. 종류가 바뀔 때마다
+                # first_at을 리셋하면 종류를 번갈아 던지는 update가 영원히 살아남으므로,
+                # 상한이 유계인 이 방식을 택했다 (PR #242 리뷰).
+                failure.send_failure = failure.send_failure or send_failure
+
+            elapsed = now - failure.first_at
+            window = (
+                SEND_FAILURE_RETRY_WINDOW_SECONDS
+                if failure.send_failure
+                else UPDATE_RETRY_WINDOW_SECONDS
+            )
+            if elapsed <= window:
+                logger.error(
+                    "Telegram update %s handling failed (attempt %s, %.0fs/%.0fs): %s",
+                    update_id,
+                    failure.attempts,
+                    elapsed,
+                    window,
+                    exc,
+                )
+                return _UpdateOutcome.RETRY
+
+            logger.error(
+                "Telegram update %s skipped after %s attempts over %.0fs: %s",
+                update_id,
+                failure.attempts,
+                elapsed,
+                exc,
+            )
+            return _UpdateOutcome.SKIPPED
+
+    def _retry_delay(self) -> float:
+        """미해결 update 중 가장 적게 시도한 것을 기준으로 백오프 간격을 고른다 (#241).
+
+        간격은 배치 전체에 하나뿐이라 가장 급한 쪽에 맞춰야 한다. 최대 시도 수를 쓰면
+        갓 실패한 update가 오래된 poison의 45초 간격을 물려받아 자기 창(60초) 안에
+        시도 횟수를 손해 본다 (PR #242 리뷰).
+        """
+        attempts = min((f.attempts for f in self._failures.values()), default=1)
+        index = min(attempts, len(UPDATE_RETRY_BACKOFF_SECONDS)) - 1
+        return UPDATE_RETRY_BACKOFF_SECONDS[index]
+
+    async def _notify_updates_skipped(self, updates: list[dict[str, Any]]) -> None:
+        # run()의 배치 루프는 try 밖이라 여기서 새는 예외는 폴러 태스크를 죽인다.
+        # 통지문 조립(임의의 update dict를 파싱한다)까지 try 안에 둔다 (PR #242 리뷰).
+        try:
+            # notifier는 자기 chat에만 보낼 수 있으므로 다른 chat이면 통지할 방법이 없다.
+            mine = [u for u in updates if _update_chat_id(u) == self.notifier.chat_id]
+            if not mine:
+                return
+            labels = ", ".join(_update_label(u) for u in mine)
+            sent = await self.notifier.send_text(
+                f"{UPDATE_SKIPPED_NOTICE}\n실패한 요청: {labels}"
+            )
+        except Exception as exc:
+            # 통지 실패가 폴러를 다시 막으면 안 된다. send_text는 예외를 삼키므로 여기
+            # except는 duck-typed notifier 방어용이다 (#241).
+            logger.error("Telegram skip notice send failed: %s", exc)
+            return
+        if sent is False:
+            # send_text는 실패해도 예외 대신 False를 돌려준다. 유일한 실패 신호라
+            # 반드시 확인해야 통지 실패가 어디에도 안 남는 일이 없다 (PR #242 리뷰).
+            logger.error("Telegram skip notice not delivered for %s updates", len(mine))
+
+    def _forget_passed_updates(self, offset: int) -> None:
+        """offset이 지나간 update_id 기록을 정리해 추적 상태가 무한히 커지지 않게 한다 (#241)."""
+        self._failures = {
+            update_id: failure
+            for update_id, failure in self._failures.items()
+            if update_id >= offset
+        }
+        self._handled_ahead = {
+            update_id for update_id in self._handled_ahead if update_id >= offset
+        }
+
+    async def _sleep(self, seconds: float) -> None:
+        """테스트가 전역 asyncio.sleep 대신 이 인스턴스만 대체할 수 있게 하는 간접층 (#241).
+
+        전역 패치는 핸들러 내부의 실제 sleep(_handle_watch의 조회 간격)까지 가로채
+        루프가 엉뚱한 지점에서 끊긴 채 테스트가 통과할 수 있다 (PR #242 리뷰).
+        """
+        await asyncio.sleep(seconds)
+
+    def _now(self) -> float:
+        """재시도 예산용 단조 시계. 테스트에서 대체할 수 있도록 메서드로 둔다 (#241)."""
+        return time.monotonic()
 
     async def _setup_bot_profile(self) -> None:
         load_bot_username = getattr(self.notifier, "load_bot_username", None)
