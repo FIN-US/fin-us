@@ -2,7 +2,7 @@ import os
 import logging
 from contextlib import asynccontextmanager
 from datetime import date
-from fastapi import FastAPI, Query, Depends, WebSocket, WebSocketDisconnect, Body
+from fastapi import FastAPI, HTTPException, Query, Depends, WebSocket, WebSocketDisconnect, Body
 from fastapi.middleware.cors import CORSMiddleware
 from sqlmodel import Session, select
 
@@ -237,13 +237,34 @@ async def get_db_catalysts(
     # 막기 위한 하한(1). 기본값 100은 기존 catalyst_repo.list_upcoming의 기본값(20)보다
     # 넉넉하게 잡아 여러 종목을 한 번에 다루는 전체 조회 용도에 맞춘다.
     limit: int = Query(100, ge=1, le=500, description="결과 상한 (1~500, 기본 100)."),
+    # 이슈 #238: 프론트 시간 링은 "이번 달", "앞으로 3개월" 같은 구간 조회다. to_date가
+    # 없으면 from_date 이후 전부를 요청한 뒤 limit에 걸려 뒷부분이 잘리는데, 잘린 뒷부분을
+    # 다시 가져올 방법이 없었다. 기본 상한(예: from_date+90일)은 두지 않는다 — "전체 조회"
+    # 용도를 막고 기존 호출자의 동작을 조용히 바꾸기 때문이다. 생략 시 상한 없음이 유지된다.
+    to_date: date | None = Query(None, description="이 날짜 이전(포함) 이벤트만 조회. 생략 시 상한 없음."),
     session: Session = Depends(get_session),
 ):
     """저장된 촉매 이벤트(실적/배당/공시/주총 등)를 조회합니다."""
+    # to_date < from_date는 빈 결과로 조용히 응답하지 않고 422로 거부한다. 빈 결과로
+    # 두면 "이 구간에 이벤트가 없다"와 "파라미터를 잘못 보냈다"를 클라이언트가 구분할
+    # 수 없다. 이 엔드포인트가 이미 빈 stock_name을 min_length=1로 422 거부하는 선례가
+    # 있어 일관된다. 두 파라미터 간 관계는 FastAPI Query만으로 검증할 수 없어 핸들러
+    # 본문에서 직접 확인한다.
+    if to_date is not None and to_date < from_date:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": "to_date must not be earlier than from_date",
+                "from_date": from_date.isoformat(),
+                "to_date": to_date.isoformat(),
+            },
+        )
     # catalyst_repo.SqliteCatalystEventRepo.list_upcoming은 stock_name이 필수 인자라
     # 전체 종목 조회에 쓸 수 없다. 기존 /api/v1/db/* 4종과 동일하게 이 라우트에서
     # session.exec(select(...))를 직접 실행한다(catalyst_repo.py는 수정하지 않는다).
     query = select(CatalystEvent).where(CatalystEvent.event_date >= from_date)
+    if to_date is not None:
+        query = query.where(CatalystEvent.event_date <= to_date)
     if stock_name is not None:
         query = query.where(CatalystEvent.stock_name == stock_name)
     # event_date만으로는 동일 날짜 이벤트 간 순서가 SQL상 보장되지 않아 limit 절단이

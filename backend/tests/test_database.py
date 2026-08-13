@@ -513,6 +513,96 @@ def test_get_catalysts_signals_truncation_when_over_limit(
     assert body["message"] == "truncated"
 
 
+def test_get_catalysts_to_date_omitted_keeps_no_upper_bound(
+    client: TestClient, session: Session, frozen_today: date
+):
+    # to_date를 생략하면 기존 동작(상한 없음)이 그대로 유지되는지 확인한다.
+    today = frozen_today
+    session.add(_make_catalyst(stock_name="가까움", event_date=today))
+    session.add(_make_catalyst(stock_name="아주먼미래", event_date=today + timedelta(days=365)))
+    session.commit()
+
+    response = client.get("/api/v1/db/catalysts")
+    assert response.status_code == 200
+    names = [row["stock_name"] for row in response.json()["data"]]
+    assert names == ["가까움", "아주먼미래"]
+
+
+def test_get_catalysts_to_date_includes_boundary_excludes_after(
+    client: TestClient, session: Session, frozen_today: date
+):
+    # to_date는 "이전(포함)"이어야 한다: event_date == to_date는 포함되고, 그 이후는 제외된다.
+    today = frozen_today
+    session.add(_make_catalyst(stock_name="경계이전", event_date=today + timedelta(days=1)))
+    session.add(_make_catalyst(stock_name="경계", event_date=today + timedelta(days=2)))
+    session.add(_make_catalyst(stock_name="경계이후", event_date=today + timedelta(days=3)))
+    session.commit()
+
+    response = client.get(
+        "/api/v1/db/catalysts",
+        params={"from_date": today.isoformat(), "to_date": (today + timedelta(days=2)).isoformat()},
+    )
+    assert response.status_code == 200
+    names = [row["stock_name"] for row in response.json()["data"]]
+    assert names == ["경계이전", "경계"]
+
+
+def test_get_catalysts_from_date_equals_to_date_single_day(
+    client: TestClient, session: Session, frozen_today: date
+):
+    # from_date == to_date는 단일 날짜 조회로 유효해야 한다(422가 아니다).
+    today = frozen_today
+    session.add(_make_catalyst(stock_name="전날", event_date=today - timedelta(days=1)))
+    session.add(_make_catalyst(stock_name="당일", event_date=today))
+    session.add(_make_catalyst(stock_name="다음날", event_date=today + timedelta(days=1)))
+    session.commit()
+
+    response = client.get(
+        "/api/v1/db/catalysts",
+        params={"from_date": today.isoformat(), "to_date": today.isoformat()},
+    )
+    assert response.status_code == 200
+    names = [row["stock_name"] for row in response.json()["data"]]
+    assert names == ["당일"]
+
+
+def test_get_catalysts_rejects_to_date_before_from_date(
+    client: TestClient, session: Session, frozen_today: date
+):
+    today = frozen_today
+    response = client.get(
+        "/api/v1/db/catalysts",
+        params={
+            "from_date": today.isoformat(),
+            "to_date": (today - timedelta(days=1)).isoformat(),
+        },
+    )
+    assert response.status_code == 422
+
+
+def test_get_catalysts_truncated_within_to_date_range(
+    client: TestClient, session: Session, frozen_today: date
+):
+    # to_date가 있어도 구간 안에 limit을 넘는 이벤트가 있으면 여전히 truncated 신호가 떠야 한다.
+    today = frozen_today
+    for i in range(4):
+        session.add(_make_catalyst(stock_name=f"종목{i}", event_date=today + timedelta(days=i)))
+    session.commit()
+
+    response = client.get(
+        "/api/v1/db/catalysts",
+        params={
+            "from_date": today.isoformat(),
+            "to_date": (today + timedelta(days=10)).isoformat(),
+            "limit": 3,
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["data"]) == 3
+    assert body["message"] == "truncated"
+
+
 def test_get_catalysts_not_truncated_at_exact_limit(
     client: TestClient, session: Session, frozen_today: date
 ):
