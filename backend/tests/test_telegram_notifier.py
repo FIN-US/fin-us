@@ -383,3 +383,32 @@ async def test_send_text_logs_retry_after_on_429(monkeypatch, caplog):
         assert await notifier.send_text("안녕") is False
 
     assert "retry_after=42s" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_send_text_failure_log_redacts_bot_token(monkeypatch, caplog):
+    """전송 실패 로그에 봇 토큰이 평문으로 남지 않아야 한다 (PR #253 리뷰).
+
+    raise_for_status가 만드는 str(HTTPStatusError)에는 요청 URL이 들어 있고, 그 URL에
+    토큰이 포함된다. 리댁션 필터가 httpx/httpcore 로거에만 걸려 있어 이 모듈 자신의
+    로거로 찍는 경로는 걸러지지 않았다.
+    """
+    token = "SECRET-BOT-TOKEN-123"
+    request = httpx.Request("POST", f"https://api.telegram.org/bot{token}/sendMessage")
+    response = httpx.Response(
+        429, json={"ok": False, "parameters": {"retry_after": 42}}, request=request
+    )
+
+    async def raise_for_status(text, *, reply_markup=None):
+        response.raise_for_status()
+
+    notifier = TelegramNotifier(token, "123")
+    monkeypatch.setattr(notifier, "_post_message", raise_for_status)
+
+    with caplog.at_level(logging.ERROR):
+        assert await notifier.send_text("안녕") is False
+
+    assert token not in caplog.text
+    assert "bot<redacted>" in caplog.text
+    # 진단에 필요한 정보는 남아 있어야 한다.
+    assert "retry_after=42s" in caplog.text

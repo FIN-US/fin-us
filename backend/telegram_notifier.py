@@ -57,7 +57,13 @@ class _TelegramTokenRedactionFilter(logging.Filter):
 
 
 def _install_telegram_token_redaction_filter() -> None:
-    for logger_name in ("httpx", "httpcore"):
+    # __name__(이 모듈의 로거)이 빠져 있었다. httpx 예외를 %s로 찍는 지점이 이 모듈 안에
+    # 있고(send_text 등 5곳), raise_for_status가 만드는 str(HTTPStatusError)에는 요청 URL이
+    # 그대로 들어 있어 봇 토큰이 평문으로 로그에 남았다 (PR #253 리뷰).
+    #
+    # 이 목록은 로거 이름 allowlist라 구조적으로 취약하다 — telegram 예외를 로깅하는 모듈이
+    # 새로 생기면 같은 누출이 다시 열린다. 근본 대응은 별도 이슈로 다룬다.
+    for logger_name in (__name__, "httpx", "httpcore"):
         target_logger = logging.getLogger(logger_name)
         if any(
             isinstance(filter_, _TelegramTokenRedactionFilter)
