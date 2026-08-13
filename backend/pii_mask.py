@@ -134,12 +134,21 @@ def mask_pii(text: str) -> tuple[str, dict[str, str]]:
         mapping[placeholder] = original
         return placeholder
 
-    # 순서: 계좌번호(가장 구체적인 10자리 패턴) -> 금액(원/만원/억원 접미사, 그다음
-    # 라벨 기반 bare 숫자) -> 수량. 앞 단계에서 자리표시자로 치환된 구간은 숫자가
-    # 아니므로 뒤 단계 정규식이 다시 건드리지 않는다.
-    masked = _ACCOUNT_RE.sub(lambda m: _replace("ACCOUNT", m), text)
-    masked = _AMOUNT_WON_RE.sub(lambda m: _replace("AMOUNT", m), masked)
+    # 순서: 금액(원/만원·억원 접미사) -> 계좌번호(10자리) -> 라벨 기반 bare 숫자 -> 수량.
+    #
+    # 금액을 계좌번호보다 먼저 적용해야 한다. 콤마 없는 10자리 금액(예: "1234567890원")은
+    # _ACCOUNT_RE의 "8자리+2자리=10자리" 모양과 겹치는데, 계좌번호 뒤에는 "원"이 붙을 수
+    # 없으므로 "원"/"만원"/"억원" 접미사가 있는 값은 정의상 계좌번호가 아니다. 이 접미사가
+    # 계좌번호 후보를 배제하는 판별자 역할을 한다 - 먼저 금액으로 소비해 버리면 뒤의
+    # _ACCOUNT_RE가 볼 숫자가 남지 않아 오분류가 원천적으로 불가능해진다.
+    # (실측 회귀: TestAmountRecognizer.test_ten_digit_amount_is_not_misclassified_as_account)
+    #
+    # 반대로 계좌번호(하이픈 있거나 없는 순수 10자리, "원" 미접미)는 이 금액 정규식들과
+    # 겹치지 않으므로 순서를 바꿔도 영향받지 않는다. _LABELED_AMOUNT_RE·_QTY_RE는 앞
+    # 단계에서 이미 자리표시자로 치환된 구간(숫자가 아님)을 다시 건드리지 않는다.
+    masked = _AMOUNT_WON_RE.sub(lambda m: _replace("AMOUNT", m), text)
     masked = _AMOUNT_UNIT_RE.sub(lambda m: _replace("AMOUNT", m), masked)
+    masked = _ACCOUNT_RE.sub(lambda m: _replace("ACCOUNT", m), masked)
     masked = _LABELED_AMOUNT_RE.sub(_replace_labeled_amount, masked)
     masked = _QTY_RE.sub(_replace_qty, masked)
 

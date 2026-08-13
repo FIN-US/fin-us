@@ -63,6 +63,24 @@ class TestAmountRecognizer:
         assert masked == "주문수량 1234567"
         assert mapping == {}
 
+    def test_ten_digit_amount_is_not_misclassified_as_account(self):
+        """콤마 없는 10자리 금액(예: 1234567890원)은 KIS_ACCOUNT_NO(8+2=10자리)와 자릿수가
+        겹치지만, '원' 접미사가 있으면 계좌번호일 수 없다 — 금액 정규식이 계좌번호 정규식보다
+        먼저 적용되어야 AMOUNT로 분류된다. 순서가 반대로 바뀌면(계좌번호 먼저) 이 금액이
+        <ACCOUNT_1>원처럼 잘못 분류된 채 자리표시자 타입이 LLM에게 틀린 문맥을 전달한다.
+        """
+        masked, mapping = mask_pii("평가금액 1234567890원 입니다")
+        assert masked == "평가금액 <AMOUNT_1> 입니다"
+        assert mapping == {"<AMOUNT_1>": "1234567890원"}
+
+    def test_account_and_amount_coexist_correctly(self):
+        """계좌번호와 금액이 한 문장에 함께 있어도 각자의 타입으로 정확히 분류되어야 한다."""
+        text = "계좌번호 1234567801 예수금 3,000,000원"
+        masked, mapping = mask_pii(text)
+        assert masked == "계좌번호 <ACCOUNT_1> 예수금 <AMOUNT_1>"
+        assert mapping == {"<ACCOUNT_1>": "1234567801", "<AMOUNT_1>": "3,000,000원"}
+        assert unmask_pii(masked, mapping) == text
+
     def test_does_not_mask_percentage(self):
         """상대 비교(수익률 %)는 원본 그대로 유지되어야 한다 — (a) 방식의 전제."""
         masked, mapping = mask_pii("수익률 +4.48%")
