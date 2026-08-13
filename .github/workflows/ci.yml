@@ -121,41 +121,6 @@ jobs:
       - name: mcp-dart 테스트 실행
         run: npm test
 
-  # 타입 체크·테스트·빌드는 같은 워킹디렉터리와 같은 lockfile을 쓰므로 한 잡으로 묶어
-  # checkout + setup-node + npm ci 중복을 없앤다. 스텝이 순차 실행되므로 실패 지점은
-  # 스텝 이름으로 그대로 구분된다.
-  #
-  # 빌드 스텝이 필요한 이유: tsc --noEmit은 타입만 본다. 번들러 설정·에셋 처리와
-  # vite.config.ts 자체의 오류(테스트 인프라 도입으로 test 블록이 추가됐다)는
-  # 실제로 vite build를 돌려야만 드러난다.
-  frontend-check:
-    name: Frontend tsc + vitest + build
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: frontend-react
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Node 24 설치 (npm 캐시 활성화)
-        uses: actions/setup-node@v4
-        with:
-          node-version: '24'
-          cache: 'npm'
-          cache-dependency-path: frontend-react/package-lock.json
-
-      - name: npm 의존성 설치
-        run: npm ci
-
-      - name: 타입 체크
-        run: npx tsc --noEmit
-
-      - name: 프론트엔드 테스트 실행
-        run: npm test
-
-      - name: 프로덕션 빌드
-        run: npm run build
-
   docker-lint:
     name: Dockerfile hadolint
     runs-on: ubuntu-latest
@@ -165,7 +130,6 @@ jobs:
         dockerfile:
           - backend/Dockerfile
           - finus_nat/Dockerfile
-          - frontend-react/Dockerfile
           - mcp-news/Dockerfile
           - mcp-trading/Dockerfile
     steps:
@@ -177,3 +141,18 @@ jobs:
           dockerfile: ${{ matrix.dockerfile }}
           # Dockerfile 부채(#52)가 정리됐으므로 warning까지 차단해 신규 부채 유입을 막는다.
           failure-threshold: warning
+
+  # frontend/nginx.conf는 컨테이너가 뜰 때만 파싱되므로, 문법이 깨져도 PR 단계에서는
+  # 아무 잡도 실패하지 않고 docker compose up에서야 드러난다. compose가 마운트하는
+  # 것과 같은 경로에 걸어 nginx -t로 검증한다.
+  nginx-config-check:
+    name: nginx.conf 문법 검증
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: nginx -t 실행
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}/frontend/nginx.conf:/etc/nginx/conf.d/default.conf:ro" \
+            nginx:alpine nginx -t

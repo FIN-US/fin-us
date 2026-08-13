@@ -32,4 +32,5 @@ else
 fi
 export FINUS_NAT_DIR="${FIN_US_INTEGRATE_ROOT}/finus_nat"
 export FIN_BACKEND="${FIN_US_DIR}/backend"
-export FIN_FRONTEND="${FIN_US_DIR}/frontend-react"
+# Unity WebGL 프로젝트. 배포되는 산출물은 이 아래 Build/ 이며 compose의 frontend(nginx)가 서빙한다.
+export FIN_FRONTEND="${FIN_US_DIR}/frontend"

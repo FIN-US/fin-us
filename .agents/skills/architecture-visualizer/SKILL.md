@@ -26,7 +26,7 @@ description: >
 - 디렉토리 구조(폴더 계층)와 주요 소스 코드 파일(`.py`, `.java`, `.ts`, `.md`)을 식별합니다.
 - 단순 폴더 나열을 금지하고, **각 모듈의 책임(역할)과 데이터/호출 흐름**을 추출합니다.
 - 아래 관계를 우선 매핑합니다.
-  - UI(`frontend-react`) → API(`backend`) 호출
+  - UI(Unity WebGL `frontend`) → API(`backend`) 호출
   - API(`backend`) → MCP 서버(`mcp-news`, `mcp-trading`) 호출
   - NAT(`finus_nat`) ↔ MCP 서버 연결 및 라우팅
   - `scripts`가 어떤 실행 경로를 묶는지
