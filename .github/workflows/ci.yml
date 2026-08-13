@@ -121,6 +121,48 @@ jobs:
       - name: mcp-dart 테스트 실행
         run: npm test
 
+  # frontend/Assets(Unity 소스)를 고치고도 frontend/Build(WebGL 번들)를 재빌드하지 않으면
+  # git이 추적하는 번들과 소스가 조용히 어긋난다(이슈 #212·PR #226에서 재빌드 절차를
+  # frontend/README.md에 문서화했으나 강제 장치는 없었다). 이 잡은 그 강제 장치다.
+  unity-build-drift:
+    name: Unity 소스/번들 드리프트 검사
+    # pull_request에서만 돈다. push(=머지 시점) 트리거는 체크아웃 대상이 머지 커밋이
+    # 아니라 푸시된 커밋이라 아래 HEAD^1 기준이 다른 것을 가리킨다. 어차피 이 검사가
+    # 보는 건 "이 PR이 Assets와 Build를 함께 건드렸는가"라 머지 후 다시 볼 이유도 없다.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # pull_request의 체크아웃 대상은 PR head가 아니라 머지 커밋(refs/pull/N/merge)이고,
+          # 그 1번 부모가 곧 비교 기준(base)이다. depth 2면 이벤트 payload의 base.sha에
+          # 의존하지 않고 체크아웃과 항상 자기일관적인 기준을 얻는다 — 재실행으로 payload는
+          # 낡고 머지 ref만 재계산된 경우에도 둘이 어긋나지 않는다.
+          # depth 1에서는 shallow graft가 부모를 가려 HEAD^1이 해석되지 않는다.
+          # fetch-depth: 0(전체 이력)은 이 잡 하나를 위해 과하고, depth 2는 머지 커밋과
+          # blob을 대부분 공유하는 델타만 받는다.
+          fetch-depth: 2
+
+      - name: Assets 변경 시 Build 동반 커밋 여부 확인
+        # Actions의 `run:` 기본 셸은 `bash -e {0}`이라 pipefail이 꺼져 있다. 아래는 파이프를
+        # 쓰지 않아 set -e가 git 실패를 직접 잡지만, 셸을 명시해 두면(-eo pipefail) 나중에
+        # 파이프가 추가돼도 이 검사가 fail-open으로 무너지지 않는다.
+        shell: bash
+        run: |
+          BASE=$(git rev-parse HEAD^1)
+          # 감시 대상은 Scripts/가 아니라 Assets/ 전체다. frontend/README.md의 재빌드 규칙
+          # 원문이 Assets/ 전체를 대상으로 하고, WebGLTemplates/·Scenes/·Resources/·
+          # Plugins/WebGL/*.jslib 모두 WebGL 번들에 구워진다. .meta도 제외하지 않는다 —
+          # 새 에셋 추가는 .meta 동반이면서 실제로 재빌드가 필요하다.
+          SRC=$(git diff --name-only "$BASE" HEAD -- frontend/Assets/)
+          BUILD=$(git diff --name-only "$BASE" HEAD -- frontend/Build/)
+          if [ -n "$SRC" ] && [ -z "$BUILD" ]; then
+            echo "::error::frontend/Assets/ 를 수정했으나 frontend/Build/ 가 갱신되지 않았습니다. Unity WebGL 재빌드 후 frontend/Build/를 함께 커밋하세요 (frontend/README.md의 재빌드 규칙 참고)."
+            echo "변경된 소스 파일:"
+            echo "$SRC" | sed 's/^/  /'
+            exit 1
+          fi
+
   docker-lint:
     name: Dockerfile hadolint
     runs-on: ubuntu-latest
