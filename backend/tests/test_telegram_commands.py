@@ -65,9 +65,12 @@ class FakeCatalystRepo:
 
 
 class FakeNotifier:
-    def __init__(self, chat_id="123", send_text_result=True, bot_username=""):
+    def __init__(self, chat_id="123", send_text_result=True, bot_username="", fail_sends=0):
         self.chat_id = chat_id
         self.send_text_result = send_text_result
+        # 처음 N번의 전송만 실패시킨다. 429처럼 곧 복구되는 일시 장애를 재현해, 실패 뒤
+        # 무엇이 이어지는지(재시도인지 대체 메시지인지)를 구분할 수 있게 한다 (#247, #249).
+        self.fail_sends = fail_sends
         self.bot_username = bot_username
         self.loaded_bot_username = False
         self.bot_commands = None
@@ -79,6 +82,9 @@ class FakeNotifier:
     async def send_text(self, text, *, reply_markup=None):
         self.messages.append(text)
         self.reply_markups.append(reply_markup)
+        if self.fail_sends > 0:
+            self.fail_sends -= 1
+            return False
         return self.send_text_result
 
     async def send_chat_action(self, action="typing"):
@@ -1955,7 +1961,13 @@ async def test_poller_sets_bot_command_menu_before_updates(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_poller_keeps_offset_when_nat_response_send_fails(monkeypatch):
+async def test_poller_does_not_rerun_llm_when_nat_response_send_fails(monkeypatch):
+    """NAT 응답 전송이 실패해도 LLM을 다시 호출하지 않는다 (#247).
+
+    LLM 호출은 확정된 부수효과다 — 과금되고 conversation_id에 대화 이력이 남는다.
+    예전에는 update 전체가 재시도 대상이라 전송 실패 예산(10회)만큼 재호출됐다.
+    지금은 전송만 그 자리에서 재시도하고 offset은 전진한다.
+    """
     calls = []
     notifier = FakeNotifier(send_text_result=False)
     notifier.enabled = True
@@ -1966,6 +1978,7 @@ async def test_poller_keeps_offset_when_nat_response_send_fails(monkeypatch):
         return "NAT 응답"
 
     handler = TelegramCommandHandler(notifier=notifier, llm_runner=fake_llm_runner)
+    settled_sleeps = _capture_settled_sleeps(monkeypatch, handler)
     poller = TelegramCommandPoller(notifier=notifier, handler=handler)
     polls = 0
 
@@ -1973,20 +1986,23 @@ async def test_poller_keeps_offset_when_nat_response_send_fails(monkeypatch):
         nonlocal polls
         polls += 1
         if polls > 1:
-            raise RuntimeError("stop after handled update")
+            raise asyncio.CancelledError
         return [{"update_id": 41, "message": {"chat": {"id": 123}, "text": "질문"}}]
 
-    async def stop_after_failure(delay):
-        raise pytest.fail.Exception("stop after first failed polling iteration")
+    async def unexpected_backoff(delay):
+        raise pytest.fail.Exception(f"폴러가 재시도 대기에 들어갔다 (delay={delay})")
 
     monkeypatch.setattr(poller, "_get_updates", fake_get_updates)
-    monkeypatch.setattr("backend.telegram_commands.asyncio.sleep", stop_after_failure)
+    monkeypatch.setattr(poller, "_sleep", unexpected_backoff)
 
-    with pytest.raises(pytest.fail.Exception):
+    with pytest.raises(asyncio.CancelledError):
         await poller.run()
 
     assert calls == [("nat", "질문", "telegram:123")]
-    assert poller.offset is None
+    assert settled_sleeps == list(telegram_commands.SETTLED_SEND_RETRY_BACKOFF_SECONDS)
+    assert notifier.messages == ["NAT 응답"] * (len(settled_sleeps) + 1)
+    assert poller.offset == 42
+    assert poller._failures == {}
 
 
 class FakePollerClock:
@@ -2906,3 +2922,269 @@ async def test_help_and_bot_menu_include_catalysts_command(monkeypatch):
 
     assert "/catalysts <종목명> - 예정 촉매 이벤트 조회" in notifier.messages[-1]
     assert "catalysts" in [command["command"] for command in telegram_commands.TELEGRAM_BOT_COMMANDS]
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# 부수효과 확정 뒤의 전송 실패 (#247) / 변환 경로의 전송 실패 삼킴 (#249)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def _order_mcp_runner():
+    async def mcp_runner(server_params, tool_name, arguments):
+        if tool_name == "resolve_stock_code":
+            return "삼성전자 (005930, KOSPI)"
+        if tool_name == "get_stock_quote":
+            return "현재가: 74,500원"
+        if tool_name == "get_balance":
+            return "주문가능금액: 1,000,000원"
+        raise AssertionError(f"unexpected tool: {tool_name}")
+
+    return mcp_runner
+
+
+def _capture_settled_sleeps(monkeypatch, handler):
+    """_send_text_settled의 인플레이스 재시도 간격을 기록하고 실제 대기는 없앤다."""
+    sleeps = []
+
+    async def fake_sleep(delay):
+        sleeps.append(delay)
+
+    monkeypatch.setattr(handler, "_sleep", fake_sleep)
+    return sleeps
+
+
+@pytest.mark.asyncio
+async def test_buy_prompt_send_failure_does_not_ask_poller_to_retry(monkeypatch):
+    """확인 프롬프트 전송이 실패해도 update를 재시도하지 않는다 (#247).
+
+    대기 주문은 이미 저장돼 있어 재실행하면 has_pending에 걸려 "이미 대기 중인 주문이
+    있습니다"로 끝난다. 사용자는 확인 버튼을 영영 받지 못한 채 주문만 60초 뒤 만료되고,
+    로그에는 "재시도로 복구됨"으로 남는다.
+    """
+    notifier = FakeNotifier(send_text_result=False)
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        mcp_runner=_order_mcp_runner(),
+        now_factory=lambda: datetime(2026, 5, 20, 10, 0, tzinfo=KST),
+    )
+    sleeps = _capture_settled_sleeps(monkeypatch, handler)
+
+    # TelegramSendError를 던지지 않는다는 것이 이 테스트의 요지다.
+    await handler.handle_update(
+        {"message": {"chat": {"id": 123}, "text": "/buy 삼성전자 10"}}
+    )
+
+    assert sleeps == list(telegram_commands.SETTLED_SEND_RETRY_BACKOFF_SECONDS)
+    assert len(notifier.messages) == len(sleeps) + 1
+    assert all("삼성전자 매수 주문 확인" in message for message in notifier.messages)
+    assert handler.pending_orders["123"].stock_code == "005930"
+
+
+@pytest.mark.asyncio
+async def test_buy_prompt_send_recovers_within_settled_retry(monkeypatch):
+    """일시적 전송 실패는 그 자리 재시도로 흡수한다 — 사용자는 프롬프트를 받는다 (#247)."""
+    notifier = FakeNotifier(fail_sends=2)
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        mcp_runner=_order_mcp_runner(),
+        now_factory=lambda: datetime(2026, 5, 20, 10, 0, tzinfo=KST),
+    )
+    sleeps = _capture_settled_sleeps(monkeypatch, handler)
+
+    await handler.handle_update(
+        {"message": {"chat": {"id": 123}, "text": "/buy 삼성전자 10"}}
+    )
+
+    assert sleeps == list(telegram_commands.SETTLED_SEND_RETRY_BACKOFF_SECONDS[:2])
+    assert len(notifier.messages) == 3
+    assert notifier.reply_markups[-1]["inline_keyboard"][0][0]["text"] == "✅ 확정"
+
+
+@pytest.mark.asyncio
+async def test_confirm_result_send_failure_does_not_ask_poller_to_retry(monkeypatch):
+    """체결 결과 전송이 실패해도 update를 재시도하지 않는다 (#247).
+
+    claim(GETDEL)으로 주문이 이미 소비돼 재실행은 "확정할 대기 주문이 없습니다"로 끝난다.
+    주문은 체결됐는데 사용자는 미체결로 인식하게 된다.
+    """
+    gateway = FakeOrderGateway()
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        mcp_runner=_order_mcp_runner(),
+        order_gateway=gateway,
+        now_factory=lambda: datetime(2026, 5, 20, 10, 0, tzinfo=KST),
+    )
+    sleeps = _capture_settled_sleeps(monkeypatch, handler)
+
+    await handler.handle_update(
+        {"message": {"chat": {"id": 123}, "text": "/buy 삼성전자 1 75000"}}
+    )
+    notifier.messages.clear()
+    notifier.send_text_result = False
+
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/confirm"}})
+
+    assert len(gateway.orders) == 1
+    assert sleeps == list(telegram_commands.SETTLED_SEND_RETRY_BACKOFF_SECONDS)
+    assert notifier.messages == ["주문 완료: 주문 접수"] * (len(sleeps) + 1)
+    assert handler.pending_orders == {}
+
+
+@pytest.mark.asyncio
+async def test_confirm_403_keeps_update_retryable_when_order_is_restored():
+    """403은 대기 주문이 복원되므로 재시도해도 같은 결과다 — 전송 실패를 폴러에 알린다 (#247)."""
+    gateway = FakeOrderGateway(error=HTTPException(status_code=403, detail="실계좌 가드"))
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        mcp_runner=_order_mcp_runner(),
+        order_gateway=gateway,
+        now_factory=lambda: datetime(2026, 5, 20, 10, 0, tzinfo=KST),
+    )
+
+    await handler.handle_update(
+        {"message": {"chat": {"id": 123}, "text": "/buy 삼성전자 1 75000"}}
+    )
+    notifier.messages.clear()
+    notifier.send_text_result = False
+
+    with pytest.raises(telegram_commands.TelegramSendError):
+        await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/confirm"}})
+
+    # 인플레이스 재시도 없이 한 번만 시도하고 폴러에 넘긴다.
+    assert notifier.messages == ["주문 실패: 실계좌 가드"]
+    assert handler.pending_orders["123"].stock_code == "005930"
+
+
+@pytest.mark.asyncio
+async def test_cancel_confirmation_send_failure_does_not_ask_poller_to_retry(monkeypatch):
+    """취소 완료 전송이 실패해도 update를 재시도하지 않는다 (#247).
+
+    대기 주문이 이미 삭제돼 재실행은 "취소할 대기 주문이 없습니다"로 끝난다.
+    """
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        mcp_runner=_order_mcp_runner(),
+        now_factory=lambda: datetime(2026, 5, 20, 10, 0, tzinfo=KST),
+    )
+    sleeps = _capture_settled_sleeps(monkeypatch, handler)
+
+    await handler.handle_update(
+        {"message": {"chat": {"id": 123}, "text": "/buy 삼성전자 1 75000"}}
+    )
+    notifier.messages.clear()
+    notifier.send_text_result = False
+
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/cancel"}})
+
+    assert notifier.messages == ["대기 주문을 취소했습니다."] * (len(sleeps) + 1)
+    assert handler.pending_orders == {}
+
+
+@pytest.mark.asyncio
+async def test_earnings_send_failure_does_not_rerun_llm(monkeypatch):
+    """실적 리포트 전송이 실패해도 DART·뉴스 조회와 LLM 호출을 반복하지 않는다 (#247)."""
+    llm_calls = []
+
+    async def mcp_runner(server_params, tool_name, arguments):
+        return f"{tool_name} 결과"
+
+    async def llm_runner(provider, prompt, *, conversation_id=None):
+        llm_calls.append(conversation_id)
+        return "호재\n실적이 좋다"
+
+    notifier = FakeNotifier(send_text_result=False)
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        mcp_runner=mcp_runner,
+        llm_runner=llm_runner,
+    )
+    sleeps = _capture_settled_sleeps(monkeypatch, handler)
+
+    await handler.handle_update(
+        {"message": {"chat": {"id": 123}, "text": "/earnings 삼성전자"}}
+    )
+
+    assert len(llm_calls) == 1
+    assert len(notifier.messages) == len(sleeps) + 1
+
+
+@pytest.mark.asyncio
+async def test_order_prepare_does_not_convert_send_failure_into_user_message():
+    """전송 실패는 사용자 메시지로 변환하지 않고 폴러에 그대로 올린다 (#249).
+
+    변환하면 사용자는 원래 메시지 대신 "주문 준비 실패: telegram send failed"를 받고,
+    그 전송이 성공하는 순간 폴러는 성공으로 판단해 offset을 전진시킨다 — 재시도 기회조차
+    사라진다. 이 지점은 아직 부수효과가 없어 재시도가 안전하다.
+    """
+
+    async def mcp_runner(server_params, tool_name, arguments):
+        if tool_name == "resolve_stock_code":
+            return "해당 종목을 찾을 수 없습니다"
+        raise AssertionError(f"unexpected tool: {tool_name}")
+
+    notifier = FakeNotifier(fail_sends=1)
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        mcp_runner=mcp_runner,
+        now_factory=lambda: datetime(2026, 5, 20, 10, 0, tzinfo=KST),
+    )
+
+    with pytest.raises(telegram_commands.TelegramSendError):
+        await handler.handle_update(
+            {"message": {"chat": {"id": 123}, "text": "/buy 삼성전자 10"}}
+        )
+
+    assert notifier.messages == ["주문 준비 실패: 종목코드를 확인할 수 없습니다."]
+    assert "123" not in handler.pending_orders
+
+
+@pytest.mark.asyncio
+async def test_handle_update_reraises_send_failure_swallowed_by_a_handler():
+    """변환 경로가 전송 실패를 삼켜도 handle_update가 종료 시점에 다시 던진다 (#249).
+
+    변환 경로가 9곳 이상이라 개별 except의 재던지기만으로는 앞으로 추가될 경로까지
+    보장하지 못한다. 폴러가 전송 실패를 신뢰성 있게 식별한다는 전제를 여기서 고정한다.
+    """
+
+    class SwallowingHandler(TelegramCommandHandler):
+        async def _dispatch_update(self, update):
+            try:
+                await self._send_text_or_raise("원래 메시지")
+            except Exception as exc:
+                await self._send_text_or_raise(f"처리 실패: {exc}")
+
+    notifier = FakeNotifier(fail_sends=1)
+    handler = SwallowingHandler(notifier=notifier)
+
+    with pytest.raises(telegram_commands.TelegramSendError):
+        await handler.handle_update({"message": {"chat": {"id": 123}, "text": "무엇이든"}})
+
+    assert notifier.messages == ["원래 메시지", "처리 실패: telegram send failed"]
+
+
+@pytest.mark.asyncio
+async def test_settled_send_clears_a_swallowed_send_failure(monkeypatch):
+    """확정 지점을 지나면 앞선 전송 실패가 있었더라도 재시도하지 않는다 (#247 + #249).
+
+    #249의 backstop이 #247의 확정 판정을 뒤집으면 안 된다 — 확정된 부수효과를 재실행시킨다.
+    """
+
+    class SwallowingHandler(TelegramCommandHandler):
+        async def _dispatch_update(self, update):
+            try:
+                await self._send_text_or_raise("원래 메시지")
+            except Exception:
+                pass
+            await self._send_text_settled("확정된 결과")
+
+    notifier = FakeNotifier(fail_sends=1)
+    handler = SwallowingHandler(notifier=notifier)
+    sleeps = _capture_settled_sleeps(monkeypatch, handler)
+
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "무엇이든"}})
+
+    assert sleeps == []
+    assert notifier.messages == ["원래 메시지", "확정된 결과"]
