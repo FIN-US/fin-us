@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from datetime import date, datetime
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
@@ -2959,12 +2960,54 @@ def test_settled_send_retry_is_bounded():
     """settled 재시도가 폴러 루프를 붙잡는 시간에 상한이 있어야 한다 (#247).
 
     이 시간만큼 (1) 같은 배치에서 재시도를 기다리는 다른 update가 시도 없이 예산을 잃고,
-    (2) /buy 확인 프롬프트는 대기 주문의 60초 만료 창을 나눠 쓴다. 값을 늘리는 변경에
-    신호가 있어야 한다.
+    (2) /buy 확인 프롬프트는 대기 주문의 60초 만료 창을 나눠 쓴다.
+
+    상한은 백오프 합이 아니라 SETTLED_SEND_TIMEOUT_SECONDS다. 시도마다 HTTP 왕복이
+    붙으므로(httpx 타임아웃 10초) 백오프 합만 재면 실제 최악을 40초 놓친다 (PR #253 리뷰).
     """
-    total = sum(telegram_commands.SETTLED_SEND_RETRY_BACKOFF_SECONDS)
-    assert total <= 15.0
-    assert total * 2 < telegram_commands.ORDER_EXPIRES_AFTER.total_seconds()
+    bound = telegram_commands.SETTLED_SEND_TIMEOUT_SECONDS
+    expiry = telegram_commands.ORDER_EXPIRES_AFTER.total_seconds()
+
+    # 만료 창의 절반은 사용자가 확인 버튼을 누를 시간으로 남는다.
+    assert bound * 2 <= expiry
+
+    # 백오프 합이 상한을 넘으면 429 흡수가 상한에 잘려 재시도의 목적을 잃는다.
+    assert sum(telegram_commands.SETTLED_SEND_RETRY_BACKOFF_SECONDS) < bound
+
+    # 상한이 없을 때의 최악(무응답 4시도 × httpx 10초 + 백오프)은 53초다. 만료 창을 넘지는
+    # 않지만 사용자에게 7초만 남기므로, 위의 "절반은 남긴다" 보장이 무너진다.
+    # 벽시계 상한을 두는 이유가 이것이다.
+    attempts = len(telegram_commands.SETTLED_SEND_RETRY_BACKOFF_SECONDS) + 1
+    unbounded_worst = sum(telegram_commands.SETTLED_SEND_RETRY_BACKOFF_SECONDS) + 10.0 * attempts
+    assert unbounded_worst > expiry / 2
+    assert expiry - unbounded_worst < 10.0
+
+
+@pytest.mark.asyncio
+async def test_settled_send_gives_up_at_the_wall_clock_bound(monkeypatch, caplog):
+    """Telegram이 무응답이면 시도 횟수가 아니라 벽시계 상한에서 끊는다 (PR #253 리뷰).
+
+    시도마다 httpx 타임아웃 10초가 그대로 붙으므로, 횟수만으로는 상한이 서지 않는다.
+    """
+    hung = 0
+
+    class HangingNotifier(FakeNotifier):
+        async def send_text(self, text, *, reply_markup=None):
+            nonlocal hung
+            hung += 1
+            await asyncio.sleep(30)  # 응답 없는 Telegram
+            raise AssertionError("상한 안에 끊겼어야 한다")
+
+    notifier = HangingNotifier()
+    handler = TelegramCommandHandler(notifier=notifier)
+    monkeypatch.setattr(telegram_commands, "SETTLED_SEND_TIMEOUT_SECONDS", 0.05)
+
+    with caplog.at_level(logging.ERROR):
+        # 예외를 던지지 않는다는 것이 요지다 — settled 전송은 update를 재시도시키지 않는다.
+        await handler._send_text_settled("확정된 결과")
+
+    assert hung == 1
+    assert "벽시계 상한" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -3066,6 +3109,42 @@ async def test_confirm_result_send_failure_does_not_ask_poller_to_retry(monkeypa
     assert len(gateway.orders) == 1
     assert sleeps == list(telegram_commands.SETTLED_SEND_RETRY_BACKOFF_SECONDS)
     assert notifier.messages == ["주문 완료: 주문 접수"] * (len(sleeps) + 1)
+    assert handler.pending_orders == {}
+
+
+@pytest.mark.asyncio
+async def test_confirm_unclear_result_send_failure_does_not_ask_poller_to_retry(monkeypatch):
+    """403이 아닌 오류(타임아웃·5xx)의 통지도 확정 뒤 전송이다 (PR #253 리뷰).
+
+    claim으로 주문이 이미 소비됐고 복원도 하지 않으므로, 재실행은 "확정할 대기 주문이
+    없습니다"로 끝나 "상태 확인 필요"라는 경고 자체가 사라진다.
+    """
+    gateway = FakeOrderGateway(error=RuntimeError("broker timeout"))
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        mcp_runner=_order_mcp_runner(),
+        order_gateway=gateway,
+        now_factory=lambda: datetime(2026, 5, 20, 10, 0, tzinfo=KST),
+    )
+    sleeps = _capture_settled_sleeps(monkeypatch, handler)
+
+    await handler.handle_update(
+        {"message": {"chat": {"id": 123}, "text": "/buy 삼성전자 1 75000"}}
+    )
+    notifier.messages.clear()
+    notifier.send_text_result = False
+
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/confirm"}})
+
+    assert len(gateway.orders) == 1
+    assert sleeps == list(telegram_commands.SETTLED_SEND_RETRY_BACKOFF_SECONDS)
+    assert len(notifier.messages) == len(sleeps) + 1
+    assert all(
+        message.startswith("주문 실패 또는 상태 확인 필요: broker timeout")
+        for message in notifier.messages
+    )
+    # 403과 달리 복원하지 않는다 — 중복 주문 방지가 우선이다.
     assert handler.pending_orders == {}
 
 

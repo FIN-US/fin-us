@@ -30,7 +30,10 @@ def _retry_after_seconds(exc: Exception) -> int | None:
         retry_after = exc.response.json()["parameters"]["retry_after"]
     except Exception:
         return None
-    return retry_after if isinstance(retry_after, int) else None
+    # bool은 int의 서브클래스라 isinstance만으로는 True/False가 통과한다 (PR #253 리뷰).
+    if isinstance(retry_after, bool) or not isinstance(retry_after, int):
+        return None
+    return retry_after
 
 
 class _TelegramTokenRedactionFilter(logging.Filter):

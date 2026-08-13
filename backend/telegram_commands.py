@@ -112,8 +112,7 @@ UPDATE_LABEL_LIMIT = 40
 # 부수효과가 확정된 뒤의 전송은 update 재시도로 되살릴 수 없다(#247). 대신 그 자리에서
 # 짧게 재시도해 429 같은 일시 장애를 흡수한다 — "전송만 별도로 재시도"에 해당한다.
 #
-# 이 값을 키우면 안 되는 이유가 둘이다. 둘 다 상한이 있다는 사실 자체를 테스트가 고정한다
-# (test_settled_send_retry_is_bounded).
+# 이 값을 키우면 안 되는 이유가 둘이다.
 #   1. 폴러 루프를 그 시간만큼 붙잡으므로, 같은 배치에서 재시도를 기다리는 다른 update가
 #      시도 없이 예산(일반 실패 60초)만 잃는다. PR #242가 넓힌 예산을 되돌리는 방향이다.
 #   2. /buy 확인 프롬프트는 대기 주문의 60초 만료 창을 나눠 쓴다. 늦게 도착할수록 사용자가
@@ -122,6 +121,16 @@ UPDATE_LABEL_LIMIT = 40
 # 429의 retry_after를 읽을 수 없어(notifier.send_text가 bool만 돌려준다) 간격은 추측이다.
 # Telegram이 더 긴 ban을 주면 4시도가 모두 그 안에서 소진되고 메시지는 버려진다.
 SETTLED_SEND_RETRY_BACKOFF_SECONDS = (1.0, 3.0, 9.0)
+# 위 백오프 합(13초)은 상한이 아니다. 시도마다 HTTP 왕복이 붙고 telegram_notifier의 httpx
+# 타임아웃이 10초라, Telegram이 429로 즉답하지 않고 무응답이면 4시도 × 10초 + 13초 = 53초까지
+# 늘어난다. 그러면 위 두 대가가 모두 한계까지 간다 — /buy 프롬프트가 60초 만료 창을 거의
+# 다 먹고, 같은 배치의 update는 예산을 통째로 잃는다 (PR #253 리뷰).
+#
+# 그래서 백오프 합이 아니라 벽시계로 상한을 강제한다. 429는 즉답이라 현실 경로는 여전히
+# 백오프 합에 가깝고, 이 상한은 무응답·행 같은 병리적 경우만 잘라낸다.
+# 상한이 있다는 사실과 그 값이 만료 창 안에 든다는 것을 테스트가 고정한다
+# (test_settled_send_retry_is_bounded, test_settled_send_gives_up_at_the_wall_clock_bound).
+SETTLED_SEND_TIMEOUT_SECONDS = 20.0
 
 
 class TelegramSendError(RuntimeError):
@@ -441,24 +450,38 @@ class TelegramCommandHandler:
         대신 전송만 그 자리에서 재시도해 429 같은 일시 장애를 흡수한다. 그래도 실패하면
         로그만 남긴다 — 사용자에게 말을 걸 수 없는 상태에서 할 수 있는 일이 없다.
 
-        재시도가 폴러 루프를 붙잡는 시간의 상한과 그 대가는
-        SETTLED_SEND_RETRY_BACKOFF_SECONDS 주석에 적어 두었다.
+        재시도가 폴러 루프를 붙잡는 시간의 상한과 그 대가는 SETTLED_SEND_TIMEOUT_SECONDS
+        주석에 적어 두었다.
         """
         # 이 지점을 지나면 update 전체는 재시도 대상이 아니다. 앞선 전송 실패 표시도
         # 함께 지워, backstop(#249)이 확정된 부수효과를 재실행시키지 않게 한다.
         _send_failed.set(False)
-        for index in range(len(SETTLED_SEND_RETRY_BACKOFF_SECONDS) + 1):
-            sent = await self.notifier.send_text(text, reply_markup=reply_markup)
-            if sent is not False:
-                return
-            if index < len(SETTLED_SEND_RETRY_BACKOFF_SECONDS):
-                await self._sleep(SETTLED_SEND_RETRY_BACKOFF_SECONDS[index])
+        attempts = len(SETTLED_SEND_RETRY_BACKOFF_SECONDS) + 1
+        try:
+            # 시도 횟수가 아니라 벽시계로 상한을 강제한다. 무응답이면 시도마다 httpx
+            # 타임아웃(10초)이 그대로 붙어 횟수만으로는 상한이 서지 않기 때문이다.
+            # asyncio.timeout은 자기 데드라인이 아닌 외부 취소는 CancelledError로 그대로
+            # 통과시키므로 폴러의 graceful shutdown을 방해하지 않는다.
+            async with asyncio.timeout(SETTLED_SEND_TIMEOUT_SECONDS):
+                for index in range(attempts):
+                    sent = await self.notifier.send_text(text, reply_markup=reply_markup)
+                    if sent is not False:
+                        return
+                    if index < len(SETTLED_SEND_RETRY_BACKOFF_SECONDS):
+                        await self._sleep(SETTLED_SEND_RETRY_BACKOFF_SECONDS[index])
+        except TimeoutError:
+            logger.error(
+                "확정된 부수효과의 결과를 전송하지 못했습니다 (%s자, 벽시계 상한 %s초 초과)",
+                len(text),
+                SETTLED_SEND_TIMEOUT_SECONDS,
+            )
+            return
         # 본문은 남기지 않는다. 이 경로에는 체결 내역·잔고가 실려 있고, 진단에 필요한 것은
         # "어느 지점에서 몇 번 만에 포기했는가"이지 사용자에게 보내려던 문장이 아니다.
         logger.error(
             "확정된 부수효과의 결과를 전송하지 못했습니다 (%s자, %s시도 후 포기)",
             len(text),
-            len(SETTLED_SEND_RETRY_BACKOFF_SECONDS) + 1,
+            attempts,
         )
 
     async def _sleep(self, seconds: float) -> None:
@@ -1307,8 +1330,9 @@ class TelegramCommandHandler:
             lines.append(UNRESOLVED_STOCK_WARNING)
 
         # 만료를 "60초 후"로 쓰면 메시지가 언제 도착하든 60초를 약속하게 된다. 실제로는
-        # created_at이 MCP 조회 전에 찍히고(:895), 전송이 429로 밀리면 _send_text_settled가
-        # 최대 13초를 더 쓴다 — 사용자가 확인 버튼을 받는 시점엔 이미 상당히 지나 있다.
+        # created_at이 MCP 조회 전(_handle_order_command의 now = self.now_factory())에 찍히고,
+        # 전송이 429로 밀리면 _send_text_settled가 SETTLED_SEND_TIMEOUT_SECONDS까지 더 쓴다
+        # — 사용자가 확인 버튼을 받는 시점엔 이미 상당히 지나 있다.
         # 절대 시각은 도착이 늦어도 어긋나지 않는다.
         expires_at = order.created_at + ORDER_EXPIRES_AFTER
         if expires_at.tzinfo is None:
