@@ -2086,6 +2086,121 @@ async def test_poller_retries_when_elapsed_equals_window(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_poller_keeps_send_failure_window_after_other_error(monkeypatch):
+    """전송 실패가 섞였던 update는 다른 오류로 바뀌어도 긴 창을 유지한다 (PR #242 리뷰).
+
+    first_at은 첫 실패에 고정인데 창만 마지막 예외 종류로 다시 고르면 기준이 어긋난다.
+    429가 이어지다 마지막에 다른 오류가 한 번 나면 창이 60초로 줄어, 그 오류에 재시도가
+    0회 주어진 채 즉시 폐기된다.
+    """
+    notifier = FakeNotifier()
+    notifier.enabled = True
+    notifier.bot_token = "token"
+
+    class FlippingHandler:
+        def __init__(self):
+            self.calls = 0
+
+        async def handle_update(self, update):
+            self.calls += 1
+            if self.calls <= 3:
+                raise telegram_commands.TelegramSendError("telegram send failed")
+            raise RuntimeError("redis timeout")
+
+    handler = FlippingHandler()
+    poller = TelegramCommandPoller(notifier=notifier, handler=handler)
+    clock = FakePollerClock(stop_after=4)
+    clock.install(monkeypatch, poller)
+
+    async def fake_get_updates():
+        if poller.offset is not None:
+            raise asyncio.CancelledError
+        return [{"update_id": 41, "message": {"chat": {"id": 123}, "text": "/buy 005930 10"}}]
+
+    monkeypatch.setattr(poller, "_get_updates", fake_get_updates)
+
+    with pytest.raises(asyncio.CancelledError):
+        await poller.run()
+
+    # 4번째 시도(t=65초)는 비-전송 오류다. 창이 60초로 줄었다면 여기서 폐기됐을 것이다.
+    assert handler.calls == 4
+    assert clock.now > telegram_commands.UPDATE_RETRY_WINDOW_SECONDS
+    assert poller.offset is None
+    assert poller._failures[41].send_failure is True
+    assert notifier.messages == []
+
+
+@pytest.mark.asyncio
+async def test_poller_extends_window_when_send_failure_appears_later(monkeypatch):
+    """반대 방향도 같다 — 도중에 전송 실패가 섞이면 긴 창으로 넘어간다 (PR #242 리뷰)."""
+    notifier = FakeNotifier()
+    notifier.enabled = True
+    notifier.bot_token = "token"
+
+    class FlippingHandler:
+        def __init__(self):
+            self.calls = 0
+
+        async def handle_update(self, update):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("redis timeout")
+            raise telegram_commands.TelegramSendError("telegram send failed")
+
+    handler = FlippingHandler()
+    poller = TelegramCommandPoller(notifier=notifier, handler=handler)
+    clock = FakePollerClock(stop_after=4)
+    clock.install(monkeypatch, poller)
+
+    async def fake_get_updates():
+        if poller.offset is not None:
+            raise asyncio.CancelledError
+        return [{"update_id": 41, "message": {"chat": {"id": 123}, "text": "/buy 005930 10"}}]
+
+    monkeypatch.setattr(poller, "_get_updates", fake_get_updates)
+
+    with pytest.raises(asyncio.CancelledError):
+        await poller.run()
+
+    # 첫 실패는 일반 오류였지만 이후 전송 실패가 섞였으므로 60초에서 폐기되지 않는다.
+    assert handler.calls == 4
+    assert clock.now > telegram_commands.UPDATE_RETRY_WINDOW_SECONDS
+    assert poller.offset is None
+    assert poller._failures[41].send_failure is True
+
+
+@pytest.mark.asyncio
+async def test_poller_retry_delay_follows_the_newest_failure(monkeypatch):
+    """간격은 배치에 하나뿐이라 가장 급한 update에 맞춘다 (PR #242 리뷰)."""
+    notifier = FakeNotifier()
+    notifier.enabled = True
+    notifier.bot_token = "token"
+
+    class FailingHandler:
+        async def handle_update(self, update):
+            raise RuntimeError("poison update")
+
+    poller = TelegramCommandPoller(notifier=notifier, handler=FailingHandler())
+    clock = FakePollerClock(stop_after=1)
+    clock.install(monkeypatch, poller)
+    # 41은 이미 오래 재시도 중(45초 간격), 42는 이제 막 실패한다.
+    poller._failures[41] = telegram_commands._UpdateFailure(
+        first_at=0.0, attempts=8, send_failure=False
+    )
+
+    async def fake_get_updates():
+        return [{"update_id": 42, "message": {"chat": {"id": 123}, "text": "/help"}}]
+
+    monkeypatch.setattr(poller, "_get_updates", fake_get_updates)
+
+    with pytest.raises(asyncio.CancelledError):
+        await poller.run()
+
+    # 42가 41의 45초 간격을 물려받으면 자기 창(60초) 안에서 시도 횟수를 손해 본다.
+    assert clock.sleeps == [5.0]
+
+
+@pytest.mark.asyncio
 async def test_poller_eventually_skips_persistent_send_failures(monkeypatch):
     """전송 실패 창에도 상한이 있어야 한다 (PR #242 리뷰).
 

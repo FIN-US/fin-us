@@ -5,6 +5,7 @@ import secrets
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from enum import Enum
 from datetime import datetime, timedelta
 from typing import Any, Callable
 from urllib.parse import quote as _url_quote
@@ -1364,11 +1365,16 @@ def _update_sort_key(update: dict[str, Any]) -> tuple[int, int]:
     return (0, 0)
 
 
-# _handle_one_update의 결과. offset을 전진시켜도 되는지(DONE/SKIPPED)와 스킵 통지가
-# 필요한지(SKIPPED)를 한 값으로 구분한다 (#241).
-_UPDATE_DONE = "done"
-_UPDATE_RETRY = "retry"
-_UPDATE_SKIPPED = "skipped"
+class _UpdateOutcome(Enum):
+    """_handle_one_update의 결과 (#241).
+
+    offset을 전진시켜도 되는지(DONE/SKIPPED)와 스킵 통지가 필요한지(SKIPPED)를 한 값으로
+    구분한다. 평문 str이면 오타가 조용히 통과하므로 Enum으로 강제한다 (PR #242 리뷰).
+    """
+
+    DONE = "done"
+    RETRY = "retry"
+    SKIPPED = "skipped"
 
 
 def _update_chat_id(update: dict[str, Any]) -> str:
@@ -1466,13 +1472,13 @@ class TelegramCommandPoller:
                 if isinstance(update_id, int) and update_id in self._handled_ahead:
                     # 이미 처리한 update의 재배달이다. 다시 실행하면 부수효과가 중복되므로
                     # 건너뛰되, offset은 전진시켜야 여기서 다시 막히지 않는다 (#241).
-                    outcome = _UPDATE_DONE
+                    outcome = _UpdateOutcome.DONE
                 else:
                     outcome = await self._handle_one_update(update, update_id)
-                if outcome is _UPDATE_RETRY:
+                if outcome is _UpdateOutcome.RETRY:
                     blocked = True
                     continue
-                if outcome is _UPDATE_SKIPPED:
+                if outcome is _UpdateOutcome.SKIPPED:
                     skipped.append(update)
                 if not isinstance(update_id, int):
                     continue
@@ -1493,7 +1499,11 @@ class TelegramCommandPoller:
                 # 실패가 이어지면 간격을 늘려 복구 창을 벌고 rate limit도 덜 자극한다 (#241).
                 await self._sleep(self._retry_delay())
 
-    async def _handle_one_update(self, update: dict[str, Any], update_id: Any) -> str:
+    async def _handle_one_update(
+        self,
+        update: dict[str, Any],
+        update_id: Any,
+    ) -> _UpdateOutcome:
         """update 처리 결과를 반환한다: 완료 / 재시도 대기 / 예산 소진 후 스킵 (#241).
 
         주의: 재시도는 handle_update가 멱등하다는 전제 위에 있다. 부수효과가 확정된 뒤
@@ -1508,7 +1518,7 @@ class TelegramCommandPoller:
         """
         try:
             await self.handler.handle_update(update)
-            return _UPDATE_DONE
+            return _UpdateOutcome.DONE
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -1516,7 +1526,7 @@ class TelegramCommandPoller:
                 # update_id가 없으면 예산도 offset도 추적할 수 없다. 붙잡아 둘 방법이
                 # 없으므로 로그만 남기고 넘어간다.
                 logger.error("Telegram update handling failed without update_id: %s", exc)
-                return _UPDATE_DONE
+                return _UpdateOutcome.DONE
 
             send_failure = isinstance(exc, TelegramSendError)
             now = self._now()
@@ -1526,12 +1536,18 @@ class TelegramCommandPoller:
                 self._failures[update_id] = failure
             else:
                 failure.attempts += 1
-                failure.send_failure = send_failure
+                # 한 번이라도 전송 실패가 있었으면 긴 창을 유지한다. first_at은 첫 실패에
+                # 고정인데 창을 마지막 예외 종류로 매번 다시 고르면 두 값의 기준이 어긋난다:
+                # 429가 290초 이어지다 마지막에 redis 오류가 한 번 나면 창이 60초로 줄어
+                # 그 오류에 재시도가 0회 주어진 채 즉시 폐기된다. 종류가 바뀔 때마다
+                # first_at을 리셋하면 종류를 번갈아 던지는 update가 영원히 살아남으므로,
+                # 상한이 유계인 이 방식을 택했다 (PR #242 리뷰).
+                failure.send_failure = failure.send_failure or send_failure
 
             elapsed = now - failure.first_at
             window = (
                 SEND_FAILURE_RETRY_WINDOW_SECONDS
-                if send_failure
+                if failure.send_failure
                 else UPDATE_RETRY_WINDOW_SECONDS
             )
             if elapsed <= window:
@@ -1543,7 +1559,7 @@ class TelegramCommandPoller:
                     window,
                     exc,
                 )
-                return _UPDATE_RETRY
+                return _UpdateOutcome.RETRY
 
             logger.error(
                 "Telegram update %s skipped after %s attempts over %.0fs: %s",
@@ -1552,23 +1568,31 @@ class TelegramCommandPoller:
                 elapsed,
                 exc,
             )
-            return _UPDATE_SKIPPED
+            return _UpdateOutcome.SKIPPED
 
     def _retry_delay(self) -> float:
-        """미해결 update 중 가장 많이 시도한 것을 기준으로 백오프 간격을 고른다 (#241)."""
-        attempts = max((f.attempts for f in self._failures.values()), default=1)
+        """미해결 update 중 가장 적게 시도한 것을 기준으로 백오프 간격을 고른다 (#241).
+
+        간격은 배치 전체에 하나뿐이라 가장 급한 쪽에 맞춰야 한다. 최대 시도 수를 쓰면
+        갓 실패한 update가 오래된 poison의 45초 간격을 물려받아 자기 창(60초) 안에
+        시도 횟수를 손해 본다 (PR #242 리뷰).
+        """
+        attempts = min((f.attempts for f in self._failures.values()), default=1)
         index = min(attempts, len(UPDATE_RETRY_BACKOFF_SECONDS)) - 1
         return UPDATE_RETRY_BACKOFF_SECONDS[index]
 
     async def _notify_updates_skipped(self, updates: list[dict[str, Any]]) -> None:
-        # notifier는 자기 chat에만 보낼 수 있으므로 다른 chat이면 통지할 방법이 없다.
-        mine = [u for u in updates if _update_chat_id(u) == self.notifier.chat_id]
-        if not mine:
-            return
-        labels = ", ".join(_update_label(u) for u in mine)
-        text = f"{UPDATE_SKIPPED_NOTICE}\n실패한 요청: {labels}"
+        # run()의 배치 루프는 try 밖이라 여기서 새는 예외는 폴러 태스크를 죽인다.
+        # 통지문 조립(임의의 update dict를 파싱한다)까지 try 안에 둔다 (PR #242 리뷰).
         try:
-            sent = await self.notifier.send_text(text)
+            # notifier는 자기 chat에만 보낼 수 있으므로 다른 chat이면 통지할 방법이 없다.
+            mine = [u for u in updates if _update_chat_id(u) == self.notifier.chat_id]
+            if not mine:
+                return
+            labels = ", ".join(_update_label(u) for u in mine)
+            sent = await self.notifier.send_text(
+                f"{UPDATE_SKIPPED_NOTICE}\n실패한 요청: {labels}"
+            )
         except Exception as exc:
             # 통지 실패가 폴러를 다시 막으면 안 된다. send_text는 예외를 삼키므로 여기
             # except는 duck-typed notifier 방어용이다 (#241).
