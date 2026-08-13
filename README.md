@@ -194,11 +194,12 @@ bash scripts/run_stack.sh
 
 | 서비스 | 포트 | 역할 |
 | :--- | :--- | :--- |
-| `frontend` | 8080 | Unity WebGL 대시보드 (nginx 정적 서빙) |
+| `frontend` | 8080 | Unity WebGL 대시보드 (nginx 정적 서빙 + `/api` 프록시) |
 | `backend` | 8000 | API·스케줄러·텔레그램 봇 |
 | `finus-nat` | 8001 | 멀티 에이전트 엔진 |
 | `redis` | 6379 | 신호 중복 방지 캐시 |
 
+- `frontend`(nginx)는 `/api/`와 `/health`를 `backend:8000`으로 프록시하므로, 대시보드와 API가 브라우저에서 같은 오리진(8080)입니다. 8000 포트는 API 직접 호출과 `/docs`용으로 계속 열려 있습니다. 자세한 내용은 [`frontend/README.md`](frontend/README.md)를 참고하세요.
 - `backend`는 `finus-nat`과 `redis`가 정상(healthy)이 된 뒤에 뜹니다. `finus-nat`은 준비되는 대로 healthy가 되며, 처음 90초 동안은 헬스체크가 실패해도 재시도로 세지 않습니다(`docker-compose.yml`의 `start_period`). 90초가 지난 뒤에도 응답이 없으면 15초 간격으로 10번 더 확인한 뒤 unhealthy로 판정하므로, 최악의 경우 약 4분 뒤에 `backend` 기동이 중단됩니다.
 - 로컬에서 `uvicorn --reload`만 쓰고 싶다면 볼륨 마운트된 소스로 호스트에서 실행하면 됩니다.
 
