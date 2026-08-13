@@ -22,6 +22,10 @@ DEFAULT_TELEGRAM_ALERT_MODE = "urgent"
 # 이미 없다. TTL은 값의 유효기간이 아니라 폴러가 영구히 내려간 뒤 남는 키를 정리하는 장치다.
 # 쓰기마다 갱신되므로 폴러가 살아 있는 한 만료되지 않는다.
 TELEGRAM_POLLER_STATE_TTL_SEC = 60 * 60 * 24 * 7
+# 저장된 handled_ahead의 허용 상한. 도달 가능한 최댓값(약 6,700 — 산출 근거는
+# RedisTelegramPollerStore._deserialize)의 15배로, 오염된 값만 걸러내고 정상 상태는
+# 절대 버리지 않도록 잡았다. 상한에 걸리면 상태를 버리므로 중복 실행이 생긴다.
+MAX_HANDLED_AHEAD = 100_000
 
 # pending_order TTL: 10분(600초).
 # 앱 레벨 ORDER_EXPIRES_AFTER(60초)는 별도 존재하며 직접 만료 체크를 수행한다.
@@ -238,20 +242,50 @@ class RedisTelegramPollerStore:
             return self._deserialize(raw)
         except (ValueError, TypeError, AttributeError) as exc:
             logger.error("telegram poller state 역직렬화 실패, 키 삭제: %s", exc)
-            await self.redis.delete(self._keys.telegram_poller_state())
+            # 삭제 실패를 여기서 새게 두면 호출자의 blanket except가 "상태 복원 실패"로
+            # 뭉뚱그려 로그해 실제 원인(키 삭제 실패)이 가려진다. 손상 키가 TTL까지 남아
+            # 매 재시작이 같은 경로를 반복하므로, 그 사실이 로그에 명시적으로 남아야 한다.
+            try:
+                await self.redis.delete(self._keys.telegram_poller_state())
+            except Exception as delete_exc:
+                logger.error(
+                    "telegram poller state 손상 키 삭제 실패, TTL(%s초)까지 남는다: %s",
+                    self.ttl_sec,
+                    delete_exc,
+                )
             return TelegramPollerState()
 
     @staticmethod
     def _deserialize(raw: str | bytes) -> TelegramPollerState:
         data = json.loads(raw if isinstance(raw, str) else raw.decode())
         offset = data.get("offset")
-        # bool은 int의 하위 타입이라 isinstance만으로는 통과한다. offset에 True가 들어가면
-        # getUpdates가 offset=1로 해석해 24시간치 update를 통째로 재배달한다.
-        if offset is not None and (isinstance(offset, bool) or not isinstance(offset, int)):
-            raise TypeError(f"offset must be int or null, got {offset!r}")
-        handled_ahead = data.get("handled_ahead") or []
+        if offset is not None:
+            # bool은 int의 하위 타입이라 isinstance만으로는 통과한다. offset에 True가 들어가면
+            # getUpdates가 offset=1로 해석해 24시간치 update를 통째로 재배달한다.
+            if isinstance(offset, bool) or not isinstance(offset, int):
+                raise TypeError(f"offset must be int or null, got {offset!r}")
+            # 음수 offset은 Telegram Bot API에서 "마지막 N개만 반환"으로 해석된다. -1이 새면
+            # getUpdates가 일부만 돌려주고, 그 뒤 offset이 정상 전진하는 순간 서버가 그보다
+            # 앞선 미확정 update를 삭제한다 — 사용자의 명령이 흔적 없이 사라진다 (PR #251 리뷰).
+            if offset < 0:
+                raise ValueError(f"offset must be non-negative, got {offset}")
+        # `or []`로 기본값을 주면 false·0·"" 같은 falsy 비-list 값이 조용히 []로 바뀌어
+        # 바로 아래 검사를 건너뛴다. 결과는 fail-safe지만 손상을 감지하지 못해 키가 남고
+        # 다음 재시작도 같은 값을 그대로 통과시킨다 (PR #251 리뷰).
+        handled_ahead = data.get("handled_ahead")
+        if handled_ahead is None:
+            handled_ahead = []
         if not isinstance(handled_ahead, list):
             raise TypeError(f"handled_ahead must be a list, got {handled_ahead!r}")
+        # 정상 운영에서 이 집합은 _forget_passed_updates가 묶는다. 상한은 오염된 값이
+        # 들어왔을 때만 의미가 있다 — 원소가 수백만이면 frozenset 생성과 save()의 매 update
+        # sorted()가 CPU·메모리를 먹는다. 한계에 걸리면 상태를 버리고 중복이 생기므로,
+        # 도달 가능한 최댓값에서 넉넉히 떨어뜨렸다: 전송 실패 창 335초 동안 최소 간격 5초로
+        # 폴링하면 67배치 × getUpdates 기본 limit 100 = 6,700이 이론적 상한이다.
+        if len(handled_ahead) > MAX_HANDLED_AHEAD:
+            raise ValueError(
+                f"handled_ahead too large ({len(handled_ahead)} > {MAX_HANDLED_AHEAD})"
+            )
         for update_id in handled_ahead:
             if isinstance(update_id, bool) or not isinstance(update_id, int):
                 raise TypeError(f"handled_ahead must hold ints, got {update_id!r}")

@@ -1,6 +1,9 @@
+import json
+
 import pytest
 
 from backend.redis_state import (
+    MAX_HANDLED_AHEAD,
     SIGNAL_HASH_TTL_SEC,
     TELEGRAM_POLLER_STATE_TTL_SEC,
     RedisSchedulerState,
@@ -30,6 +33,9 @@ class FakeRedis:
 
     async def exists(self, key):
         return 1 if key in self.store else 0
+
+    async def delete(self, key):
+        self.store.pop(key, None)
 
     async def eval(self, script, numkeys, key, token):
         _ = script, numkeys
@@ -166,16 +172,9 @@ async def test_telegram_alert_mode_ignores_invalid_values():
 # ---------------------------------------------------------------------------
 
 
-class PollerFakeRedis(FakeRedis):
-    """delete를 더한 FakeRedis. 손상된 상태 키를 지우는 경로를 태우기 위함이다."""
-
-    async def delete(self, key):
-        self.store.pop(key, None)
-
-
 @pytest.mark.asyncio
 async def test_poller_state_round_trips_offset_and_handled_ahead():
-    redis = PollerFakeRedis()
+    redis = FakeRedis()
     store = RedisTelegramPollerStore(redis)
 
     assert await store.load() == TelegramPollerState()
@@ -193,7 +192,7 @@ async def test_poller_state_round_trips_offset_and_handled_ahead():
 @pytest.mark.asyncio
 async def test_poller_state_load_drops_corrupted_value():
     """손상된 값을 남겨두면 매 재시작마다 같은 실패를 반복한다 (#248)."""
-    redis = PollerFakeRedis()
+    redis = FakeRedis()
     redis.store["finus:telegram:poller_state"] = "not json"
     store = RedisTelegramPollerStore(redis)
 
@@ -209,12 +208,20 @@ async def test_poller_state_load_drops_corrupted_value():
         # bool은 int의 하위 타입이라 타입 검사를 그냥 통과한다. offset=True가 통과하면
         # getUpdates가 offset=1로 해석해 24시간치 update를 통째로 재배달한다.
         '{"offset": true}',
+        # 음수 offset은 Telegram이 "마지막 N개만"으로 해석한다. 통과하면 앞선 미확정
+        # update가 조용히 삭제된다 (PR #251 리뷰).
+        '{"offset": -1}',
         '{"offset": 42, "handled_ahead": "42"}',
         '{"offset": 42, "handled_ahead": ["42"]}',
+        # falsy 비-list 값. `or []`로 기본값을 주면 조용히 []가 되어 검사를 건너뛴다
+        # (PR #251 리뷰).
+        '{"handled_ahead": false}',
+        '{"handled_ahead": 0}',
+        '{"handled_ahead": ""}',
     ],
 )
 async def test_poller_state_load_rejects_wrong_types(payload):
-    redis = PollerFakeRedis()
+    redis = FakeRedis()
     redis.store["finus:telegram:poller_state"] = payload
     store = RedisTelegramPollerStore(redis)
 
@@ -225,10 +232,70 @@ async def test_poller_state_load_rejects_wrong_types(payload):
 @pytest.mark.asyncio
 async def test_poller_state_save_overwrites_whole_state():
     """전체 상태를 매번 덮어쓰므로 이전 쓰기가 실패해도 다음 쓰기가 따라잡는다 (#248)."""
-    redis = PollerFakeRedis()
+    redis = FakeRedis()
     store = RedisTelegramPollerStore(redis)
 
     await store.save(TelegramPollerState(offset=None, handled_ahead=frozenset({42, 43})))
     await store.save(TelegramPollerState(offset=44, handled_ahead=frozenset()))
 
     assert await store.load() == TelegramPollerState(offset=44, handled_ahead=frozenset())
+
+
+@pytest.mark.asyncio
+async def test_poller_state_load_accepts_zero_offset_and_empty_handled_ahead():
+    """0과 빈 리스트는 정상값이다 — falsy라고 손상으로 몰면 안 된다 (PR #251 리뷰)."""
+    redis = FakeRedis()
+    redis.store["finus:telegram:poller_state"] = '{"offset": 0, "handled_ahead": []}'
+    store = RedisTelegramPollerStore(redis)
+
+    assert await store.load() == TelegramPollerState(offset=0, handled_ahead=frozenset())
+    # 정상값이므로 키가 남아 있어야 한다.
+    assert "finus:telegram:poller_state" in redis.store
+
+
+@pytest.mark.asyncio
+async def test_poller_state_load_rejects_oversized_handled_ahead():
+    """오염된 거대 집합은 버린다. frozenset 생성과 매 update sorted()가 CPU를 먹는다 (PR #251 리뷰)."""
+    redis = FakeRedis()
+    oversized = list(range(MAX_HANDLED_AHEAD + 1))
+    redis.store["finus:telegram:poller_state"] = json.dumps({"offset": 1, "handled_ahead": oversized})
+    store = RedisTelegramPollerStore(redis)
+
+    assert await store.load() == TelegramPollerState()
+    assert redis.store == {}
+
+
+@pytest.mark.asyncio
+async def test_poller_state_load_keeps_realistic_handled_ahead_size():
+    """도달 가능한 최댓값(약 6,700)은 상한에 걸리지 않아야 한다 (PR #251 리뷰).
+
+    상한에 걸리면 상태를 버려 중복 실행이 생긴다 — 정상 상태를 버리는 상한은 이 PR이
+    고치려는 버그를 되살린다. 전송 실패 창 335초 / 최소 간격 5초 = 67배치 × limit 100.
+    """
+    redis = FakeRedis()
+    reachable = list(range(6_700))
+    redis.store["finus:telegram:poller_state"] = json.dumps({"offset": 1, "handled_ahead": reachable})
+    store = RedisTelegramPollerStore(redis)
+
+    assert len((await store.load()).handled_ahead) == 6_700
+
+
+@pytest.mark.asyncio
+async def test_poller_state_load_logs_when_corrupted_key_delete_fails(caplog):
+    """삭제 실패를 삼키되 원인이 로그에 남아야 한다 (PR #251 리뷰).
+
+    호출자의 blanket except가 "상태 복원 실패"로 뭉뚱그리면 실제 원인이 가려지고,
+    손상 키는 TTL까지 남아 매 재시작이 같은 경로를 반복한다.
+    """
+    class DeleteFailingRedis(FakeRedis):
+        async def delete(self, key):
+            raise RuntimeError("redis unavailable")
+
+    redis = DeleteFailingRedis()
+    redis.store["finus:telegram:poller_state"] = "not json"
+    store = RedisTelegramPollerStore(redis)
+
+    with caplog.at_level("ERROR"):
+        assert await store.load() == TelegramPollerState()
+
+    assert "손상 키 삭제 실패" in caplog.text
