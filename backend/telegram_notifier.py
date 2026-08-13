@@ -18,6 +18,21 @@ def _redact_telegram_bot_token(value: str) -> str:
     return _TELEGRAM_BOT_URL_RE.sub(r"\1<redacted>", value)
 
 
+def _retry_after_seconds(exc: Exception) -> int | None:
+    """429 응답의 parameters.retry_after. 429가 아니거나 본문이 없으면 None.
+
+    send_text가 bool만 돌려주는 탓에 호출부는 이 값을 볼 수 없다. 최소한 로그에는
+    남겨 두어야 재시도 간격 가정이 실제 ban 길이와 맞는지 판단할 수 있다.
+    """
+    if not isinstance(exc, httpx.HTTPStatusError) or exc.response.status_code != 429:
+        return None
+    try:
+        retry_after = exc.response.json()["parameters"]["retry_after"]
+    except Exception:
+        return None
+    return retry_after if isinstance(retry_after, int) else None
+
+
 class _TelegramTokenRedactionFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         if isinstance(record.msg, str):
@@ -178,7 +193,18 @@ class TelegramNotifier:
             await self._post_message(text[:4000], reply_markup=reply_markup)
             return True
         except Exception as exc:
-            logger.error("Telegram message send failed: %s", exc)
+            retry_after = _retry_after_seconds(exc)
+            if retry_after is None:
+                logger.error("Telegram message send failed: %s", exc)
+            else:
+                # 호출부(telegram_commands._send_text_settled)의 재시도 간격은 이 값을
+                # 볼 수 없어 고정 추측값이다. 실제 ban 길이가 그 가정과 맞는지 판단할
+                # 근거를 남긴다 — 어긋나면 간격을 조정하거나 값을 전달하도록 바꿔야 한다.
+                logger.error(
+                    "Telegram message send failed (429, retry_after=%ss): %s",
+                    retry_after,
+                    exc,
+                )
             return False
 
     async def answer_callback_query(

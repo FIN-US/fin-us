@@ -135,6 +135,32 @@ class FakeTradeRecorder:
             raise self.error
 
 
+def _order_mcp_runner():
+    """/buy → /confirm 경로가 기대하는 세 MCP 응답을 돌려준다."""
+
+    async def mcp_runner(server_params, tool_name, arguments):
+        if tool_name == "resolve_stock_code":
+            return "삼성전자 (005930, KOSPI)"
+        if tool_name == "get_stock_quote":
+            return "현재가: 74,500원"
+        if tool_name == "get_balance":
+            return "주문가능금액: 1,000,000원"
+        raise AssertionError(f"unexpected tool: {tool_name}")
+
+    return mcp_runner
+
+
+def _capture_settled_sleeps(monkeypatch, handler):
+    """_send_text_settled의 인플레이스 재시도 간격을 기록하고 실제 대기는 없앤다."""
+    sleeps = []
+
+    async def fake_sleep(delay):
+        sleeps.append(delay)
+
+    monkeypatch.setattr(handler, "_sleep", fake_sleep)
+    return sleeps
+
+
 @pytest.mark.asyncio
 async def test_alerts_all_command_updates_mode_and_replies():
     state = FakeState()
@@ -2929,28 +2955,40 @@ async def test_help_and_bot_menu_include_catalysts_command(monkeypatch):
 # ──────────────────────────────────────────────────────────────────────────
 
 
-def _order_mcp_runner():
-    async def mcp_runner(server_params, tool_name, arguments):
-        if tool_name == "resolve_stock_code":
-            return "삼성전자 (005930, KOSPI)"
-        if tool_name == "get_stock_quote":
-            return "현재가: 74,500원"
-        if tool_name == "get_balance":
-            return "주문가능금액: 1,000,000원"
-        raise AssertionError(f"unexpected tool: {tool_name}")
+def test_settled_send_retry_is_bounded():
+    """settled 재시도가 폴러 루프를 붙잡는 시간에 상한이 있어야 한다 (#247).
 
-    return mcp_runner
+    이 시간만큼 (1) 같은 배치에서 재시도를 기다리는 다른 update가 시도 없이 예산을 잃고,
+    (2) /buy 확인 프롬프트는 대기 주문의 60초 만료 창을 나눠 쓴다. 값을 늘리는 변경에
+    신호가 있어야 한다.
+    """
+    total = sum(telegram_commands.SETTLED_SEND_RETRY_BACKOFF_SECONDS)
+    assert total <= 15.0
+    assert total * 2 < telegram_commands.ORDER_EXPIRES_AFTER.total_seconds()
 
 
-def _capture_settled_sleeps(monkeypatch, handler):
-    """_send_text_settled의 인플레이스 재시도 간격을 기록하고 실제 대기는 없앤다."""
-    sleeps = []
+@pytest.mark.asyncio
+async def test_order_prompt_states_absolute_expiry_time(monkeypatch):
+    """만료를 "60초 후"가 아니라 절대 시각으로 알린다 (#247 자가리뷰).
 
-    async def fake_sleep(delay):
-        sleeps.append(delay)
+    created_at은 MCP 조회 전에 찍히고, 전송이 429로 밀리면 settled 재시도가 최대 13초를
+    더 쓴다. "60초 후"는 메시지가 언제 도착하든 60초를 약속하므로 사실과 어긋난다.
+    """
+    notifier = FakeNotifier(fail_sends=3)
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        mcp_runner=_order_mcp_runner(),
+        now_factory=lambda: datetime(2026, 5, 20, 10, 0, 0, tzinfo=KST),
+    )
+    _capture_settled_sleeps(monkeypatch, handler)
 
-    monkeypatch.setattr(handler, "_sleep", fake_sleep)
-    return sleeps
+    await handler.handle_update(
+        {"message": {"chat": {"id": 123}, "text": "/buy 삼성전자 10"}}
+    )
+
+    # created_at 10:00:00 + 60초. 네 번째 시도에서야 도착해도 같은 시각을 가리킨다.
+    assert "이 주문은 10:01:00에 만료됩니다." in notifier.messages[-1]
+    assert "60초 후 만료" not in notifier.messages[-1]
 
 
 @pytest.mark.asyncio

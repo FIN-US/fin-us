@@ -3,7 +3,11 @@ import logging
 import httpx
 import pytest
 
-from backend.telegram_notifier import TelegramNotifier, should_send_telegram_alert
+from backend.telegram_notifier import (
+    TelegramNotifier,
+    _retry_after_seconds,
+    should_send_telegram_alert,
+)
 
 
 def test_should_send_telegram_alert_requires_high_or_critical_with_flag():
@@ -338,3 +342,44 @@ async def test_load_bot_username_fetches_and_caches_get_me(monkeypatch):
     assert await notifier.load_bot_username() == "finus_bot"
     assert await notifier.load_bot_username() == "finus_bot"
     assert calls == [("https://api.telegram.org/bottoken/getMe", {})]
+
+
+def _http_status_error(status_code, body):
+    request = httpx.Request("POST", "https://api.telegram.org/bottoken/sendMessage")
+    response = httpx.Response(status_code, json=body, request=request)
+    return httpx.HTTPStatusError("error", request=request, response=response)
+
+
+def test_retry_after_seconds_reads_429_parameters():
+    """429의 retry_after를 로그에 남길 수 있어야 한다 (#247 자가리뷰).
+
+    send_text가 bool만 돌려주는 탓에 호출부의 재시도 간격은 고정 추측값이다.
+    실제 ban 길이가 그 가정과 맞는지 판단할 근거가 로그에 있어야 한다.
+    """
+    exc = _http_status_error(429, {"ok": False, "parameters": {"retry_after": 37}})
+    assert _retry_after_seconds(exc) == 37
+
+
+def test_retry_after_seconds_returns_none_for_non_429_or_malformed_body():
+    assert _retry_after_seconds(_http_status_error(500, {"ok": False})) is None
+    assert _retry_after_seconds(_http_status_error(429, {"ok": False})) is None
+    assert _retry_after_seconds(_http_status_error(429, {"parameters": {}})) is None
+    assert (
+        _retry_after_seconds(_http_status_error(429, {"parameters": {"retry_after": "30"}}))
+        is None
+    )
+    assert _retry_after_seconds(httpx.ConnectError("boom")) is None
+
+
+@pytest.mark.asyncio
+async def test_send_text_logs_retry_after_on_429(monkeypatch, caplog):
+    async def raise_429(text, *, reply_markup=None):
+        raise _http_status_error(429, {"ok": False, "parameters": {"retry_after": 42}})
+
+    notifier = TelegramNotifier("token", "123")
+    monkeypatch.setattr(notifier, "_post_message", raise_429)
+
+    with caplog.at_level(logging.ERROR):
+        assert await notifier.send_text("안녕") is False
+
+    assert "retry_after=42s" in caplog.text
