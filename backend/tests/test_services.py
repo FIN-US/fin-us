@@ -1,3 +1,5 @@
+import ast
+import asyncio
 import inspect
 import logging
 import typing
@@ -1513,3 +1515,181 @@ def test_morning_briefing_from_text_skips_non_briefing_candidates():
         "브리핑 키 없는 후보가 reversed 선두에 와도 건너뛰고 올바른 후보를 써야 한다"
     )
     assert result["watchlist"] == ["삼성전자"]
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# PII 마스킹 계층 통합 테스트 (#230, F-17/NFR-05)
+#
+# backend/pii_mask.py 자체의 recognizer/왕복 무손실 단위 테스트는
+# backend/tests/test_pii_mask.py에 있다. 여기서는 llm_chat()이 그 모듈을
+# 실제로 호출하는지 - 요청·응답 경계에서의 배선 - 만 확인한다.
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_llm_chat_masks_pii_before_dispatching_to_provider(monkeypatch):
+    """llm_chat이 provider 구현을 부르기 전에 mask_pii를 거쳐야 한다.
+
+    이 테스트가 잡는 mutation: llm_chat에서 mask_pii 호출을 제거. 제거하면
+    provider가 받는 문자열에 원본 계좌번호·금액·수량이 그대로 남는다.
+    """
+    captured: list[str] = []
+
+    async def fake_openai(user_msg):
+        captured.append(user_msg)
+        return "ok"
+
+    monkeypatch.setattr(services, "_llm_openai_chat", fake_openai)
+
+    pii_text = "12345678-01 계좌, 삼성전자 3주, 평가금액 12,345,000원"
+    await services.llm_chat("openai", pii_text)
+
+    assert len(captured) == 1
+    sent = captured[0]
+    assert "12345678-01" not in sent, "계좌번호가 마스킹되지 않고 그대로 전송됐다"
+    assert "12,345,000원" not in sent, "금액이 마스킹되지 않고 그대로 전송됐다"
+    assert "<ACCOUNT_1>" in sent
+    assert "<AMOUNT_1>" in sent
+    assert "<QTY_1>" in sent
+
+
+@pytest.mark.asyncio
+async def test_llm_chat_unmasks_response_placeholders(monkeypatch):
+    """llm_chat이 provider 응답의 자리표시자를 원값으로 역치환해 반환해야 한다.
+
+    이 테스트가 잡는 mutation: llm_chat에서 unmask_pii 호출을 제거. 제거하면
+    호출자가 <AMOUNT_1> 같은 자리표시자를 그대로 받아 분석 결과에 노출된다.
+    """
+
+    async def fake_openai(user_msg):
+        # provider가 자리표시자를 그대로 되읊는 상황을 흉내낸다(상대 비교 답변 등).
+        return "요약: <AMOUNT_1>은 <AMOUNT_2>보다 작습니다."
+
+    monkeypatch.setattr(services, "_llm_openai_chat", fake_openai)
+
+    pii_text = "평가금액 12,345,000원, 총자산 45,678,000원"
+    result = await services.llm_chat("openai", pii_text)
+
+    assert result == "요약: 12,345,000원은 45,678,000원보다 작습니다."
+    assert "<AMOUNT_1>" not in result
+    assert "<AMOUNT_2>" not in result
+
+
+@pytest.mark.asyncio
+async def test_llm_chat_unmask_fails_open_on_unknown_placeholder(monkeypatch):
+    """provider가 존재하지 않는 자리표시자를 지어내도(<AMOUNT_9>) llm_chat이 예외 없이
+    나머지 원문을 최대한 살려 반환해야 한다.
+
+    이 테스트가 잡는 mutation: unmask_pii(또는 그 호출부)가 매핑에 없는 자리표시자를
+    만났을 때 예외를 던지도록 바뀌는 경우 - 그러면 이 테스트가 예외로 실패해야 한다.
+    """
+
+    async def fake_openai(user_msg):
+        return "총자산은 <AMOUNT_9>입니다."  # 매핑에 없는 자리표시자
+
+    monkeypatch.setattr(services, "_llm_openai_chat", fake_openai)
+
+    result = await services.llm_chat("openai", "평가금액 12,345,000원")
+
+    assert result == "총자산은 <AMOUNT_9>입니다."
+
+
+@pytest.mark.asyncio
+async def test_llm_chat_masking_does_not_leak_between_concurrent_calls():
+    """llm_chat을 asyncio.gather로 동시에 호출해도 서로 다른 PII 매핑이 섞이지 않아야 한다.
+
+    mask_pii/unmask_pii의 mapping이 모듈 전역이 아니라 llm_chat 호출마다 지역
+    변수로 생성된다는 것을 확인한다 - 스케줄러가 병렬로 llm_chat을 부르는 구조이므로
+    전역에 두면 동시 요청의 매핑이 서로 덮어써진다.
+    """
+
+    # 서로 다른 provider 함수를 붙여 두 호출을 구분한다(둘 다 openai를 쓰면 monkeypatch가
+    # 서로를 덮어써 어느 호출이 무엇을 받았는지 구분할 수 없다).
+    calls: dict[str, str] = {}
+
+    def make_capturing(name, delay):
+        async def _inner(user_msg):
+            await asyncio.sleep(delay)  # 다른 호출과 인터리빙되도록 강제로 양보한다
+            calls[name] = user_msg
+            return user_msg  # 받은 그대로 되돌려 마스킹된 텍스트를 관측한다
+
+        return _inner
+
+    from backend import services as services_module
+
+    orig_openai = services_module._llm_openai_chat
+    orig_anthropic = services_module._llm_anthropic_chat
+    try:
+        services_module._llm_openai_chat = make_capturing("a", 0.02)
+        services_module._llm_anthropic_chat = make_capturing("b", 0)
+
+        text_a = "평가금액 11,111,111원"
+        text_b = "평가금액 22,222,222원"
+
+        result_a, result_b = await asyncio.gather(
+            services_module.llm_chat("openai", text_a),
+            services_module.llm_chat("anthropic", text_b),
+        )
+
+        # 각 호출이 받은 마스킹된 텍스트에 서로의 원본 금액이 섞이지 않아야 한다.
+        assert "11,111,111원" not in calls["b"]
+        assert "22,222,222원" not in calls["a"]
+        # 각 호출의 최종 결과(역치환 후)는 자기 자신의 원본 금액으로 복원되어야 한다.
+        assert result_a == text_a
+        assert result_b == text_b
+    finally:
+        services_module._llm_openai_chat = orig_openai
+        services_module._llm_anthropic_chat = orig_anthropic
+
+
+def test_no_bypass_of_llm_chat_masking_layer():
+    """provider별 구현(_llm_openai_chat 등)은 llm_chat() 밖에서 직접 호출되면 안 된다.
+
+    _llm_openai_chat/_llm_anthropic_chat/_llm_ollama_chat/_llm_nat_chat은 마스킹되지
+    않은 원문을 그대로 외부로 보낸다 - llm_chat()만이 mask_pii를 거친 뒤 이 함수들을
+    호출해야 한다. AST로 backend/services.py 전체를 스캔해, 이 함수들의 호출부가
+    llm_chat 함수 본문 밖에 생기면(=마스킹 계층을 우회하는 새 경로) 이 테스트가 실패한다.
+    """
+    source = inspect.getsource(services)
+    tree = ast.parse(source)
+    provider_fns = {
+        "_llm_openai_chat",
+        "_llm_anthropic_chat",
+        "_llm_ollama_chat",
+        "_llm_nat_chat",
+    }
+    callers: dict[str, set[str]] = {fn: set() for fn in provider_fns}
+
+    class _CallerVisitor(ast.NodeVisitor):
+        def __init__(self):
+            self.func_stack: list[str] = []
+
+        def _enter(self, node):
+            self.func_stack.append(node.name)
+            self.generic_visit(node)
+            self.func_stack.pop()
+
+        def visit_FunctionDef(self, node):
+            self._enter(node)
+
+        def visit_AsyncFunctionDef(self, node):
+            self._enter(node)
+
+        def visit_Call(self, node):
+            name = None
+            if isinstance(node.func, ast.Name):
+                name = node.func.id
+            elif isinstance(node.func, ast.Attribute):
+                name = node.func.attr
+            if name in provider_fns and self.func_stack:
+                callers[name].add(self.func_stack[-1])
+            self.generic_visit(node)
+
+    _CallerVisitor().visit(tree)
+
+    for fn_name, caller_set in callers.items():
+        assert caller_set == {"llm_chat"}, (
+            f"{fn_name}이 llm_chat() 밖({caller_set})에서도 호출됩니다. "
+            "마스킹 계층(mask_pii/unmask_pii)을 우회하는 새 호출 경로가 생긴 것으로 보입니다 — "
+            "PII가 마스킹되지 않은 채 외부 LLM provider로 나갈 수 있습니다."
+        )

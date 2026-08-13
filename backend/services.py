@@ -29,6 +29,7 @@ from .stock_code import (
     _is_unresolved_echo,
     _looks_like_stock_code,
 )
+from .pii_mask import mask_pii, unmask_pii
 
 logger = logging.getLogger(__name__)
 _NAT_RESPONSE_LOG_PREVIEW_CHARS = 800
@@ -820,13 +821,28 @@ async def llm_chat(
     *,
     conversation_id: str | None = None,
 ) -> str:
+    """4개 provider 경로(OpenAI/Anthropic/Ollama/NAT)의 단일 진입점.
+
+    #230(F-17/NFR-05): 외부로 나가는 프롬프트는 반드시 이 함수를 거쳐야 마스킹된다.
+    _llm_openai_chat 등 provider별 구현을 직접 호출하는 새 경로가 생기면 마스킹
+    계층을 우회한다 — backend/tests/test_services.py의 회귀 테스트가 이를 잡는다.
+
+    mask_pii/unmask_pii는 이 함수 지역 변수(mapping)로만 존재한다. 요청마다 새로
+    만들어지므로, llm_chat이 asyncio.gather 등으로 동시에 여러 번 호출돼도 서로의
+    매핑을 덮어쓰지 않는다.
+    """
+    masked_msg, mapping = mask_pii(user_msg)
+
     if provider_key == "openai":
-        return await _llm_openai_chat(user_msg)
-    if provider_key == "anthropic":
-        return await _llm_anthropic_chat(user_msg)
-    if provider_key == "ollama":
-        return await _llm_ollama_chat(user_msg)
-    return await _llm_nat_chat(user_msg, conversation_id=conversation_id)
+        raw = await _llm_openai_chat(masked_msg)
+    elif provider_key == "anthropic":
+        raw = await _llm_anthropic_chat(masked_msg)
+    elif provider_key == "ollama":
+        raw = await _llm_ollama_chat(masked_msg)
+    else:
+        raw = await _llm_nat_chat(masked_msg, conversation_id=conversation_id)
+
+    return unmask_pii(raw, mapping)
 
 
 # llm_chat의 분기와 함께 유지한다: NAT처럼 도구(MCP/KIS/뉴스)를 호출할 수 있는 경로로
