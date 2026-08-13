@@ -548,6 +548,67 @@ async def test_perform_stock_analysis_skips_mcp_when_stock_is_already_code(monke
 
 
 @pytest.mark.asyncio
+async def test_perform_stock_analysis_skips_mcp_for_known_master_fund_code(monkeypatch):
+    """#151과 별개로 #140의 지름길(9자 펀드 코드)을 회귀시키면 안 된다.
+
+    F70100026은 종목마스터 실제 항목(수용 기준: 존재하는 펀드 코드는 정상 해석).
+    """
+
+    async def fake_llm_chat(provider, prompt, *, conversation_id=None):
+        return "plain analysis"
+
+    async def unexpected_run_mcp_tool(params, tool_name, arguments):
+        raise AssertionError("마스터에 실재하는 코드는 MCP를 호출하면 안 된다")
+
+    monkeypatch.setattr(services, "llm_chat", fake_llm_chat)
+    monkeypatch.setattr(services, "run_mcp_tool", unexpected_run_mcp_tool)
+
+    fake_session = FakeSession()
+    await services.perform_stock_analysis("F70100026", "openai", fake_session)
+
+    assert fake_session.report.stock_code == "F70100026"
+
+
+@pytest.mark.asyncio
+async def test_perform_stock_analysis_master_unknown_code_not_saved_without_verification(
+    monkeypatch, caplog
+):
+    """#151 수용 기준: 마스터에 없는 코드 형태 입력(999999)은 존재 확인 없이
+    저장되면 안 된다.
+
+    지름길이 마스터 대조에서 걸러지면 아래 MCP 경로로 흘러간다. 999999는
+    stock-master.js CODE_SHAPE_PATTERN에 걸리는 6자 숫자라 Step 3가 예외 없이
+    market="UNKNOWN"으로 그대로 에코하므로(존재 검증이 아니라 되돌려주는 것),
+    이 에코를 성공으로 오인하면 #151이 재발한다.
+
+    뮤테이션 ①(마스터 대조 제거)이 들어가면 이 테스트는 MCP를 호출하지 않고
+    stock_code == "999999"를 저장해 red가 된다.
+    """
+
+    async def fake_llm_chat(provider, prompt, *, conversation_id=None):
+        return "plain analysis"
+
+    mcp_calls = []
+
+    async def fake_run_mcp_tool(params, tool_name, arguments):
+        mcp_calls.append(arguments)
+        return "999999 (999999, UNKNOWN)"
+
+    monkeypatch.setattr(services, "llm_chat", fake_llm_chat)
+    monkeypatch.setattr(services, "run_mcp_tool", fake_run_mcp_tool)
+
+    fake_session = FakeSession()
+    with caplog.at_level(logging.WARNING, logger=services.logger.name):
+        await services.perform_stock_analysis("999999", "openai", fake_session)
+
+    # 마스터 대조에서 걸러져 지름길을 포기하고 실제로 MCP 경로를 탔는지 확인한다.
+    assert mcp_calls == [{"stock_name": "999999"}]
+    # market="UNKNOWN" 에코를 성공으로 오인하지 않고 빈 문자열로 폴백해야 한다.
+    assert fake_session.report.stock_code == ""
+    assert "종목코드 추출 실패" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_perform_stock_analysis_bom_prefixed_name_caches_under_normalized_key(
     monkeypatch,
 ):

@@ -3,7 +3,14 @@
 services.py와 telegram_commands.py가 각자 중복 구현하던 정규식과 함수를
 이 모듈로 통합한다. 두 파일에서 import해 사용한다.
 """
+import json
+import logging
 import re
+from pathlib import Path
+
+from .config import _TRADING_MCP_DIR
+
+logger = logging.getLogger(__name__)
 
 # ──────────────────────────────────────────────────────────────────────────
 # MCP 응답에서 종목코드 추출
@@ -52,6 +59,146 @@ _STOCK_CODE_RE = re.compile(r"\A(?:[0-9A-Z]{6,7}|[0-9A-Z]{9})\Z")
 _ORDERABLE_STOCK_CODE_RE = re.compile(r"\A[0-9]{6,7}\Z")
 
 
+# ──────────────────────────────────────────────────────────────────────────
+# 종목마스터 코드 존재 검증 (#151) — _looks_like_stock_code 지름길이 MCP 존재
+# 확인 없이 코드를 확정해 버리는 문제를 로컬 코드 집합 대조로 막는다.
+# ──────────────────────────────────────────────────────────────────────────
+# 경로를 config._TRADING_MCP_DIR에서 파생시킨다. 백엔드가 MCP를 띄우는 디렉터리와
+# 마스터를 읽는 디렉터리가 *같은 계산*에서 나오므로, 백엔드가 읽는 파일은 MCP가
+# stock-master.js:8(DEFAULT_STOCKS_PATH)로 읽는 파일과 정의상 같다.
+# 이 파일 위치(backend/)에 고정하면 안 된다 — TRADING_MCP_DIR로 MCP 디렉터리를 옮긴
+# 구성에서 둘이 갈라진다(backend/Dockerfile: 백엔드 소스는 /app에 bind mount,
+# MCP는 이미지 안 /opt/mcp-trading). 특히 레포 바깥을 가리키면 backend 쪽 경로에
+# 파일이 없어 fail-open으로 #151 검증이 조용히 꺼진다.
+# config는 stock_code를 import하지 않으므로 순환 import는 발생하지 않는다.
+#
+# 파생 규칙을 순수 함수로 뽑아둔다 — importlib.reload(config) + reload(stock_code)로
+# 이 경로 계산을 검증하면 두 모듈의 전역 바인딩을 다른 테스트가 붙잡고 있는 채로
+# 영향을 준다. 함수 대상으로 테스트하면 reload 없이 같은 계약을 고정할 수 있다.
+def _master_stocks_path(mcp_dir: Path) -> Path:
+    return mcp_dir / "data" / "stocks.json"
+
+
+# 경로를 모듈 상수로 한 번만 굳히지 않는다(과거 _MASTER_STOCKS_PATH 방식) — 그러면
+# _TRADING_MCP_DIR이 나중에 바뀌어도(예: 테스트가 몽키패치) 이미 계산된 값은 따라가지
+# 않아, importlib.reload 없이는 "마스터 경로가 TRADING_MCP_DIR을 따라가는가"라는
+# 배선 자체를 테스트로 고정할 방법이 없다. 대신 _load_master_codes가 매 호출
+# _master_stocks_path(_TRADING_MCP_DIR)를 그 자리에서 계산해 쓴다 — _TRADING_MCP_DIR은
+# 평범한 모듈 전역이라 매 호출 새로 조회되므로, 테스트가 reload 없이
+# stock_code._TRADING_MCP_DIR을 직접 몽키패치하는 것만으로 이 배선을 검증할 수
+# 있다(test_master_path_wiring_follows_trading_mcp_dir_without_reload).
+# _master_stocks_path 자체는 Path 조인뿐이라 매 호출 다시 계산해도 비용이 없다 —
+# 실제 디스크 I/O는 아래 캐시가 여전히 막는다.
+
+# 마스터 로드 실패(fail-open)를 "성공했지만 빈 집합"과 구분하기 위한 센티널.
+_MASTER_LOAD_FAILED = object()
+
+# 지연 로딩 캐시: None=아직 로드 안 함, frozenset=로드 성공, _MASTER_LOAD_FAILED=로드 실패.
+# 요청마다 489K짜리 stocks.json을 다시 파싱하면 지름길을 둔 이유(MCP 왕복 생략)가
+# 사라지므로, 프로세스 수명 동안 한 번만 읽고 캐시한다.
+# _master_codes_cache_path는 캐시가 어느 경로에서 만들어졌는지 기록한다 — 경로 계산을
+# 매 호출로 바꾸면서 함께 필요해졌다. 경로가 바뀌면(_TRADING_MCP_DIR 변경) 캐시를
+# 무효화해야 한다 — 그러지 않으면 이전 경로에서 읽은 캐시를 새 경로에도 그대로
+# 돌려줘, 테스트 간 캐시 오염이나 실제 배포에서 경로가 바뀐 뒤에도 옛 마스터를
+# 계속 쓰는 문제가 생긴다.
+_master_codes_cache: object = None
+_master_codes_cache_path: Path | None = None
+
+
+def _load_master_codes():
+    """종목마스터 코드 집합을 지연 로딩해 프로세스 메모리에 캐시합니다.
+
+    파일이 없거나 파싱에 실패하면 예외를 던지지 않고 _MASTER_LOAD_FAILED를
+    캐시해 반환합니다(fail-open) — 이 경로는 리포트 저장 판정에 쓰이지
+    주문에는 쓰이지 않으므로, 마스터를 못 읽는다고 분석 기능 전체가 죽으면
+    안 됩니다.
+
+    개별 항목의 결손은 그 항목만 건너뛰고 나머지로 계속하되, 코드를 하나도
+    읽지 못한 경우는 로드 실패로 취급합니다(빈 집합은 모든 코드를 거부하므로).
+    """
+    global _master_codes_cache, _master_codes_cache_path
+    path = _master_stocks_path(_TRADING_MCP_DIR)
+    if _master_codes_cache is not None and _master_codes_cache_path == path:
+        return _master_codes_cache
+    try:
+        raw = path.read_text(encoding="utf-8")
+        stocks = json.loads(raw)
+        # 항목 단위로 건너뛴다. 마스터는 외부 KIS 파일에서 생성되므로 code 키가 빠진
+        # 항목이 섞일 수 있는데, 하나의 KeyError로 4,353건 전체 검증이 fail-open되면
+        # 그 한 건 때문에 #151이 통째로 꺼진다. stock-master.js도 String(s.code ?? "")로
+        # 항목 단위로 방어한다.
+        codes = frozenset(
+            str(stock["code"]).upper()
+            for stock in stocks
+            if isinstance(stock, dict) and stock.get("code")
+        )
+        total = len(stocks)
+        if not codes:
+            # 파일 형태가 통째로 바뀌어 코드를 하나도 못 읽으면 빈 집합이 되는데, 그러면
+            # _is_known_master_code가 모든 코드를 조용히 거부한다 — fail-open보다 나쁘다.
+            # 센티널과 구분되지 않으므로 여기서 로드 실패로 되돌린다.
+            raise ValueError("종목마스터에서 코드를 하나도 읽지 못했습니다")
+    except Exception as exc:
+        logger.warning(
+            "종목마스터 로드 실패, 지름길 존재 검증을 건너뜁니다(fail-open): path=%s, error=%s",
+            path,
+            exc,
+        )
+        _master_codes_cache = _MASTER_LOAD_FAILED
+        _master_codes_cache_path = path
+        return _master_codes_cache
+    if len(codes) < total:
+        # 캐시 때문에 이 경고는 프로세스 수명 동안 한 번만 찍힌다 — 얼마나 건졌는지를
+        # 함께 남겨야 "일부만 검증 중"인 상태를 나중에 알아볼 수 있다.
+        # 마스터의 코드는 유일하므로(stock-master.js Step 1의 전제) 차이는 곧 누락 건수다.
+        logger.warning(
+            "종목마스터 일부 항목에서 코드를 읽지 못했습니다: path=%s, %d/%d건만 사용합니다",
+            path,
+            len(codes),
+            total,
+        )
+    _master_codes_cache = codes
+    _master_codes_cache_path = path
+    return codes
+
+
+def _is_known_master_code(code: str) -> bool:
+    """code(이미 upper() 정규화된 값)가 종목마스터에 실재하는 코드인지 확인합니다.
+
+    마스터를 읽을 수 없으면(fail-open) 검증을 생략하고 True를 반환해 #151
+    이전의 지름길 동작(검증 없이 통과)을 유지합니다.
+    """
+    codes = _load_master_codes()
+    if codes is _MASTER_LOAD_FAILED:
+        return True
+    return code in codes
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# 미해석 에코 판정 (#151) — stock-master.js Step 3
+# ──────────────────────────────────────────────────────────────────────────
+# resolveStock은 코드 형태 입력이 마스터에 코드로도 이름·별칭으로도 없으면
+# market="UNKNOWN"으로 입력을 그대로 되돌려준다(stock-master.js:91-93).
+# 존재 검증이 아니라 에코이므로 이걸 성공으로 오인하면 #151이 재발한다.
+# 실제 마스터의 market은 KOSPI/KOSDAQ뿐이라(mcp-trading/data/stocks.json 전수 확인)
+# "(코드, UNKNOWN)" 조합은 이 에코의 신뢰 가능한 신호다.
+#
+# _STOCK_CODE_EXTRACT_RE와 같은 "괄호+코드" 지점에 앵커한다. 문자열 끝에 앵커하면
+# index.js:559가 응답 뒤에 무언가를 덧붙이는 순간 코드 추출은 계속 성공하는데
+# 에코 감지만 조용히 멈춰 #151이 되돌아온다.
+_UNRESOLVED_ECHO_RE = re.compile(r"\([0-9A-Z]{6,}, UNKNOWN\)")
+
+
+def _is_unresolved_echo(resolved_text: str) -> bool:
+    """resolve_stock_code 응답이 stock-master.js Step 3의 미해석 에코인지 판정합니다.
+
+    리포트 저장(services._resolve_stock_code)과 주문 준비(telegram_commands)가
+    같은 판정을 쓰도록 여기 둔다 — 한쪽에만 적용하면 같은 미해석 입력이 위험도가
+    높은 주문 경로로만 통과한다.
+    """
+    return bool(_UNRESOLVED_ECHO_RE.search(resolved_text))
+
+
 def _has_code_digit(value: str) -> bool:
     """실제 종목코드는 항상 숫자를 포함한다(종목마스터 4,353종 전수 확인, 0건 예외).
 
@@ -80,8 +227,9 @@ def _looks_like_stock_code(stock: str) -> bool:
     이 함수를 재검토해야 한다.
 
     #140 영향: {6,7} → {6,7}|{9} 확대로 F70100026 같은 9자 펀드 코드가 이제 지름길을 탄다.
-    이 코드들은 MCP 검증 없이 통과하므로, 실재하지 않는 9자 코드를 직접 입력하면
-    존재 확인 없이 저장된다(#151 — 별도 이슈로 다룸).
+    이 함수 자체는 마스터를 보지 않으므로 실재 여부를 가리지 못한다 — 그 존재
+    검증은 이 함수의 True를 소비하는 쪽(services._resolve_stock_code의
+    _is_known_master_code 호출)이 담당한다(#151).
     """
     value = stock.strip().upper()
     return bool(_STOCK_CODE_RE.match(value)) and _has_code_digit(value)
