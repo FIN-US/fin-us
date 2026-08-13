@@ -84,9 +84,18 @@ UPDATE_RETRY_WINDOW_SECONDS = 60.0
 # 429 몇 초 때문에 대기 중인 명령이 전부 폐기되는데, 폐기 통지도 같은 이유로 실패해
 # 사용자는 아무것도 못 받는다. 기존 동작(막히더라도 복구되면 전부 실행) 대비 회귀이므로
 # 전송 실패에는 훨씬 긴 창을 준다 (PR #242 리뷰).
+#
+# 이 값은 무한정 키우면 안 된다. handle_update가 던지는 지배적 경로가 전송 실패라서,
+# 영구적 전송 실패(특정 메시지의 Markdown 파싱 400)가 하나 들어오면 offset이 이 시간만큼
+# 얼어붙어 #241이 그대로 재발한다. 상한이 있다는 사실 자체를 테스트가 고정한다
+# (test_poller_eventually_skips_persistent_send_failures).
 SEND_FAILURE_RETRY_WINDOW_SECONDS = 300.0
 # 재시도 간격. 실패가 이어지면 폴링을 늦춰 텔레그램 rate limit을 자극하지 않는다.
 # 폴러는 단일 인스턴스라 동시 기상이 겹칠 일이 없어 jitter는 두지 않았다.
+#
+# 위 두 창과 맞물려 실제 예산은 이렇게 정해진다 (PR #242 리뷰):
+#   일반 실패   t=0, 5, 20, 65  → 4시도 / 65초 후 폐기
+#   전송 실패   t=0, 5, 20, 65, 110 … 335 → 10시도 / 335초 후 폐기 (마지막 간격 45초 반복)
 UPDATE_RETRY_BACKOFF_SECONDS = (5.0, 15.0, 45.0)
 UPDATE_SKIPPED_NOTICE = "요청 처리에 실패했어요. 다시 시도해주세요."
 # 통지에 붙일 실패 명령 요약의 최대 길이. 명령을 연달아 보낸 사용자가 무엇을 다시
@@ -101,6 +110,8 @@ class TelegramSendError(RuntimeError):
     던지는 지배적 경로는 전송 실패다. 이걸 update별 poison으로 세면 429 한 번에
     대기 중인 명령이 전부 폐기되므로 폴러가 별도 예산으로 다뤄야 한다 (PR #242 리뷰).
     """
+
+
 ALERT_MODE_EMOJIS = {
     "urgent": "🚨",
     "all": "📣",
@@ -1418,6 +1429,11 @@ class TelegramCommandPoller:
         # 들이는 리스크다. 금전 경로는 별도로 막혀 있지만(/confirm은 GETDEL claim,
         # /buy는 set_if_absent) LLM 재호출·중복 메시지는 발생한다. 근본 해결은 offset을
         # redis에 영속화하는 것이고 별도 이슈로 다룬다 (PR #242 리뷰).
+        #
+        # 창의 길이는 재시도 예산과 같다: 일반 실패 65초, 전송 실패 335초.
+        # 시간 기반 예산으로 바꾸면서 기존 10초(고정 5초 × 3회)보다 크게 넓어졌고,
+        # 429와 재시작은 "배포"라는 공통 원인으로 상관관계가 있어 동시에 발생할 수 있다.
+        # 영속화 이슈의 우선순위를 매길 때 이 수치가 근거가 된다 (PR #242 리뷰).
         self._handled_ahead: set[int] = set()
 
     async def run(self) -> None:
@@ -1484,6 +1500,11 @@ class TelegramCommandPoller:
         전송에서 실패하는 경로(/buy의 set_if_absent 후 프롬프트 전송, /confirm의 체결 후
         결과 전송)는 재시도해도 원래 의도를 달성하지 못하고 다른 메시지로 끝난다.
         이 PR 범위 밖이라 별도 이슈로 다룬다 (PR #242 리뷰).
+
+        그 경로의 재실행 횟수는 예산과 같다 — 일반 실패 4회, 전송 실패 10회다.
+        예산을 시간 기반으로 넓히면서 기존 3회보다 늘었다. 자연어 메시지처럼 부수효과가
+        LLM 호출인 경로는 429 구간에서 최대 10번 호출·과금된다(주문은 GETDEL·set_if_absent로
+        보호되어 금전 피해는 없다). 멱등성 이슈의 노출량 근거다 (PR #242 리뷰).
         """
         try:
             await self.handler.handle_update(update)

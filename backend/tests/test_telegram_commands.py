@@ -2009,7 +2009,8 @@ async def test_poller_skips_update_after_retry_window(monkeypatch):
         await poller.run()
 
     # 5 + 15 + 45 = 65초 > 60초 창. 예산이 실질 10초가 아니라는 회귀 가드다.
-    assert clock.sleeps == list(telegram_commands.UPDATE_RETRY_BACKOFF_SECONDS)
+    # 상수를 그대로 비교하면 동어반복이라 값 변경을 못 잡는다. 리터럴로 고정한다 (PR #242 리뷰).
+    assert clock.sleeps == [5.0, 15.0, 45.0]
     assert clock.now > telegram_commands.UPDATE_RETRY_WINDOW_SECONDS
     assert attempts == [41, 41, 41, 41]
     assert poller.offset == 42
@@ -2050,6 +2051,77 @@ async def test_poller_does_not_spend_poison_budget_on_send_failures(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_poller_retries_when_elapsed_equals_window(monkeypatch):
+    """창의 경계는 포함이다 — 경과 == 창이면 아직 폐기하지 않는다 (PR #242 리뷰)."""
+    notifier = FakeNotifier()
+    notifier.enabled = True
+    notifier.bot_token = "token"
+
+    class FailingHandler:
+        async def handle_update(self, update):
+            raise RuntimeError("poison update")
+
+    poller = TelegramCommandPoller(notifier=notifier, handler=FailingHandler())
+    clock = FakePollerClock(stop_after=2)
+    clock.install(monkeypatch, poller)
+    # 기본 백오프(5/15/45)로는 경과가 창에 정확히 걸리지 않아 경계를 지나친다.
+    monkeypatch.setattr(
+        poller, "_retry_delay", lambda: telegram_commands.UPDATE_RETRY_WINDOW_SECONDS
+    )
+
+    async def fake_get_updates():
+        if poller.offset is not None:
+            raise asyncio.CancelledError
+        return [{"update_id": 41, "message": {"chat": {"id": 123}, "text": "/alerts off"}}]
+
+    monkeypatch.setattr(poller, "_get_updates", fake_get_updates)
+
+    with pytest.raises(asyncio.CancelledError):
+        await poller.run()
+
+    assert clock.now == telegram_commands.UPDATE_RETRY_WINDOW_SECONDS * 2
+    assert poller.offset is None
+    assert poller._failures[41].attempts == 2
+    assert notifier.messages == []
+
+
+@pytest.mark.asyncio
+async def test_poller_eventually_skips_persistent_send_failures(monkeypatch):
+    """전송 실패 창에도 상한이 있어야 한다 (PR #242 리뷰).
+
+    이 창이 사실상 무한대가 되면 영구적 전송 실패(특정 메시지의 파싱 400) 하나로 offset이
+    그 시간만큼 얼어붙어 #241이 그대로 재발한다. 창을 늘리는 변경에 신호가 있어야 한다.
+    """
+    notifier = FakeNotifier()
+    notifier.enabled = True
+    notifier.bot_token = "token"
+
+    class SendFailingHandler:
+        async def handle_update(self, update):
+            raise telegram_commands.TelegramSendError("telegram send failed")
+
+    poller = TelegramCommandPoller(notifier=notifier, handler=SendFailingHandler())
+    # stop_after는 안전망이다. 창에 상한이 없으면 여기서 끊겨 아래 offset 단언이 실패한다.
+    clock = FakePollerClock(stop_after=20)
+    clock.install(monkeypatch, poller)
+
+    async def fake_get_updates():
+        if poller.offset is not None:
+            raise asyncio.CancelledError
+        return [{"update_id": 41, "message": {"chat": {"id": 123}, "text": "/alerts off"}}]
+
+    monkeypatch.setattr(poller, "_get_updates", fake_get_updates)
+
+    with pytest.raises(asyncio.CancelledError):
+        await poller.run()
+
+    assert poller.offset == 42
+    assert clock.now > telegram_commands.SEND_FAILURE_RETRY_WINDOW_SECONDS
+    assert clock.now < telegram_commands.SEND_FAILURE_RETRY_WINDOW_SECONDS * 2
+    assert poller._failures == {}
+
+
+@pytest.mark.asyncio
 async def test_poller_handles_later_update_when_earlier_update_is_poison(monkeypatch):
     """배치 안의 poison 1건이 뒤의 정상 update를 막지 않는다 (#241)."""
     notifier = FakeNotifier()
@@ -2085,7 +2157,8 @@ async def test_poller_handles_later_update_when_earlier_update_is_poison(monkeyp
     assert poller.offset == 43
     assert poller._handled_ahead == set()
     assert poller._failures == {}
-    assert clock.sleeps == list(telegram_commands.UPDATE_RETRY_BACKOFF_SECONDS)
+    # 상수를 그대로 비교하면 동어반복이라 값 변경을 못 잡는다. 리터럴로 고정한다 (PR #242 리뷰).
+    assert clock.sleeps == [5.0, 15.0, 45.0]
     assert notifier.messages == [
         f"{telegram_commands.UPDATE_SKIPPED_NOTICE}\n실패한 요청: /alerts off"
     ]
@@ -2170,6 +2243,7 @@ async def test_poller_offset_stays_behind_poison_in_out_of_order_batch(monkeypat
 
     assert poller.offset is None
     assert set(poller._failures) == {41}
+    assert poller._failures[41].attempts == 1
     assert poller._handled_ahead == {42}
     assert handled == [None, 42]
 
@@ -2306,7 +2380,7 @@ async def test_poller_clears_failure_state_after_success(monkeypatch):
     assert handler.calls == 2
     assert poller.offset == 42
     assert poller._failures == {}
-    assert clock.sleeps == [telegram_commands.UPDATE_RETRY_BACKOFF_SECONDS[0]]
+    assert clock.sleeps == [5.0]
     assert notifier.messages == []
 
 
