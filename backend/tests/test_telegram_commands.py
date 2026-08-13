@@ -23,9 +23,23 @@ from backend.telegram_commands import (
     TelegramCommandHandler,
     TelegramCommandPoller,
 )
+from backend.redis_state import InMemoryTelegramPollerStore, TelegramPollerState
 from backend.trading_orders import OrderExecutionResult, PendingOrder
 
 KST = ZoneInfo("Asia/Seoul")
+
+
+def _make_poller(notifier, handler, *, state_store=None):
+    """폴러 테스트용 생성기 — 상태 저장소를 인메모리로 고정한다 (#248).
+
+    state_store 기본값은 redis 클라이언트라, 주입하지 않으면 테스트가 실제 연결을 시도한다.
+    재시작 시나리오는 같은 state_store를 두 폴러에 넘겨 재현한다.
+    """
+    return TelegramCommandPoller(
+        notifier=notifier,
+        handler=handler,
+        state_store=state_store if state_store is not None else InMemoryTelegramPollerStore(),
+    )
 
 
 class FakeState:
@@ -1844,7 +1858,7 @@ def test_poller_explicit_handler_does_not_call_dependency_factories(monkeypatch)
     monkeypatch.setattr(telegram_commands, "_create_order_gateway", fail_factory)
     monkeypatch.setattr(telegram_commands, "_create_trade_recorder", fail_factory)
 
-    poller = TelegramCommandPoller(notifier=notifier, handler=handler)
+    poller = _make_poller(notifier, handler=handler)
 
     assert poller.handler is handler
 
@@ -1881,7 +1895,7 @@ async def test_poller_keeps_offset_when_update_handling_fails(monkeypatch):
         async def handle_update(self, update):
             raise RuntimeError("redis unavailable")
 
-    poller = TelegramCommandPoller(notifier=notifier, handler=FailingHandler())
+    poller = _make_poller(notifier, handler=FailingHandler())
 
     async def fake_get_updates():
         return [{"update_id": 41, "message": {"chat": {"id": 123}, "text": "/alerts off"}}]
@@ -1908,7 +1922,7 @@ async def test_poller_loads_bot_username_before_updates(monkeypatch):
         async def handle_update(self, update):
             return None
 
-    poller = TelegramCommandPoller(notifier=notifier, handler=NoopHandler())
+    poller = _make_poller(notifier, handler=NoopHandler())
 
     async def fake_get_updates():
         assert notifier.loaded_bot_username is True
@@ -1936,7 +1950,7 @@ async def test_poller_sets_bot_command_menu_before_updates(monkeypatch):
         async def handle_update(self, update):
             return None
 
-    poller = TelegramCommandPoller(notifier=notifier, handler=NoopHandler())
+    poller = _make_poller(notifier, handler=NoopHandler())
 
     async def fake_get_updates():
         assert notifier.bot_commands == telegram_commands.TELEGRAM_BOT_COMMANDS
@@ -1966,7 +1980,7 @@ async def test_poller_keeps_offset_when_nat_response_send_fails(monkeypatch):
         return "NAT 응답"
 
     handler = TelegramCommandHandler(notifier=notifier, llm_runner=fake_llm_runner)
-    poller = TelegramCommandPoller(notifier=notifier, handler=handler)
+    poller = _make_poller(notifier, handler=handler)
     polls = 0
 
     async def fake_get_updates():
@@ -2032,7 +2046,7 @@ async def test_poller_skips_update_after_retry_window(monkeypatch):
             attempts.append(update["update_id"])
             raise RuntimeError("poison update")
 
-    poller = TelegramCommandPoller(notifier=notifier, handler=FailingHandler())
+    poller = _make_poller(notifier, handler=FailingHandler())
     clock = FakePollerClock()
     clock.install(monkeypatch, poller)
 
@@ -2069,7 +2083,7 @@ async def test_poller_does_not_spend_poison_budget_on_send_failures(monkeypatch)
         async def handle_update(self, update):
             raise telegram_commands.TelegramSendError("telegram send failed")
 
-    poller = TelegramCommandPoller(notifier=notifier, handler=SendFailingHandler())
+    poller = _make_poller(notifier, handler=SendFailingHandler())
     clock = FakePollerClock(stop_after=5)
     clock.install(monkeypatch, poller)
 
@@ -2099,7 +2113,7 @@ async def test_poller_retries_when_elapsed_equals_window(monkeypatch):
         async def handle_update(self, update):
             raise RuntimeError("poison update")
 
-    poller = TelegramCommandPoller(notifier=notifier, handler=FailingHandler())
+    poller = _make_poller(notifier, handler=FailingHandler())
     clock = FakePollerClock(stop_after=2)
     clock.install(monkeypatch, poller)
     # 기본 백오프(5/15/45)로는 경과가 창에 정확히 걸리지 않아 경계를 지나친다.
@@ -2146,7 +2160,7 @@ async def test_poller_keeps_send_failure_window_after_other_error(monkeypatch):
             raise RuntimeError("redis timeout")
 
     handler = FlippingHandler()
-    poller = TelegramCommandPoller(notifier=notifier, handler=handler)
+    poller = _make_poller(notifier, handler=handler)
     clock = FakePollerClock(stop_after=4)
     clock.install(monkeypatch, poller)
 
@@ -2186,7 +2200,7 @@ async def test_poller_extends_window_when_send_failure_appears_later(monkeypatch
             raise telegram_commands.TelegramSendError("telegram send failed")
 
     handler = FlippingHandler()
-    poller = TelegramCommandPoller(notifier=notifier, handler=handler)
+    poller = _make_poller(notifier, handler=handler)
     clock = FakePollerClock(stop_after=4)
     clock.install(monkeypatch, poller)
 
@@ -2218,7 +2232,7 @@ async def test_poller_retry_delay_follows_the_newest_failure(monkeypatch):
         async def handle_update(self, update):
             raise RuntimeError("poison update")
 
-    poller = TelegramCommandPoller(notifier=notifier, handler=FailingHandler())
+    poller = _make_poller(notifier, handler=FailingHandler())
     clock = FakePollerClock(stop_after=1)
     clock.install(monkeypatch, poller)
     # 41은 이미 오래 재시도 중(45초 간격), 42는 이제 막 실패한다.
@@ -2253,7 +2267,7 @@ async def test_poller_eventually_skips_persistent_send_failures(monkeypatch):
         async def handle_update(self, update):
             raise telegram_commands.TelegramSendError("telegram send failed")
 
-    poller = TelegramCommandPoller(notifier=notifier, handler=SendFailingHandler())
+    poller = _make_poller(notifier, handler=SendFailingHandler())
     # stop_after는 안전망이다. 창에 상한이 없으면 여기서 끊겨 아래 offset 단언이 실패한다.
     clock = FakePollerClock(stop_after=20)
     clock.install(monkeypatch, poller)
@@ -2288,7 +2302,7 @@ async def test_poller_handles_later_update_when_earlier_update_is_poison(monkeyp
                 raise RuntimeError("poison update")
             handled.append(update["update_id"])
 
-    poller = TelegramCommandPoller(notifier=notifier, handler=PartialHandler())
+    poller = _make_poller(notifier, handler=PartialHandler())
     clock = FakePollerClock()
     clock.install(monkeypatch, poller)
     batch = _poison_batch()
@@ -2331,7 +2345,7 @@ async def test_poller_offset_stays_behind_poison_until_retries_exhausted(monkeyp
                 raise RuntimeError("poison update")
             handled.append(update["update_id"])
 
-    poller = TelegramCommandPoller(notifier=notifier, handler=PartialHandler())
+    poller = _make_poller(notifier, handler=PartialHandler())
     batch = _poison_batch()
 
     async def fake_get_updates():
@@ -2376,7 +2390,7 @@ async def test_poller_offset_stays_behind_poison_in_out_of_order_batch(monkeypat
                 raise RuntimeError("poison update")
             handled.append(update.get("update_id"))
 
-    poller = TelegramCommandPoller(notifier=notifier, handler=PartialHandler())
+    poller = _make_poller(notifier, handler=PartialHandler())
     clock = FakePollerClock(stop_after=1)
     clock.install(monkeypatch, poller)
 
@@ -2412,7 +2426,7 @@ async def test_poller_batches_skip_notice_for_multiple_poison_updates(monkeypatc
         async def handle_update(self, update):
             raise RuntimeError("poison update")
 
-    poller = TelegramCommandPoller(notifier=notifier, handler=FailingHandler())
+    poller = _make_poller(notifier, handler=FailingHandler())
     clock = FakePollerClock()
     clock.install(monkeypatch, poller)
     batch = _poison_batch()
@@ -2445,7 +2459,7 @@ async def test_poller_logs_when_skip_notice_is_not_delivered(monkeypatch, caplog
         async def handle_update(self, update):
             raise RuntimeError("poison update")
 
-    poller = TelegramCommandPoller(notifier=notifier, handler=FailingHandler())
+    poller = _make_poller(notifier, handler=FailingHandler())
     clock = FakePollerClock()
     clock.install(monkeypatch, poller)
 
@@ -2475,7 +2489,7 @@ async def test_poller_skip_notice_skipped_for_other_chat(monkeypatch):
         async def handle_update(self, update):
             raise RuntimeError("poison update")
 
-    poller = TelegramCommandPoller(notifier=notifier, handler=FailingHandler())
+    poller = _make_poller(notifier, handler=FailingHandler())
     clock = FakePollerClock()
     clock.install(monkeypatch, poller)
 
@@ -2510,7 +2524,7 @@ async def test_poller_clears_failure_state_after_success(monkeypatch):
                 raise RuntimeError("redis unavailable")
 
     handler = FlakyHandler()
-    poller = TelegramCommandPoller(notifier=notifier, handler=handler)
+    poller = _make_poller(notifier, handler=handler)
 
     class AssertingClock(FakePollerClock):
         async def _sleep(self, delay):
@@ -2535,6 +2549,186 @@ async def test_poller_clears_failure_state_after_success(monkeypatch):
     assert poller._failures == {}
     assert clock.sleeps == [5.0]
     assert notifier.messages == []
+
+
+# ---------------------------------------------------------------------------
+# 폴러 상태 영속화 (#248)
+# ---------------------------------------------------------------------------
+
+
+def test_poller_defaults_to_redis_state_store(monkeypatch):
+    """상태 저장소를 주입하지 않는 프로덕션 경로는 redis를 쓴다 (#248).
+
+    기본값이 인메모리로 되돌아가면 이 이슈의 중복 창이 조용히 재발한다.
+    """
+    notifier = FakeNotifier()
+    client = object()
+    monkeypatch.setattr(telegram_commands, "create_redis_client", lambda: client)
+
+    poller = TelegramCommandPoller(notifier=notifier, handler=TelegramCommandHandler(notifier=notifier))
+
+    assert isinstance(poller.state_store, telegram_commands.RedisTelegramPollerStore)
+    assert poller.state_store.redis is client
+
+
+@pytest.mark.asyncio
+async def test_poller_restart_does_not_reexecute_updates_handled_ahead_of_poison(monkeypatch):
+    """poison 뒤에서 먼저 실행한 update는 재시작 후에도 다시 실행되지 않는다 (#248).
+
+    이 이슈의 본체다. 영속화 이전에는 blocked 구간(일반 실패 65초, 전송 실패 335초)에
+    프로세스가 죽으면 offset과 _handled_ahead가 함께 사라져 42, 43이 재실행됐다.
+    """
+    notifier = FakeNotifier()
+    notifier.enabled = True
+    notifier.bot_token = "token"
+    handled = []
+    store = InMemoryTelegramPollerStore()
+    batch = [
+        {"update_id": 41, "message": {"chat": {"id": 123}, "text": "/alerts off"}},
+        {"update_id": 42, "message": {"chat": {"id": 123}, "text": "/help"}},
+        {"update_id": 43, "message": {"chat": {"id": 123}, "text": "/trade"}},
+    ]
+
+    class PartialHandler:
+        async def handle_update(self, update):
+            if update["update_id"] == 41:
+                raise RuntimeError("poison update")
+            handled.append(update["update_id"])
+
+    def run_process():
+        """새 폴러 = 새 프로세스. 인메모리 상태는 버리고 store만 넘겨준다."""
+        poller = _make_poller(notifier, handler=PartialHandler(), state_store=store)
+        clock = FakePollerClock(stop_after=1)
+        clock.install(monkeypatch, poller)
+
+        async def fake_get_updates():
+            # 실제 Telegram처럼 offset 이후의 update만 배달한다.
+            offset = poller.offset
+            return [u for u in batch if offset is None or u["update_id"] >= offset]
+
+        monkeypatch.setattr(poller, "_get_updates", fake_get_updates)
+        return poller
+
+    first = run_process()
+    with pytest.raises(asyncio.CancelledError):
+        await first.run()
+
+    # 41은 아직 창 안이라 offset이 멈춰 있고, 42·43은 이미 실행됐다.
+    assert handled == [42, 43]
+    assert first.offset is None
+    assert first._handled_ahead == {42, 43}
+
+    # 프로세스 교체. 41은 여전히 미확정이라 텔레그램이 42·43까지 다시 배달한다.
+    second = run_process()
+    with pytest.raises(asyncio.CancelledError):
+        await second.run()
+
+    assert handled == [42, 43]  # 재실행 없음
+    assert second.offset is None
+    assert second._handled_ahead == {42, 43}
+
+
+@pytest.mark.asyncio
+async def test_poller_restores_offset_across_restart(monkeypatch):
+    """확정된 offset은 재시작 후에도 유지되어 지나간 update를 다시 받지 않는다 (#248)."""
+    notifier = FakeNotifier()
+    notifier.enabled = True
+    notifier.bot_token = "token"
+    store = InMemoryTelegramPollerStore(TelegramPollerState(offset=42, handled_ahead=frozenset()))
+    requested_offsets = []
+
+    class NoopHandler:
+        async def handle_update(self, update):
+            return None
+
+    poller = _make_poller(notifier, handler=NoopHandler(), state_store=store)
+
+    async def fake_get_updates():
+        requested_offsets.append(poller.offset)
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(poller, "_get_updates", fake_get_updates)
+
+    with pytest.raises(asyncio.CancelledError):
+        await poller.run()
+
+    assert requested_offsets == [42]
+
+
+@pytest.mark.asyncio
+async def test_poller_persists_state_after_each_update(monkeypatch):
+    """배치 끝이 아니라 update마다 저장한다 — 배치 중간에 죽어도 기록이 남아야 한다 (#248)."""
+    notifier = FakeNotifier()
+    notifier.enabled = True
+    notifier.bot_token = "token"
+    saved = []
+
+    class NoopHandler:
+        async def handle_update(self, update):
+            return None
+
+    class RecordingStore(InMemoryTelegramPollerStore):
+        async def save(self, state):
+            saved.append(state.offset)
+            await super().save(state)
+
+    poller = _make_poller(notifier, handler=NoopHandler(), state_store=RecordingStore())
+
+    async def fake_get_updates():
+        if poller.offset is not None:
+            raise asyncio.CancelledError
+        return [
+            {"update_id": 41, "message": {"chat": {"id": 123}, "text": "/help"}},
+            {"update_id": 42, "message": {"chat": {"id": 123}, "text": "/help"}},
+        ]
+
+    monkeypatch.setattr(poller, "_get_updates", fake_get_updates)
+
+    with pytest.raises(asyncio.CancelledError):
+        await poller.run()
+
+    assert saved == [42, 43]
+
+
+@pytest.mark.asyncio
+async def test_poller_keeps_polling_when_state_store_fails(monkeypatch, caplog):
+    """redis 장애로 load·save가 실패해도 폴링은 인메모리 상태로 계속된다 (#248).
+
+    fail-closed로 두면 redis 장애가 곧 텔레그램 명령 전면 중단이 된다.
+    """
+    notifier = FakeNotifier()
+    notifier.enabled = True
+    notifier.bot_token = "token"
+    handled = []
+
+    class NoopHandler:
+        async def handle_update(self, update):
+            handled.append(update["update_id"])
+
+    class BrokenStore:
+        async def load(self):
+            raise RuntimeError("redis unavailable")
+
+        async def save(self, state):
+            raise RuntimeError("redis unavailable")
+
+    poller = _make_poller(notifier, handler=NoopHandler(), state_store=BrokenStore())
+
+    async def fake_get_updates():
+        if poller.offset is not None:
+            raise asyncio.CancelledError
+        return [{"update_id": 41, "message": {"chat": {"id": 123}, "text": "/help"}}]
+
+    monkeypatch.setattr(poller, "_get_updates", fake_get_updates)
+
+    with caplog.at_level("ERROR"):
+        with pytest.raises(asyncio.CancelledError):
+            await poller.run()
+
+    assert handled == [41]
+    assert poller.offset == 42
+    assert "상태 복원 실패" in caplog.text
+    assert "상태 저장 실패" in caplog.text
 
 
 # ---------------------------------------------------------------------------

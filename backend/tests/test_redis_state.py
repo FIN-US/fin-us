@@ -2,7 +2,10 @@ import pytest
 
 from backend.redis_state import (
     SIGNAL_HASH_TTL_SEC,
+    TELEGRAM_POLLER_STATE_TTL_SEC,
     RedisSchedulerState,
+    RedisTelegramPollerStore,
+    TelegramPollerState,
     signal_hash,
     normalize_signal_text,
 )
@@ -156,3 +159,76 @@ async def test_telegram_alert_mode_ignores_invalid_values():
     assert await state.get_telegram_alert_mode() == "all"
 
 
+
+
+# ---------------------------------------------------------------------------
+# RedisTelegramPollerStore (#248)
+# ---------------------------------------------------------------------------
+
+
+class PollerFakeRedis(FakeRedis):
+    """delete를 더한 FakeRedis. 손상된 상태 키를 지우는 경로를 태우기 위함이다."""
+
+    async def delete(self, key):
+        self.store.pop(key, None)
+
+
+@pytest.mark.asyncio
+async def test_poller_state_round_trips_offset_and_handled_ahead():
+    redis = PollerFakeRedis()
+    store = RedisTelegramPollerStore(redis)
+
+    assert await store.load() == TelegramPollerState()
+
+    await store.save(TelegramPollerState(offset=44, handled_ahead=frozenset({42, 43})))
+    loaded = await store.load()
+
+    assert loaded.offset == 44
+    assert loaded.handled_ahead == frozenset({42, 43})
+    # 두 값이 한 키에 함께 저장되어야 절반만 반영된 상태가 생기지 않는다.
+    assert list(redis.store) == ["finus:telegram:poller_state"]
+    assert redis.calls[-1][2] == TELEGRAM_POLLER_STATE_TTL_SEC
+
+
+@pytest.mark.asyncio
+async def test_poller_state_load_drops_corrupted_value():
+    """손상된 값을 남겨두면 매 재시작마다 같은 실패를 반복한다 (#248)."""
+    redis = PollerFakeRedis()
+    redis.store["finus:telegram:poller_state"] = "not json"
+    store = RedisTelegramPollerStore(redis)
+
+    assert await store.load() == TelegramPollerState()
+    assert redis.store == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload",
+    [
+        '{"offset": "42"}',
+        # bool은 int의 하위 타입이라 타입 검사를 그냥 통과한다. offset=True가 통과하면
+        # getUpdates가 offset=1로 해석해 24시간치 update를 통째로 재배달한다.
+        '{"offset": true}',
+        '{"offset": 42, "handled_ahead": "42"}',
+        '{"offset": 42, "handled_ahead": ["42"]}',
+    ],
+)
+async def test_poller_state_load_rejects_wrong_types(payload):
+    redis = PollerFakeRedis()
+    redis.store["finus:telegram:poller_state"] = payload
+    store = RedisTelegramPollerStore(redis)
+
+    assert await store.load() == TelegramPollerState()
+    assert redis.store == {}
+
+
+@pytest.mark.asyncio
+async def test_poller_state_save_overwrites_whole_state():
+    """전체 상태를 매번 덮어쓰므로 이전 쓰기가 실패해도 다음 쓰기가 따라잡는다 (#248)."""
+    redis = PollerFakeRedis()
+    store = RedisTelegramPollerStore(redis)
+
+    await store.save(TelegramPollerState(offset=None, handled_ahead=frozenset({42, 43})))
+    await store.save(TelegramPollerState(offset=44, handled_ahead=frozenset()))
+
+    assert await store.load() == TelegramPollerState(offset=44, handled_ahead=frozenset())

@@ -4,7 +4,13 @@ from uuid import uuid4
 
 import pytest
 
-from backend.redis_state import RedisKeys, RedisSchedulerState, signal_hash
+from backend.redis_state import (
+    RedisKeys,
+    RedisSchedulerState,
+    RedisTelegramPollerStore,
+    TelegramPollerState,
+    signal_hash,
+)
 
 
 pytestmark = pytest.mark.asyncio
@@ -76,4 +82,31 @@ async def test_real_redis_allows_only_one_concurrent_analysis_lock_holder():
         keys = await redis.keys(f"{prefix}:*")
         if keys:
             await redis.delete(*keys)
+        await redis.aclose()
+
+
+async def test_real_redis_poller_state_survives_a_new_store_instance():
+    """폴러 상태가 실제 redis를 통해 새 인스턴스로 넘어간다 (#248).
+
+    인스턴스 교체 = 프로세스 재시작. FakeRedis는 JSON 왕복과 TTL 적용을 흉내만 내므로
+    실제 서버에서 한 번 확인한다.
+    """
+    redis = await _redis_client()
+    prefix = f"finus:test:{uuid4().hex}"
+    keys = RedisKeys(prefix=prefix)
+
+    try:
+        writer = RedisTelegramPollerStore(redis, keys=keys)
+        await writer.save(TelegramPollerState(offset=44, handled_ahead=frozenset({42, 43})))
+
+        reader = RedisTelegramPollerStore(redis, keys=keys)
+        loaded = await reader.load()
+
+        assert loaded.offset == 44
+        assert loaded.handled_ahead == frozenset({42, 43})
+        assert await redis.ttl(keys.telegram_poller_state()) > 0
+    finally:
+        stale = await redis.keys(f"{prefix}:*")
+        if stale:
+            await redis.delete(*stale)
         await redis.aclose()
