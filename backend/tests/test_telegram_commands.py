@@ -8,6 +8,7 @@ from fastapi import HTTPException
 
 import backend.telegram_commands as telegram_commands
 from backend.config import DART_MCP_PARAMS, NEWS_MCP_PARAMS, TRADING_MCP_PARAMS
+from backend.redis_state import InMemoryPendingOrderStore
 from backend.telegram_commands import (
     BUY_COMMAND_HELP,
     CATALYST_COMMAND_HELP,
@@ -3102,3 +3103,211 @@ async def test_cancel_after_confirm_send_failure_reports_already_settled():
     assert len(gateway.orders) == 1
     assert notifier.messages[-1].startswith("이미 확정된 주문입니다.")
     assert "주문 완료" in notifier.messages[-1]
+
+
+# ---------------------------------------------------------------------------
+# #249 동작 가드 — 돈이 오가는 경로(주문 준비·확정·취소)의 개별 except Exception이
+# TelegramSendError를 재전파하는지 "구조 검사"가 아니라 실제 handle_update 실행으로
+# 고정한다.
+#
+# 판단 근거: 구조 불변식 테스트(test_telegram_commands_invariants.py)는 소스에
+# `except TelegramSendError: raise`가 "있는지"는 보장하지만, 그게 handle_update
+# 호출 경로에서 실제로 동작하는지(예: 잘못된 위치에 놓여 오작동)까지는 보장하지
+# 않는다. 돈·주문 상태가 걸린 세 핸들러(_handle_order_command, _handle_confirm,
+# _handle_cancel과 그 도우미 _resend_order_prompt)는 동작으로도 이중 고정한다.
+# 부수효과가 없는 순수 조회 명령(_handle_balance/_handle_quote/_handle_trend/
+# _handle_earnings/_handle_chat_fallback)은 구조 검사만으로 충분하다고 판단해
+# 여기 포함하지 않았다 — 회귀해도 잘못된 오류 메시지 한 줄이 나갈 뿐, 중복 주문·
+# 중복 체결 같은 돈 문제로 이어지지 않는다.
+# ---------------------------------------------------------------------------
+
+class _SendErrorOnMethodStore:
+    """지정한 메서드 호출 시 TelegramSendError를 강제로 던지는 pending_order 저장소 프록시.
+
+    실제 저장소 메서드(get/set/delete/claim/set_if_absent/has)는 텔레그램 API를
+    부르지 않으므로 오늘은 TelegramSendError를 던지지 않는다. 이 프록시는 "이
+    try 블록 안에서 TelegramSendError가 발생한다면"을 가정해, 감싸는 except가
+    그것을 올바르게 재전파하는지를 실제 handle_update 실행으로 검증한다.
+    """
+
+    def __init__(self, delegate, *, raise_on: str):
+        self._delegate = delegate
+        self._raise_on = raise_on
+
+    def __getattr__(self, name):
+        if name == self._raise_on:
+            async def _raise(*args, **kwargs):
+                raise telegram_commands.TelegramSendError("simulated send failure")
+
+            return _raise
+        return getattr(self._delegate, name)
+
+
+@pytest.mark.asyncio
+async def test_order_command_pending_lookup_send_error_propagates():
+    """/buy의 대기 주문 조회 try(_drop_expired_pending_order + pending_orders.get)
+    안에서 TelegramSendError가 나면 그대로 위로 전파해야 한다."""
+    store = _SendErrorOnMethodStore(InMemoryPendingOrderStore(), raise_on="get")
+    handler = TelegramCommandHandler(
+        notifier=FakeNotifier(),
+        pending_order_store=store,
+        now_factory=lambda: datetime(2026, 5, 20, 10, 0, tzinfo=KST),
+    )
+
+    with pytest.raises(telegram_commands.TelegramSendError):
+        await handler.handle_update(
+            {"message": {"chat": {"id": 123}, "text": "/buy 삼성전자 1 75000"}}
+        )
+
+
+@pytest.mark.asyncio
+async def test_order_command_set_if_absent_send_error_propagates():
+    """/buy의 주문 저장(set_if_absent) try 안에서 TelegramSendError가 나면
+    재전파해야 한다."""
+
+    async def mcp_runner(server_params, tool_name, arguments):
+        if tool_name == "resolve_stock_code":
+            return "삼성전자 (005930, KOSPI)"
+        if tool_name == "get_stock_quote":
+            return "현재가: 74,500원"
+        if tool_name == "get_balance":
+            return "주문가능금액: 1,000,000원"
+        raise AssertionError(f"unexpected tool: {tool_name}")
+
+    store = _SendErrorOnMethodStore(InMemoryPendingOrderStore(), raise_on="set_if_absent")
+    handler = TelegramCommandHandler(
+        notifier=FakeNotifier(),
+        pending_order_store=store,
+        mcp_runner=mcp_runner,
+        now_factory=lambda: datetime(2026, 5, 20, 10, 0, tzinfo=KST),
+    )
+
+    with pytest.raises(telegram_commands.TelegramSendError):
+        await handler.handle_update(
+            {"message": {"chat": {"id": 123}, "text": "/buy 삼성전자 1 75000"}}
+        )
+
+
+@pytest.mark.asyncio
+async def test_resend_order_prompt_quote_lookup_send_error_propagates():
+    """#247 재시도 경로(_resend_order_prompt)의 시세·잔고 재조회 try 안에서
+    TelegramSendError가 나면 재전파해야 한다."""
+    order = PendingOrder(
+        chat_id="123",
+        stock_name="삼성전자",
+        stock_code="005930",
+        side="BUY",
+        quantity=1,
+        price=75000,
+        created_at=datetime(2026, 5, 20, 10, 0, tzinfo=KST),
+        callback_token="tok",
+        prompt_delivered=False,
+    )
+    store = InMemoryPendingOrderStore()
+    await store.set("123", order)
+
+    async def mcp_runner(server_params, tool_name, arguments):
+        raise telegram_commands.TelegramSendError("simulated send failure")
+
+    handler = TelegramCommandHandler(
+        notifier=FakeNotifier(),
+        pending_order_store=store,
+        mcp_runner=mcp_runner,
+        now_factory=lambda: datetime(2026, 5, 20, 10, 0, 10, tzinfo=KST),
+    )
+
+    with pytest.raises(telegram_commands.TelegramSendError):
+        await handler.handle_update(
+            {"message": {"chat": {"id": 123}, "text": "/buy 삼성전자 1 75000"}}
+        )
+
+
+@pytest.mark.asyncio
+async def test_confirm_claim_send_error_propagates():
+    """/confirm의 claim try(_drop_expired_pending_order + pending_orders.claim)
+    안에서 TelegramSendError가 나면 재전파해야 한다."""
+    store = _SendErrorOnMethodStore(InMemoryPendingOrderStore(), raise_on="claim")
+    handler = TelegramCommandHandler(
+        notifier=FakeNotifier(),
+        pending_order_store=store,
+        order_gateway=FakeOrderGateway(),
+        now_factory=lambda: datetime(2026, 5, 20, 10, 0, tzinfo=KST),
+    )
+
+    with pytest.raises(telegram_commands.TelegramSendError):
+        await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/confirm"}})
+
+
+@pytest.mark.asyncio
+async def test_confirm_place_order_send_error_propagates():
+    """/confirm의 place_order try 안에서 TelegramSendError가 나면(가상의 미래
+    리팩터를 가정) 재전파해야 한다."""
+
+    class _SendErrorGateway:
+        async def place_order(self, order):
+            raise telegram_commands.TelegramSendError("simulated send failure")
+
+    order = PendingOrder(
+        chat_id="123",
+        stock_name="삼성전자",
+        stock_code="005930",
+        side="BUY",
+        quantity=1,
+        price=75000,
+        created_at=datetime(2026, 5, 20, 10, 0, tzinfo=KST),
+        callback_token="tok",
+        prompt_delivered=True,
+    )
+    store = InMemoryPendingOrderStore()
+    await store.set("123", order)
+
+    handler = TelegramCommandHandler(
+        notifier=FakeNotifier(),
+        pending_order_store=store,
+        order_gateway=_SendErrorGateway(),
+        now_factory=lambda: datetime(2026, 5, 20, 10, 0, 10, tzinfo=KST),
+    )
+
+    with pytest.raises(telegram_commands.TelegramSendError):
+        await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/confirm"}})
+
+
+@pytest.mark.asyncio
+async def test_cancel_pending_lookup_send_error_propagates():
+    """/cancel의 대기 주문 조회 try 안에서 TelegramSendError가 나면 재전파해야 한다."""
+    store = _SendErrorOnMethodStore(InMemoryPendingOrderStore(), raise_on="get")
+    handler = TelegramCommandHandler(
+        notifier=FakeNotifier(),
+        pending_order_store=store,
+        now_factory=lambda: datetime(2026, 5, 20, 10, 0, tzinfo=KST),
+    )
+
+    with pytest.raises(telegram_commands.TelegramSendError):
+        await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/cancel"}})
+
+
+@pytest.mark.asyncio
+async def test_cancel_delete_send_error_propagates():
+    """/cancel의 삭제 try 안에서 TelegramSendError가 나면 재전파해야 한다."""
+    order = PendingOrder(
+        chat_id="123",
+        stock_name="삼성전자",
+        stock_code="005930",
+        side="BUY",
+        quantity=1,
+        price=75000,
+        created_at=datetime(2026, 5, 20, 10, 0, tzinfo=KST),
+        callback_token="tok",
+    )
+    base_store = InMemoryPendingOrderStore()
+    await base_store.set("123", order)
+    store = _SendErrorOnMethodStore(base_store, raise_on="delete")
+
+    handler = TelegramCommandHandler(
+        notifier=FakeNotifier(),
+        pending_order_store=store,
+        now_factory=lambda: datetime(2026, 5, 20, 10, 0, 10, tzinfo=KST),
+    )
+
+    with pytest.raises(telegram_commands.TelegramSendError):
+        await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/cancel"}})
