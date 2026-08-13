@@ -594,6 +594,35 @@ async def test_duplicate_confirm_calls_place_order_only_once():
     assert notifier.messages[-1] == "확정할 대기 주문이 없습니다."
 
 
+@pytest.mark.asyncio
+async def test_redis_store_claim_removes_order_atomically():
+    """claim()은 getdel(원자적 읽기+삭제)을 써서, 첫 호출이 값을 가져가면 뒤이은
+    호출은 반드시 None을 받는다 (이슈 #63/#247, PR #242·#247 리뷰: settled 레코드
+    도입 이후에도 claim 자체의 원자성이 store 수준에서 고정돼야 한다).
+
+    #247에서 place_order 성공 후 settled 레코드를 다시 써넣도록 handler를 바꾸면서,
+    handler 수준의 회귀 테스트(test_duplicate_confirm_calls_place_order_only_once)는
+    "그 다음에 handler가 명시적으로 delete하는지"까지 함께 확인하게 됐다. 그 결과
+    claim()이 get()으로(비원자화) 바뀌어도 handler의 사후 delete가 상태를 정리해버려
+    handler 수준 테스트만으로는 이 mutation을 잡지 못한다. store 수준에서 claim() 두
+    번을 직접 호출해 원자성 자체를 고정한다.
+
+    이 테스트가 잡는 mutation: claim()에서 getdel을 get으로 바꾸는 것(비원자화).
+    get으로 바뀌면 첫 claim() 후에도 키가 지워지지 않아 두 번째 claim()이 같은
+    주문을 또 돌려준다 — 동시에 들어온 두 /confirm이 각각 place_order를 불러
+    중복 체결로 이어지는 근본 원인이다.
+    """
+    redis = FakeRedis()
+    store = RedisPendingOrderStore(redis)
+    await store.set("123", _ORDER_A)
+
+    first = await store.claim("123")
+    second = await store.claim("123")
+
+    assert first is not None and first.callback_token == "tok-a"
+    assert second is None
+
+
 # ---------------------------------------------------------------------------
 # set_if_absent NX 시맨틱 가드 (이슈 #63, PR #223 Improvement 1)
 # ---------------------------------------------------------------------------

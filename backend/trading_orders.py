@@ -24,6 +24,19 @@ class PendingOrder:
     created_at: datetime
     order_type: OrderType = "LIMIT"
     callback_token: str = ""
+    # 아래 두 필드는 #247(멱등성) 전용이다. 전송 실패(TelegramSendError)로 poller가
+    # handle_update를 재시도할 때, 이미 확정된 부수효과(저장·체결)를 다시 실행하지 않고
+    # "같은 사용자 응답"으로 수렴시키기 위한 상태다.
+    #
+    # prompt_delivered: set_if_absent로 주문이 저장된 뒤 확인 프롬프트 전송까지
+    # 성공했는지. False인 채로 재시도를 만나면 새 주문을 또 만들지 않고 이
+    # 프롬프트를 재전송한다(telegram_commands._handle_order_command).
+    prompt_delivered: bool = False
+    # settled: place_order(체결)까지 끝났는지. True면 claim()이 이 레코드를 돌려줘도
+    # place_order를 다시 부르지 않고 settled_message만 재전송한다
+    # (telegram_commands._handle_confirm).
+    settled: bool = False
+    settled_message: str | None = None
 
 
 @dataclass(frozen=True)

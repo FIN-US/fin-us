@@ -4,7 +4,7 @@ import re
 import secrets
 import time
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from datetime import datetime, timedelta
 from typing import Any, Callable
@@ -696,6 +696,11 @@ class TelegramCommandHandler:
         await self.notifier.send_chat_action("typing")
         try:
             result = await self.mcp_runner(TRADING_MCP_PARAMS, "get_balance", {})
+        # #249: try 안에 전송 호출은 없어 오늘은 실질 위험이 없지만, "except Exception →
+        # _send_text_or_raise로 재변환" 패턴 자체가 향후 try 본문에 send가 섞여도
+        # 조용히 삼키지 않도록 방어적으로 재전파한다(핸들러 전역 불변식).
+        except TelegramSendError:
+            raise
         except Exception as exc:
             await self._send_text_or_raise(f"조회 실패: {_short_error(exc)}")
             return
@@ -717,6 +722,8 @@ class TelegramCommandHandler:
                 "get_stock_quote",
                 {"stock_name": stock},
             )
+        except TelegramSendError:  # #249: 방어적 재전파, 위 _handle_balance 주석 참고
+            raise
         except Exception as exc:
             await self._send_text_or_raise(f"조회 실패: {_short_error(exc)}")
             return
@@ -742,14 +749,25 @@ class TelegramCommandHandler:
 
         try:
             await self._drop_expired_pending_order(chat_id, now)
-            has_pending = await self.pending_orders.has(chat_id)
+            pending = await self.pending_orders.get(chat_id)
+        except TelegramSendError:
+            raise
         except Exception as exc:
             await self._send_text_or_raise(f"주문 저장소 오류: {_short_error(exc)}")
             return
-        if has_pending:
-            await self._send_text_or_raise(
-                "이미 대기 중인 주문이 있습니다. /confirm 또는 /cancel로 먼저 처리하세요."
-            )
+        if pending is not None:
+            if pending.prompt_delivered:
+                await self._send_text_or_raise(
+                    "이미 대기 중인 주문이 있습니다. /confirm 또는 /cancel로 먼저 처리하세요."
+                )
+                return
+            # #247(멱등성): 이전 시도가 set_if_absent(부수효과 확정)까지는 성공했지만
+            # 확인 프롬프트 전송에서 실패했다(TelegramSendError) — 이 update는 poller가
+            # 재시도한 것이다. 새 주문을 또 만들면 두 번째 /buy로 오인되어 "이미 대기
+            # 중인 주문이 있습니다"를 돌려주고 사용자는 확인 버튼을 영영 못 받는다.
+            # 대신 이미 저장된 주문의 프롬프트를 그대로 재전송해 재시도가 원래
+            # 의도(확인 버튼 수신)로 수렴하게 한다.
+            await self._resend_order_prompt(chat_id, pending)
             return
 
         await self.notifier.send_chat_action("typing")
@@ -799,6 +817,14 @@ class TelegramCommandHandler:
                 ),
                 self.mcp_runner(TRADING_MCP_PARAMS, "get_balance", {}),
             )
+        except TelegramSendError:
+            # #249: 위 세 개의 send_text_or_raise(766~792행)는 이 try 안에 있다. 429 등으로
+            # 그중 하나가 TelegramSendError를 던지면 아래 except Exception이 이를 삼켜
+            # "주문 준비 실패: telegram send failed"로 재전송했다 — 원래 메시지가 사라지고
+            # (재전송이 성공하면) handle_update가 정상 종료해 poller가 성공으로 오판했다.
+            # 전송 실패는 이 명령의 오류가 아니라 사용자에게 말을 걸 수 없는 상태이므로
+            # 그대로 위로 전파해 poller의 전송-실패 전용 재시도 예산이 다루게 한다.
+            raise
         except Exception as exc:
             await self._send_text_or_raise(f"주문 준비 실패: {_short_error(exc)}")
             return
@@ -816,32 +842,92 @@ class TelegramCommandHandler:
         )
         try:
             stored = await self.pending_orders.set_if_absent(chat_id, order)
+        except TelegramSendError:
+            raise
         except Exception as exc:
             await self._send_text_or_raise(f"주문 저장 실패: {_short_error(exc)}")
             return
         if not stored:
-            # MCP 호출 사이에 같은 chat에서 /buy가 먼저 체결된 경우
+            # MCP 호출 사이에 같은 chat에서 /buy가 먼저 체결된 경우(레이스). 함수 진입
+            # 시점엔 대기 주문이 없었는데 resolve/validate 도중 다른 /buy가 새로 만든
+            # 것이므로, #247 재시도 케이스(진입 시점부터 이미 있던 주문)와 다르다 — 그
+            # 주문을 대신 전달할 근거가 없으므로 사용자가 직접 /confirm·/cancel을
+            # 선택하게 한다.
             await self._send_text_or_raise(
                 "이미 대기 중인 주문이 있습니다. /confirm 또는 /cancel로 먼저 처리하세요."
             )
             return
+        await self._deliver_order_prompt(chat_id, order, str(quote_result), str(balance_result))
+
+    async def _resend_order_prompt(self, chat_id: str, order: PendingOrder) -> None:
+        """#247: 저장은 됐지만 전송에 실패한 pending order의 프롬프트를 재전송한다.
+
+        새 명령을 다시 파싱하지 않고 이미 저장된 order를 그대로 쓴다 — 재시도가 다른
+        주문을 만들어내면 안 되기 때문이다. 시세·잔고는 저장해두지 않으므로(주문
+        내용만 저장) 다시 조회한다: 어차피 실시간 데이터라 매 전송마다 새로 조회하는
+        것이 기존 동작과 같다.
+        """
+        await self.notifier.send_chat_action("typing")
+        try:
+            quote_result, balance_result = await asyncio.gather(
+                self.mcp_runner(
+                    TRADING_MCP_PARAMS,
+                    "get_stock_quote",
+                    {"stock_name": order.stock_name},
+                ),
+                self.mcp_runner(TRADING_MCP_PARAMS, "get_balance", {}),
+            )
+        except TelegramSendError:
+            raise
+        except Exception as exc:
+            await self._send_text_or_raise(f"주문 준비 실패: {_short_error(exc)}")
+            return
+        await self._deliver_order_prompt(chat_id, order, str(quote_result), str(balance_result))
+
+    async def _deliver_order_prompt(
+        self,
+        chat_id: str,
+        order: PendingOrder,
+        quote_result: str,
+        balance_result: str,
+    ) -> None:
         await self._send_text_or_raise(
-            self._format_order_prompt(order, str(quote_result), str(balance_result)),
+            self._format_order_prompt(order, quote_result, balance_result),
             reply_markup=self._order_reply_markup(order),
         )
+        # #247: 전송이 성공한 뒤에만 delivered로 표시한다. 전송이 TelegramSendError를
+        # 던지면 이 줄에 도달하지 못하므로 저장소에는 prompt_delivered=False가 그대로
+        # 남고, 다음 재시도가 _resend_order_prompt로 다시 온다.
+        try:
+            await self.pending_orders.set(chat_id, replace(order, prompt_delivered=True))
+        except Exception as exc:
+            logger.warning("pending_order prompt_delivered 갱신 실패: %s", exc)
 
     async def _handle_cancel(self, chat_id: str) -> None:
         try:
             await self._drop_expired_pending_order(chat_id, self.now_factory())
-            has_pending = await self.pending_orders.has(chat_id)
+            pending = await self.pending_orders.get(chat_id)
+        except TelegramSendError:
+            raise
         except Exception as exc:
             await self._send_text_or_raise(f"주문 저장소 오류: {_short_error(exc)}")
             return
-        if not has_pending:
+        if pending is None:
             await self._send_text_or_raise("취소할 대기 주문이 없습니다.")
+            return
+        if pending.settled:
+            # #247: settled 레코드는 이미 체결까지 끝난 주문의 결과 재전송 대기 상태다.
+            # "취소"는 이미 끝난 체결을 없던 일로 만들 수 없으므로 체결 결과를 그대로
+            # 안내한다 — 삭제도 하지 않는다: /confirm 쪽 재시도가 여전히 이 레코드를
+            # 필요로 할 수 있다.
+            await self._send_text_or_raise(
+                f"이미 확정된 주문입니다.\n{pending.settled_message or ''}".rstrip()
+            )
             return
         try:
             await self.pending_orders.delete(chat_id)
+        except TelegramSendError:
+            raise
         except Exception as exc:
             await self._send_text_or_raise(f"주문 저장소 오류: {_short_error(exc)}")
             return
@@ -857,6 +943,8 @@ class TelegramCommandHandler:
             # claim(GETDEL): 원자적 읽기+삭제. 재시작 후 재전송된 Telegram update나
             # 멀티워커 경합에서 정확히 하나의 호출만 order를 받고 나머지는 None을 받는다.
             order = await self.pending_orders.claim(chat_id)
+        except TelegramSendError:
+            raise
         except Exception as exc:
             await self._send_text_or_raise(f"주문 저장소 오류: {_short_error(exc)}")
             return
@@ -864,9 +952,24 @@ class TelegramCommandHandler:
             await self._send_text_or_raise("확정할 대기 주문이 없습니다.")
             return
 
+        if order.settled:
+            # #247(멱등성): claim은 원자적이라 정상적으로는 이 chat에 대해 한 번만
+            # 미체결 PendingOrder를 돌려준다. settled=True로 저장된 레코드를 받았다는
+            # 것은 직전 /confirm이 place_order까지 성공했지만 결과 전송에서 실패해
+            # (TelegramSendError) poller가 이 update를 재시도했다는 뜻이다. place_order를
+            # 다시 부르면 중복 체결이므로, 저장해둔 체결 결과 메시지만 재전송한다.
+            await self._send_text_or_raise(order.settled_message or "주문 완료")
+            try:
+                await self.pending_orders.delete(chat_id)
+            except Exception as exc:
+                logger.warning("settled pending_order 정리 실패: %s", exc)
+            return
+
         await self.notifier.send_chat_action("typing")
         try:
             result = await self.order_gateway.place_order(order)
+        except TelegramSendError:
+            raise
         except Exception as exc:
             if isinstance(exc, HTTPException) and exc.status_code == 403:
                 # 403 = 실계좌 가드 미충족: 주문 미실행이 확실하므로 대기 주문 복원.
@@ -885,6 +988,9 @@ class TelegramCommandHandler:
                 return
 
             # 주문 실행 결과 불명확: claim으로 이미 삭제됨 — 추가 delete 불필요
+            # (settled 레코드도 만들지 않는다. place_order 성공 여부를 모르는 채로
+            # "체결됨"이라고 캐시해 두면 재시도가 실제로는 안 됐을 체결을 됐다고
+            # 우긴다 — #247 범위 밖. 실패가 확실한 경우만 안전하게 재시도로 수렴시킨다.)
             await self._send_text_or_raise(
                 "주문 실패 또는 상태 확인 필요: "
                 f"{_short_error(exc)}\n"
@@ -892,7 +998,7 @@ class TelegramCommandHandler:
             )
             return
 
-        # 주문 성공: claim으로 이미 삭제됨 — 추가 delete 불필요
+        # 주문 성공(부수효과 확정): claim으로 이미 삭제됨 — 추가 delete 불필요
         record_warning = ""
         if self.trade_recorder is not None:
             try:
@@ -900,7 +1006,25 @@ class TelegramCommandHandler:
             except Exception as exc:
                 logger.warning("Trade history recording failed: %s", exc)
                 record_warning = f"\n거래 이력 기록 실패: {_short_error(exc)}"
-        await self._send_text_or_raise(f"주문 완료: {result.message}{record_warning}")
+        message = f"주문 완료: {result.message}{record_warning}"
+        # #247: 전송 전에 체결 결과를 settled 레코드로 먼저 저장한다. place_order는 이미
+        # 끝났으므로, 이 저장 다음의 전송이 실패해도(TelegramSendError) 재시도는 이
+        # 레코드를 만나 place_order를 다시 부르지 않고 메시지만 재전송해야 한다. TTL은
+        # 원래 order의 저장소 TTL(600초)을 그대로 물려받아 전송 재시도 창(최대 335초)을
+        # 넉넉히 덮는다.
+        try:
+            await self.pending_orders.set(
+                chat_id, replace(order, settled=True, settled_message=message)
+            )
+        except Exception as exc:
+            logger.error("settled 결과 저장 실패: %s", exc)
+        await self._send_text_or_raise(message)
+        # 전송 성공: settled 레코드를 즉시 정리한다. 남겨두면 TTL(600초)이 끝날 때까지
+        # 재조회 없이도 그 chat의 다음 무관한 /confirm이 이 결과를 다시 받을 수 있다.
+        try:
+            await self.pending_orders.delete(chat_id)
+        except Exception as exc:
+            logger.warning("settled pending_order 정리 실패: %s", exc)
 
     def _parse_order_argument(self, argument: str) -> tuple[str, int, int, OrderType] | None:
         parts = argument.split()
@@ -982,6 +1106,13 @@ class TelegramCommandHandler:
     async def _drop_expired_pending_order(self, chat_id: str, now: datetime) -> None:
         order = await self.pending_orders.get(chat_id)
         if order is None:
+            return
+        if order.settled:
+            # #247: settled 레코드는 이미 place_order까지 끝난 뒤 결과 전송 재시도를
+            # 위해 남겨둔 것이다. created_at은 원래 /buy 시각이라 60초 만료 검사를
+            # 적용하면 안 된다 — 전송 실패 재시도 창(최대 335초, PR #242)이 60초보다
+            # 길어서 여기서 지우면 재시도가 체결 결과를 통째로 잃는다. 정리는 성공
+            # 전송 후 명시적 delete 또는 저장소 TTL(600초, PENDING_ORDER_TTL_SEC)이 맡는다.
             return
         created_at = order.created_at
         if created_at.tzinfo is None:
@@ -1230,6 +1361,8 @@ class TelegramCommandHandler:
                 "get_investor_trading",
                 {"stock_name": stock},
             )
+        except TelegramSendError:  # #249: 방어적 재전파, _handle_balance 주석 참고
+            raise
         except Exception as exc:
             await self._send_text_or_raise(f"조회 실패: {_short_error(exc)}")
             return
@@ -1260,6 +1393,8 @@ class TelegramCommandHandler:
                 self._earnings_analysis_prompt(stock, period, str(dart_result), str(news_result)),
                 conversation_id=f"telegram:{chat_id}:earnings:{_url_quote(stock, safe='')}",
             )
+        except TelegramSendError:  # #249: 방어적 재전파, _handle_balance 주석 참고
+            raise
         except Exception as exc:
             await self._send_text_or_raise(f"조회 실패: {_short_error(exc)}")
             return
@@ -1354,6 +1489,8 @@ class TelegramCommandHandler:
                 text,
                 conversation_id=f"telegram:{chat_id}",
             )
+        except TelegramSendError:  # #249: 방어적 재전파, _handle_balance 주석 참고
+            raise
         except Exception as exc:
             await self._send_text_or_raise(f"응답 생성 실패: {_short_error(exc)}")
             return

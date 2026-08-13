@@ -2906,3 +2906,199 @@ async def test_help_and_bot_menu_include_catalysts_command(monkeypatch):
 
     assert "/catalysts <종목명> - 예정 촉매 이벤트 조회" in notifier.messages[-1]
     assert "catalysts" in [command["command"] for command in telegram_commands.TELEGRAM_BOT_COMMANDS]
+
+
+# ---------------------------------------------------------------------------
+# #249: except Exception이 TelegramSendError를 삼키지 않는다
+# #247: 부수효과 확정 후 전송 실패 재시도가 같은 결과로 수렴한다 (멱등성)
+# ---------------------------------------------------------------------------
+
+class _FailOnceForPrefixNotifier(FakeNotifier):
+    """지정한 접두사로 시작하는 메시지의 첫 전송만 실패시킨다(429 재시도 후 성공 시뮬레이션).
+
+    FakeNotifier(send_text_result=False)는 모든 전송을 실패시켜 "재시도가 성공하는"
+    시나리오(#249/#247의 핵심 — 429가 잠깐이고 재전송에서 서버가 복구되는 경우)를
+    표현할 수 없다. 이 fake는 딱 한 번, 지정한 메시지에서만 실패한다.
+    """
+
+    def __init__(self, *, fail_prefix: str, **kwargs):
+        super().__init__(**kwargs)
+        self._fail_prefix = fail_prefix
+        self._failed_once = False
+
+    async def send_text(self, text, *, reply_markup=None):
+        self.messages.append(text)
+        self.reply_markups.append(reply_markup)
+        if not self._failed_once and text.startswith(self._fail_prefix):
+            self._failed_once = True
+            return False
+        return True
+
+
+@pytest.mark.asyncio
+async def test_order_prepare_send_failure_propagates_instead_of_being_swallowed():
+    """#249: 준비 단계 안의 send_text_or_raise(766행 부근)가 던진 TelegramSendError를
+    감싸는 except Exception(802행 부근)이 삼켜 "주문 준비 실패: telegram send failed"로
+    재전송하면 안 된다. 재전송이 성공해도(429 복구) handle_update는 TelegramSendError를
+    던져야 poller가 전송 실패 전용 예산(SEND_FAILURE_RETRY_WINDOW_SECONDS)으로 다룬다.
+
+    이 테스트는 뮤테이션 ①(TelegramSendError 재전파 제거)의 회귀 가드다: 재전파를
+    없애면 아래 with pytest.raises가 실패한다(재전송이 성공해 handle_update가 정상
+    종료하므로).
+    """
+
+    async def mcp_runner(server_params, tool_name, arguments):
+        if tool_name == "resolve_stock_code":
+            # 코드 추출 실패 → stock_code is None 분기의 전송(766행 부근)을 태운다.
+            return "종목을 찾지 못했습니다"
+        raise AssertionError(f"unexpected tool: {tool_name}")
+
+    notifier = _FailOnceForPrefixNotifier(fail_prefix="주문 준비 실패: 종목코드")
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        mcp_runner=mcp_runner,
+        now_factory=lambda: datetime(2026, 5, 20, 10, 0, tzinfo=KST),
+    )
+
+    with pytest.raises(telegram_commands.TelegramSendError):
+        await handler.handle_update(
+            {"message": {"chat": {"id": 123}, "text": "/buy 알수없는종목 1 75000"}}
+        )
+
+    # 삼켜졌다면 여기서 "주문 준비 실패: telegram send failed" 재전송이 성공해
+    # 메시지가 하나 더 남았을 것이다. 재전파되면 원래 메시지 한 건만 남는다.
+    assert notifier.messages == ["주문 준비 실패: 종목코드를 확인할 수 없습니다."]
+    assert handler.pending_orders == {}
+
+
+@pytest.mark.asyncio
+async def test_buy_retry_after_prompt_send_failure_resends_same_prompt():
+    """#247: set_if_absent(부수효과 확정) 후 확인 프롬프트 전송이 실패해 poller가
+    handle_update를 재시도하면, 재시도는 "이미 대기 중인 주문이 있습니다"가 아니라
+    원래 의도했던 확인 프롬프트(버튼 포함)로 수렴해야 한다.
+
+    뮤테이션 ②(멱등성 보장 로직 무력화)의 회귀 가드: prompt_delivered 분기를 지우면
+    두 번째 handle_update가 "이미 대기 중인 주문이 있습니다"를 보내 아래 단언이 실패한다.
+    """
+
+    async def mcp_runner(server_params, tool_name, arguments):
+        if tool_name == "resolve_stock_code":
+            return "삼성전자 (005930, KOSPI)"
+        if tool_name == "get_stock_quote":
+            return "현재가: 74,500원"
+        if tool_name == "get_balance":
+            return "주문가능금액: 1,000,000원"
+        raise AssertionError(f"unexpected tool: {tool_name}")
+
+    notifier = _FailOnceForPrefixNotifier(fail_prefix="삼성전자 매수 주문 확인")
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        mcp_runner=mcp_runner,
+        now_factory=lambda: datetime(2026, 5, 20, 10, 0, tzinfo=KST),
+    )
+    update = {"message": {"chat": {"id": 123}, "text": "/buy 삼성전자 10 70000"}}
+
+    # 1차 시도: 부수효과(set_if_absent)는 성공하지만 프롬프트 전송이 실패한다.
+    with pytest.raises(telegram_commands.TelegramSendError):
+        await handler.handle_update(update)
+    assert "123" in handler.pending_orders
+    assert handler.pending_orders["123"].prompt_delivered is False
+
+    # poller가 같은 update를 재시도한다.
+    await handler.handle_update(update)
+
+    assert "이미 대기 중인 주문이 있습니다" not in "".join(notifier.messages)
+    # 두 건 모두 프롬프트다(1차: 실패한 시도, 2차: 성공한 재시도) — "이미 대기 중"으로
+    # 바뀌지 않고 같은 의도(확인 프롬프트)로 수렴했음을 고정한다.
+    prompt_messages = [m for m in notifier.messages if m.startswith("삼성전자 매수 주문 확인")]
+    assert len(prompt_messages) == 2
+    assert notifier.messages[-1] == prompt_messages[0] == prompt_messages[1]
+    assert handler.pending_orders["123"].prompt_delivered is True
+
+
+@pytest.mark.asyncio
+async def test_confirm_retry_after_result_send_failure_resends_completion_without_reordering():
+    """#247: place_order 성공(부수효과 확정) 후 결과 전송이 실패해 재시도되면,
+    place_order를 다시 부르지 않고(중복 체결 방지) 저장된 체결 결과 메시지만
+    재전송해야 한다.
+
+    뮤테이션 ②(멱등성 보장 로직 무력화)의 회귀 가드: settled 분기를 지우면 재시도가
+    claim()에서 None을 받아 "확정할 대기 주문이 없습니다"를 보내 아래 단언이 실패한다.
+    """
+
+    async def mcp_runner(server_params, tool_name, arguments):
+        if tool_name == "resolve_stock_code":
+            return "삼성전자 (005930, KOSPI)"
+        if tool_name == "get_stock_quote":
+            return "현재가: 74,500원"
+        if tool_name == "get_balance":
+            return "주문가능금액: 1,000,000원"
+        raise AssertionError(f"unexpected tool: {tool_name}")
+
+    gateway = FakeOrderGateway()
+    notifier = _FailOnceForPrefixNotifier(fail_prefix="주문 완료")
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        mcp_runner=mcp_runner,
+        order_gateway=gateway,
+        now_factory=lambda: datetime(2026, 5, 20, 10, 0, tzinfo=KST),
+    )
+
+    await handler.handle_update(
+        {"message": {"chat": {"id": 123}, "text": "/buy 삼성전자 1 75000"}}
+    )
+    confirm_update = {"message": {"chat": {"id": 123}, "text": "/confirm"}}
+
+    # 1차 시도: place_order는 성공하지만 결과 전송이 실패한다.
+    with pytest.raises(telegram_commands.TelegramSendError):
+        await handler.handle_update(confirm_update)
+    assert len(gateway.orders) == 1
+
+    # poller가 같은 update를 재시도한다.
+    await handler.handle_update(confirm_update)
+
+    assert len(gateway.orders) == 1  # place_order가 다시 호출되지 않았다 — 중복 체결 방지
+    assert "확정할 대기 주문이 없습니다" not in notifier.messages
+    # 두 건 모두 같은 체결 결과다(1차: 실패한 시도, 2차: 성공한 재시도) — place_order를
+    # 다시 부르지 않고 캐시된 settled_message를 그대로 재전송했음을 고정한다.
+    completion_messages = [m for m in notifier.messages if m.startswith("주문 완료")]
+    assert len(completion_messages) == 2
+    assert notifier.messages[-1] == completion_messages[0] == completion_messages[1]
+    assert handler.pending_orders == {}  # 성공 전송 후 settled 레코드가 정리된다
+
+
+@pytest.mark.asyncio
+async def test_cancel_after_confirm_send_failure_reports_already_settled():
+    """#247 경계 케이스: /confirm 결과 전송이 실패해 settled 레코드가 남은 채로
+    사용자가 /cancel을 보내면, 이미 끝난 체결을 취소했다고 거짓 응답하지 않고
+    체결 결과를 그대로 안내한다."""
+
+    async def mcp_runner(server_params, tool_name, arguments):
+        if tool_name == "resolve_stock_code":
+            return "삼성전자 (005930, KOSPI)"
+        if tool_name == "get_stock_quote":
+            return "현재가: 74,500원"
+        if tool_name == "get_balance":
+            return "주문가능금액: 1,000,000원"
+        raise AssertionError(f"unexpected tool: {tool_name}")
+
+    gateway = FakeOrderGateway()
+    notifier = _FailOnceForPrefixNotifier(fail_prefix="주문 완료")
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        mcp_runner=mcp_runner,
+        order_gateway=gateway,
+        now_factory=lambda: datetime(2026, 5, 20, 10, 0, tzinfo=KST),
+    )
+
+    await handler.handle_update(
+        {"message": {"chat": {"id": 123}, "text": "/buy 삼성전자 1 75000"}}
+    )
+    with pytest.raises(telegram_commands.TelegramSendError):
+        await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/confirm"}})
+
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/cancel"}})
+
+    assert len(gateway.orders) == 1
+    assert notifier.messages[-1].startswith("이미 확정된 주문입니다.")
+    assert "주문 완료" in notifier.messages[-1]
