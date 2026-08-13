@@ -3,7 +3,6 @@ import logging
 import re
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
-from zoneinfo import ZoneInfo
 from typing import Any, Callable
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from sqlmodel import Session, select
@@ -19,6 +18,7 @@ from .services import (
     generate_morning_briefing,
 )
 from .models import Portfolio
+from .timeutil import KST
 from .watchlist_repo import SqliteWatchlistRepo
 from .telegram_notifier import telegram_notifier
 from .telegram_notifier import should_send_telegram_alert
@@ -26,7 +26,6 @@ from .telegram_notifier import should_send_telegram_alert
 logger = logging.getLogger(__name__)
 
 # 비동기 스케줄러 인스턴스 생성
-KST = ZoneInfo("Asia/Seoul")
 scheduler = AsyncIOScheduler(timezone=KST)
 
 # 뉴스 필터링에 사용할 모델 제공자 (ollama 또는 openai)

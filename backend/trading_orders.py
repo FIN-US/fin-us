@@ -4,12 +4,11 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, time
 from typing import Any, Awaitable, Callable, Literal
-from zoneinfo import ZoneInfo
 
 from fastapi import HTTPException
 
+from .timeutil import KST
 
-KST = ZoneInfo("Asia/Seoul")
 OrderSide = Literal["BUY", "SELL"]
 OrderType = Literal["LIMIT", "MARKET"]
 
