@@ -513,6 +513,25 @@ def test_get_catalysts_signals_truncation_when_over_limit(
     assert body["message"] == "truncated"
 
 
+def test_get_catalysts_not_truncated_at_exact_limit(
+    client: TestClient, session: Session, frozen_today: date
+):
+    # 정확히 limit개일 때가 유일하게 애매한 경계다. 위 두 테스트는 각각 경계에서
+    # 2 모자라고 1 넘어서 비켜 가므로, len(rows) > limit을 >= 로 바꾼 오프바이원
+    # 뮤턴트가 둘 다 통과한다. 이 경계가 깨지면 이벤트가 정확히 limit개일 때 프론트가
+    # "더 있음"으로 오해해 없는 다음 페이지를 그린다 — 데이터는 멀쩡한데 UI만 틀린다.
+    today = frozen_today
+    for i in range(3):
+        session.add(_make_catalyst(stock_name=f"종목{i}", event_date=today + timedelta(days=i)))
+    session.commit()
+
+    response = client.get("/api/v1/db/catalysts", params={"limit": 3})
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["data"]) == 3
+    assert body["message"] is None
+
+
 def test_get_catalysts_to_date_omitted_keeps_no_upper_bound(
     client: TestClient, session: Session, frozen_today: date
 ):
@@ -531,7 +550,8 @@ def test_get_catalysts_to_date_omitted_keeps_no_upper_bound(
 def test_get_catalysts_to_date_includes_boundary_excludes_after(
     client: TestClient, session: Session, frozen_today: date
 ):
-    # to_date는 "이전(포함)"이어야 한다: event_date == to_date는 포함되고, 그 이후는 제외된다.
+    # to_date는 "그 날짜까지(당일 포함)"여야 한다: event_date == to_date는 포함되고,
+    # 그 이후는 제외된다.
     today = frozen_today
     session.add(_make_catalyst(stock_name="경계이전", event_date=today + timedelta(days=1)))
     session.add(_make_catalyst(stock_name="경계", event_date=today + timedelta(days=2)))
@@ -564,6 +584,37 @@ def test_get_catalysts_from_date_equals_to_date_single_day(
     assert response.status_code == 200
     names = [row["stock_name"] for row in response.json()["data"]]
     assert names == ["당일"]
+
+
+def test_get_catalysts_valid_but_empty_range_returns_200_not_422(
+    client: TestClient, session: Session, frozen_today: date
+):
+    """유효한 구간에 이벤트가 0건이면 200 + 빈 배열이어야 한다.
+
+    to_date < from_date를 422로 거부하는 근거는 "이 구간에 이벤트가 없다"와
+    "파라미터를 잘못 보냈다"를 클라이언트가 구분할 수 있게 하는 것이다. 그 구분은
+    양쪽이 모두 고정돼야 성립하는데, 다른 테스트들은 422(후자)만 검증한다. 대비되는
+    쪽이 비어 있으면 훗날 누군가 "빈 구간도 에러로 알려주자"고 바꿔도 스위트가
+    red가 되지 않아 422의 존재 이유가 조용히 사라진다. 이 테스트가 그 절반을 고정한다.
+    """
+    today = frozen_today
+    # 조회 구간(내일~모레) 바깥에만 이벤트를 둬, 구간 자체는 유효하지만 결과가 0건이 되게 한다.
+    session.add(_make_catalyst(stock_name="구간이전", event_date=today))
+    session.add(_make_catalyst(stock_name="구간이후", event_date=today + timedelta(days=10)))
+    session.commit()
+
+    response = client.get(
+        "/api/v1/db/catalysts",
+        params={
+            "from_date": (today + timedelta(days=1)).isoformat(),
+            "to_date": (today + timedelta(days=2)).isoformat(),
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "success"
+    assert body["data"] == []
+    assert body["message"] is None
 
 
 def test_get_catalysts_rejects_to_date_before_from_date(
@@ -683,25 +734,6 @@ def test_get_catalysts_truncated_within_to_date_range(
     body = response.json()
     assert len(body["data"]) == 3
     assert body["message"] == "truncated"
-
-
-def test_get_catalysts_not_truncated_at_exact_limit(
-    client: TestClient, session: Session, frozen_today: date
-):
-    # 정확히 limit개일 때가 유일하게 애매한 경계다. 위 두 테스트는 각각 경계에서
-    # 2 모자라고 1 넘어서 비켜 가므로, len(rows) > limit을 >= 로 바꾼 오프바이원
-    # 뮤턴트가 둘 다 통과한다. 이 경계가 깨지면 이벤트가 정확히 limit개일 때 프론트가
-    # "더 있음"으로 오해해 없는 다음 페이지를 그린다 — 데이터는 멀쩡한데 UI만 틀린다.
-    today = frozen_today
-    for i in range(3):
-        session.add(_make_catalyst(stock_name=f"종목{i}", event_date=today + timedelta(days=i)))
-    session.commit()
-
-    response = client.get("/api/v1/db/catalysts", params={"limit": 3})
-    assert response.status_code == 200
-    body = response.json()
-    assert len(body["data"]) == 3
-    assert body["message"] is None
 
 
 @pytest.mark.asyncio
