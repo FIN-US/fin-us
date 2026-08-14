@@ -368,6 +368,11 @@ def test_retry_after_seconds_returns_none_for_non_429_or_malformed_body():
         _retry_after_seconds(_http_status_error(429, {"parameters": {"retry_after": "30"}}))
         is None
     )
+    # bool은 int의 서브클래스라 가드가 없으면 True가 1로 통과한다 (PR #253 리뷰).
+    assert (
+        _retry_after_seconds(_http_status_error(429, {"parameters": {"retry_after": True}}))
+        is None
+    )
     assert _retry_after_seconds(httpx.ConnectError("boom")) is None
 
 
