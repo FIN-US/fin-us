@@ -441,6 +441,123 @@ class TestUnmaskFailOpen:
         assert unmask_pii(None, {"<AMOUNT_deadbe_1>": "1원"}) is None
 
 
+class _TaggedStr(str):
+    """str을 상속해 메타데이터를 얹는 호출자를 흉내낸다(#260 services.NatAnswer).
+
+    services를 import하지 않고 로컬에 정의한다 — 순환 의존과, 이 테스트가 요구하지도
+    않는 httpx 의존을 끌어오지 않기 위함이다.
+    """
+
+    def __new__(cls, value, tag=None):
+        obj = super().__new__(cls, value)
+        obj.tag = tag
+        return obj
+
+
+class _StrictStr(str):
+    """생성자가 추가 인자를 강제하는 str 서브클래스."""
+
+    def __new__(cls, value, required):
+        obj = super().__new__(cls, value)
+        obj.required = required
+        return obj
+
+
+class _HostileStr(str):
+    """__dict__ 접근 자체가 실패하는 str 서브클래스(fail-open 경로 확인용).
+
+    unmask_pii는 어떤 서브클래스가 올지 알 수 없다. 복원이 불가능한 타입을 만나도
+    예외를 밖으로 던지지 않는다는 계약을 이 클래스로 고정한다.
+    """
+
+    @property
+    def __dict__(self):
+        raise RuntimeError("이 타입은 복제할 수 없다")
+
+
+class TestUnmaskPreservesStrSubclass:
+    """입력이 str 서브클래스면 반환값도 같은 타입이어야 한다.
+
+    re.sub은 str 서브클래스를 벗겨 항상 plain str을 반환한다. 그래서 호출자가 str을
+    상속해 메타데이터를 얹은 값을 넘기면(#260이 도입하는 services.NatAnswer — 추론
+    과정 각주를 속성으로 들고 다닌다) 역치환을 통과하는 순간 그 메타데이터가 조용히
+    사라진다.
+
+    특히 고약한 것은 **두 경로가 갈린다**는 점이다. unmask_pii는 mapping이 비면 곧바로
+    원본을 돌려주므로 PII가 없는 질의에서는 타입이 살아남고, PII가 있는 질의에서만
+    타입이 소실된다. 즉 "가끔만, 사용자 입력에 따라서만" 각주가 사라지는 재현하기
+    어려운 형태가 된다. 그래서 양쪽 경로를 모두 단언한다.
+
+    이 테스트들이 잡는 mutation: unmask_pii 반환부의 타입 보존 제거, 그리고 복원을
+    `str.__new__` + `__dict__` 복사가 아니라 `type(text)(restored)`로 되돌리는 변경.
+    """
+
+    def test_subclass_and_its_attributes_survive_restoration(self):
+        """타입뿐 아니라 인스턴스 속성까지 살아남아야 한다.
+
+        타입만 유지하고 서브클래스 생성자를 다시 부르면(`type(text)(restored)`)
+        NatAnswer처럼 속성이 기본값 있는 키워드 인자인 클래스는 **예외 없이 성공하면서
+        속성만 기본값으로 리셋된다** — 각주 데이터가 비워진 채 타입만 맞는 값이 나가서
+        결함이 형태만 바꿔 그대로 남는다. 그래서 값까지 단언한다.
+        """
+        mapping = {"<AMOUNT_deadbe_1>": "12,345,000원"}
+        text = _TaggedStr("평가금액은 <AMOUNT_deadbe_1>이다.", tag="trading_agent")
+
+        restored = unmask_pii(text, mapping)
+
+        assert restored == "평가금액은 12,345,000원이다."
+        assert type(restored) is _TaggedStr, (
+            "역치환을 거치며 str 서브클래스가 plain str로 벗겨졌다 — 호출자가 얹은 "
+            "메타데이터가 조용히 사라진다"
+        )
+        assert restored.tag == "trading_agent", (
+            "타입은 유지됐지만 인스턴스 속성이 기본값으로 리셋됐다 — 각주 데이터가 "
+            "조용히 비워진다"
+        )
+
+    def test_subclass_is_preserved_when_there_is_nothing_to_restore(self):
+        """마스킹 대상이 없는 경로도 같은 타입을 유지해야 한다(두 경로가 갈리면 안 된다)."""
+        text = _TaggedStr("자리표시자가 없는 응답", tag="trading_agent")
+
+        assert type(unmask_pii(text, {})) is _TaggedStr
+        assert type(unmask_pii(text, {"<AMOUNT_deadbe_1>": "1원"})) is _TaggedStr
+
+    def test_subclass_with_required_constructor_arg_is_still_preserved(self):
+        """생성자가 추가 인자를 요구해도 복원된다 — 생성자를 다시 부르지 않기 때문이다.
+
+        `type(text)(restored)` 방식이었다면 TypeError로 실패해 plain str로 떨어진다.
+        `str.__new__`는 서브클래스 생성자를 우회하므로 이런 클래스도 그대로 살린다.
+        """
+        mapping = {"<AMOUNT_deadbe_1>": "12,345,000원"}
+        text = _StrictStr("평가금액은 <AMOUNT_deadbe_1>이다.", required="keep")
+
+        restored = unmask_pii(text, mapping)
+
+        assert restored == "평가금액은 12,345,000원이다."
+        assert type(restored) is _StrictStr
+        assert restored.required == "keep"
+
+    def test_unrestorable_subclass_falls_back_to_str_without_raising(self):
+        """복원이 불가능한 서브클래스여도 예외를 던지지 않는다(fail-open 계약).
+
+        타입 보존은 부가 기능이고, 이 함수가 예외를 밖으로 던지지 않는다는 것이
+        이 모듈의 핵심 계약이다. 값의 정확성을 지키고 타입만 포기한다.
+        """
+        mapping = {"<AMOUNT_deadbe_1>": "12,345,000원"}
+        text = _HostileStr("평가금액은 <AMOUNT_deadbe_1>이다.")
+
+        restored = unmask_pii(text, mapping)
+
+        assert restored == "평가금액은 12,345,000원이다."
+        assert type(restored) is str
+
+        # 반대로 바꿀 것이 없으면 복원 자체를 시도하지 않고 원본을 그대로 돌려준다 —
+        # 복원 불가능한 타입이 아무 이유 없이 벗겨지거나 경고가 남지 않아야 한다.
+        # (이 단언이 잡는 mutation: 반환부의 `if restored == text: return text` 제거)
+        untouched = _HostileStr("자리표시자가 없는 응답")
+        assert type(unmask_pii(untouched, mapping)) is _HostileStr
+
+
 class TestMaskEmptyInput:
     def test_empty_string_returns_empty_mapping(self):
         masked, mapping = mask_pii("")

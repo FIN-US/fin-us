@@ -282,6 +282,9 @@ def unmask_pii(text: str, mapping: dict[str, str]) -> str:
     두 갈래로 갈린다: (1) 형식은 맞지만 매핑에 없는 자리표시자(다른 호출의 scope를 가진
     것 포함)는 원문 유지 + 경고 로그, (2) _PLACEHOLDER_RE에 아예 매치되지 않는 변형
     (<AMOUNT1>, scope 없는 구형식 <AMOUNT_1> 등)은 손대지 않아 자연히 원문이 유지된다.
+
+    입력이 str 서브클래스면 반환값도 같은 타입·같은 인스턴스 속성으로 유지한다
+    (복원이 불가능한 서브클래스일 때만 plain str). 자세한 근거는 아래 반환부 주석 참고.
     """
     if not text or not mapping:
         return text
@@ -312,4 +315,39 @@ def unmask_pii(text: str, mapping: dict[str, str]) -> str:
             missing,
         )
 
+    # 입력이 str 서브클래스면 그 타입과 인스턴스 속성을 유지해 돌려준다. re.sub은 항상
+    # plain str을 반환하므로, 호출자가 str을 상속해 메타데이터를 얹은 값을 넘기면
+    # (#260의 services.NatAnswer — 답변 텍스트에 routed_agent/tools_used를 얹어 각주를
+    # 만든다) 역치환을 통과하는 순간 그 메타데이터가 조용히 사라진다.
+    #
+    # 마스킹 대상이 없어 조기 반환하는 경로(위의 `not mapping`)에서는 원본이 그대로
+    # 유지되므로, 이 보존이 없으면 "PII가 있는 질의에서만 메타데이터가 사라지는"
+    # 재현하기 어려운 형태가 된다.
+    #
+    # 재생성에 `type(text)(restored)`가 아니라 `str.__new__` + `__dict__` 복사를 쓴다.
+    # 서브클래스 생성자를 다시 부르면 **타입만 살고 속성은 기본값으로 리셋**되기
+    # 때문이다. NatAnswer가 정확히 그 모양이라(routed_agent/tools_used가 기본값 있는
+    # 키워드 인자) 생성자 호출은 예외 없이 성공하면서 각주 데이터만 조용히 비운다 —
+    # 고치려던 결함이 형태만 바꿔 그대로 남는다. 실측:
+    #   type(text)(restored)          -> NatAnswer | routed_agent=None,  tools_used=()
+    #   str.__new__ + __dict__ 복사   -> NatAnswer | routed_agent='trading_agent', ...
+    # 부수적으로 생성자가 추가 인자를 요구하는 서브클래스도 이 방식이면 복원된다.
+    if restored == text:
+        return text
+    if type(text) is not str:
+        try:
+            revived = str.__new__(type(text), restored)
+            state = getattr(text, "__dict__", None)
+            if state:
+                revived.__dict__.update(state)
+            return revived
+        except Exception:
+            # 어떤 서브클래스가 올지는 이 모듈이 알 수 없다(__slots__ 사용, __dict__
+            # 접근 차단 등). 이 함수는 어떤 경우에도 예외를 밖으로 던지지 않으므로
+            # (fail-open), 타입을 포기하고 역치환된 plain str을 돌려준다 —
+            # 값의 정확성이 타입 보존보다 우선이다.
+            logger.warning(
+                "역치환 결과를 원래 타입(%s)으로 되돌리지 못해 str로 반환합니다.",
+                type(text).__name__,
+            )
     return restored
