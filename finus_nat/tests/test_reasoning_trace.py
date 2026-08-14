@@ -35,6 +35,7 @@ from nat_finus_nat.finus_api import (
     REASONING_TRACE,
     DataToolLedger,
     ReasoningTrace,
+    ToolUse,
     _record_to_ledger,
 )
 
@@ -81,7 +82,10 @@ async def test_gate_records_executed_tools_into_trace_in_call_order():
     finally:
         REASONING_TRACE.reset(token)
 
-    assert trace.tools_used == ["finus_account_balance", "finus_market_news"]
+    assert trace.tools_used == [
+        ToolUse("finus_account_balance", ok=True),
+        ToolUse("finus_market_news", ok=True),
+    ]
 
 
 @pytest.mark.asyncio
@@ -119,7 +123,8 @@ async def test_trace_deduplicates_tools_across_gate_retry():
         REASONING_TRACE.reset(token)
 
     assert call_count["n"] == 2, "재시도가 일어나는 시나리오여야 한다"
-    assert trace.tools_used == ["finus_market_news"]
+    # 1차 실패 + 2차 성공 → 한 항목으로 접히고, 결국 데이터를 얻었으므로 ok=True.
+    assert trace.tools_used == [ToolUse("finus_market_news", ok=True)]
 
 
 @pytest.mark.asyncio
@@ -155,11 +160,11 @@ async def test_gate_does_not_fail_without_trace_box():
     assert answer == "정리했습니다."
 
 
-def test_ledger_merge_ignores_nothing_recorded_by_code():
-    """ReasoningTrace는 원장 레코드만 병합한다 — 오류 응답 기록도 '실행된 도구'다.
+def test_failed_tool_is_kept_but_marked_not_ok():
+    """실패한 호출도 목록에 남기되 ok=False로 구분한다.
 
-    도구를 호출했지만 오류가 났다면 그 사실 자체가 사용자가 알아야 할 근거다.
-    ok 여부로 거르면 각주가 "확인한 자료 없음"이 되어 시도조차 안 한 것처럼 보인다.
+    빼면 시도조차 안 한 것처럼 보이고, ok 없이 이름만 실으면 소비자가 실패한 호출까지
+    "확인한 자료"로 표시해 사용자가 답변의 근거를 오독한다.
     """
     ledger = DataToolLedger()
     ledger.record("finus_account_balance", ok=False, produced_rows=False)
@@ -167,7 +172,19 @@ def test_ledger_merge_ignores_nothing_recorded_by_code():
 
     trace.record_ledger_tools(ledger)
 
-    assert trace.tools_used == ["finus_account_balance"]
+    assert trace.tools_used == [ToolUse("finus_account_balance", ok=False)]
+
+
+def test_repeated_failure_stays_not_ok():
+    """같은 도구가 계속 실패하면 ok=False를 유지한다."""
+    ledger = DataToolLedger()
+    ledger.record("finus_account_balance", ok=False, produced_rows=False)
+    ledger.record("finus_account_balance", ok=False, produced_rows=False)
+    trace = ReasoningTrace()
+
+    trace.record_ledger_tools(ledger)
+
+    assert trace.tools_used == [ToolUse("finus_account_balance", ok=False)]
 
 
 # ---------------------------------------------------------------------------
@@ -199,14 +216,20 @@ def test_with_reasoning_trace_adds_fields_without_touching_existing_ones():
     original = ChatResponse.from_string("답변 본문", usage=Usage())
     trace = ReasoningTrace(
         routed_agent="news_agent",
-        tools_used=["finus_market_news", "finus_account_balance"],
+        tools_used=[
+            ToolUse("finus_market_news", ok=True),
+            ToolUse("finus_account_balance", ok=False),
+        ],
     )
 
     updated = with_reasoning_trace(original, trace)
     dumped = updated.model_dump()
 
     assert dumped["routed_agent"] == "news_agent"
-    assert dumped["tools_used"] == ["finus_market_news", "finus_account_balance"]
+    assert dumped["tools_used"] == [
+        {"name": "finus_market_news", "ok": True},
+        {"name": "finus_account_balance", "ok": False},
+    ]
     # 기존 필드 전부 불변 — 백엔드 파서와 scheduler가 이 필드들만 읽는다.
     for field_name in ("id", "object", "model", "created", "choices", "usage"):
         assert dumped[field_name] == original.model_dump()[field_name]
@@ -278,7 +301,7 @@ async def test_transcript_agent_attaches_trace_to_response(tmp_path):
     dumped = result.model_dump()
 
     assert dumped["routed_agent"] == "news_agent"
-    assert dumped["tools_used"] == ["finus_market_news"]
+    assert dumped["tools_used"] == [{"name": "finus_market_news", "ok": True}]
     assert dumped["choices"][0]["message"]["content"] == "삼성전자 뉴스입니다."
 
 

@@ -604,13 +604,17 @@ def with_reasoning_trace(response: ChatResponse, trace: ReasoningTrace) -> ChatR
     빈 값을 실어 보내는 것보다 없는 편이 소비자 입장에서 명확하다 — backend는
     필드가 없으면 각주를 조용히 생략한다. 반대로 라우팅은 됐는데 도구가 하나도
     실행되지 않은 경우는 관측 결과 그 자체이므로 ``tools_used: []``로 싣는다.
+
+    ``tools_used``는 ``[{"name": ..., "ok": ...}]`` 형태다. 실패한 호출을 이름만
+    실어 보내면 소비자가 그것까지 "확인한 자료"로 표시하게 된다 —
+    :class:`ToolUse` docstring 참고.
     """
     if trace.routed_agent is None and not trace.tools_used:
         return response
     return response.model_copy(
         update={
             "routed_agent": trace.routed_agent,
-            "tools_used": list(trace.tools_used),
+            "tools_used": [{"name": tool.name, "ok": tool.ok} for tool in trace.tools_used],
         }
     )
 

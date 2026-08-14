@@ -14,6 +14,17 @@ finus_nat/scripts/run.sh 으로 실행하여 cli 환경에서 에이전트를 �
 router.yml과 router_nomemory.yml은 기본적으로 최근 대화 히스토리를 SQLite에 저장하고 다음 요청에 다시 주입합니다. NAT는 HTTP `conversation-id` 헤더로 세션을 구분합니다.
 이는 OpenAI compatible /v1/chat/completion을 사용하기 위함입니다.
 
+## 추론 각주 (routed_agent / tools_used)
+
+응답에 담당 에이전트와 실제 실행된 도구 목록을 실어 보내, 텔레그램 봇이 답변 하단에
+근거 각주를 렌더링합니다 (#260).
+
+**router_nomemory.yml(기본값)에서만 동작합니다.** router.yml(`--memory`)은 최상위
+workflow가 vendor `auto_memory_agent`인데, 그 `_response_fn` 시그니처가
+`(input_message: str) -> str`이라 안쪽에서 `ChatResponse`에 붙인 두 필드가 래퍼를
+통과하면서 버려집니다. backend는 필드가 없으면 각주를 조용히 생략하므로, 메모리
+모드에서는 경고 없이 각주만 사라집니다.
+
 ## 1. Mem0 self-hosted server 설정
 
 설치하지 않아도 테스트 및 구동에는 문제가 없습니다. 에이전트는 자동으로 router_nomemory.yml을 사용하게 됩니다.

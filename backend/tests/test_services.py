@@ -968,7 +968,10 @@ async def test_llm_nat_chat_carries_reasoning_metadata(monkeypatch):
         json={
             "choices": [{"message": {"content": "삼성전자 뉴스입니다."}}],
             "routed_agent": "news_agent",
-            "tools_used": ["finus_account_balance", "finus_market_news"],
+            "tools_used": [
+                {"name": "finus_account_balance", "ok": False},
+                {"name": "finus_market_news", "ok": True},
+            ],
         },
     )
     monkeypatch.setattr(services.httpx, "AsyncClient", mock_async_client_factory(response))
@@ -977,7 +980,10 @@ async def test_llm_nat_chat_carries_reasoning_metadata(monkeypatch):
 
     assert result == "삼성전자 뉴스입니다."
     assert result.routed_agent == "news_agent"
-    assert result.tools_used == ("finus_account_balance", "finus_market_news")
+    assert result.tools_used == (
+        services.NatToolUse("finus_account_balance", ok=False),
+        services.NatToolUse("finus_market_news", ok=True),
+    )
 
 
 @pytest.mark.asyncio
@@ -1046,12 +1052,34 @@ def test_nat_reasoning_trace_dedupes_and_keeps_call_order():
     routed_agent, tools_used = services._nat_reasoning_trace_from_payload(
         {
             "routed_agent": "  news_agent  ",
-            "tools_used": ["finus_market_news", "", 7, "finus_market_news", "finus_save_diary"],
+            "tools_used": [
+                {"name": " finus_market_news ", "ok": True},
+                {"name": ""},
+                "문자열은 무시",
+                {"name": "finus_market_news", "ok": True},
+                {"name": "finus_save_diary"},
+            ],
         }
     )
 
     assert routed_agent == "news_agent"
-    assert tools_used == ("finus_market_news", "finus_save_diary")
+    # ok가 없는 항목은 실패로 본다 — 근거를 과장하지 않는 쪽으로 기운다.
+    assert tools_used == (
+        services.NatToolUse("finus_market_news", ok=True),
+        services.NatToolUse("finus_save_diary", ok=False),
+    )
+
+
+def test_nat_reasoning_trace_caps_tool_count():
+    """다른 서비스가 보내는 값이므로 개수를 backend에서 잘라 둔다 (각주가 본문을 밀어냄 방지)."""
+    _, tools_used = services._nat_reasoning_trace_from_payload(
+        {
+            "routed_agent": "news_agent",
+            "tools_used": [{"name": f"tool_{i}", "ok": True} for i in range(100)],
+        }
+    )
+
+    assert len(tools_used) == services.NAT_MAX_TOOLS_USED
 
 
 # ── A (#162): 도구 없는 provider 출력 범위 축소 ──────────────────────────────

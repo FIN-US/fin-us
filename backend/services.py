@@ -3,7 +3,7 @@ import httpx
 import logging
 import re
 from datetime import date
-from typing import Any, Literal, Optional, get_args
+from typing import Any, Literal, NamedTuple, Optional, get_args, overload
 from urllib.parse import quote as _url_quote
 from fastapi import HTTPException
 from anthropic import AsyncAnthropic
@@ -597,6 +597,19 @@ async def _llm_ollama_chat(user_msg: str) -> str:
     return (choice or "").strip()
 
 
+class NatToolUse(NamedTuple):
+    """각주에 실을 도구 한 건 — 도구명과 성공 여부 (#260).
+
+    finus_nat이 도구 강제 원장에서 만들어 보내는 ``{"name": ..., "ok": ...}``에 대응한다.
+    ``ok=False``는 도구를 호출했지만 오류 응답을 받았다는 뜻이다 — 각주에서 성공과
+    구분해 표시해야 한다. 실패한 호출을 "확인한 자료"로 보여주면 사용자는 답변이
+    그 데이터에 근거했다고 읽지만 실제로는 아니다.
+    """
+
+    name: str
+    ok: bool
+
+
 class NatAnswer(str):
     """NAT 답변 텍스트 + 추론 메타데이터 (#260).
 
@@ -611,14 +624,14 @@ class NatAnswer(str):
     """
 
     routed_agent: str | None
-    tools_used: tuple[str, ...]
+    tools_used: tuple[NatToolUse, ...]
 
     def __new__(
         cls,
         text: str,
         *,
         routed_agent: str | None = None,
-        tools_used: tuple[str, ...] = (),
+        tools_used: tuple[NatToolUse, ...] = (),
     ) -> "NatAnswer":
         answer = super().__new__(cls, text)
         answer.routed_agent = routed_agent
@@ -626,33 +639,54 @@ class NatAnswer(str):
         return answer
 
 
+# 각주에 실을 도구 개수 상한. tools_used는 다른 서비스(NAT)가 보내는 값이라
+# 개수·길이가 backend에서 보장되지 않는다 — 비정상적으로 긴 목록이 텔레그램 메시지의
+# 본문 자리를 밀어내지 않도록 파싱 단계에서 잘라 둔다.
+NAT_MAX_TOOLS_USED = 16
+
+
 def _nat_reasoning_trace_from_payload(
     payload: dict[str, Any],
-) -> tuple[str | None, tuple[str, ...]]:
+) -> tuple[str | None, tuple[NatToolUse, ...]]:
     """NAT 응답 최상위의 ``routed_agent``/``tools_used``를 읽는다 (#260).
 
     두 필드는 finus_nat이 supervisor의 라우팅 결과와 도구 강제 원장에서 만들어
     실어 보내는 값이다. 여기서는 **읽기만** 한다 — 답변 텍스트를 뒤져서 도구명이나
     에이전트명을 추측하지 않는다.
 
-    필드가 없거나 타입이 어긋나면 조용히 비운다. 두 필드를 싣지 않는 구버전
-    finus_nat과 혼용될 수 있고, 각주는 답변에 덧붙는 부가 정보이므로 없다고 해서
-    응답 자체를 실패로 만들 이유가 없다.
+    ``tools_used``는 ``[{"name": str, "ok": bool}]`` 형태다. 필드가 없거나 타입이
+    어긋나면 조용히 비운다. 두 필드를 싣지 않는 구버전 finus_nat과 혼용될 수 있고,
+    각주는 답변에 덧붙는 부가 정보이므로 없다고 해서 응답 자체를 실패로 만들 이유가
+    없다. 개수는 :data:`NAT_MAX_TOOLS_USED`로 자른다.
     """
     routed_raw = payload.get("routed_agent")
     routed_agent = routed_raw.strip() if isinstance(routed_raw, str) else ""
 
     tools_raw = payload.get("tools_used")
-    tools_used: list[str] = []
+    tools_used: list[NatToolUse] = []
+    seen: set[str] = set()
     if isinstance(tools_raw, list):
         for item in tools_raw:
-            if not isinstance(item, str):
+            if not isinstance(item, dict):
                 continue
-            name = item.strip()
+            name = item.get("name")
+            if not isinstance(name, str) or not name.strip():
+                continue
+            name = name.strip()
             # 호출 순서 유지 + 중복 제거. finus_nat이 이미 그렇게 보내지만,
             # 신뢰 경계 밖의 값이므로 backend에서도 같은 불변식을 세운다.
-            if name and name not in tools_used:
-                tools_used.append(name)
+            if name in seen:
+                continue
+            seen.add(name)
+            # ok가 빠졌거나 bool이 아니면 실패로 본다 — 근거를 과장하지 않는 쪽으로 기운다.
+            tools_used.append(NatToolUse(name, item.get("ok") is True))
+            if len(tools_used) >= NAT_MAX_TOOLS_USED:
+                logger.warning(
+                    "NAT tools_used가 %d개를 넘어 잘라냅니다 (수신 %d개)",
+                    NAT_MAX_TOOLS_USED,
+                    len(tools_raw),
+                )
+                break
 
     return (routed_agent or None), tuple(tools_used)
 
@@ -877,6 +911,28 @@ def normalize_llm_provider(
             "openai | anthropic | ollama | nat(API 전용) 중 하나를 사용하세요."
         ),
     )
+
+
+# provider별 반환 타입 오버로드 (#260): "nat"만 추론 메타데이터를 실은 NatAnswer를
+# 돌려준다. NatAnswer는 str 서브클래스라 단순 유니온(`str | NatAnswer`)으로는 타입
+# 체커에게 아무 정보도 못 준다 — str로 접히기 때문이다. Literal 오버로드로 갈라야
+# routed_agent/tools_used를 읽는 호출부가 체커의 도움을 받는다.
+@overload
+async def llm_chat(
+    provider_key: Literal["nat"],
+    user_msg: str,
+    *,
+    conversation_id: str | None = None,
+) -> NatAnswer: ...
+
+
+@overload
+async def llm_chat(
+    provider_key: Literal["openai", "anthropic", "ollama"],
+    user_msg: str,
+    *,
+    conversation_id: str | None = None,
+) -> str: ...
 
 
 async def llm_chat(

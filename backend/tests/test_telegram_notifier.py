@@ -457,3 +457,38 @@ async def test_progress_helpers_are_inert_when_notifier_disabled():
 
     assert await notifier.send_text_returning_id("⏳") is None
     assert await notifier.edit_message_text(1, "답변") is False
+
+
+@pytest.mark.asyncio
+async def test_delete_message_posts_delete_payload(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        "backend.telegram_notifier.httpx.AsyncClient",
+        _fake_client_factory(calls, _FakeResponse({"ok": True})),
+    )
+    notifier = TelegramNotifier("token", "123")
+
+    assert await notifier.delete_message(4242) is True
+    assert calls == [
+        (
+            "https://api.telegram.org/bottoken/deleteMessage",
+            {"chat_id": "123", "message_id": 4242},
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_delete_message_returns_false_on_failure(monkeypatch):
+    """삭제 거부는 예외가 아니라 False — 호출부가 종료 표시 편집으로 폴백한다."""
+    monkeypatch.setattr(
+        "backend.telegram_notifier.httpx.AsyncClient",
+        _fake_client_factory([], _FakeResponse(error=httpx.HTTPError("message can't be deleted"))),
+    )
+    notifier = TelegramNotifier("token", "123")
+
+    assert await notifier.delete_message(4242) is False
+
+
+@pytest.mark.asyncio
+async def test_delete_message_is_inert_when_notifier_disabled():
+    assert await TelegramNotifier("", "").delete_message(1) is False

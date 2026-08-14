@@ -88,6 +88,19 @@ DATA_TOOL_LEDGER: ContextVar["DataToolLedger | None"] = ContextVar(
 # ---- Reasoning trace for the response footnote (#260) ----
 
 
+class ToolUse(NamedTuple):
+    """각주에 실을 도구 한 건 — 도구명과 성공 여부.
+
+    ``ok``는 원장의 ``DataToolRecord.ok``를 그대로 옮긴 값이다(오류 응답이 아님).
+    성공 여부를 함께 싣는 이유: 이름만 보내면 소비자가 실패한 호출까지 "확인한
+    자료"로 표시하게 되고, 사용자는 답변이 그 데이터에 근거했다고 읽는다. 실제로는
+    아니므로, 근거를 보여준다는 이 기능의 목적과 정반대의 오독이 된다.
+    """
+
+    name: str
+    ok: bool
+
+
 @dataclass
 class ReasoningTrace:
     """한 요청에서 코드가 관측한 추론 경로 — 어느 브랜치로 갔고 어떤 도구가 실행됐는지.
@@ -96,7 +109,7 @@ class ReasoningTrace:
 
     - ``routed_agent`` — supervisor의 ``_choose_branch``가 반환한 브랜치명. 브랜치
       허용 목록으로 정규화된 값이므로 임의 문자열이 들어올 수 없다.
-    - ``tools_used`` — 도구 강제 원장(:class:`DataToolLedger`)에 기록된 도구명.
+    - ``tools_used`` — 도구 강제 원장(:class:`DataToolLedger`)에 기록된 도구.
       모든 Fin-Us 도구가 ``_record_to_ledger``를 거치므로 "실제로 실행된 도구"다.
 
     LLM 출력 텍스트를 파싱해서 채우지 않는다. 파싱으로 만들면 "실행된 도구"가 아니라
@@ -109,22 +122,31 @@ class ReasoningTrace:
     """
 
     routed_agent: str | None = None
-    tools_used: list[str] = field(default_factory=list)
+    tools_used: list[ToolUse] = field(default_factory=list)
 
     def record_route(self, branch_name: str) -> None:
         """supervisor가 고른 브랜치명을 기록한다 (마지막 라우팅이 최종 값)."""
         self.routed_agent = branch_name
 
     def record_ledger_tools(self, ledger: "DataToolLedger") -> None:
-        """*ledger*에 기록된 도구명을 호출 순서대로 병합한다 (중복 제거).
+        """*ledger*의 도구를 첫 호출 순서대로 병합한다 (도구명 기준 중복 제거).
 
         게이트 재시도(``_run_with_gate``의 2차 시도)는 원장을 새로 만들므로 이
         메서드가 여러 번 호출된다. 중복 제거는 "한 번이라도 실행된 도구" 집합을
         순서를 유지한 채 만든다.
+
+        같은 도구를 여러 번 호출해 **한 번이라도 성공**했다면 ``ok=True``로 올린다 —
+        결국 그 데이터를 얻었다는 뜻이고, 실제로 재시도 루프에서 흔한 경로다.
         """
         for record in ledger.records:
-            if record.tool_name not in self.tools_used:
-                self.tools_used.append(record.tool_name)
+            for index, seen in enumerate(self.tools_used):
+                if seen.name != record.tool_name:
+                    continue
+                if record.ok and not seen.ok:
+                    self.tools_used[index] = ToolUse(seen.name, True)
+                break
+            else:
+                self.tools_used.append(ToolUse(record.tool_name, record.ok))
 
 
 REASONING_TRACE: ContextVar["ReasoningTrace | None"] = ContextVar(
