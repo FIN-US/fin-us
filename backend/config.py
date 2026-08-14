@@ -110,6 +110,9 @@ def is_placeholder_secret(value: str | None) -> bool:
 
 # CORS 설정
 # 기본값은 docker-compose의 frontend(nginx)가 Unity WebGL 번들을 서빙하는 8080 오리진이다.
+# #245로 nginx가 /api를 backend로 프록시하므로, 번들이 상대 경로를 쓰기 시작하면(#246,
+# WebGL 재빌드 필요) 브라우저 요청은 same-origin이 되어 CORS 자체가 개입하지 않는다.
+# 현재 번들은 아직 8000번을 직접 호출하므로 이 목록이 계속 필요하다.
 _ALLOW_ORIGINS_RAW = os.getenv("ALLOW_ORIGINS", "http://localhost:8080,http://127.0.0.1:8080")
 ALLOW_ORIGINS = [origin.strip() for origin in _ALLOW_ORIGINS_RAW.split(",") if origin.strip()]
 
