@@ -957,6 +957,103 @@ async def test_llm_nat_chat_logs_json_parse_failure(monkeypatch, caplog):
     assert "NAT response body preview: not-json" in caplog.text
 
 
+# ── #260: NAT 응답의 추론 메타데이터(routed_agent / tools_used) ──────────────
+
+
+@pytest.mark.asyncio
+async def test_llm_nat_chat_carries_reasoning_metadata(monkeypatch):
+    """응답 최상위의 routed_agent/tools_used가 NatAnswer 속성으로 실려 온다."""
+    response = httpx.Response(
+        200,
+        json={
+            "choices": [{"message": {"content": "삼성전자 뉴스입니다."}}],
+            "routed_agent": "news_agent",
+            "tools_used": ["finus_account_balance", "finus_market_news"],
+        },
+    )
+    monkeypatch.setattr(services.httpx, "AsyncClient", mock_async_client_factory(response))
+
+    result = await services._llm_nat_chat("삼성전자 뉴스")
+
+    assert result == "삼성전자 뉴스입니다."
+    assert result.routed_agent == "news_agent"
+    assert result.tools_used == ("finus_account_balance", "finus_market_news")
+
+
+@pytest.mark.asyncio
+async def test_llm_nat_chat_result_is_a_plain_string_for_existing_callers(monkeypatch):
+    """NatAnswer는 str이므로 기존 호출부(scheduler 파서 등)가 그대로 동작한다."""
+    raw = (
+        '{"summary":"요약",'
+        '"details":{"decision":"BUY","confidence_score":0.7,'
+        '"reason":"수급 개선","target_stock":"삼성전자"},'
+        '"source_news":[],"trading_trend":null}'
+    )
+    response = httpx.Response(
+        200,
+        json={
+            "choices": [{"message": {"content": raw}}],
+            "routed_agent": "strategy_agent",
+            "tools_used": [],
+        },
+    )
+    monkeypatch.setattr(services.httpx, "AsyncClient", mock_async_client_factory(response))
+
+    result = await services._llm_nat_chat("삼성전자 분석")
+
+    assert isinstance(result, str)
+    assert str(result) == raw
+    # scheduler 경로의 파서가 메타데이터 추가와 무관하게 그대로 동작한다.
+    parsed = services.analysis_from_nat_text(str(result), "삼성전자")
+    assert parsed["summary"] == "요약"
+    assert parsed["details"]["decision"] == "BUY"
+
+
+@pytest.mark.asyncio
+async def test_llm_nat_chat_without_metadata_yields_empty_trace(monkeypatch):
+    """두 필드를 싣지 않는 구버전 finus_nat 응답도 그대로 처리된다."""
+    response = httpx.Response(200, json={"choices": [{"message": {"content": "답변"}}]})
+    monkeypatch.setattr(services.httpx, "AsyncClient", mock_async_client_factory(response))
+
+    result = await services._llm_nat_chat("질문")
+
+    assert result == "답변"
+    assert result.routed_agent is None
+    assert result.tools_used == ()
+
+
+@pytest.mark.asyncio
+async def test_llm_nat_chat_ignores_malformed_metadata(monkeypatch):
+    """타입이 어긋난 메타데이터는 조용히 버린다 — 각주 때문에 응답을 실패시키지 않는다."""
+    response = httpx.Response(
+        200,
+        json={
+            "choices": [{"message": {"content": "답변"}}],
+            "routed_agent": 42,
+            "tools_used": {"not": "a list"},
+        },
+    )
+    monkeypatch.setattr(services.httpx, "AsyncClient", mock_async_client_factory(response))
+
+    result = await services._llm_nat_chat("질문")
+
+    assert result == "답변"
+    assert result.routed_agent is None
+    assert result.tools_used == ()
+
+
+def test_nat_reasoning_trace_dedupes_and_keeps_call_order():
+    routed_agent, tools_used = services._nat_reasoning_trace_from_payload(
+        {
+            "routed_agent": "  news_agent  ",
+            "tools_used": ["finus_market_news", "", 7, "finus_market_news", "finus_save_diary"],
+        }
+    )
+
+    assert routed_agent == "news_agent"
+    assert tools_used == ("finus_market_news", "finus_save_diary")
+
+
 # ── A (#162): 도구 없는 provider 출력 범위 축소 ──────────────────────────────
 
 

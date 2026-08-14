@@ -178,15 +178,125 @@ LOOKUP_COMMAND_HELP = "\n".join(
 )
 TELEGRAM_MESSAGE_LIMIT = 4000
 TELEGRAM_TRUNCATION_SUFFIX = "...(이하 생략)"
+
+# ---- 추론 과정 표시 (#260) ----
+
+NAT_PROGRESS_MESSAGE = "⏳ 분석 중입니다..."
+# 텔레그램은 같은 메시지에 대한 잦은 편집을 제한한다. 굵직한 단계에만 쓰도록 상한을 둔다.
+MAX_PROGRESS_EDITS = 2
+REASONING_FOOTNOTE_SEPARATOR = "─────"
+
+# NAT supervisor 브랜치명 → 사용자에게 보여줄 한국어 라벨.
+# 키는 finus_nat/configs/router*.yml의 branches[].name과 같아야 한다.
+AGENT_LABELS: dict[str, str] = {
+    "trading_agent": "트레이딩 에이전트",
+    "monitoring_agent": "모니터링 에이전트",
+    "news_agent": "뉴스 에이전트",
+    "recommend_agent": "추천 에이전트",
+    "strategy_agent": "전략 에이전트",
+    "diary_agent": "매매일지 에이전트",
+}
+
+# 도구 강제 원장(finus_nat/src/nat_finus_nat/finus_api.py의 _record_to_ledger 호출부)에
+# 기록되는 내부 도구명 → 사용자에게 보여줄 한국어 라벨.
+# 매핑에 없는 도구는 내부 이름을 그대로 노출한다 — 조용히 감추면 각주가 "확인한 자료"를
+# 실제보다 적게 보여주게 되어, 근거를 보여준다는 목적 자체가 무너진다.
+TOOL_LABELS: dict[str, str] = {
+    "finus_account_balance": "KIS 시세·계좌 조회",
+    "finus_market_news": "뉴스 검색",
+    "finus_disclosure_signal": "지분공시 조회",
+    "finus_earnings_report": "DART 실적 조회",
+    "finus_mcp_trading_today_orders": "당일 주문·체결 조회",
+    "finus_mcp_trading_get_balance": "계좌 잔고 조회",
+    "finus_mcp_trading_balance_rlz_pl": "실현손익 조회",
+    "finus_save_diary": "매매일지 저장",
+    "finus_list_diaries": "매매일지 조회",
+}
+
 _telegram_command_task: asyncio.Task | None = None
 
 
-def _telegram_text(text: str) -> str:
+def _telegram_text(text: str, limit: int = TELEGRAM_MESSAGE_LIMIT) -> str:
     stripped = text.strip()
-    if len(stripped) <= TELEGRAM_MESSAGE_LIMIT:
+    if len(stripped) <= limit:
         return stripped
-    keep = TELEGRAM_MESSAGE_LIMIT - len(TELEGRAM_TRUNCATION_SUFFIX)
+    keep = limit - len(TELEGRAM_TRUNCATION_SUFFIX)
     return f"{stripped[:keep]}{TELEGRAM_TRUNCATION_SUFFIX}"
+
+
+def _reasoning_footnote(routed_agent: Any, tools_used: Any) -> str:
+    """담당 에이전트·확인한 자료 각주를 만든다. 근거가 없으면 빈 문자열 (#260).
+
+    입력은 NAT 응답의 ``routed_agent``/``tools_used`` 필드에서만 온다 — 답변 텍스트를
+    파싱해 에이전트명이나 도구명을 추측하지 않는다 (#129와 같은 원칙). 파싱으로 만들면
+    "실제로 호출한 도구"가 아니라 "모델이 호출했다고 주장하는 도구"가 되어, 근거로
+    보여주는 각주가 오히려 환각을 사실처럼 전달하는 표면이 된다.
+
+    두 값이 모두 없으면(구버전 finus_nat 등) 각주를 조용히 생략한다. 라우팅은 됐는데
+    도구가 하나도 실행되지 않은 경우는 "없음"으로 드러낸다 — 도구 없이 나온 답변이라는
+    사실 자체가 사용자가 알아야 할 근거다.
+    """
+    agent = routed_agent.strip() if isinstance(routed_agent, str) else ""
+    tools = (
+        [name.strip() for name in tools_used if isinstance(name, str) and name.strip()]
+        if isinstance(tools_used, (list, tuple))
+        else []
+    )
+    if not agent and not tools:
+        return ""
+
+    labels: list[str] = []
+    for name in tools:
+        label = TOOL_LABELS.get(name, name)
+        if label not in labels:  # 서로 다른 내부 도구가 같은 라벨로 접힐 수 있다
+            labels.append(label)
+
+    parts: list[str] = []
+    if agent:
+        parts.append(f"🤖 {AGENT_LABELS.get(agent, agent)}")
+    parts.append(f"📚 확인한 자료: {', '.join(labels) if labels else '없음'}")
+    return f"{REASONING_FOOTNOTE_SEPARATOR}\n{' · '.join(parts)}"
+
+
+def _answer_with_footnote(answer: str, footnote: str) -> str:
+    """답변 본문과 각주를 텔레그램 길이 한도 안에 함께 담는다 (#260).
+
+    각주 자리를 먼저 확보한 뒤 본문을 나머지에 맞춰 자른다. 합친 뒤에 자르면 긴 답변에서
+    각주가 통째로 잘려나가, 정작 근거가 필요한 답변에서만 근거가 사라진다.
+    """
+    if not footnote:
+        return _telegram_text(answer)
+    block = f"\n\n{footnote}"
+    return f"{_telegram_text(answer, TELEGRAM_MESSAGE_LIMIT - len(block))}{block}"
+
+
+def _nat_answer_message(result: Any) -> str:
+    """NAT 응답을 각주까지 붙인 텔레그램 메시지로 만든다 (#260).
+
+    ``routed_agent``/``tools_used``는 ``services.NatAnswer``가 실어 오는 속성이다.
+    속성이 없는 값(구버전 경로, 문자열만 주는 대역)이면 각주 없이 본문만 보낸다.
+    """
+    footnote = _reasoning_footnote(
+        getattr(result, "routed_agent", None),
+        getattr(result, "tools_used", ()),
+    )
+    return _answer_with_footnote(str(result), footnote)
+
+
+@dataclass
+class _ProgressMessage:
+    """진행 메시지 한 건의 상태 — 편집 대상 message_id와 남은 편집 예산 (#260).
+
+    ``message_id``가 없으면(전송 실패, 또는 message_id를 주지 못하는 notifier) 편집할
+    수 없으므로 최종 답변은 새 메시지로 나간다.
+    """
+
+    message_id: int | None = None
+    edits_used: int = 0
+
+    @property
+    def editable(self) -> bool:
+        return self.message_id is not None and self.edits_used < MAX_PROGRESS_EDITS
 
 
 def _short_error(exc: Exception) -> str:
@@ -1346,8 +1456,39 @@ class TelegramCommandHandler:
             lines.append(line)
         return "\n".join(lines).strip()
 
+    async def _send_progress_message(self, text: str) -> _ProgressMessage:
+        """진행 메시지를 보내고 이후 편집에 쓸 상태를 반환한다 (#260).
+
+        message_id를 돌려주지 못하는 notifier에서는 진행 메시지만 일반 전송하고
+        편집 불가 상태를 반환한다 — 최종 답변은 새 메시지로 나간다.
+
+        전송 실패는 삼킨다. 진행 표시는 답변에 덧붙는 편의 기능이므로, 이걸로
+        질의 처리 자체를 실패시키면 사용자는 답도 못 받는다.
+        """
+        send_returning_id = getattr(self.notifier, "send_text_returning_id", None)
+        if callable(send_returning_id):
+            return _ProgressMessage(message_id=await send_returning_id(text))
+        await self.notifier.send_text(text)
+        return _ProgressMessage()
+
+    async def _replace_progress_message(self, progress: _ProgressMessage, text: str) -> None:
+        """진행 메시지를 *text*로 교체한다. 편집할 수 없으면 새 메시지로 보낸다 (#260)."""
+        if progress.editable:
+            progress.edits_used += 1
+            edit_message_text = getattr(self.notifier, "edit_message_text", None)
+            if callable(edit_message_text) and await edit_message_text(progress.message_id, text):
+                return
+            logger.info(
+                "진행 메시지 편집 실패 — 새 메시지로 폴백합니다 (message_id=%s)",
+                progress.message_id,
+            )
+        await self._send_text_or_raise(text)
+
     async def _handle_chat_fallback(self, text: str, chat_id: str) -> None:
         await self.notifier.send_chat_action("typing")
+        # #260: NAT 응답까지 수십 초가 걸린다. typing 액션은 5초 뒤 사라지므로
+        # 접수 즉시 진행 메시지를 남기고, 응답이 오면 그 메시지를 답변으로 교체한다.
+        progress = await self._send_progress_message(NAT_PROGRESS_MESSAGE)
         try:
             result = await self.llm_runner(
                 "nat",
@@ -1355,9 +1496,10 @@ class TelegramCommandHandler:
                 conversation_id=f"telegram:{chat_id}",
             )
         except Exception as exc:
-            await self._send_text_or_raise(f"응답 생성 실패: {_short_error(exc)}")
+            # 실패해도 진행 메시지를 교체한다 — 안 그러면 "분석 중"이 영원히 남는다.
+            await self._replace_progress_message(progress, f"응답 생성 실패: {_short_error(exc)}")
             return
-        await self._send_text_or_raise(_telegram_text(str(result)))
+        await self._replace_progress_message(progress, _nat_answer_message(result))
 
     @asynccontextmanager
     async def _state(self):

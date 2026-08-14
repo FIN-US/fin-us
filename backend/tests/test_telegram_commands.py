@@ -12,7 +12,10 @@ from backend.telegram_commands import (
     BUY_COMMAND_HELP,
     CATALYST_COMMAND_HELP,
     EARNINGS_COMMAND_HELP,
+    MAX_PROGRESS_EDITS,
+    NAT_PROGRESS_MESSAGE,
     QUOTE_COMMAND_HELP,
+    REASONING_FOOTNOTE_SEPARATOR,
     TELEGRAM_INTERACTIVE_HELP,
     TRADE_COMMAND_HELP,
     LOOKUP_COMMAND_HELP,
@@ -22,7 +25,10 @@ from backend.telegram_commands import (
     UNRESOLVED_STOCK_WARNING,
     TelegramCommandHandler,
     TelegramCommandPoller,
+    _ProgressMessage,
+    _reasoning_footnote,
 )
+from backend.services import NatAnswer
 from backend.trading_orders import OrderExecutionResult, PendingOrder
 
 KST = ZoneInfo("Asia/Seoul")
@@ -2906,3 +2912,232 @@ async def test_help_and_bot_menu_include_catalysts_command(monkeypatch):
 
     assert "/catalysts <종목명> - 예정 촉매 이벤트 조회" in notifier.messages[-1]
     assert "catalysts" in [command["command"] for command in telegram_commands.TELEGRAM_BOT_COMMANDS]
+
+
+# ── #260: 추론 과정 표시 (진행 메시지 + 응답 근거 각주) ──────────────────────
+
+
+class EditingFakeNotifier(FakeNotifier):
+    """editMessageText를 지원하는 notifier 대역.
+
+    messages에는 sendMessage로 나간 것만, edits에는 편집으로 나간 것만 쌓인다 —
+    "진행 메시지를 새로 보냈는지 / 기존 메시지를 고쳤는지"를 구분해 검증하기 위함이다.
+    """
+
+    def __init__(self, *, edit_result=True, message_id=4242, **kwargs):
+        super().__init__(**kwargs)
+        self.edit_result = edit_result
+        self.message_id = message_id
+        self.edits = []
+
+    async def send_text_returning_id(self, text, *, reply_markup=None):
+        self.messages.append(text)
+        self.reply_markups.append(reply_markup)
+        return self.message_id
+
+    async def edit_message_text(self, message_id, text):
+        self.edits.append((message_id, text))
+        return self.edit_result
+
+
+def _nat_runner(result):
+    async def runner(provider, text, *, conversation_id=None):
+        return result
+
+    return runner
+
+
+async def _ask(handler, text="삼성전자 뉴스 알려줘", chat_id=123):
+    await handler.handle_update({"message": {"chat": {"id": chat_id}, "text": text}})
+
+
+@pytest.mark.asyncio
+async def test_progress_message_is_sent_and_edited_into_the_answer():
+    notifier = EditingFakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        llm_runner=_nat_runner(NatAnswer("삼성전자 뉴스입니다.")),
+    )
+
+    await _ask(handler)
+
+    assert notifier.actions == ["typing"]
+    assert notifier.messages == [NAT_PROGRESS_MESSAGE]
+    assert notifier.edits == [(4242, "삼성전자 뉴스입니다.")]
+
+
+@pytest.mark.asyncio
+async def test_answer_carries_reasoning_footnote_with_korean_labels():
+    notifier = EditingFakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        llm_runner=_nat_runner(
+            NatAnswer(
+                "삼성전자 뉴스입니다.",
+                routed_agent="news_agent",
+                tools_used=("finus_account_balance", "finus_market_news"),
+            )
+        ),
+    )
+
+    await _ask(handler)
+
+    _, final_text = notifier.edits[-1]
+    assert final_text == (
+        "삼성전자 뉴스입니다.\n\n"
+        f"{REASONING_FOOTNOTE_SEPARATOR}\n"
+        "🤖 뉴스 에이전트 · 📚 확인한 자료: KIS 시세·계좌 조회, 뉴스 검색"
+    )
+
+
+@pytest.mark.asyncio
+async def test_footnote_is_omitted_when_response_has_no_metadata():
+    """구버전 finus_nat 응답(메타데이터 없음)에서는 각주를 조용히 생략한다."""
+    notifier = EditingFakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        llm_runner=_nat_runner("메타데이터 없는 답변"),  # 평범한 str
+    )
+
+    await _ask(handler)
+
+    _, final_text = notifier.edits[-1]
+    assert final_text == "메타데이터 없는 답변"
+    assert REASONING_FOOTNOTE_SEPARATOR not in final_text
+
+
+@pytest.mark.asyncio
+async def test_footnote_shows_no_sources_when_ledger_was_empty():
+    """도구 없이 나온 답변이라는 사실 자체가 사용자가 알아야 할 근거다."""
+    notifier = EditingFakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        llm_runner=_nat_runner(NatAnswer("일반론입니다.", routed_agent="strategy_agent")),
+    )
+
+    await _ask(handler)
+
+    _, final_text = notifier.edits[-1]
+    assert final_text.endswith("🤖 전략 에이전트 · 📚 확인한 자료: 없음")
+
+
+@pytest.mark.asyncio
+async def test_unmapped_tool_name_falls_back_to_internal_name():
+    """매핑에 없는 도구는 내부 이름 그대로 노출한다 — 조용히 감추지 않는다."""
+    notifier = EditingFakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        llm_runner=_nat_runner(
+            NatAnswer("답변", routed_agent="news_agent", tools_used=("finus_brand_new_tool",))
+        ),
+    )
+
+    await _ask(handler)
+
+    _, final_text = notifier.edits[-1]
+    assert final_text.endswith("📚 확인한 자료: finus_brand_new_tool")
+
+
+@pytest.mark.asyncio
+async def test_edit_failure_falls_back_to_a_new_message():
+    """편집이 거부되면(오래된 메시지 등) 답변을 새 메시지로 보낸다."""
+    notifier = EditingFakeNotifier(edit_result=False)
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        llm_runner=_nat_runner(NatAnswer("최종 답변")),
+    )
+
+    await _ask(handler)
+
+    assert notifier.edits == [(4242, "최종 답변")]
+    assert notifier.messages == [NAT_PROGRESS_MESSAGE, "최종 답변"]
+
+
+@pytest.mark.asyncio
+async def test_missing_message_id_falls_back_to_a_new_message():
+    """message_id를 확보하지 못하면 편집을 시도하지 않고 새 메시지로 보낸다."""
+    notifier = EditingFakeNotifier(message_id=None)
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        llm_runner=_nat_runner(NatAnswer("최종 답변")),
+    )
+
+    await _ask(handler)
+
+    assert notifier.edits == []
+    assert notifier.messages == [NAT_PROGRESS_MESSAGE, "최종 답변"]
+
+
+@pytest.mark.asyncio
+async def test_notifier_without_edit_support_sends_two_plain_messages():
+    """편집을 지원하지 않는 notifier에서도 진행 표시와 답변이 모두 전달된다."""
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        llm_runner=_nat_runner(NatAnswer("최종 답변")),
+    )
+
+    await _ask(handler)
+
+    assert notifier.messages == [NAT_PROGRESS_MESSAGE, "최종 답변"]
+
+
+@pytest.mark.asyncio
+async def test_llm_failure_replaces_the_progress_message():
+    """실패해도 진행 메시지를 교체한다 — 안 그러면 '분석 중'이 영원히 남는다."""
+    notifier = EditingFakeNotifier()
+
+    async def failing_runner(provider, text, *, conversation_id=None):
+        raise HTTPException(status_code=502, detail="NAT 연결 실패")
+
+    handler = TelegramCommandHandler(notifier=notifier, llm_runner=failing_runner)
+
+    await _ask(handler)
+
+    assert notifier.edits == [(4242, "응답 생성 실패: NAT 연결 실패")]
+
+
+def test_progress_message_edit_budget_is_capped():
+    """텔레그램 편집 빈도 제한 때문에 편집 횟수에 상한을 둔다."""
+    progress = _ProgressMessage(message_id=1)
+
+    assert progress.editable is True
+    progress.edits_used = MAX_PROGRESS_EDITS
+    assert progress.editable is False
+
+
+def test_progress_message_without_id_is_never_editable():
+    assert _ProgressMessage(message_id=None).editable is False
+
+
+def test_reasoning_footnote_is_empty_without_any_evidence():
+    assert _reasoning_footnote(None, ()) == ""
+    assert _reasoning_footnote("", []) == ""
+
+
+def test_reasoning_footnote_ignores_malformed_metadata():
+    """타입이 어긋난 값은 각주를 만들지 않는다 — 신뢰 경계 밖의 값이다."""
+    assert _reasoning_footnote(42, "not-a-list") == ""
+
+
+@pytest.mark.asyncio
+async def test_footnote_survives_truncation_of_a_long_answer():
+    """긴 답변이 잘려도 각주는 남는다 — 각주 자리를 먼저 확보한 뒤 본문을 자른다."""
+    notifier = EditingFakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        llm_runner=_nat_runner(
+            NatAnswer(
+                "가" * (TELEGRAM_MESSAGE_LIMIT * 2),
+                routed_agent="news_agent",
+                tools_used=("finus_market_news",),
+            )
+        ),
+    )
+
+    await _ask(handler)
+
+    _, final_text = notifier.edits[-1]
+    assert len(final_text) <= TELEGRAM_MESSAGE_LIMIT
+    assert TELEGRAM_TRUNCATION_SUFFIX in final_text
+    assert final_text.endswith("🤖 뉴스 에이전트 · 📚 확인한 자료: 뉴스 검색")

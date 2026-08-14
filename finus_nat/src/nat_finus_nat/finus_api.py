@@ -84,6 +84,53 @@ DATA_TOOL_LEDGER: ContextVar["DataToolLedger | None"] = ContextVar(
     "finus_data_tool_ledger", default=None
 )
 
+
+# ---- Reasoning trace for the response footnote (#260) ----
+
+
+@dataclass
+class ReasoningTrace:
+    """한 요청에서 코드가 관측한 추론 경로 — 어느 브랜치로 갔고 어떤 도구가 실행됐는지.
+
+    **출처 원칙 (#129와 같은 원칙):** 두 값 모두 코드가 남긴 기록에서만 만든다.
+
+    - ``routed_agent`` — supervisor의 ``_choose_branch``가 반환한 브랜치명. 브랜치
+      허용 목록으로 정규화된 값이므로 임의 문자열이 들어올 수 없다.
+    - ``tools_used`` — 도구 강제 원장(:class:`DataToolLedger`)에 기록된 도구명.
+      모든 Fin-Us 도구가 ``_record_to_ledger``를 거치므로 "실제로 실행된 도구"다.
+
+    LLM 출력 텍스트를 파싱해서 채우지 않는다. 파싱으로 만들면 "실행된 도구"가 아니라
+    "모델이 실행했다고 주장하는 도구"가 되어, 근거로 보여주는 각주가 오히려 환각을
+    사용자에게 사실처럼 전달하는 표면이 된다.
+
+    :class:`DataToolLedger`와 같은 이유로 **mutable box**다: ``ContextVar.set()``은
+    LangGraph가 내부적으로 만드는 ``copy_context()`` 경계를 넘어 바깥으로 전파되지
+    않는다. 최상단에서 박스 하나를 심고, 안쪽에서는 박스를 mutate하기만 한다.
+    """
+
+    routed_agent: str | None = None
+    tools_used: list[str] = field(default_factory=list)
+
+    def record_route(self, branch_name: str) -> None:
+        """supervisor가 고른 브랜치명을 기록한다 (마지막 라우팅이 최종 값)."""
+        self.routed_agent = branch_name
+
+    def record_ledger_tools(self, ledger: "DataToolLedger") -> None:
+        """*ledger*에 기록된 도구명을 호출 순서대로 병합한다 (중복 제거).
+
+        게이트 재시도(``_run_with_gate``의 2차 시도)는 원장을 새로 만들므로 이
+        메서드가 여러 번 호출된다. 중복 제거는 "한 번이라도 실행된 도구" 집합을
+        순서를 유지한 채 만든다.
+        """
+        for record in ledger.records:
+            if record.tool_name not in self.tools_used:
+                self.tools_used.append(record.tool_name)
+
+
+REASONING_TRACE: ContextVar["ReasoningTrace | None"] = ContextVar(
+    "finus_reasoning_trace", default=None
+)
+
 _ERROR_JSON_PREFIX_RE = re.compile(r'^\s*\{"error"')
 
 # 각 MCP 서버가 조회 결과가 없을 때 출력하는 리터럴 부분문자열.

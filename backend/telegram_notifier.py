@@ -69,6 +69,26 @@ def should_send_telegram_alert(
     )
 
 
+def _message_id_from_send_response(response: Any) -> int | None:
+    """sendMessage 응답 본문에서 ``message_id``를 뽑는다 (#260).
+
+    본문을 읽을 수 없거나 형식이 다르면 ``None``을 반환해 "편집 불가"로 떨어뜨린다.
+    전송 자체는 이미 성공한 뒤이므로 예외로 올리지 않는다 — 호출부는 편집 대신
+    새 메시지 전송으로 폴백하면 된다.
+    """
+    try:
+        body = response.json()
+    except Exception:
+        return None
+    if not isinstance(body, dict) or body.get("ok") is not True:
+        return None
+    result = body.get("result")
+    if not isinstance(result, dict):
+        return None
+    message_id = result.get("message_id")
+    return message_id if isinstance(message_id, int) else None
+
+
 class TelegramNotifier:
     def __init__(
         self,
@@ -181,6 +201,54 @@ class TelegramNotifier:
             logger.error("Telegram message send failed: %s", exc)
             return False
 
+    async def send_text_returning_id(
+        self,
+        text: str,
+        *,
+        reply_markup: dict[str, Any] | None = None,
+    ) -> int | None:
+        """메시지를 보내고 ``message_id``를 반환한다. 실패하면 ``None`` (#260).
+
+        진행 메시지처럼 나중에 ``editMessageText``로 갱신할 메시지에 쓴다.
+        성공/실패 bool을 주는 :meth:`send_text`와 달리 편집에 필요한 식별자를 준다.
+        """
+        if not self.enabled:
+            return None
+
+        try:
+            response = await self._post_message(text[:4000], reply_markup=reply_markup)
+        except Exception as exc:
+            logger.error("Telegram message send failed: %s", exc)
+            return None
+        return _message_id_from_send_response(response)
+
+    async def edit_message_text(self, message_id: int, text: str) -> bool:
+        """``editMessageText``로 기존 메시지 본문을 교체한다 (#260).
+
+        메시지가 너무 오래됐거나(48시간 초과) 이미 삭제된 경우 등 편집이 거부되면
+        ``False``를 반환한다. 호출부는 이를 새 메시지 전송으로 폴백하는 신호로 쓴다.
+        """
+        if not self.enabled:
+            return False
+
+        url = f"https://api.telegram.org/bot{self.bot_token}/editMessageText"
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.post(
+                    url,
+                    json={
+                        "chat_id": self.chat_id,
+                        "message_id": message_id,
+                        "text": text[:4000],
+                        "disable_web_page_preview": True,
+                    },
+                )
+                response.raise_for_status()
+            return True
+        except Exception as exc:
+            logger.error("Telegram message edit failed: %s", exc)
+            return False
+
     async def answer_callback_query(
         self,
         callback_query_id: str,
@@ -259,7 +327,12 @@ class TelegramNotifier:
         text: str,
         *,
         reply_markup: dict[str, Any] | None = None,
-    ) -> None:
+    ) -> Any:
+        """sendMessage를 호출하고 HTTP 응답을 반환한다.
+
+        반환값은 message_id가 필요한 :meth:`send_text_returning_id`만 사용한다.
+        :meth:`send_text`는 예전처럼 성공/실패만 보고 무시한다.
+        """
         url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
         payload = {
             "chat_id": self.chat_id,
@@ -271,6 +344,7 @@ class TelegramNotifier:
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.post(url, json=payload)
             response.raise_for_status()
+        return response
 
 
 telegram_notifier = TelegramNotifier()

@@ -597,6 +597,66 @@ async def _llm_ollama_chat(user_msg: str) -> str:
     return (choice or "").strip()
 
 
+class NatAnswer(str):
+    """NAT 답변 텍스트 + 추론 메타데이터 (#260).
+
+    ``str`` 서브클래스인 이유: ``llm_chat("nat", ...)``의 반환값은 scheduler의
+    ``analysis_from_nat_text``, Telegram ``/earnings`` 핸들러 등 여러 곳에서 이미
+    문자열로 소비된다. 별도 타입을 새로 반환하면 그 호출부를 전부 고쳐야 하고,
+    "기존 응답 파서를 건드리지 않는다"는 이 작업의 전제가 깨진다. ``str``을
+    상속하면 기존 호출부는 그대로 동작하고, 각주가 필요한 호출부만 두 속성을 읽는다.
+
+    두 속성은 NAT 응답 페이로드의 **최상위 필드**에서 그대로 온다 — 답변 텍스트
+    (``choices[0].message.content``)를 파싱해 만들지 않는다 (#129와 같은 원칙).
+    """
+
+    routed_agent: str | None
+    tools_used: tuple[str, ...]
+
+    def __new__(
+        cls,
+        text: str,
+        *,
+        routed_agent: str | None = None,
+        tools_used: tuple[str, ...] = (),
+    ) -> "NatAnswer":
+        answer = super().__new__(cls, text)
+        answer.routed_agent = routed_agent
+        answer.tools_used = tuple(tools_used)
+        return answer
+
+
+def _nat_reasoning_trace_from_payload(
+    payload: dict[str, Any],
+) -> tuple[str | None, tuple[str, ...]]:
+    """NAT 응답 최상위의 ``routed_agent``/``tools_used``를 읽는다 (#260).
+
+    두 필드는 finus_nat이 supervisor의 라우팅 결과와 도구 강제 원장에서 만들어
+    실어 보내는 값이다. 여기서는 **읽기만** 한다 — 답변 텍스트를 뒤져서 도구명이나
+    에이전트명을 추측하지 않는다.
+
+    필드가 없거나 타입이 어긋나면 조용히 비운다. 두 필드를 싣지 않는 구버전
+    finus_nat과 혼용될 수 있고, 각주는 답변에 덧붙는 부가 정보이므로 없다고 해서
+    응답 자체를 실패로 만들 이유가 없다.
+    """
+    routed_raw = payload.get("routed_agent")
+    routed_agent = routed_raw.strip() if isinstance(routed_raw, str) else ""
+
+    tools_raw = payload.get("tools_used")
+    tools_used: list[str] = []
+    if isinstance(tools_raw, list):
+        for item in tools_raw:
+            if not isinstance(item, str):
+                continue
+            name = item.strip()
+            # 호출 순서 유지 + 중복 제거. finus_nat이 이미 그렇게 보내지만,
+            # 신뢰 경계 밖의 값이므로 backend에서도 같은 불변식을 세운다.
+            if name and name not in tools_used:
+                tools_used.append(name)
+
+    return (routed_agent or None), tuple(tools_used)
+
+
 def _nat_message_from_payload(payload: dict[str, Any]) -> str:
     if "error" in payload:
         err = payload["error"]
@@ -632,7 +692,7 @@ def _log_nat_response(resp: httpx.Response) -> None:
         )
 
 
-async def _llm_nat_chat(user_msg: str, *, conversation_id: str | None = None) -> str:
+async def _llm_nat_chat(user_msg: str, *, conversation_id: str | None = None) -> NatAnswer:
     url = f"{NAT_BASE_URL}/v1/chat/completions"
     cid = (conversation_id or NAT_CONVERSATION_ID).strip()
     headers = {
@@ -681,7 +741,7 @@ async def _llm_nat_chat(user_msg: str, *, conversation_id: str | None = None) ->
         raise HTTPException(status_code=502, detail="NAT 응답이 JSON 객체가 아닙니다.")
 
     try:
-        return _nat_message_from_payload(payload)
+        message = _nat_message_from_payload(payload)
     except (KeyError, IndexError, TypeError) as exc:
         body_snip = resp.text[:1200] if resp.text else ""
         raise HTTPException(
@@ -691,6 +751,11 @@ async def _llm_nat_chat(user_msg: str, *, conversation_id: str | None = None) ->
                 f"body[:1200]={body_snip!r}"
             ),
         ) from exc
+
+    # #260: 답변 텍스트는 위에서 기존 파서가 그대로 뽑았고, 여기서는 추론 메타데이터만
+    # 덧붙인다. NatAnswer는 str이므로 이 반환값을 문자열로 쓰는 기존 호출부는 불변이다.
+    routed_agent, tools_used = _nat_reasoning_trace_from_payload(payload)
+    return NatAnswer(message, routed_agent=routed_agent, tools_used=tools_used)
 
 
 async def run_mcp_tool(
