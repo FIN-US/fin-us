@@ -6,7 +6,7 @@ from fastapi import FastAPI, Query, Depends, WebSocket, WebSocketDisconnect, Bod
 from fastapi.middleware.cors import CORSMiddleware
 from sqlmodel import Session, select
 
-from .config import NAT_BASE_URL, NEWS_MCP_PARAMS, TRADING_MCP_PARAMS, DART_MCP_PARAMS, ALLOW_ORIGINS
+from .config import NEWS_MCP_PARAMS, TRADING_MCP_PARAMS, DART_MCP_PARAMS, ALLOW_ORIGINS
 from .ws_manager import manager
 from .scheduler import start_scheduler, stop_scheduler
 from .telegram_commands import start_telegram_commands, stop_telegram_commands
@@ -278,7 +278,10 @@ async def create_db_diary(
 
 @app.get("/health", tags=["System"])
 async def health_check():
-    return {"status": "alive", "nat_base_url": NAT_BASE_URL}
+    # nat_base_url(내부 서비스 주소)은 싣지 않는다. #245로 nginx가 /health를 8080으로도
+    # 중계하면서 내부 토폴로지가 외부에 노출되는 경로가 생겼다. compose 헬스체크는
+    # 상태코드만 보고, 이 필드를 읽는 코드도 없다(PR #252 리뷰).
+    return {"status": "alive"}
 
 
 @app.websocket("/api/v1/ws")

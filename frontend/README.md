@@ -104,7 +104,13 @@ docker compose up frontend
 `proxy_pass`에는 상수 대신 변수(`set $backend_upstream backend:8000;`)를 씁니다. 상수
 호스트명이면 nginx가 **기동 시점에** 이름을 해석하고 실패 시 아예 뜨지 않아 `depends_on`이
 필요해지는데, 변수를 쓰면 Docker 내장 DNS(`resolver 127.0.0.11`)로 **요청 시점에** 해석하므로
-backend를 기다리지 않아도 됩니다. backend가 없는 동안 `/api` 호출만 502가 납니다.
+backend를 기다리지 않아도 됩니다. backend가 없는 동안에는 `/api/` 호출만 502(이름 해석 실패·
+연결 거부) 또는 504(`proxy_connect_timeout 5s` 만료, 재시작 중 stale IP로 향한 경우)가 납니다.
+슬래시 없는 `/api`는 `location /api/` 프리픽스에 걸리지 않아 정적 라우트의 404입니다.
+
+`frontend` 서비스에 healthcheck를 추가할 일이 생기면 `/health`가 아니라 **`/nginx-health`**를
+쓰세요. `/health`는 backend로 프록시되므로, backend가 죽으면 frontend까지 unhealthy가 되어
+`depends_on`을 뺀 위 설계가 그대로 무효가 됩니다.
 
 `/api/v1/ws`(WebSocket)는 `map $http_upgrade $connection_upgrade`로 업그레이드 헤더를
 조건부 중계합니다. `/api/v1/analyze`는 LLM 호출로 오래 걸려 `proxy_read_timeout`을 300s로
