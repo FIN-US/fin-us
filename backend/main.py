@@ -225,7 +225,12 @@ async def get_db_diary(session: Session = Depends(get_session)):
     return {"status": "success", "data": diaries}
 
 
-@app.get("/api/v1/db/catalysts", response_model=CommonResponse, tags=["Database"])
+@app.get(
+    "/api/v1/db/catalysts",
+    response_model=CommonResponse,
+    tags=["Database"],
+    responses={422: {"description": "to_date < from_date 이거나 쿼리 파라미터 검증 실패"}},
+)
 async def get_db_catalysts(
     # Request는 쿼리 파라미터가 아니라 타입으로 판별돼 주입된다. 기본값이 없는 인자라
     # 기본값 있는 인자들보다 앞에 와야 한다(파이썬 문법). from_date가 기본값으로
@@ -235,7 +240,7 @@ async def get_db_catalysts(
     # default_factory에 today_kst를 직접 넘기면 라우트 등록 시점의 함수 객체가
     # 고정돼 테스트에서 backend.main.today_kst를 monkeypatch해도 반영되지 않는다.
     # 람다로 감싸 요청마다 모듈 전역의 today_kst를 다시 조회하도록 한다.
-    from_date: date = Query(default_factory=lambda: today_kst(), description="이 날짜 이후(포함) 이벤트만 조회. 생략 시 KST 기준 오늘."),
+    from_date: date = Query(default_factory=lambda: today_kst(), description="이 날짜부터(당일 포함) 이벤트만 조회. 생략 시 KST 기준 오늘."),
     # 이슈 #228: 프론트 시간 링(캘린더 시각화)이 한 번에 그릴 이벤트 수를 과도하게
     # 받아 렌더링이 느려지는 것을 막기 위한 상한(500). 1건도 없이 호출되는 것을
     # 막기 위한 하한(1). 기본값 100은 기존 catalyst_repo.list_upcoming의 기본값(20)보다
@@ -245,7 +250,20 @@ async def get_db_catalysts(
     # 없으면 from_date 이후 전부를 요청한 뒤 limit에 걸려 뒷부분이 잘리는데, 잘린 뒷부분을
     # 다시 가져올 방법이 없었다. 기본 상한(예: from_date+90일)은 두지 않는다 — "전체 조회"
     # 용도를 막고 기존 호출자의 동작을 조용히 바꾸기 때문이다. 생략 시 상한 없음이 유지된다.
-    to_date: date | None = Query(None, description="이 날짜 이전(포함) 이벤트만 조회. 생략 시 상한 없음."),
+    #
+    # 남은 간극: to_date는 절단 문제를 완화할 뿐 없애지 못한다. 구간을 하루까지 좁혀도
+    # (from_date == to_date) 그 하루에 limit을 넘는 이벤트가 몰리면 message == "truncated"인
+    # 채로 더 좁힐 수 없어 뒷부분을 회수할 방법이 없다. 실적 시즌처럼 특정일에 공시가
+    # 집중되는 도메인이라 가정적 시나리오가 아니다. 이 잔여 간극은 offset/cursor
+    # 페이지네이션으로만 닫히며, 별도 이슈로 다룬다.
+    to_date: date | None = Query(
+        None,
+        description=(
+            "이 날짜까지(당일 포함) 이벤트만 조회. 생략 시 상한 없음. "
+            "과거 구간을 조회하려면 from_date도 함께 보내야 한다 "
+            "(생략 시 KST 기준 오늘이 적용되어 to_date < from_date로 422가 난다)."
+        ),
+    ),
     session: Session = Depends(get_session),
 ):
     """저장된 촉매 이벤트(실적/배당/공시/주총 등)를 조회합니다."""
