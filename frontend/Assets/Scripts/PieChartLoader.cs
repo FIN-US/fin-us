@@ -79,23 +79,23 @@ public class PieChartLoader : MonoBehaviour
     // 같은 재시도 루프에서 배너부터 띄운 뒤 상단바를 갱신한다.
     IEnumerator UpdateTopBarWhenReady(PortfolioData data, string sampleDataError = null)
     {
-        bool noticeShown = false;
+        // 대기 루프가 최대 30프레임 도는데 배너 처리는 한 번 성공하면 끝이다.
+        bool noticeHandled = false;
 
         for (int i = 0; i < 30; i++)
         {
             EnsurePanelController();
             if (panelController != null)
             {
-                if (sampleDataError == null)
+                // 실데이터면 이전 실패 표시를 걷고, 샘플이면 배너를 띄운다. 상단바보다
+                // 먼저 해야 MarkSample이 이번 데이터에 맞는 상태로 적용된다.
+                // 실데이터 쪽은 지금 재조회 경로가 없지만, 새로고침이 붙었을 때
+                // [샘플]이 남지 않게 한다.
+                if (!noticeHandled)
                 {
-                    // 실데이터를 받았으므로 이전 실패 표시를 걷는다. 지금은 재조회 경로가
-                    // 없지만, 새로고침이 붙었을 때 [샘플]이 남지 않게 한다.
-                    panelController.ClearDataSourceNotice();
-                }
-                else if (!noticeShown)
-                {
-                    // 한 번 띄우면 다시 만들지 않는다 — 대기 루프가 최대 30프레임 돈다.
-                    noticeShown = panelController.ShowSampleDataNotice(sampleDataError);
+                    noticeHandled = sampleDataError == null
+                        ? panelController.ClearDataSourceNotice()
+                        : panelController.ShowSampleDataNotice(sampleDataError);
                 }
 
                 if (panelController.UpdateTopBar(data))
