@@ -6,8 +6,10 @@
 
 ## 방식: (a) 자리표시자 + 매핑 복원
 
-    보내는 프롬프트: "<ACCOUNT_1> 계좌, 삼성전자 <QTY_1>주, 평가금액 <AMOUNT_1>, 총자산 <AMOUNT_2>"
-    응답 수신 후   : <AMOUNT_1> -> 12,345,000원 로 역치환
+    보내는 프롬프트: "<ACCOUNT_9f2a1c_1> 계좌, 삼성전자 <QTY_9f2a1c_1>주, 평가금액 <AMOUNT_9f2a1c_1>"
+    응답 수신 후   : <AMOUNT_9f2a1c_1> -> 12,345,000원 로 역치환
+
+가운데 "9f2a1c"는 mask_pii 호출마다 새로 뽑는 nonce(scope)다. 이유는 `_Counter` docstring 참고.
 
 상대 비교(AMOUNT_2 > AMOUNT_1처럼 "총자산이 평가금액보다 큰가")는 자리표시자만으로도
 LLM이 수행할 수 있어 유지되지만, **절대 금액 기반 판단**("이 종목 비중이 1천만원으로
@@ -18,17 +20,25 @@ LLM이 수행할 수 있어 유지되지만, **절대 금액 기반 판단**("�
 ## 왜 정규식이고 Presidio가 아닌가 (#230 착수 시 판단, 이슈 코멘트에도 근거를 남김)
 
 대상 3종(한국 계좌번호/원화 금액/보유 수량)은 모두 정규식으로 충분히 식별 가능한
-구조화된 패턴이다. `_build_toolless_prompt`/`_build_nat_prompt`/`generate_morning_briefing`이
-조립하는 프롬프트는 종목명 + 트리거 컨텍스트 + KIS 잔고 텍스트 + 고정 지시문뿐이며, 사용자
-자유 입력이 섞이지 않으므로 한국어 인명 등 NER이 필요한 대상이 들어올 여지가 없다.
-presidio-analyzer는 spaCy NER 모델 다운로드가 Docker 이미지·CI 시간에 얹히는 비용이 있어,
-이 범위에서는 이점 없이 비용만 발생한다.
+구조화된 패턴이다. 이 계층에는 자유 입력 경로가 실제로 존재한다 —
+`backend/telegram_commands.py:1349-1356`의 `_handle_chat_fallback`은 텔레그램 사용자
+원문을 가공 없이 `llm_chat`으로 넘기고, `backend/services.py:497-512`의
+`check_signal_significance`는 외부 뉴스 원문 1000자를 프롬프트에 넣는다. 다만 F-17이
+정의한 대상 3종은 그 자유 입력 안에서도 정규식으로 충분히 식별되며, 한국어 인명·연락처
+등 NER이 필요한 대상은 이번 이슈(#230) 범위 밖이다. presidio-analyzer는 spaCy NER 모델
+다운로드가 Docker 이미지·CI 시간에 얹히는 비용이 있어, 이 범위에서는 이점 없이 비용만
+발생한다.
 
 ## 미적용 경로 (이 모듈이 막지 못하는 것)
 
 - NAT 멀티에이전트가 자체적으로 MCP 도구(KIS 잔고 등)를 호출해 만드는 프롬프트 조각은
   backend가 보지 못하므로 이 계층 밖이다 (#231에서 다룬다).
-- Telegram 명령 경로는 애초에 이 LLM 호출 경로를 타지 않는다 (#232에서 다룬다).
+- Telegram 경로 중 **LLM을 아예 거치지 않고 원값을 그대로 사용자에게 표시하는** 것들
+  (예: `/balance`)은 이 계층이 손댈 지점이 없다 (#232에서 다룬다). 반대로
+  `_handle_chat_fallback`(`telegram_commands.py:1353`)과 `/earnings`
+  (`telegram_commands.py:1259`)는 `llm_runner("nat", ...)`를 부르고 `llm_runner`의
+  기본값이 `services.llm_chat`이므로(`telegram_commands.py:246, 258`) 이 계층을 탄다 —
+  "Telegram 명령은 이 경로를 타지 않는다"는 진술은 사실이 아니다.
 - 정규식 기반이므로 위 3종 패턴에서 벗어난 표기(예: 계좌번호를 자릿수가 다른 증권사
   형식으로 표기)는 놓칠 수 있다. `_ACCOUNT_RE`는 KIS_ACCOUNT_NO 형식(CANO 8자리 +
   상품코드 2자리, 총 10자리, 하이픈 유무 무관)만 다룬다(mcp-trading/index.js:96,
@@ -38,6 +48,7 @@ from __future__ import annotations
 
 import logging
 import re
+import secrets
 
 logger = logging.getLogger(__name__)
 
@@ -69,34 +80,117 @@ _AMOUNT_UNIT_RE = re.compile(r"(?<!\d)\d+(?:\.\d+)?(?:만|억)\s?원")
 # 잡으면 라벨 인근의 사소한 숫자(예: 순번)까지 마스킹 대상이 되어 과탐이 커진다.
 _LABELED_AMOUNT_RE = re.compile(
     r"(?:금액|잔고|자산|예수금|손익|투자금)\s*[:：]?\s*"
-    r"(?P<amount>(?<!\d)(?:\d{1,3}(?:,\d{3})+|\d{4,})(?!\d))"
+    # (?!-\d{2}(?!\d)) : "잔고 12345678-01"처럼 라벨 뒤에 하이픈 계좌 표기가 오는 경우는
+    #                    소비하지 않고 아래 _ACCOUNT_RE로 넘긴다. 이 배제가 없으면
+    #                    "12345678"만 AMOUNT로 잘라먹고 "-01"이 원문에 남는다.
+    r"(?P<amount>(?<!\d)(?:\d{1,3}(?:,\d{3})+|\d{4,})(?!\d)(?!-\d{2}(?!\d)))"
 )
 
 # 보유 수량 — 잔고 리포트의 "{qty}주" 표기(mcp-trading/balance.js formatQuantity 결과).
-# "3주일"(3 weeks)처럼 기간을 세는 표기와의 오탐을 막기 위해 뒤에 "일"이 오지 않는
-# 경우만 매치한다. 자리표시자는 숫자만 대체하고 "주"는 원문 그대로 남긴다 — 이 모듈의
-# 다른 recognizer(금액)와 달리 단위 문자를 프롬프트에 남겨 LLM이 "이 값은 수량"이라는
+# 자리표시자는 숫자만 대체하고 "주"는 원문 그대로 남긴다 — 이 모듈의 다른
+# recognizer(금액)와 달리 단위 문자를 프롬프트에 남겨 LLM이 "이 값은 수량"이라는
 # 문맥을 잃지 않게 한다.
-_QTY_RE = re.compile(r"(?<!\d)\d+(?=주(?!일))")
+#
+# 각 구성 요소의 근거:
+# - (?<![\d,]) : 콤마 중간에서 매치가 시작되지 않게 한다. 이게 없으면 "12,345주"에서
+#                "345"부터 매치가 시작돼 앞자리 "12,"가 마스킹되지 않고 새어 나간다.
+# - \d(?:[\d,]*\d)? : formatQuantity()가 toLocaleString("ko-KR")을 쓰므로 1,000주
+#                이상은 콤마가 들어간다(mcp-trading/balance.js:208-215). 같은 사실을
+#                이미 반영한 선례가 backend/scheduler.py:171-175의 r"\)\s*·\s*([\d,]+)주"다.
+#                끝을 숫자로 강제해 "1,234," 같은 후행 콤마를 삼키지 않는다.
+# - (?![가-힣]) : "주" 뒤에 한글이 이어지면("3주째", "2주차", "1주당", "3주일")
+#                기간·단가 표현이지 보유 수량이 아니다.
+# - (?![ \t]*(?:신고가|...)) : "52주 신고가"처럼 공백을 두고 이어지는 기간 관용구.
+#                이것은 열거식 휴리스틱이라 완전하지 않다 — 목록에 없는 새 관용구가
+#                등장하면 다시 과탐한다. 다만 과탐은 왕복 무손실(마스킹 후 역치환되어
+#                사용자에게 보이는 값은 그대로)이라 품질 문제일 뿐 유출이 아니므로,
+#                불완전한 배제 목록을 감수하고 과소탐(=유출) 쪽을 막는 데 무게를 둔다.
+#                공백 문자를 \s*가 아니라 [ \t]*로 한정하는 것이 중요하다. \s*는 개행을
+#                넘으므로, 잔고 리포트처럼 수량이 줄 끝에 오는 여러 줄 텍스트에서
+#                다음 줄이 배제 목록 단어로 시작하면 배제가 잘못 발동해 수량이 통째로
+#                마스킹되지 않는다(= 유출). 실측:
+#                  "- 삼성전자 (005930) · 1,234주\n  평균단가 67,000원"
+#                  \s*  -> 1,234가 마스킹되지 않음
+#                  [ \t]* -> 1,234 정상 마스킹
+#                관용구 배제는 어디까지나 같은 줄의 후속 어절을 보려는 것이므로
+#                줄을 넘지 않게 한정한다. (회귀: test_qty_at_line_end_is_masked_when_
+#                next_line_starts_with_excluded_word)
+#
+# 리뷰에서 제안된 "잔고 리포트의 '· ' 앵커링"(즉 "\)\s*·\s*[\d,]+주"만 마스킹)은
+# 채택하지 않았다. 보유 수량이 프롬프트에 들어가는 경로가 잔고 리포트 하나가 아니기
+# 때문이다 — backend/telegram_commands.py:1349-1356의 _handle_chat_fallback은 텔레그램
+# 사용자 원문("삼성전자 3주 보유중인데 팔아야 할까요?")을 가공 없이 llm_chat으로 보내며,
+# 앵커링은 이 경로의 실제 보유 수량을 통째로 놓친다. F-17의 취지상 유출을 만드는
+# 과소탐보다 품질 문제에 그치는 과탐을 택한다.
+_QTY_RE = re.compile(
+    r"(?<![\d,])\d(?:[\d,]*\d)?"
+    r"(?=주(?![가-힣])(?![ \t]*(?:신고가|신저가|최고가|최저가|평균|연속)))"
+)
 
-_PLACEHOLDER_RE = re.compile(r"<(ACCOUNT|AMOUNT|QTY)_(\d+)>")
+# 자리표시자 형식: <KIND_{scope}_{n}> — scope는 mask_pii 호출마다 새로 뽑는 6자리 hex.
+# scope가 없으면(구형식 <AMOUNT_1>) 이 정규식에 매치되지 않아 unmask_pii의 fail-open
+# 경로로 떨어진다. _Counter의 docstring에 그 이유를 적었다.
+_PLACEHOLDER_RE = re.compile(r"<(ACCOUNT|AMOUNT|QTY)_[0-9a-f]{6}_(\d+)>")
 
 
 class _Counter:
-    """마스킹 1회 호출 동안만 사는 타입별 자리표시자 카운터.
+    """마스킹 1회 호출 동안만 사는 타입별 자리표시자 카운터 + 호출별 이름공간(scope).
 
     llm_chat() 호출마다 새로 만들어 반환하는 mapping과 함께 지역 변수로만 존재한다.
     모듈 전역에 두면 동시 요청(asyncio.gather로 병렬 호출되는 llm_chat들)이 서로의
     카운터를 공유해 자리표시자 번호가 요청을 넘나들며 섞인다 — 그 자체로 매핑 오염은
     아니지만 굳이 그런 결합을 만들 이유가 없다. mapping은 항상 함수 지역 dict다.
+
+    ## 왜 번호만으로는 부족하고 호출별 nonce(scope)가 필요한가
+
+    카운터가 호출마다 0에서 다시 시작하므로 모든 호출이 항상 <AMOUNT_1>부터 쓴다.
+    그런데 NAT 경로의 대화 히스토리는 **호출을 넘어 서버 쪽에 유지**된다:
+
+    - backend/services.py:648-653 — backend는 messages에 현재 메시지 1건만 보내고,
+      conversation-id 헤더로 세션을 식별한다.
+    - finus_nat/src/nat_finus_nat/agents.py:643-665 `_load_history()` — SQLite
+      chat_messages에서 `WHERE conversation_id = ?`로 과거 메시지를 로드한다.
+    - finus_nat/src/nat_finus_nat/agents.py:696-732 — `forward_messages =
+      history + chat_request.messages`로 과거 턴과 현재 턴을 합쳐 내부 라우터에 넘긴다.
+    - finus_nat/configs/router.yml:58-61 — `max_history_messages: 30`으로 실제 배선됨.
+    - conversation_id는 호출 간 재사용된다: backend/services.py:166-176
+      `_nat_conversation_id`는 "{trigger_source}:{stock}:{today}"(하루에 같은 종목을
+      여러 번 분석하면 동일), backend/telegram_commands.py:1355는
+      f"telegram:{chat_id}"(그 사용자의 모든 메시지가 영구히 같은 스레드).
+
+    따라서 nonce가 없으면 다음이 성립한다:
+
+        턴 1 "잔고 12,345,000원인데 어때?" -> NAT이 보는 것: "잔고 <AMOUNT_1>인데 어때?"
+        턴 2 "5,000,000원 더 넣으면?"      -> NAT이 보는 것: "<AMOUNT_1> 더 넣으면?"
+        턴 2 응답 "앞서 말씀하신 <AMOUNT_1> 기준으로는 …"  (히스토리의 턴 1 자리표시자 인용)
+        unmask_pii(응답, 턴 2 매핑) -> "앞서 말씀하신 5,000,000원 기준으로는 …"
+
+    <AMOUNT_1>이 가리키던 값은 턴 1의 12,345,000원인데 턴 2의 매핑으로 복원되어 **경고
+    한 줄 없이 틀린 금액**이 사용자에게 나간다. unmask_pii의 fail-open 방어선은 "매핑에
+    **없는** 자리표시자"만 보호하는데, 이 케이스는 매핑에 **있으면서 값이 틀린** 경우라
+    그 방어선이 통하지 않는다.
+
+    scope를 붙이면 이전 턴의 자리표시자는 현재 턴 매핑에 존재하지 않으므로 기존
+    fail-open 경로(원문 유지 + 경고 로그)로 떨어진다 — 조용한 오답이 관측 가능한
+    경고로 바뀐다.
+
+    ## 왜 secrets이고 왜 6자리인가
+
+    예측 가능한 값(전역 카운터·시각·`random`)을 쓰면 서로 다른 호출이 같은 scope를
+    뽑아 위 충돌이 그대로 재발할 수 있다 — `random`은 프로세스 재시작 시 같은 시드에서
+    같은 수열을 낼 수 있고, 전역 카운터는 프로세스가 다르면(워커 여러 개) 겹친다.
+    `secrets.token_hex(3)`은 CSPRNG에서 6자리 hex(16^6 ≈ 1,678만 가지)를 뽑는다.
+    한 conversation_id의 히스토리 창은 30 메시지(router.yml:58-61)이므로 충돌 확률은
+    무시할 수 있고, 설령 충돌해도 결과는 nonce 이전 상태와 같을 뿐 더 나빠지지 않는다.
     """
 
     def __init__(self) -> None:
         self.values: dict[str, int] = {"ACCOUNT": 0, "AMOUNT": 0, "QTY": 0}
+        self.scope = secrets.token_hex(3)  # 예: "9f2a1c" (_PLACEHOLDER_RE의 [0-9a-f]{6})
 
     def next_placeholder(self, kind: str) -> str:
         self.values[kind] += 1
-        return f"<{kind}_{self.values[kind]}>"
+        return f"<{kind}_{self.scope}_{self.values[kind]}>"
 
 
 def mask_pii(text: str) -> tuple[str, dict[str, str]]:
@@ -134,7 +228,7 @@ def mask_pii(text: str) -> tuple[str, dict[str, str]]:
         mapping[placeholder] = original
         return placeholder
 
-    # 순서: 금액(원/만원·억원 접미사) -> 계좌번호(10자리) -> 라벨 기반 bare 숫자 -> 수량.
+    # 순서: 금액(원/만원·억원 접미사) -> 라벨 기반 bare 숫자 -> 계좌번호(10자리) -> 수량.
     #
     # 금액을 계좌번호보다 먼저 적용해야 한다. 콤마 없는 10자리 금액(예: "1234567890원")은
     # _ACCOUNT_RE의 "8자리+2자리=10자리" 모양과 겹치는데, 계좌번호 뒤에는 "원"이 붙을 수
@@ -143,13 +237,22 @@ def mask_pii(text: str) -> tuple[str, dict[str, str]]:
     # _ACCOUNT_RE가 볼 숫자가 남지 않아 오분류가 원천적으로 불가능해진다.
     # (실측 회귀: TestAmountRecognizer.test_ten_digit_amount_is_not_misclassified_as_account)
     #
-    # 반대로 계좌번호(하이픈 있거나 없는 순수 10자리, "원" 미접미)는 이 금액 정규식들과
-    # 겹치지 않으므로 순서를 바꿔도 영향받지 않는다. _LABELED_AMOUNT_RE·_QTY_RE는 앞
+    # **금액 라벨도 정확히 같은 판별자다.** "예수금 1234567890"의 10자리 숫자는 "원"이
+    # 없을 뿐 계좌번호가 아니다 — "예수금"/"잔고"/"총자산" 뒤에 오는 숫자는 정의상
+    # 금액이기 때문이다. 그래서 _LABELED_AMOUNT_RE도 _ACCOUNT_RE보다 **앞**에 둔다.
+    # 뒤에 두면 "예수금 1234567890"이 <ACCOUNT_...>로 오분류되어, 이미 고친
+    # "1234567890원" 케이스와 똑같은 결함이 라벨 경로로 남는다.
+    # (실측 회귀: test_labeled_ten_digit_amount_is_not_misclassified_as_account)
+    # 라벨 뒤에 하이픈 계좌 표기가 오는 경우("잔고 12345678-01")는 _LABELED_AMOUNT_RE의
+    # 배제 lookahead가 소비를 포기해 _ACCOUNT_RE로 넘어간다.
+    #
+    # 반대로 계좌번호(하이픈 있거나 없는 순수 10자리, "원" 미접미, 금액 라벨 없음)는 이
+    # 금액 정규식들과 겹치지 않으므로 순서를 바꿔도 영향받지 않는다. _QTY_RE는 앞
     # 단계에서 이미 자리표시자로 치환된 구간(숫자가 아님)을 다시 건드리지 않는다.
     masked = _AMOUNT_WON_RE.sub(lambda m: _replace("AMOUNT", m), text)
     masked = _AMOUNT_UNIT_RE.sub(lambda m: _replace("AMOUNT", m), masked)
-    masked = _ACCOUNT_RE.sub(lambda m: _replace("ACCOUNT", m), masked)
     masked = _LABELED_AMOUNT_RE.sub(_replace_labeled_amount, masked)
+    masked = _ACCOUNT_RE.sub(lambda m: _replace("ACCOUNT", m), masked)
     masked = _QTY_RE.sub(_replace_qty, masked)
 
     return masked, mapping
@@ -158,10 +261,14 @@ def mask_pii(text: str) -> tuple[str, dict[str, str]]:
 def unmask_pii(text: str, mapping: dict[str, str]) -> str:
     """자리표시자를 원값으로 역치환한다.
 
-    LLM 응답에서 자리표시자가 변형되거나(예: <AMOUNT_1> -> <AMOUNT1>) 존재하지 않는
-    자리표시자가 지어질 수 있다(예: <AMOUNT_9>). 이 함수는 어떤 경우에도 예외를
-    던지지 않는다 — 역치환 실패가 분석 결과 전체를 죽이면 안 되므로, 실패한
+    LLM 응답에서 자리표시자가 변형되거나(예: <AMOUNT_9f2a1c_1> -> <AMOUNT1>) 존재하지
+    않는 자리표시자가 지어질 수 있다(예: <AMOUNT_9f2a1c_9>). 이 함수는 어떤 경우에도
+    예외를 던지지 않는다 — 역치환 실패가 분석 결과 전체를 죽이면 안 되므로, 실패한
     자리표시자는 원문 그대로 남기고 경고 로그만 남긴다(fail-open).
+
+    두 갈래로 갈린다: (1) 형식은 맞지만 매핑에 없는 자리표시자(다른 호출의 scope를 가진
+    것 포함)는 원문 유지 + 경고 로그, (2) _PLACEHOLDER_RE에 아예 매치되지 않는 변형
+    (<AMOUNT1>, scope 없는 구형식 <AMOUNT_1> 등)은 손대지 않아 자연히 원문이 유지된다.
     """
     if not text or not mapping:
         return text
@@ -179,8 +286,10 @@ def unmask_pii(text: str, mapping: dict[str, str]) -> str:
     try:
         restored = _PLACEHOLDER_RE.sub(_restore, text)
     except Exception:
-        # 정규식 치환 자체가 실패하는 경우는 사실상 없지만(순수 문자열 연산),
-        # 방어적으로 원문을 그대로 반환한다 — 역치환이 분석을 막아서는 안 된다.
+        # 비문자열 입력 방어(TypeError). _PLACEHOLDER_RE.sub은 순수 문자열 연산이라
+        # 정규식 자체가 실패할 일은 없지만, provider 구현이 str이 아닌 값을 반환하면
+        # (예: dict/None이 아닌 객체) 여기서 TypeError가 난다. 그 경우에도 예외를
+        # 밖으로 던지지 않고 받은 값을 그대로 돌려준다 — 역치환이 분석을 막아서는 안 된다.
         logger.exception("PII 자리표시자 역치환 중 예상치 못한 오류가 발생했습니다.")
         return text
 

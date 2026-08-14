@@ -2,6 +2,7 @@ import ast
 import asyncio
 import inspect
 import logging
+import re
 import typing
 from datetime import date
 from urllib.parse import quote
@@ -1525,6 +1526,16 @@ def test_morning_briefing_from_text_skips_non_briefing_candidates():
 # 실제로 호출하는지 - 요청·응답 경계에서의 배선 - 만 확인한다.
 # ──────────────────────────────────────────────────────────────────────────
 
+# 자리표시자는 <KIND_{scope}_{n}> 형태이고 scope는 mask_pii 호출마다 새로 뽑는 6자리
+# hex nonce다(backend/pii_mask.py의 _Counter docstring 참고). 정확한 문자열을 단언할 수
+# 없으므로 nonce만 지워 <AMOUNT_1> 형태로 정규화한 뒤 단언한다.
+_SCOPED_PLACEHOLDER_RE = re.compile(r"<(ACCOUNT|AMOUNT|QTY)_[0-9a-f]{6}_(\d+)>")
+
+
+def _norm(text: str) -> str:
+    """자리표시자의 호출별 nonce를 지워 <AMOUNT_1> 형태로 정규화한다(단언 가독성 유지용)."""
+    return _SCOPED_PLACEHOLDER_RE.sub(r"<\1_\2>", text)
+
 
 @pytest.mark.asyncio
 async def test_llm_chat_masks_pii_before_dispatching_to_provider(monkeypatch):
@@ -1548,9 +1559,10 @@ async def test_llm_chat_masks_pii_before_dispatching_to_provider(monkeypatch):
     sent = captured[0]
     assert "12345678-01" not in sent, "계좌번호가 마스킹되지 않고 그대로 전송됐다"
     assert "12,345,000원" not in sent, "금액이 마스킹되지 않고 그대로 전송됐다"
-    assert "<ACCOUNT_1>" in sent
-    assert "<AMOUNT_1>" in sent
-    assert "<QTY_1>" in sent
+    normalized = _norm(sent)
+    assert "<ACCOUNT_1>" in normalized
+    assert "<AMOUNT_1>" in normalized
+    assert "<QTY_1>" in normalized
 
 
 @pytest.mark.asyncio
@@ -1563,7 +1575,10 @@ async def test_llm_chat_unmasks_response_placeholders(monkeypatch):
 
     async def fake_openai(user_msg):
         # provider가 자리표시자를 그대로 되읊는 상황을 흉내낸다(상대 비교 답변 등).
-        return "요약: <AMOUNT_1>은 <AMOUNT_2>보다 작습니다."
+        # 자리표시자에는 호출별 nonce가 붙으므로 하드코딩하지 않고 받은 프롬프트에서
+        # 실제로 나간 자리표시자를 뽑아 되읊는다.
+        first, second = (m.group(0) for m in _SCOPED_PLACEHOLDER_RE.finditer(user_msg))
+        return f"요약: {first}은 {second}보다 작습니다."
 
     monkeypatch.setattr(services, "_llm_openai_chat", fake_openai)
 
@@ -1571,27 +1586,30 @@ async def test_llm_chat_unmasks_response_placeholders(monkeypatch):
     result = await services.llm_chat("openai", pii_text)
 
     assert result == "요약: 12,345,000원은 45,678,000원보다 작습니다."
-    assert "<AMOUNT_1>" not in result
-    assert "<AMOUNT_2>" not in result
+    assert "<AMOUNT" not in result
 
 
 @pytest.mark.asyncio
 async def test_llm_chat_unmask_fails_open_on_unknown_placeholder(monkeypatch):
-    """provider가 존재하지 않는 자리표시자를 지어내도(<AMOUNT_9>) llm_chat이 예외 없이
+    """provider가 존재하지 않는 자리표시자를 지어내도 llm_chat이 예외 없이
     나머지 원문을 최대한 살려 반환해야 한다.
 
     이 테스트가 잡는 mutation: unmask_pii(또는 그 호출부)가 매핑에 없는 자리표시자를
     만났을 때 예외를 던지도록 바뀌는 경우 - 그러면 이 테스트가 예외로 실패해야 한다.
+
+    두 갈래를 함께 넣는다: 형식은 유효하지만 매핑에 없는 자리표시자
+    (<AMOUNT_deadbe_9> - scope가 이번 호출과 다르다)와 scope 없는 구형식(<AMOUNT_9>).
     """
 
     async def fake_openai(user_msg):
-        return "총자산은 <AMOUNT_9>입니다."  # 매핑에 없는 자리표시자
+        # 둘 다 이번 호출의 매핑에 없는 자리표시자다.
+        return "총자산은 <AMOUNT_deadbe_9>이고 예수금은 <AMOUNT_9>입니다."
 
     monkeypatch.setattr(services, "_llm_openai_chat", fake_openai)
 
     result = await services.llm_chat("openai", "평가금액 12,345,000원")
 
-    assert result == "총자산은 <AMOUNT_9>입니다."
+    assert result == "총자산은 <AMOUNT_deadbe_9>이고 예수금은 <AMOUNT_9>입니다."
 
 
 @pytest.mark.asyncio
@@ -1642,13 +1660,65 @@ async def test_llm_chat_masking_does_not_leak_between_concurrent_calls():
         services_module._llm_anthropic_chat = orig_anthropic
 
 
+@pytest.mark.asyncio
+async def test_placeholders_do_not_collide_across_calls_in_same_conversation(monkeypatch):
+    """같은 conversation_id로 연속 호출할 때 이전 턴 자리표시자가 현재 턴 값으로 복원되면 안 된다.
+
+    NAT 경로는 마스킹 매핑과 달리 대화 히스토리를 **호출을 넘어 서버 쪽에 유지**한다:
+    backend/services.py:648-653이 messages에 현재 메시지 1건만 보내고 conversation-id
+    헤더로 세션을 식별하면, finus_nat/src/nat_finus_nat/agents.py:643-665의
+    _load_history()가 SQLite chat_messages에서 과거 턴을 읽어 오고 같은 파일
+    696-732가 `history + chat_request.messages`로 합쳐 라우터에 넘긴다
+    (finus_nat/configs/router.yml:58-61, max_history_messages: 30). conversation_id는
+    호출 간 재사용된다(backend/telegram_commands.py:1355의 f"telegram:{chat_id}"는
+    그 사용자의 모든 메시지가 같은 스레드).
+
+    따라서 NAT은 이전 턴의 자리표시자를 응답에 인용할 수 있다. 자리표시자 이름이
+    호출마다 <AMOUNT_1>부터 다시 시작하면 그 인용이 **현재 턴의 다른 값으로 조용히**
+    복원된다 - unmask_pii의 fail-open은 "매핑에 없는" 자리표시자만 보호하는데 이
+    케이스는 매핑에 "있으면서 값이 틀린" 경우라 방어선이 통하지 않는다.
+
+    이 테스트가 잡는 mutation: _Counter에서 scope(호출별 nonce)를 제거해 자리표시자를
+    다시 `<{kind}_{n}>` 형태로 되돌리는 변경. 그러면 아래 turn-1 자리표시자가 turn-2
+    매핑에 존재하게 되어 "5,000,000원"으로 복원되고 이 단언이 실패한다.
+    """
+    seen: list[str] = []
+
+    async def echo_prev(user_msg, *, conversation_id=None):
+        # 턴 1에서 NAT이 본 자리표시자를 턴 2 응답에서 그대로 인용하는 상황.
+        seen.append(user_msg)
+        # 자리표시자 형식과 무관하게(nonce 유무 모두) 턴 1의 자리표시자를 뽑는다 —
+        # nonce를 제거하는 mutation에서도 이 fake가 깨지지 않고 아래 단언이 red가 되도록.
+        turn1_placeholder = re.search(r"<AMOUNT[^>]*>", seen[0]).group(0)
+        return f"앞서 말씀하신 {turn1_placeholder} 기준으로는"
+
+    monkeypatch.setattr(services, "_llm_nat_chat", echo_prev)
+
+    await services.llm_chat("nat", "잔고 12,345,000원", conversation_id="telegram:1")
+    result = await services.llm_chat("nat", "5,000,000원 더", conversation_id="telegram:1")
+
+    assert "5,000,000원" not in result, "이전 턴 자리표시자가 현재 턴 값으로 잘못 복원됐다"
+    assert "12,345,000원" not in result, "이전 턴 매핑이 호출을 넘어 살아 있으면 안 된다"
+
+
 def test_no_bypass_of_llm_chat_masking_layer():
     """provider별 구현(_llm_openai_chat 등)은 llm_chat() 밖에서 직접 호출되면 안 된다.
 
     _llm_openai_chat/_llm_anthropic_chat/_llm_ollama_chat/_llm_nat_chat은 마스킹되지
     않은 원문을 그대로 외부로 보낸다 - llm_chat()만이 mask_pii를 거친 뒤 이 함수들을
-    호출해야 한다. AST로 backend/services.py 전체를 스캔해, 이 함수들의 호출부가
-    llm_chat 함수 본문 밖에 생기면(=마스킹 계층을 우회하는 새 경로) 이 테스트가 실패한다.
+    호출해야 한다. AST로 backend/services.py 전체를 스캔해, 이 함수들이 llm_chat 함수
+    본문 밖에서 쓰이면(=마스킹 계층을 우회하는 새 경로) 이 테스트가 실패한다.
+
+    호출(ast.Call)뿐 아니라 **이름 참조(ast.Name)** 를 검사하므로 다음 우회 경로까지
+    잡는다:
+    - 별칭 대입: `_direct = _llm_openai_chat` 후 `await _direct(msg)`
+      (ast.Call의 함수명이 `_direct`라 호출만 보면 탐지되지 않는다)
+    - 콜백 전달: `dispatch(_llm_nat_chat)`처럼 호출하지 않고 넘기는 경우
+    - 모듈 최상위(함수 밖) 사용: func_stack이 비면 "<module>"로 기록해 llm_chat이
+      아닌 스코프로 잡힌다
+
+    ast.Attribute 분기(`services._llm_openai_chat()`처럼 속성 접근으로 부르는 형태)는
+    visit_Name으로 잡히지 않으므로 visit_Call에 남겨 둔다.
     """
     source = inspect.getsource(services)
     tree = ast.parse(source)
@@ -1675,21 +1745,28 @@ def test_no_bypass_of_llm_chat_masking_layer():
         def visit_AsyncFunctionDef(self, node):
             self._enter(node)
 
+        def _record(self, name):
+            if name in provider_fns:
+                callers[name].add(self.func_stack[-1] if self.func_stack else "<module>")
+
+        def visit_Name(self, node):
+            # 호출이 아닌 참조(별칭 대입·콜백 전달)도 우회 경로가 될 수 있다.
+            # 직접 호출 `_llm_openai_chat(...)`도 func가 ast.Name이라 여기서 잡힌다.
+            self._record(node.id)
+            self.generic_visit(node)
+
         def visit_Call(self, node):
-            name = None
-            if isinstance(node.func, ast.Name):
-                name = node.func.id
-            elif isinstance(node.func, ast.Attribute):
-                name = node.func.attr
-            if name in provider_fns and self.func_stack:
-                callers[name].add(self.func_stack[-1])
+            # `services._llm_openai_chat()`처럼 속성 접근으로 부르는 형태는 ast.Name이
+            # 아니므로 visit_Name이 잡지 못한다 - 이 분기를 남겨 둔다.
+            if isinstance(node.func, ast.Attribute):
+                self._record(node.func.attr)
             self.generic_visit(node)
 
     _CallerVisitor().visit(tree)
 
     for fn_name, caller_set in callers.items():
         assert caller_set == {"llm_chat"}, (
-            f"{fn_name}이 llm_chat() 밖({caller_set})에서도 호출됩니다. "
+            f"{fn_name}이 llm_chat() 밖({caller_set})에서도 참조/호출됩니다. "
             "마스킹 계층(mask_pii/unmask_pii)을 우회하는 새 호출 경로가 생긴 것으로 보입니다 — "
             "PII가 마스킹되지 않은 채 외부 LLM provider로 나갈 수 있습니다."
         )
