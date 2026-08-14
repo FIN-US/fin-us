@@ -167,13 +167,20 @@ bash scripts/check_env.sh
 uv sync --project backend
 uv run --project backend uvicorn backend.main:app --host 0.0.0.0 --port 8000
 
-# 3. Frontend(Unity WebGL 번들) 실행
+# 3. Frontend(Unity WebGL 번들) 실행 — 화면 확인용 정적 서빙
 # file://로 직접 열면 로더가 동작하지 않으므로 반드시 HTTP로 서빙합니다.
 python -m http.server 8080 --directory frontend/Build
 ```
 
-> Docker Compose를 쓰면 `frontend` 서비스(nginx)가 같은 일을 대신합니다. 자세한 내용은
-> [`frontend/README.md`](frontend/README.md)를 참고하세요.
+> ⚠️ **이 정적 서빙만으로는 백엔드 연동이 되지 않습니다.** 번들은 백엔드 주소를 모른 채 상대
+> 경로(`/api/v1/...`)로만 호출하므로(#246), 위 2번 백엔드가 떠 있어도 `/api` 프록시가 없는
+> `http.server`에서는 404가 나고 대시보드에 실데이터 연결 실패 배너와 샘플 데이터가 표시됩니다.
+> 화면·레이아웃만 확인할 때 쓰세요.
+>
+> 백엔드 연동까지 확인하려면 아래 [Docker로 한번에 설치하기](#docker)의 compose 경로를 쓰세요 —
+> `frontend`(nginx)가 `/api/`를 같은 네트워크의 `backend`로 중계합니다. compose의 `frontend`만
+> 띄우고 백엔드는 호스트에서 돌리는 조합은 nginx가 `backend:8000`을 찾지 못해 502가 납니다.
+> 자세한 내용은 [`frontend/README.md`](frontend/README.md)를 참고하세요.
 
 <a id="docker" name="docker"></a>
 
@@ -195,12 +202,11 @@ bash scripts/run_stack.sh
 | 서비스 | 포트 | 역할 |
 | :--- | :--- | :--- |
 | `frontend` | 8080 | Unity WebGL 대시보드 (nginx 정적 서빙 + `/api` 프록시) |
-| `backend` | 8000 (호스트 루프백 전용) | API·스케줄러·텔레그램 봇 |
+| `backend` | 8000 | API·스케줄러·텔레그램 봇 |
 | `finus-nat` | 8001 | 멀티 에이전트 엔진 |
 | `redis` | 6379 | 신호 중복 방지 캐시 |
 
-- `frontend`(nginx)는 `/api/`와 `/health`를 `backend:8000`으로 프록시합니다(#245). Unity 번들은 상대 경로(`/api/v1/...`)만 쓰므로(#246) 대시보드와 API가 브라우저에서 항상 같은 오리진(8080)이고, 어떤 주소(로컬·Tailscale·리버스 프록시 뒤)로 열어도 그대로 동작합니다. CORS 설정(`ALLOW_ORIGINS`)은 그래서 제거됐습니다.
-- `backend`의 8000 포트는 **호스트 루프백(`127.0.0.1:8000`)에만 바인딩**됩니다. 브라우저는 8080 프록시로, nginx는 compose 내부 네트워크로 backend에 닿으므로 기능 영향은 없고, 무인증 API와 `/docs`·`/redoc`·`/openapi.json`이 LAN·Tailscale에 노출되지 않습니다. 호스트에서 직접 부르는 `curl http://127.0.0.1:8000/...`과 `/docs` 열람은 그대로 됩니다. 자세한 내용은 [`frontend/README.md`](frontend/README.md)를 참고하세요.
+- `frontend`(nginx)는 `/api/`와 `/health`를 `backend:8000`으로 프록시합니다(#245). Unity 번들 소스는 상대 경로(`/api/v1/...`)만 쓰므로(#246) 대시보드와 API가 브라우저에서 항상 같은 오리진(8080)이고, 호스트·스킴·포트가 무엇이든(로컬, Tailscale, 443의 리버스 프록시 뒤) 그대로 동작합니다. 단 root-relative 경로라 서브패스 마운트(`https://example.com/finus/`)까지 따라가지는 않으므로, 그 구성에서는 프록시가 `/api`를 루트에서 함께 중계해야 합니다. **재빌드된 번들이 랜딩되기 전까지는 현행 번들이 8000번을 직접 호출하므로 `ALLOW_ORIGINS`가 계속 필요합니다** — CORS 설정과 8000 포트 노출 축소는 재빌드 이후 후속 PR에서 함께 정리합니다. 자세한 내용은 [`frontend/README.md`](frontend/README.md)를 참고하세요.
 - `backend`는 `finus-nat`과 `redis`가 정상(healthy)이 된 뒤에 뜹니다. `finus-nat`은 준비되는 대로 healthy가 되며, 처음 90초 동안은 헬스체크가 실패해도 재시도로 세지 않습니다(`docker-compose.yml`의 `start_period`). 90초가 지난 뒤에도 응답이 없으면 15초 간격으로 10번 더 확인한 뒤 unhealthy로 판정하므로, 최악의 경우 약 4분 뒤에 `backend` 기동이 중단됩니다.
 - 로컬에서 `uvicorn --reload`만 쓰고 싶다면 볼륨 마운트된 소스로 호스트에서 실행하면 됩니다.
 

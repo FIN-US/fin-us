@@ -128,6 +128,13 @@ public class PanelController : MonoBehaviour
         return SetDataSourceMessage($"⚠ 실데이터 연결 실패 — 포트폴리오를 표시할 수 없습니다\n{error}");
     }
 
+    // 실데이터를 (다시) 받았을 때 배너와 [샘플] 표시를 걷는다.
+    public bool ClearDataSourceNotice()
+    {
+        isSampleData = false;
+        return SetDataSourceMessage(null);
+    }
+
     bool SetDataSourceMessage(string message)
     {
         dataSourceMessage = message;
@@ -151,8 +158,10 @@ public class PanelController : MonoBehaviour
         dataSourceBanner.style.display = hasMessage ? DisplayStyle.Flex : DisplayStyle.None;
     }
 
-    // 샘플 데이터일 때는 숫자 라벨 하나하나에도 표시를 붙인다.
+    // 샘플 데이터일 때 종목명과 상단바(총자산·총수익률)에 [샘플]을 붙인다.
     // 배너를 놓치거나 스크린샷으로 잘려 나가도 실제 잔고로 오해되지 않게 하기 위함이다.
+    // 패널의 개별 수치(현재가·평단가·수익률·수량)에는 붙이지 않는다 — 이미 [샘플] 표시가
+    // 붙은 종목명 바로 아래라 맥락이 분명하고, 라벨마다 붙이면 시끄럽기만 하다.
     string MarkSample(string text)
     {
         return isSampleData ? $"[샘플] {text}" : text;

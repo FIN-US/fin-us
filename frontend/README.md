@@ -27,11 +27,21 @@ frontend/
 ### 왜 추적하는가
 
 `frontend/Build/`는 **Unity 미설치 팀원이 프론트엔드를 로컬에서 바로 실행할 수 있도록** git으로 추적합니다.
-Unity 에디터 없이도 `frontend/Build/`를 **로컬 HTTP 서버로 서빙**하면 바로 확인할 수 있습니다.
+Unity 에디터 없이도 아래 한 줄이면 대시보드가 뜹니다.
 
 ```bash
-python -m http.server 8080 --directory frontend/Build
+docker compose up frontend
 # → http://localhost:8080 접속
+```
+
+`docker compose up frontend`를 쓰는 이유는 nginx가 정적 서빙과 `/api` 프록시를 함께 하기
+때문입니다. 번들은 백엔드 주소를 모른 채 상대 경로로만 호출하므로(#246), 프록시 없이
+정적 서버로만 띄우면 **화면은 뜨지만 백엔드 연동은 되지 않습니다.**
+
+```bash
+# 화면·레이아웃만 확인할 때. /api 프록시가 없어 API 호출은 404가 나고,
+# 대시보드에는 실데이터 연결 실패 배너와 샘플 데이터가 표시됩니다.
+python -m http.server 8080 --directory frontend/Build
 ```
 
 > ⚠️ `frontend/Build/index.html`을 브라우저에서 **직접 열면(`file://`) 동작하지 않습니다.**
@@ -76,10 +86,14 @@ python -m http.server 8080 --directory frontend/Build
 **이 경고는 다음 WebGL 재빌드·커밋으로 한꺼번에 해소됩니다. 해소한 커밋에서 이 섹션을 함께
 삭제하세요.**
 
-> ⚠️ #246은 CORS 설정(`ALLOW_ORIGINS`)과 backend 8000 포트 노출을 함께 걷어냈습니다.
-> 번들이 아직 8000번을 직접 호출하는 동안에는 **`docker compose`로 띄운 대시보드에서
-> 포트폴리오 조회가 실패합니다.** 재빌드 전까지는 `frontend/Build/`를 로컬 HTTP 서버로
-> 띄우는 경로도 마찬가지입니다. 재빌드가 이 상태를 정상화합니다.
+> ⚠️ 재빌드 전까지는 CORS 설정(`ALLOW_ORIGINS`)과 backend 8000 포트 노출을 그대로 둡니다.
+> 현행 번들이 8000번을 직접 호출하므로, 지금 걷어내면 되던 것이 즉시 막힙니다. 두 정리는
+> 재빌드가 랜딩된 뒤 후속 PR로 뺐습니다.
+>
+> `python -m http.server`로 번들만 띄우는 경로는 재빌드로 정상화되지 **않습니다.**
+> 지금은 8000 하드코딩과 CORS 덕에 동작하지만, 재빌드 후에는 상대 경로 요청을 중계할
+> 프록시가 없어 확정적으로 404가 납니다. 그래서 위 "왜 추적하는가"의 실행 방법을
+> `docker compose up frontend`로 바꿔 뒀습니다.
 
 ### 배포 파이프라인 현황
 
@@ -123,13 +137,20 @@ backend를 기다리지 않아도 됩니다. backend가 없는 동안에는 `/ap
 조건부 중계합니다. `/api/v1/analyze`는 LLM 호출로 오래 걸려 `proxy_read_timeout`을 300s로
 올려 뒀습니다.
 
-> **CORS 설정은 제거됐습니다(이슈 #246).** `ApiClient`가 베이스 URL 없이 상대 경로
-> (`/api/v1/...`)로 요청하므로 브라우저는 항상 대시보드와 같은 오리진을 부르고, `backend`의
-> `CORSMiddleware`·`ALLOW_ORIGINS`는 함께 걷어냈습니다. 새 호스트로 시연할 때 허용 오리진을
-> 추가할 일도 없습니다.
+> **CORS 설정은 아직 남겨 둡니다.** `ApiClient`가 베이스 URL 없이 상대 경로(`/api/v1/...`)로
+> 요청하므로 재빌드된 번들부터는 브라우저가 항상 대시보드와 같은 오리진을 부르고, `backend`의
+> `CORSMiddleware`·`ALLOW_ORIGINS`는 불필요해집니다. 다만 제거는 **재빌드가 랜딩된 뒤 후속
+> PR**로 뺐습니다 — 지금 걷어내면 아직 8000번을 직접 호출하는 현행 번들이 곧바로 차단됩니다.
+> 같은 이유로 `backend`의 8000 포트를 호스트 루프백에만 바인딩하는 것도 후속 PR입니다.
+> 그전까지는 backend의 허용 오리진에 `http://localhost:8080`이 포함돼야 하고
+> (`backend/config.py`의 `ALLOW_ORIGINS` 기본값, `.env.example` 참고), 다른 호스트(예:
+> Tailscale 주소)로 시연할 때는 해당 오리진을 `ALLOW_ORIGINS`에 추가하세요.
 >
 > 베이스 URL을 상대 경로로 두면 포트를 고정하는 오리진 해석(`{Scheme}://{Host}:8000`)과 달리
-> 443·서브패스 배포에서도 깨지지 않습니다. 단, **에디터 플레이 모드에는 페이지 오리진이 없어**
+> 443 뒤에서도 깨지지 않습니다. 다만 선행 슬래시가 붙은 root-relative 경로라 **서브패스까지
+> 따라가지는 않습니다** — 대시보드를 `https://example.com/finus/`에 마운트하면 요청은
+> `/finus/api/...`가 아니라 `/api/...`로 나가므로, 그 구성에서는 리버스 프록시가 `/api`를
+> 루트에서 함께 중계해야 합니다. 그리고 **에디터 플레이 모드에는 페이지 오리진이 없어**
 > (`Application.absoluteURL`이 빈 문자열) 상대 경로를 절대 URL로 만들 수 없습니다. 그래서
 > `ApiClient.DefaultBaseUrl`은 에디터에서만 `http://localhost:8000`으로 폴백합니다 —
 > 에디터로 테스트하려면 backend를 호스트에서 8000번으로 띄워 두세요.

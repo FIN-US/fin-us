@@ -21,11 +21,9 @@ services:
       context: .
       dockerfile: backend/Dockerfile
     ports:
-      # 루프백에만 바인딩한다(이슈 #246). 브라우저는 8080의 nginx 프록시로 API에 닿고,
-      # nginx는 compose 내부 네트워크로 backend에 직접 붙으므로 기능 영향이 없다.
-      # 대신 무인증 API와 /docs·/redoc·/openapi.json이 LAN·Tailscale에 노출되지 않는다.
-      # 호스트에서의 직접 호출(curl, /docs 열람)은 그대로 http://127.0.0.1:8000 이다.
-      - "127.0.0.1:8000:8000"
+      # 재빌드된 번들이 랜딩되면 127.0.0.1에만 바인딩해 노출면을 줄인다(#246 후속 PR).
+      # 지금 좁히면 8000번을 직접 호출하는 현행 번들의 원격 시연이 막힌다.
+      - "8000:8000"
     volumes:
       - .:/app
       - /app/backend/.venv

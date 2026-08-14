@@ -3,9 +3,10 @@ import logging
 from contextlib import asynccontextmanager
 from datetime import date
 from fastapi import FastAPI, HTTPException, Query, Depends, Request, WebSocket, WebSocketDisconnect, Body
+from fastapi.middleware.cors import CORSMiddleware
 from sqlmodel import Session, select
 
-from .config import NEWS_MCP_PARAMS, TRADING_MCP_PARAMS, DART_MCP_PARAMS
+from .config import NEWS_MCP_PARAMS, TRADING_MCP_PARAMS, DART_MCP_PARAMS, ALLOW_ORIGINS
 from .ws_manager import manager
 from .scheduler import start_scheduler, stop_scheduler
 from .telegram_commands import start_telegram_commands, stop_telegram_commands
@@ -49,12 +50,16 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# CORS 미들웨어는 두지 않는다(이슈 #246).
-# 브라우저에서 이 API를 부르는 것은 Unity WebGL 대시보드뿐이고, 그 번들은 이제
-# 상대 경로(/api/v1/...)만 쓴다. 요청은 대시보드를 서빙하는 nginx(8080)를 거쳐
-# backend:8000으로 프록시되므로(#245) 브라우저 입장에서 same-origin이고 CORS가
-# 개입하지 않는다. 허용 오리진을 손으로 관리할 이유가 사라져 ALLOW_ORIGINS와 함께
-# 걷어냈다. 다른 오리진의 웹 클라이언트를 붙일 일이 생기면 그때 다시 추가한다.
+# 번들이 상대 경로로 바뀌면(#246) 요청이 same-origin이 되어 이 미들웨어는 불필요해진다.
+# 다만 제거는 재빌드된 번들이 랜딩된 뒤로 미룬다 — 지금 걷어내면 아직 8000번을 직접
+# 호출하는 현행 번들이 곧바로 차단된다. 제거는 후속 PR에서 ALLOW_ORIGINS와 함께 한다.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOW_ORIGINS,
+    allow_credentials=False,
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type"],
+)
 
 
 @app.get("/api/v1/news", response_model=CommonResponse, tags=["Market Data"])
@@ -375,4 +380,6 @@ async def websocket_endpoint(websocket: WebSocket):
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("FIN_US_BACKEND_PORT", "8787")))
+    # 기본 포트는 compose·문서·에디터 폴백이 모두 쓰는 8000으로 맞춘다.
+    # 이전 기본값 8787은 이 엔트리포인트에서만 쓰이던 값이라 혼선의 원인이었다.
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("FIN_US_BACKEND_PORT", "8000")))
