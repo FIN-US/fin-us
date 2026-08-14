@@ -3,10 +3,9 @@ import logging
 from contextlib import asynccontextmanager
 from datetime import date
 from fastapi import FastAPI, HTTPException, Query, Depends, Request, WebSocket, WebSocketDisconnect, Body
-from fastapi.middleware.cors import CORSMiddleware
 from sqlmodel import Session, select
 
-from .config import NEWS_MCP_PARAMS, TRADING_MCP_PARAMS, DART_MCP_PARAMS, ALLOW_ORIGINS
+from .config import NEWS_MCP_PARAMS, TRADING_MCP_PARAMS, DART_MCP_PARAMS
 from .ws_manager import manager
 from .scheduler import start_scheduler, stop_scheduler
 from .telegram_commands import start_telegram_commands, stop_telegram_commands
@@ -50,13 +49,12 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=ALLOW_ORIGINS,
-    allow_credentials=False,
-    allow_methods=["GET", "POST"],
-    allow_headers=["Content-Type"],
-)
+# CORS 미들웨어는 두지 않는다(이슈 #246).
+# 브라우저에서 이 API를 부르는 것은 Unity WebGL 대시보드뿐이고, 그 번들은 이제
+# 상대 경로(/api/v1/...)만 쓴다. 요청은 대시보드를 서빙하는 nginx(8080)를 거쳐
+# backend:8000으로 프록시되므로(#245) 브라우저 입장에서 same-origin이고 CORS가
+# 개입하지 않는다. 허용 오리진을 손으로 관리할 이유가 사라져 ALLOW_ORIGINS와 함께
+# 걷어냈다. 다른 오리진의 웹 클라이언트를 붙일 일이 생기면 그때 다시 추가한다.
 
 
 @app.get("/api/v1/news", response_model=CommonResponse, tags=["Market Data"])

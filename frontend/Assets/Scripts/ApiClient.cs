@@ -10,9 +10,29 @@ public class ApiClient
 {
     private readonly string apiBaseUrl;
 
+    // 백엔드 주소를 하드코딩하지 않기 위한 기본 베이스 URL이다(이슈 #246).
+    // WebGL 번들은 nginx가 /api/·/health를 backend:8000으로 프록시하는 오리진에서
+    // 서빙되므로(이슈 #245) 베이스 URL이 아예 필요 없다. 빈 문자열이면 요청 URL이
+    // "/api/v1/..." 상대 경로가 되고, UnityWebRequest가 Application.absoluteURL(=페이지
+    // 주소) 기준으로 절대 URL을 만든다. 그래서 로컬·Tailscale·리버스 프록시 뒤·서브패스
+    // 어디로 열어도 그대로 맞는다. 포트를 고정하는 오리진 해석은 443·서브패스에서
+    // 깨지므로 채택하지 않았다.
+    //
+    // 에디터 플레이 모드에는 페이지 오리진이 없어(Application.absoluteURL이 빈 문자열)
+    // 상대 경로를 절대 URL로 만들 수 없다. 그때만 로컬 백엔드를 직접 가리킨다.
+    public static string DefaultBaseUrl =>
+#if UNITY_WEBGL && !UNITY_EDITOR
+        string.Empty;
+#else
+        "http://localhost:8000";
+#endif
+
     public ApiClient(string apiBaseUrl)
     {
-        this.apiBaseUrl = apiBaseUrl;
+        // 끝의 '/'를 남기면 "http://host:8000//api/v1/..."처럼 슬래시가 겹친다.
+        this.apiBaseUrl = string.IsNullOrWhiteSpace(apiBaseUrl)
+            ? string.Empty
+            : apiBaseUrl.Trim().TrimEnd('/');
     }
 
     // 흐름: 뉴스 GET → 성공 시 트렌드 GET → 둘 다 성공이면 JSON 파싱 후 DataOnlyResult로 묶어 onSuccess.
