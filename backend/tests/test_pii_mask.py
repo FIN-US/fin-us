@@ -235,15 +235,18 @@ class TestQuantityRecognizer:
         1000자를 그대로 프롬프트에 넣으므로(mcp-news/index.js의 네이버 뉴스 검색
         title/description, 필터링 없음) 과탐이 곧바로 판정 품질을 떨어뜨린다.
 
-        이 테스트가 잡는 mutation: _QTY_RE의 `(?![가-힣])` 또는
-        `(?!\\s*(?:신고가|...))` 배제 lookahead 제거.
+        이 테스트가 잡는 mutation: _QTY_RE의 `(?!일|째|차|간|년|기|당)` 또는
+        `(?![ \\t]*(?:신고가|...))` 배제 lookahead 제거.
         """
         for text in [
             "52주 신고가 갱신",
             "52주 신저가 경신",
             "52주 최고가 대비",
+            "52주 최저가 대비",
             "3주째 상승세",
             "2주차 실적",
+            "3주간 조정",
+            "3주년 기념",
             "1주당 배당",
         ]:
             masked, mapping = mask_pii(text)
@@ -261,24 +264,77 @@ class TestQuantityRecognizer:
         assert _norm(masked) == "삼성전자 <QTY_1>주 보유중인데 팔아야 할까요?"
         assert _norm_mapping(mapping) == {"<QTY_1>": "3"}
 
+    def test_masks_quantity_with_attached_korean_particle(self):
+        """수량 뒤에 조사가 곧바로 붙은 형태도 마스킹돼야 한다.
+
+        위 test_masks_quantity_in_free_form_user_message의 예시가 하필 "3주 보유중"처럼
+        띄어쓴 형태라서, "주" 뒤의 한글을 전부 배제하는 `(?![가-힣])`으로도 green이었다.
+        하지만 한국어는 수량 명사 뒤에 조사가 곧바로 붙는 쪽이 더 일반적이다
+        ("3주를", "3주도", "3주만", "3주보유중"). 한글 전체를 배제하면 이 형태를 전부
+        놓쳐 **실제 보유 수량이 그대로 외부 LLM으로 나간다.**
+
+        그리고 그 경로가 하필 잔고 리포트 앵커링("· {qty}주"로만 매치)을 거절한 유일한
+        근거였다 — backend/telegram_commands.py:1349-1356의 _handle_chat_fallback이
+        텔레그램 사용자 원문을 가공 없이 llm_chat으로 넘기는 경로. 앵커링을
+        포기하면서까지 지키려던 경로를 조사 하나로 다시 놓치면 안 되므로 여기서 고정한다.
+
+        이 테스트가 잡는 mutation: _QTY_RE의 `(?!일|째|차|간|년|기|당)` ->
+        `(?![가-힣])`(한글 전체 배제로 되돌리기).
+        """
+        for text, expected in [
+            ("삼성전자 3주를 팔까요?", "삼성전자 <QTY_1>주를 팔까요?"),
+            ("삼성전자 3주도 있어요", "삼성전자 <QTY_1>주도 있어요"),
+            ("삼성전자 3주만 매도", "삼성전자 <QTY_1>주만 매도"),
+            ("삼성전자 3주보유중인데", "삼성전자 <QTY_1>주보유중인데"),
+        ]:
+            masked, mapping = mask_pii(text)
+            assert _norm(masked) == expected, f"조사가 붙은 보유 수량이 유출됐다: {text}"
+            assert _norm_mapping(mapping) == {"<QTY_1>": "3"}
+            assert unmask_pii(masked, mapping) == text
+
+    def test_masks_quantity_before_average_and_streak_words(self):
+        """배제 목록에 '평균'·'연속'이 있으면 안 된다 — 배제 목록 자체가 과소탐 장치다.
+
+        _QTY_RE의 관용구 배제는 "52주 신고가"처럼 **기간 표현하고만 결합하는** 어휘로
+        제한해야 한다. "평균"·"연속"은 실제 보유 수량 뒤에도 자연스럽게 오므로
+        ("1,234주 평균 매입단가는", "5주 연속 매수했는데") 목록에 넣는 순간 그 문장의
+        보유 수량이 통째로 마스킹되지 않고 나간다.
+
+        반대 방향(과탐)은 대가가 없다 — "5주 연속 상승" 같은 뉴스 문구를 수량으로
+        오분류해도 마스킹 후 역치환되어 사용자에게 보이는 값은 그대로다. 모듈 주석이
+        선언한 우선순위(과탐 < 과소탐)를 배제 목록에도 그대로 적용한 것이다.
+
+        이 테스트가 잡는 mutation: _QTY_RE 배제 목록에 `평균`·`연속`을 다시 추가.
+        """
+        for text, expected in [
+            ("삼성전자 1,234주 평균 매입단가는", "삼성전자 <QTY_1>주 평균 매입단가는"),
+            ("3주 평균 단가", "<QTY_1>주 평균 단가"),
+            ("5주 연속 상승", "<QTY_1>주 연속 상승"),
+        ]:
+            masked, mapping = mask_pii(text)
+            assert _norm(masked) == expected, f"보유 수량이 마스킹되지 않고 남았다: {text}"
+            assert unmask_pii(masked, mapping) == text
+
     def test_qty_at_line_end_is_masked_when_next_line_starts_with_excluded_word(self):
         """관용구 배제는 줄을 넘어가면 안 된다 — 넘어가면 수량이 통째로 유출된다.
 
-        _QTY_RE의 관용구 배제 lookahead를 `(?!\\s*(?:...|평균|...))`로 쓰면 \\s*가
+        _QTY_RE의 관용구 배제 lookahead를 `(?!\\s*(?:신고가|...))`로 쓰면 \\s*가
         개행을 넘는다. 잔고 리포트는 수량이 줄 끝에 오는 여러 줄 텍스트이므로
         (mcp-trading\\balance.js:278의 "- {종목} ({코드}) · {수량}주\\n  평단가 ..."),
         다음 줄이 배제 목록 단어로 시작하면 배제가 잘못 발동해 **보유 수량이 전혀
         마스킹되지 않은 채 외부 LLM으로 나간다.** 배제는 같은 줄의 후속 어절만
         보려는 것이므로 [ \\t]*로 한정해야 한다.
 
-        오늘 balance.js의 실제 문구는 "평단가"라 이 결합이 발동하지 않는다. 그래서
-        공유 픽스처 왕복 테스트는 green이고, 이 회귀는 픽스처로 잡히지 않는다 —
-        문구가 "평균단가"로 바뀌는 순간 조용히 유출이 생긴다. 그 결합 자체를 여기서
-        끊어 고정한다.
+        이 케이스를 처음 고정할 때는 다음 줄을 "평균단가"로 썼다. 그런데 '평균'은
+        보유 수량 뒤에도 자연스럽게 와서 배제 목록에서 빠졌으므로
+        (test_masks_quantity_before_average_and_streak_words) 그 문장으로는 \\s* 뮤테이션이
+        더 이상 발동하지 않는다 — 회귀 가드로서 죽는다. 그래서 남은 배제어(신고가)로
+        바꿔 가드를 살려 둔다. 잔고 리포트 다음 줄이 배제어로 시작하는 형태 자체가
+        문제이지, 특정 단어가 문제인 게 아니다.
 
         이 테스트가 잡는 mutation: _QTY_RE의 `(?![ \\t]*(?:...))` -> `(?!\\s*(?:...))`.
         """
-        text = "- 삼성전자 (005930) · 1,234주\n  평균단가 67,000원"
+        text = "- 삼성전자 (005930) · 1,234주\n  신고가 갱신"
         masked, mapping = mask_pii(text)
 
         assert "1,234" not in masked, "수량이 마스킹되지 않고 그대로 남았다"
