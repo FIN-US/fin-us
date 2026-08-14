@@ -26,6 +26,9 @@ TELEGRAM_POLLER_STATE_TTL_SEC = 60 * 60 * 24 * 7
 # RedisTelegramPollerStore._deserialize)의 15배로, 오염된 값만 걸러내고 정상 상태는
 # 절대 버리지 않도록 잡았다. 상한에 걸리면 상태를 버리므로 중복 실행이 생긴다.
 MAX_HANDLED_AHEAD = 100_000
+# offset의 허용 상한. Telegram update_id는 32비트라 정상값이 넘을 수 없다.
+# 왜 위쪽도 닫는지는 RedisTelegramPollerStore._deserialize 참조.
+MAX_OFFSET = 2**31
 
 # pending_order TTL: 10분(600초).
 # 앱 레벨 ORDER_EXPIRES_AFTER(60초)는 별도 존재하며 직접 만료 체크를 수행한다.
@@ -208,13 +211,24 @@ class RedisTelegramPollerStore:
     폴러는 단일 인스턴스이므로 원자적 SET 하나면 둘의 일관성이 보장된다.
 
     호출자(TelegramCommandPoller)가 예외를 삼키는 fail-open이다.
-    RedisPendingOrderStore의 fail-closed와 갈리는 이유는 보호 대상이 다르기 때문이다:
-    금전 경로는 GETDEL claim과 set_if_absent가 이미 별도로 막고 있고, 여기 남는 위험은
-    LLM 재호출과 중복 메시지다. redis 장애에 폴러를 세우면 텔레그램 명령이 전면 중단되는데,
-    이는 영속화 없이 폴링을 계속할 때의 손해(#248 이전 수준의 중복 창)보다 크다.
+    RedisPendingOrderStore의 fail-closed와 갈리는 근거는 "redis가 죽었을 때 무엇이 중복될 수
+    있는가"다. 답은 **아무것도 없다**: /confirm의 claim과 /buy의 set_if_absent가 그 상태에서는
+    보호하는 게 아니라 예외를 던지고, 호출부가 그것을 "주문 저장소 오류"로 사용자에게 돌려주며
+    끝낸다(telegram_commands.py의 _handle_confirm·_handle_buy). 즉 redis 장애 중에는 주문이
+    생성되지도 체결되지도 못하므로 중복될 금전 부수효과 자체가 존재하지 않고, 남는 중복 위험은
+    LLM 재호출과 중복 메시지뿐이다. 반면 여기서 fail-closed를 택하면 redis 장애가 곧 텔레그램
+    명령 전면 중단이 된다.
+
+    주의: "GETDEL이 중복 체결을 막아주니 fail-open이어도 된다"는 정신 모델은 틀렸다 —
+    그 보호는 redis가 살아 있을 때만 존재한다. 이 구분이 무너지면 누군가 같은 논리로
+    pending_order를 fail-open으로 바꿀 수 있고, 그때는 진짜 중복 체결이 생긴다 (PR #251 리뷰).
 
     키: ``finus:telegram:poller_state``
-    TTL: TELEGRAM_POLLER_STATE_TTL_SEC (7일, 쓰기마다 갱신)
+    TTL: TELEGRAM_POLLER_STATE_TTL_SEC (7일)
+        쓰기마다 갱신되지만 쓰기는 update를 처리할 때만 일어난다. 7일 내내 update가 하나도
+        없으면 키가 만료된다 — 그 시점엔 보호할 미확정 update도 없으므로 무해하다.
+        이 TTL을 줄이려면 "유휴 기간 < TTL"이 더는 성립하지 않는다는 점을 먼저 따져야 한다
+        (PR #251 리뷰).
     """
 
     def __init__(
@@ -269,6 +283,13 @@ class RedisTelegramPollerStore:
             # 앞선 미확정 update를 삭제한다 — 사용자의 명령이 흔적 없이 사라진다 (PR #251 리뷰).
             if offset < 0:
                 raise ValueError(f"offset must be non-negative, got {offset}")
+            # 위쪽도 닫는다. 손상으로 거대 양수가 들어가면 getUpdates가 "그보다 작은 update를
+            # 전부 확정"으로 처리해 미확정 update를 모두 삭제하고 빈 배열을 돌려준다. 이후
+            # 새 update_id는 항상 그보다 작으므로 봇이 영구 무응답이 되고, update가 없으니
+            # save()도 안 불려 TTL 7일이 흘러야 복구된다. update_id는 32비트라 이 상한을
+            # 정상값이 넘길 수 없다 (PR #251 리뷰).
+            if offset > MAX_OFFSET:
+                raise ValueError(f"offset too large ({offset} > {MAX_OFFSET})")
         # `or []`로 기본값을 주면 false·0·"" 같은 falsy 비-list 값이 조용히 []로 바뀌어
         # 바로 아래 검사를 건너뛴다. 결과는 fail-safe지만 손상을 감지하지 못해 키가 남고
         # 다음 재시작도 같은 값을 그대로 통과시킨다 (PR #251 리뷰).
@@ -278,10 +299,11 @@ class RedisTelegramPollerStore:
         if not isinstance(handled_ahead, list):
             raise TypeError(f"handled_ahead must be a list, got {handled_ahead!r}")
         # 정상 운영에서 이 집합은 _forget_passed_updates가 묶는다. 상한은 오염된 값이
-        # 들어왔을 때만 의미가 있다 — 원소가 수백만이면 frozenset 생성과 save()의 매 update
-        # sorted()가 CPU·메모리를 먹는다. 한계에 걸리면 상태를 버리고 중복이 생기므로,
-        # 도달 가능한 최댓값에서 넉넉히 떨어뜨렸다: 전송 실패 창 335초 동안 최소 간격 5초로
-        # 폴링하면 67배치 × getUpdates 기본 limit 100 = 6,700이 이론적 상한이다.
+        # 들어왔을 때만 의미가 있다. 검사가 json.loads 뒤라 파싱 시점의 메모리 폭증 자체는
+        # 막지 못한다 — 실제로 막는 것은 그 값을 save()가 매 update마다 재직렬화(sorted +
+        # json.dumps)하는 지속 비용이다 (PR #251 리뷰). 한계에 걸리면 상태를 버리고 중복이
+        # 생기므로 도달 가능한 최댓값에서 넉넉히 떨어뜨렸다: 전송 실패 창 335초 동안 최소
+        # 간격 5초로 폴링하면 67배치 × getUpdates 기본 limit 100 = 6,700이 이론적 상한이다.
         if len(handled_ahead) > MAX_HANDLED_AHEAD:
             raise ValueError(
                 f"handled_ahead too large ({len(handled_ahead)} > {MAX_HANDLED_AHEAD})"
@@ -292,6 +314,17 @@ class RedisTelegramPollerStore:
         return TelegramPollerState(offset=offset, handled_ahead=frozenset(handled_ahead))
 
     async def save(self, state: TelegramPollerState) -> None:
+        # 상한은 load()에만 걸려 있어, 메모리에서 넘어가면 여기서는 그대로 쓰고 다음 재시작의
+        # load()가 조용히 거부한다 — 영속화가 무의미해진 상태를 알릴 신호가 없어진다.
+        # 실패 방향 자체는 수용 가능하므로(상태를 버려도 offset=None 재시작이 받는 집합이
+        # handled_ahead가 덮던 집합과 같다) 거부 대신 경고만 남긴다 (PR #251 리뷰).
+        if len(state.handled_ahead) > MAX_HANDLED_AHEAD // 2:
+            logger.warning(
+                "telegram poller handled_ahead가 상한의 절반을 넘었다 (%s / %s). "
+                "상한을 넘기면 다음 재시작의 load()가 상태를 버려 중복 실행이 생긴다.",
+                len(state.handled_ahead),
+                MAX_HANDLED_AHEAD,
+            )
         payload = json.dumps(
             {"offset": state.offset, "handled_ahead": sorted(state.handled_ahead)}
         )

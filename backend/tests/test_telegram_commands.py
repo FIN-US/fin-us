@@ -3100,3 +3100,49 @@ async def test_help_and_bot_menu_include_catalysts_command(monkeypatch):
 
     assert "/catalysts <종목명> - 예정 촉매 이벤트 조회" in notifier.messages[-1]
     assert "catalysts" in [command["command"] for command in telegram_commands.TELEGRAM_BOT_COMMANDS]
+
+
+@pytest.mark.asyncio
+async def test_poller_keeps_polling_when_state_store_hangs(monkeypatch, caplog):
+    """저장소가 예외 대신 hang하면 fail-open이 fail-hang으로 무너진다 (PR #251 리뷰).
+
+    create_redis_client()가 socket_timeout을 주지 않아 redis 호스트가 RST 없이 패킷을
+    drop하면 set()이 무한 블록되고, 그 await는 run()의 배치 루프 안이라 폴러 태스크가
+    통째로 멈춘다. except Exception은 예외가 나야 도는 방어라 여기서는 발화하지 않는다.
+    BrokenStore(즉시 raise)는 이 경로를 재현하지 못한다.
+    """
+    notifier = FakeNotifier()
+    notifier.enabled = True
+    notifier.bot_token = "token"
+    handled = []
+
+    class NoopHandler:
+        async def handle_update(self, update):
+            handled.append(update["update_id"])
+
+    class HangingStore:
+        async def load(self):
+            await asyncio.Event().wait()  # 영원히 깨어나지 않는다
+
+        async def save(self, state):
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(telegram_commands, "STATE_STORE_TIMEOUT_SECONDS", 0.01)
+    poller = _make_poller(notifier, handler=NoopHandler(), state_store=HangingStore())
+
+    async def fake_get_updates():
+        if poller.offset is not None:
+            raise asyncio.CancelledError
+        return [{"update_id": 41, "message": {"chat": {"id": 123}, "text": "/help"}}]
+
+    monkeypatch.setattr(poller, "_get_updates", fake_get_updates)
+
+    with caplog.at_level("ERROR"):
+        with pytest.raises(asyncio.CancelledError):
+            await poller.run()
+
+    # hang에 갇히지 않고 폴링이 진행됐다.
+    assert handled == [41]
+    assert poller.offset == 42
+    assert "상태 복원 실패" in caplog.text
+    assert "상태 저장 실패" in caplog.text

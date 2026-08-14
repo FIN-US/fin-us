@@ -211,8 +211,14 @@ async def test_poller_state_load_drops_corrupted_value():
         # 음수 offset은 Telegram이 "마지막 N개만"으로 해석한다. 통과하면 앞선 미확정
         # update가 조용히 삭제된다 (PR #251 리뷰).
         '{"offset": -1}',
+        # 위쪽도 닫혀 있어야 한다. 거대 양수가 새면 Telegram이 미확정 update를 전부 삭제하고
+        # 봇이 영구 무응답이 된다 (PR #251 리뷰).
+        '{"offset": 99999999999}',
         '{"offset": 42, "handled_ahead": "42"}',
         '{"offset": 42, "handled_ahead": ["42"]}',
+        # 원소의 bool 가드. 구현은 있었는데 케이스가 없어 뮤테이션이 살아 있었다
+        # (PR #251 리뷰). `1 in frozenset({True})`가 True라 update_id 1이 건너뛰어진다.
+        '{"offset": 42, "handled_ahead": [true]}',
         # falsy 비-list 값. `or []`로 기본값을 주면 조용히 []가 되어 검사를 건너뛴다
         # (PR #251 리뷰).
         '{"handled_ahead": false}',
@@ -299,3 +305,26 @@ async def test_poller_state_load_logs_when_corrupted_key_delete_fails(caplog):
         assert await store.load() == TelegramPollerState()
 
     assert "손상 키 삭제 실패" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_poller_state_save_warns_when_handled_ahead_nears_limit(caplog):
+    """상한은 load에만 걸려 있어, 넘어가는 순간을 save가 알리지 않으면 신호가 없다 (PR #251 리뷰)."""
+    store = RedisTelegramPollerStore(FakeRedis())
+    near_limit = frozenset(range(MAX_HANDLED_AHEAD // 2 + 1))
+
+    with caplog.at_level("WARNING"):
+        await store.save(TelegramPollerState(offset=1, handled_ahead=near_limit))
+
+    assert "상한의 절반을 넘었다" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_poller_state_save_is_quiet_below_warning_threshold(caplog):
+    """도달 가능한 크기(약 6,700)에서 경고가 울리면 로그가 무의미해진다 (PR #251 리뷰)."""
+    store = RedisTelegramPollerStore(FakeRedis())
+
+    with caplog.at_level("WARNING"):
+        await store.save(TelegramPollerState(offset=1, handled_ahead=frozenset(range(6_700))))
+
+    assert caplog.text == ""
