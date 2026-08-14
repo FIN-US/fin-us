@@ -1801,7 +1801,7 @@ async def test_monitor_market_task_broadcasts_portfolio_update_on_sync_success(m
     assert payload["holdings_count"] == 3
     # broadcast_at은 ISO 8601로 파싱 가능해야 한다.
     datetime.fromisoformat(payload["broadcast_at"])
-    # 보유 내역 원본(종목명·수량 등)은 인증 없는 WebSocket으로 나가면 안 된다(#65).
+    # 보유 내역 원본(종목명·수량 등)은 인증 없는 WebSocket으로 나가면 안 된다(#256).
     assert "holdings" not in payload
     assert "stocks" not in payload
 
