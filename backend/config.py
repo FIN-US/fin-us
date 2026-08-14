@@ -113,6 +113,9 @@ def is_placeholder_secret(value: str | None) -> bool:
 # #245로 nginx가 /api를 backend로 프록시하므로, 번들이 상대 경로를 쓰기 시작하면(#246,
 # WebGL 재빌드 필요) 브라우저 요청은 same-origin이 되어 CORS 자체가 개입하지 않는다.
 # 현재 번들은 아직 8000번을 직접 호출하므로 이 목록이 계속 필요하다.
+# 또한 CORSMiddleware는 WebSocket 핸드셰이크에 적용되지 않으므로, /api/v1/ws가 이 목록을
+# 직접 읽어 Origin을 대조한다(#256, main.py is_allowed_ws_origin). 즉 #246 이후 HTTP 쪽
+# 필요가 사라져도 이 목록은 WS 허용목록으로 남는다.
 _ALLOW_ORIGINS_RAW = os.getenv("ALLOW_ORIGINS", "http://localhost:8080,http://127.0.0.1:8080")
 ALLOW_ORIGINS = [origin.strip() for origin in _ALLOW_ORIGINS_RAW.split(",") if origin.strip()]
 

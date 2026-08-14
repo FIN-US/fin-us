@@ -630,7 +630,7 @@ async def _monitor_market_task(
                 # 브로드캐스트하지 않는다. 동기화가 수행된 경우 전량 교체 특성상 내용이
                 # 직전과 동일해도 신호가 나간다 — 즉 정상 주기마다 1건이다.
                 # payload에는 보유 종목 개수만 싣고 종목명·수량 등 실제 보유 내역은 담지
-                # 않는다. WebSocket에는 인증이 없어(#65) 계좌 보유 현황이 인증 없는
+                # 않는다. WebSocket에는 인증이 없어(#256) 계좌 보유 현황이 인증 없는
                 # 채널로 유출될 수 있으므로, 신호만 보내고 클라이언트가
                 # /api/v1/db/portfolio를 재조회하도록 한다.
                 if sync_result is not None:
@@ -787,12 +787,23 @@ async def _monitor_signal(
 
         await _send_telegram_alert_if_needed(stock, source.name, analysis_data, state)
 
-        # 분석 결과를 WebSocket으로 실시간 전송
+        # 분석이 갱신됐다는 신호만 WebSocket으로 보낸다. 분석 전문(analysis_data)은
+        # 싣지 않는다 — PORTFOLIO_UPDATE(#229)와 같은 패턴이고, 클라이언트는 이 신호를
+        # 받으면 /api/v1/db/reports를 재조회한다.
+        #
+        # #256: WebSocket에는 인증이 없다. Origin 허용목록 검사(main.py
+        # is_allowed_ws_origin)로 브라우저발 Cross-Site WebSocket Hijacking은 막지만,
+        # Origin 헤더를 보내지 않는 비브라우저 클라이언트는 여전히 붙을 수 있다. 분석
+        # 전문을 싣지 않으면 채널이 뚫려도 유출될 내용 자체가 없다.
+        #
+        # stock·source는 남긴다. 어떤 종목의 리포트를 다시 읽어야 하는지 알려 주는 값이고,
+        # 이걸 빼면 클라이언트가 매 신호마다 전체 리포트를 훑어야 한다. 재조회 대상인
+        # /api/v1/db/reports 자체가 같은 내용을 인증 없이 내주므로, 종목명만 남기는 것이
+        # 새로 여는 경로도 아니다.
         await manager.broadcast({
             "type": "AGENT_ANALYSIS",
             "stock": stock,
             "source": source.name,
-            "data": analysis_data,
             "reason": "significant_change_detected"
         })
         logger.info(f"[{source.name}:{stock}] 분석 결과 브로드캐스트 완료")

@@ -355,11 +355,39 @@ async def health_check():
     return {"status": "alive"}
 
 
+def is_allowed_ws_origin(origin: str | None) -> bool:
+    """WebSocket 핸드셰이크의 Origin이 허용 대상인지 판정합니다 (#256).
+
+    CORSMiddleware는 WebSocket 핸드셰이크에 적용되지 않는다. ALLOW_ORIGINS로 HTTP를
+    조여도 WS는 그대로 열려 있어, 임의 사이트에 심어 둔 new WebSocket(...)이 붙어
+    브로드캐스트를 수신할 수 있다(Cross-Site WebSocket Hijacking). 같은 목록을 WS
+    핸드셰이크에서도 직접 대조해 이 비대칭을 없앤다.
+
+    Origin 헤더가 없으면 허용한다. Origin은 브라우저가 붙이는 헤더이고 CSWSH는 브라우저
+    공격이다. curl·wscat·헬스체크 같은 비브라우저 클라이언트는 헤더를 보내지 않으므로,
+    없음을 거부로 취급하면 막으려는 위협은 그대로 둔 채 운영 도구만 끊긴다.
+    """
+    if origin is None:
+        return True
+    # CORSMiddleware가 "*"를 전체 허용으로 해석하므로 같은 목록을 읽는 여기서도 맞춘다.
+    # 두 곳의 해석이 갈리면 HTTP는 열려 있는데 WS만 막히는(또는 반대) 상태가 된다.
+    if "*" in ALLOW_ORIGINS:
+        return True
+    return origin in ALLOW_ORIGINS
+
+
 @app.websocket("/api/v1/ws")
 async def websocket_endpoint(websocket: WebSocket):
     """
     실시간 알림을 위한 WebSocket 엔드포인트입니다.
     """
+    origin = websocket.headers.get("origin")
+    if not is_allowed_ws_origin(origin):
+        # accept() 전에 close()하면 핸드셰이크가 완성되지 않고 HTTP 403으로 끝난다.
+        # accept() 후에 끊으면 그사이 브로드캐스트 1건이 나갈 수 있으므로 순서가 중요하다.
+        logger.warning("WebSocket 연결 거부 — 허용되지 않은 Origin: %s", origin)
+        await websocket.close(code=1008)
+        return
     await manager.connect(websocket)
     try:
         while True:
