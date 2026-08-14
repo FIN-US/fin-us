@@ -587,25 +587,79 @@ def test_get_catalysts_rejects_to_date_before_from_date(
     )
     assert response.status_code == 422
     detail = response.json()["detail"]
-    assert isinstance(detail, dict)
-    assert detail["from_date"] == today.isoformat()
-    assert detail["to_date"] == to_date.isoformat()
-
-
-def test_get_catalysts_fastapi_native_422_has_different_detail_shape(
-    client: TestClient,
-):
-    # to_date < from_date 검사와 FastAPI 자체 검증(예: stock_name의 min_length=1)이
-    # 둘 다 422를 내지만 detail 형태가 달라야 한다. 위 테스트가 detail 내용만 보고
-    # "우리 검사가 통과했다"고 착각하지 않도록, FastAPI 자체 422는 우리 detail 구조
-    # (from_date/to_date 키를 가진 dict)를 갖지 않음을 실측으로 고정한다.
-    response = client.get("/api/v1/db/catalysts", params={"stock_name": ""})
-    assert response.status_code == 422
-    detail = response.json()["detail"]
-    # FastAPI 자체 검증 오류는 dict가 아니라 list(각 원소가 loc/msg/type을 담은 dict)다.
+    # FastAPI 자체 검증 422와 동일한 list[{loc,msg,type}] 형태다(아래 share_detail_shape 참고).
     assert isinstance(detail, list)
-    for error in detail:
-        assert not ({"from_date", "to_date"} <= set(error.keys()))
+    assert len(detail) == 1
+    error = detail[0]
+    assert error["loc"] == ["query", "to_date"]
+    assert error["type"] == "value_error.date_range"
+    assert error["ctx"]["from_date"] == today.isoformat()
+    assert error["ctx"]["to_date"] == to_date.isoformat()
+    # from_date를 명시해 보냈으므로 기본값 적용이 아니다.
+    assert error["ctx"]["from_date_defaulted"] is False
+
+
+def test_get_catalysts_to_date_only_reports_from_date_defaulted(
+    client: TestClient, session: Session, frozen_today: date
+):
+    # from_date를 생략하면 서버가 KST 오늘로 채운다. 과거 구간을 의도해 to_date만 보낸
+    # 클라이언트는 보낸 적 없는 from_date와 비교돼 422를 받으므로, 원인을 알려면
+    # "기본값이 적용됐다"는 사실이 detail에 실려야 한다. 이게 없으면 메시지가
+    # "to_date must not be earlier than from_date"뿐이라 무엇을 고쳐야 할지 알 수 없다.
+    today = frozen_today
+    response = client.get(
+        "/api/v1/db/catalysts",
+        params={"to_date": (today - timedelta(days=30)).isoformat()},
+    )
+    assert response.status_code == 422
+    error = response.json()["detail"][0]
+    assert error["ctx"]["from_date_defaulted"] is True
+    assert error["ctx"]["from_date"] == today.isoformat()
+    # 메시지 자체에도 기본값 적용 사실이 드러나야 한다(ctx를 안 보는 클라이언트/사람용).
+    assert "defaulted" in error["msg"]
+
+
+def test_get_catalysts_custom_and_native_422_share_detail_shape(
+    client: TestClient, frozen_today: date
+):
+    """두 종류의 422가 같은 detail 형태(list)를 갖는지 고정한다.
+
+    to_date < from_date 검사와 FastAPI 자체 검증(예: stock_name의 min_length=1)은
+    같은 엔드포인트에서 같은 422를 낸다. 형태가 다르면 클라이언트가
+    `for err in resp.json()["detail"]: err["loc"]`처럼 단일 경로로 파싱할 수 없고,
+    dict를 순회해 키 문자열에서 TypeError가 난다. 두 경로가 같은 형태임을 실측으로
+    묶어 클라이언트의 단일 파싱 경로를 보장한다.
+
+    형태가 같아진 대가로 "다른 경로에서 나온 422를 우리 검사가 통과한 것으로 착각"할
+    위험이 생기므로, loc/type으로 두 422를 여전히 구별할 수 있음도 함께 단언한다.
+    """
+    today = frozen_today
+    native = client.get("/api/v1/db/catalysts", params={"stock_name": ""})
+    custom = client.get(
+        "/api/v1/db/catalysts",
+        params={
+            "from_date": today.isoformat(),
+            "to_date": (today - timedelta(days=1)).isoformat(),
+        },
+    )
+    assert native.status_code == 422
+    assert custom.status_code == 422
+
+    native_detail = native.json()["detail"]
+    custom_detail = custom.json()["detail"]
+    # 단일 파싱 경로: 둘 다 list이고, 원소는 loc/msg/type을 갖는 dict다.
+    for detail in (native_detail, custom_detail):
+        assert isinstance(detail, list)
+        assert detail
+        for error in detail:
+            assert isinstance(error, dict)
+            assert {"loc", "msg", "type"} <= set(error.keys())
+
+    # 형태가 같아도 두 422는 구별 가능해야 한다.
+    assert native_detail[0]["loc"] == ["query", "stock_name"]
+    assert custom_detail[0]["loc"] == ["query", "to_date"]
+    assert native_detail[0]["type"] != custom_detail[0]["type"]
+    assert custom_detail[0]["type"] == "value_error.date_range"
 
 
 def test_get_catalysts_truncated_within_to_date_range(

@@ -2,7 +2,7 @@ import os
 import logging
 from contextlib import asynccontextmanager
 from datetime import date
-from fastapi import FastAPI, HTTPException, Query, Depends, WebSocket, WebSocketDisconnect, Body
+from fastapi import FastAPI, HTTPException, Query, Depends, Request, WebSocket, WebSocketDisconnect, Body
 from fastapi.middleware.cors import CORSMiddleware
 from sqlmodel import Session, select
 
@@ -227,6 +227,10 @@ async def get_db_diary(session: Session = Depends(get_session)):
 
 @app.get("/api/v1/db/catalysts", response_model=CommonResponse, tags=["Database"])
 async def get_db_catalysts(
+    # Request는 쿼리 파라미터가 아니라 타입으로 판별돼 주입된다. 기본값이 없는 인자라
+    # 기본값 있는 인자들보다 앞에 와야 한다(파이썬 문법). from_date가 기본값으로
+    # 채워졌는지 판별하는 데만 쓴다 — 아래 422 분기 참고.
+    request: Request,
     stock_name: str | None = Query(None, min_length=1, description="종목명 정확 일치 필터. 생략 시 전체 종목 조회."),
     # default_factory에 today_kst를 직접 넘기면 라우트 등록 시점의 함수 객체가
     # 고정돼 테스트에서 backend.main.today_kst를 monkeypatch해도 반영되지 않는다.
@@ -250,14 +254,42 @@ async def get_db_catalysts(
     # 수 없다. 이 엔드포인트가 이미 빈 stock_name을 min_length=1로 422 거부하는 선례가
     # 있어 일관된다. 두 파라미터 간 관계는 FastAPI Query만으로 검증할 수 없어 핸들러
     # 본문에서 직접 확인한다.
+    #
+    # detail은 FastAPI 자체 검증(min_length=1, ge/le 등)과 동일한 list[{loc,msg,type}]
+    # 형태로 낸다. 같은 엔드포인트가 같은 422를 dict와 list 두 형태로 내면
+    # `for err in resp.json()["detail"]: err["loc"]` 같은 표준 파싱이 dict를 순회해
+    # 키 문자열에서 TypeError로 죽는다. 상태 코드만 선례를 따르고 body 계약은 따르지
+    # 않은 셈이었다.
+    #
+    # 교차 필드 의미 오류를 400으로 분리하는 안도 검토했다("422 = 스키마 검증" 불변식이
+    # 유지된다). 채택하지 않은 이유: 이미 422로 문서화·테스트된 계약을 바꾸는 것이라
+    # 팀 합의가 필요한데, 소비자가 붙기 전인 지금은 형태 통일만으로 문제가 해소되므로
+    # 계약 변경 비용을 지불할 이유가 없다.
+    #
+    # from_date는 생략 시 서버가 오늘(KST)로 채운다. 클라이언트가 과거 구간을 의도해
+    # to_date만 보내면 보낸 적 없는 from_date와 비교돼 422가 나므로, 기본값이 적용됐다는
+    # 사실을 detail에 실어 원인을 바로 알 수 있게 한다.
+    from_date_defaulted = "from_date" not in request.query_params
     if to_date is not None and to_date < from_date:
         raise HTTPException(
             status_code=422,
-            detail={
-                "message": "to_date must not be earlier than from_date",
-                "from_date": from_date.isoformat(),
-                "to_date": to_date.isoformat(),
-            },
+            detail=[
+                {
+                    "loc": ["query", "to_date"],
+                    "msg": (
+                        "to_date must not be earlier than from_date "
+                        "(from_date was not sent and defaulted to today in KST)"
+                        if from_date_defaulted
+                        else "to_date must not be earlier than from_date"
+                    ),
+                    "type": "value_error.date_range",
+                    "ctx": {
+                        "from_date": from_date.isoformat(),
+                        "to_date": to_date.isoformat(),
+                        "from_date_defaulted": from_date_defaulted,
+                    },
+                }
+            ],
         )
     # catalyst_repo.SqliteCatalystEventRepo.list_upcoming은 stock_name이 필수 인자라
     # 전체 종목 조회에 쓸 수 없다. 기존 /api/v1/db/* 4종과 동일하게 이 라우트에서
