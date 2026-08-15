@@ -28,8 +28,6 @@ from .redis_state import (
     InMemoryPendingOrderStore,
     RedisSchedulerState,
     RedisPendingOrderStore,
-    RedisTelegramPollerStore,
-    TelegramPollerState,
     create_redis_client,
     redis_state,
 )
@@ -108,24 +106,6 @@ UPDATE_SKIPPED_NOTICE = "요청 처리에 실패했어요. 다시 시도해주�
 # 통지에 붙일 실패 명령 요약의 최대 길이. 명령을 연달아 보낸 사용자가 무엇을 다시
 # 보내야 하는지 알 수 있어야 한다 (PR #242 리뷰).
 UPDATE_LABEL_LIMIT = 40
-# 폴러 상태 저장소 호출의 상한. create_redis_client()는 socket_timeout을 주지 않고
-# redis-py asyncio 기본값은 None(무한 대기)이라, 이게 없으면 fail-open이 fail-hang으로 무너진다:
-# redis 호스트가 RST 없이 패킷을 drop하면 _persist_state의 await가 돌아오지 않고, 그 await는
-# run()의 배치 루프 안이라 폴러 태스크가 통째로 멈춘다. except Exception은 예외가 나야 도는데
-# hang은 예외를 내지 않으므로 "인메모리로 계속" 로그조차 남지 않는다.
-#
-# 이 PR이 노출을 넓혔다는 점이 근거다: 이전에는 redis를 만지는 명령(/alerts, /buy, /confirm,
-# /cancel)만 이 위험을 졌고 /help·자연어·/watch는 blackhole 중에도 서비스됐지만, 이제 모든
-# update가 루프 안에서 redis를 동기 대기한다 (PR #251 리뷰).
-#
-# 값은 사용자 체감(폴링 지연)과 일시적 지연 흡수 사이의 절충이다. 정상 redis는 1ms 수준이라
-# 이 상한에 닿는 것은 이미 비정상이며, docker-compose에서 가장 흔한 장애(컨테이너 다운)는
-# 즉시 ECONNREFUSED를 내므로 이 경로를 타지 않는다.
-#
-# 값을 조정할 때 알아둘 성질: 타임아웃은 update마다 걸리므로 hang 중 배치 하나가 멈추는
-# 시간은 "배치 크기 × 이 값"으로 선형이다(응답 자체는 handle_update가 먼저 끝내 나간 뒤,
-# 그 뒤에 죽은 시간이 붙는다). getUpdates limit이 100이면 최악 약 300초다 (PR #251 리뷰).
-STATE_STORE_TIMEOUT_SECONDS = 3.0
 
 
 class TelegramSendError(RuntimeError):
@@ -244,14 +224,6 @@ def _create_pending_order_store() -> RedisPendingOrderStore:
     핸들러 인스턴스당 한 번만 호출되므로 클라이언트 누적 없음.
     """
     return RedisPendingOrderStore(create_redis_client())
-
-
-def _create_poller_state_store() -> RedisTelegramPollerStore:
-    """프로덕션 폴러 상태 저장소를 생성한다 (#248).
-
-    _create_pending_order_store와 같은 이유로 클라이언트를 하나만 만들어 풀을 재사용한다.
-    """
-    return RedisTelegramPollerStore(create_redis_client())
 
 
 def _default_watchlist_repo() -> SqliteWatchlistRepo:
@@ -1459,7 +1431,6 @@ class TelegramCommandPoller:
         *,
         notifier: TelegramNotifier = telegram_notifier,
         handler: TelegramCommandHandler | None = None,
-        state_store: Any | None = None,
     ):
         self.notifier = notifier
         if handler is None:
@@ -1470,47 +1441,30 @@ class TelegramCommandPoller:
                 pending_order_store=_create_pending_order_store(),
             )
         self.handler = handler
-        # offset과 _handled_ahead는 redis에 함께 영속화된다 (#248). 둘 다 인메모리였을 때는
-        # blocked 구간에 프로세스가 죽으면 여기 기록된 update들이 "실행됐지만 서버에 미확정"
-        # 상태로 남아 재시작 후 전부 재실행됐다. 창의 길이가 재시도 예산과 같아
-        # (일반 실패 65초, 전송 실패 335초) 무시할 수 없었다.
-        #
-        # "429와 재시작이 배포라는 원인을 공유한다"는 근거는 폐기했다 — 배포는 자기가 죽이는
-        # 프로세스의 poison을 만들 수 없고(_handled_ahead는 blocked가 이미 True일 때만 차므로
-        # poison이 사망보다 먼저, 같은 프로세스 안에서 일어나야 한다), 애초에 이 레포엔 CD도
-        # restart: 정책도 없다. 실제 재시작 계기는 Dockerfile의 uvicorn --reload + .:/app
-        # bind mount이며, 그 재시작은 SIGTERM → lifespan → stop_telegram_commands()의 취소
-        # 경로를 탄다. 근거는 확률이 아니라 비용 대비다: _handled_ahead는 Telegram이 원리적으로
-        # 보호해줄 수 없는 유일한 상태인데(서버는 미확정 update만 알 뿐 무엇을 이미 실행했는지
-        # 모른다) 영속화 비용은 이미 쓰는 키에 필드 하나다 (PR #251 리뷰).
-        self.state_store = state_store if state_store is not None else _create_poller_state_store()
         self.offset: int | None = None
-        # update_id -> 재시도 예산. 유실돼도 poison 폐기가 미뤄질 뿐 중복 실행으로 이어지지
-        # 않으므로 영속화하지 않는다. 매 update 쓰기에 얹을 값이 아니다 (#248).
-        #
-        # 대가는 분명히 해 둔다: _restore_state가 이 값을 건드리지 않으므로 재시작마다
-        # poison에 예산이 새로 지급된다. 배포가 잦으면 폐기가 무기한 미뤄지고 그동안
-        # _handled_ahead도 함께 묶인다. 영속화하는 offset·_handled_ahead가 "자신을 poison에
-        # 붙들어 매는 상태"인 반면 이건 "poison을 포기하게 해주는 유일한 상태"라 방향이
-        # 반대다. 다만 이 PR이 새로 들이는 위험은 아니다 — 이전에도 재시작 후 Telegram이
-        # 같은 지점부터 재배달하며 예산이 리셋됐다 (PR #251 리뷰).
+        # update_id -> 재시도 예산. 폴러는 단일 인스턴스로만 돌기 때문에 인메모리로 충분하다 (#241).
         self._failures: dict[int, _UpdateFailure] = {}
         # 재시도 대기 중인 update보다 뒤에 있어서 먼저 처리해버린 update_id.
         # offset은 실패 지점에서 멈추므로 이 update들은 다음 폴링에 다시 배달되는데,
         # 그대로 재실행하면 주문 같은 부수효과가 중복된다 (#241).
         #
-        # 영속화로 창은 "실행 완료 후 redis 쓰기까지"로 좁혀졌지만 0은 아니다. 순서를 뒤집어
-        # 실행 전에 기록하면 중복 대신 유실(기록만 남고 실행 안 됨)이 되는데, 여기서는
-        # at-least-once가 낫다 — 금전 경로는 GETDEL claim·set_if_absent가 이미 막고 있어
-        # 중복의 실질 비용은 LLM 재호출과 중복 메시지인 반면, 유실은 사용자의 명령이 아무
-        # 흔적 없이 사라지는 것이다 (#248).
+        # 주의: offset과 이 집합이 둘 다 인메모리라, blocked 구간에 프로세스가 죽으면
+        # 여기 기록된 update들은 "실행됐지만 서버에 미확정" 상태로 남아 재시작 후 재실행된다.
+        # origin/main은 poison에서 배치를 통째로 중단해 이 창이 없었으므로 이 PR이 새로
+        # 들이는 리스크다. 금전 경로는 별도로 막혀 있지만(/confirm은 GETDEL claim,
+        # /buy는 set_if_absent) LLM 재호출·중복 메시지는 발생한다. 근본 해결은 offset을
+        # redis에 영속화하는 것이고 별도 이슈로 다룬다 (PR #242 리뷰).
+        #
+        # 창의 길이는 재시도 예산과 같다: 일반 실패 65초, 전송 실패 335초.
+        # 시간 기반 예산으로 바꾸면서 기존 10초(고정 5초 × 3회)보다 크게 넓어졌고,
+        # 429와 재시작은 "배포"라는 공통 원인으로 상관관계가 있어 동시에 발생할 수 있다.
+        # 영속화 이슈의 우선순위를 매길 때 이 수치가 근거가 된다 (PR #242 리뷰).
         self._handled_ahead: set[int] = set()
 
     async def run(self) -> None:
         if not self.notifier.enabled:
             return
         await self._setup_bot_profile()
-        await self._restore_state()
 
         while True:
             try:
@@ -1554,20 +1508,6 @@ class TelegramCommandPoller:
                 else:
                     self.offset = update_id + 1
                     self._forget_passed_updates(self.offset)
-                # 배치 끝이 아니라 update마다 쓴다. 배치 단위로 미루면 중간에 죽었을 때
-                # 이미 실행한 update의 기록이 통째로 사라져 영속화의 의미가 없다 (#248).
-                #
-                # 남는 창은 handle_update의 실행 시간이다. #253이 _send_text_settled로
-                # "부수효과 확정 뒤의 전송"을 그 자리에서 재시도하게 만들면서 이 시간이
-                # 밀리초에서 십수 초로 늘어난다. 그 구간에 SIGTERM이 오면 체결은 됐는데
-                # persist 전이라, 재시작 후 재배달·재실행에서 claim이 None을 돌려주고
-                # 사용자는 "확정할 대기 주문이 없습니다"를 받는다 — #253이 없애려던 그
-                # 오표시다. 다만 두 PR 중 어느 쪽의 회귀도 아니다: 영속화 이전에는 이 창이
-                # 재시도 예산 전체(최대 335초)였고 #251이 그걸 handle_update 한 번으로
-                # 줄인다. 삼중 우연(체결 + 전송 실패 + 그 사이 배포)을 요구하고 금전 자체는
-                # 안전하지만(체결은 정상이고 trade_recorder에도 남는다), 오표시가 수동
-                # 재주문을 유발할 수 있어 별도 이슈로 추적한다 (PR #251 리뷰).
-                await self._persist_state()
 
             if skipped:
                 # 배치 통지는 한 건으로 합친다. poison N건에 N번 발송하면 채팅당 초당 ~1건
@@ -1681,59 +1621,6 @@ class TelegramCommandPoller:
             # send_text는 실패해도 예외 대신 False를 돌려준다. 유일한 실패 신호라
             # 반드시 확인해야 통지 실패가 어디에도 안 남는 일이 없다 (PR #242 리뷰).
             logger.error("Telegram skip notice not delivered for %s updates", len(mine))
-
-    async def _restore_state(self) -> None:
-        """재시작 전 offset·_handled_ahead를 복원한다 (#248).
-
-        실패하면 빈 상태로 시작한다. Telegram이 미확정 update를 전부 재배달하므로 명령이
-        유실되지는 않지만, 실행됐던 것이 다시 실행된다 — 영속화 이전과 같은 상태다.
-        여기서 예외를 올리면 redis 장애가 폴러 태스크의 죽음이 되므로 삼킨다.
-
-        wait_for가 필요한 이유는 STATE_STORE_TIMEOUT_SECONDS 주석에 있다. 여기서는 hang이
-        폴링 시작 자체를 막아, 봇이 아무 응답도 못 하는 상태로 무한정 머문다.
-        """
-        try:
-            state = await asyncio.wait_for(
-                self.state_store.load(), timeout=STATE_STORE_TIMEOUT_SECONDS
-            )
-        except Exception as exc:
-            # asyncio.TimeoutError는 3.11+에서 내장 TimeoutError(OSError 하위)라 여기 걸린다.
-            # CancelledError는 BaseException이라 걸리지 않고 정상 전파된다.
-            logger.error("Telegram poller 상태 복원 실패, 빈 상태로 시작: %s", exc)
-            return
-        self.offset = state.offset
-        self._handled_ahead = set(state.handled_ahead)
-        if state.offset is not None or state.handled_ahead:
-            logger.info(
-                "Telegram poller 상태 복원: offset=%s, 처리 완료 대기 %s건",
-                state.offset,
-                len(state.handled_ahead),
-            )
-
-    async def _persist_state(self) -> None:
-        """offset과 _handled_ahead를 한 번에 저장한다 (#248).
-
-        쓰기 실패는 삼킨다 — fail-open 근거는 RedisTelegramPollerStore 독스트링에 있다.
-        폴링은 인메모리 상태로 계속되고, 다음 update의 쓰기가 성공하면 그 시점 상태가
-        통째로 반영되므로 실패가 누적되지 않는다(전체 상태를 매번 덮어쓰는 덕분이다).
-
-        wait_for가 없으면 이 삼킴이 무의미해진다 — 근거는 STATE_STORE_TIMEOUT_SECONDS 주석.
-        여기 남는 로그가 "영속화가 조용히 죽었다"를 알리는 유일한 신호다. 이게 반복되면
-        중복 창이 #248 이전 수준으로 돌아간 것이므로 경보 대상으로 삼을 만하다.
-        """
-        try:
-            await asyncio.wait_for(
-                self.state_store.save(
-                    TelegramPollerState(
-                        offset=self.offset,
-                        handled_ahead=frozenset(self._handled_ahead),
-                    )
-                ),
-                timeout=STATE_STORE_TIMEOUT_SECONDS,
-            )
-        except Exception as exc:
-            # TimeoutError·CancelledError 취급은 _restore_state 주석 참조.
-            logger.error("Telegram poller 상태 저장 실패, 인메모리로 계속: %s", exc)
 
     def _forget_passed_updates(self, offset: int) -> None:
         """offset이 지나간 update_id 기록을 정리해 추적 상태가 무한히 커지지 않게 한다 (#241)."""
