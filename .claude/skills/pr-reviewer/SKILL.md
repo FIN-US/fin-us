@@ -124,16 +124,10 @@ node 패키지가 추가되면 이 목록과 CI 잡을 함께 갱신합니다.
 
 #### 파이썬 영역(`backend`, `finus_nat`)은 기본적으로 건너뜁니다
 
-`.venv`를 심볼릭 링크로 연결한 뒤 `uv run`을 돌리면 **개발자의 메인 트리 venv를 직접 mutate합니다.**
-`uv run`은 기본적으로 프로젝트 환경을 자동 동기화하기 때문에, 링크를 따라가 실제 venv를 건드립니다.
-
-두 가지 결과가 따라옵니다.
-
-- 병렬 리뷰 두 개가 같은 실제 venv를 동시에 mutate합니다. 이 스킬이 없애려던 공유 가변 상태가
-  워킹 트리에서 venv로 옮겨간 것뿐입니다.
-- `finus_nat/.venv`는 `finus_nat/scripts/patch_vendor.py`로 벤더 패치가 적용된 상태입니다
-  (`.github/workflows/ci.yml` 참조). `uv sync`가 패키지를 재설치하면 **패치가 조용히 벗겨져
-  로컬 NAT 환경이 깨집니다.** 리뷰 한 번 돌린 대가로 감당할 부작용이 아닙니다.
+`.venv`를 링크한 뒤 `uv run`을 돌리면 **개발자의 메인 트리 venv를 직접 mutate합니다**
+(`uv run`이 프로젝트 환경을 자동 동기화하며 링크를 따라갑니다). 결과는 둘입니다 —
+병렬 리뷰가 같은 venv를 동시에 건드리고, `finus_nat/.venv`에 적용된 `patch_vendor.py`
+벤더 패치가 재설치로 **조용히 벗겨져 로컬 NAT 환경이 깨집니다.**
 
 굳이 파이썬 검증이 필요하면 sync를 막고 인터프리터를 직접 지목합니다.
 
@@ -166,14 +160,11 @@ ln -s "<REPO>/<PKG>/node_modules" "<WT_PATH>/<PKG>/node_modules" \
   || echo "PREFLIGHT SKIP: <PKG> node_modules 링크 실패 — 리포트에 사유를 명시할 것"
 ```
 
-세 패키지 모두 `npm test`(`node --test tests/*.test.js`)를 가지고 있습니다.
+> `frontend/`는 Unity 프로젝트라 node 의존성이 없습니다. 검증 지점은 추적 중인 WebGL
+> 번들(`frontend/Build/`)과 소스가 어긋나지 않았는지입니다(`frontend/README.md` 재빌드 규칙).
 
-> `frontend/`는 Unity 프로젝트라 node 의존성이 없습니다. 프론트엔드 변경은 추적 중인
-> WebGL 번들(`frontend/Build/`)과 소스가 어긋나지 않았는지를 보는 것이 검증 지점입니다
-> (`frontend/README.md`의 재빌드 규칙 참고).
-
-> 6단계의 `git worktree remove --force`는 링크를 따라가지 않고 **링크 자체만** 제거합니다.
-> 원본 `node_modules`는 보존됩니다. 심볼릭 링크와 junction 모두 실측으로 확인했습니다.
+> 6단계의 `worktree remove --force`는 링크 자체만 제거하고 원본 `node_modules`는 보존합니다
+> (심볼릭 링크·junction 모두 실측 확인). 링크를 지울까 걱정해 정리를 건너뛰지 마세요.
 
 #### 건너뛴 경우
 
@@ -211,8 +202,7 @@ ln -s "<REPO>/<PKG>/node_modules" "<WT_PATH>/<PKG>/node_modules" \
 
 ### 5. 리뷰 리포트 형식
 
-**이 리포트의 주 독자는 사람이 아니라 다음 작업을 이어받는 에이전트입니다.** 설득이 아니라
-지목이 목적이므로, 아래 형식을 벗어나 길게 쓰지 않습니다.
+주 독자는 사람이 아니라 다음 작업을 이어받는 에이전트입니다. 설득이 아니라 지목이 목적입니다.
 
 ```
 ## 리뷰: <PR 제목>
@@ -237,11 +227,7 @@ Approved ✅ / Request Changes 🔄 / Comment 💬 — <이유 한 줄>
   다시 붙이는 것은 분량만 늘립니다. 수정 제안도 3줄을 넘기면 산문으로 대체합니다.
 - **건수가 0인 섹션은 헤더째 생략합니다.** "🔵 Nitpicks (0건) — 없음"은 정보가 아닙니다.
 - **"잘 된 점" 섹션은 쓰지 않습니다.** 칭찬이 필요하면 결론 줄에 한 구절로 붙입니다.
-- **Nitpicks는 최대 5건.** 넘으면 가장 반복되는 패턴 하나로 묶어 지목합니다.
-- **Improvements는 최대 7건.** 넘으면 Critical 다음으로 영향이 큰 것만 남깁니다.
-
-글자 수 상한은 두지 않습니다 — 셀 수 없는 기준은 지켜지지 않습니다. 위의 건수와 줄 수가
-실제 상한입니다. 다 지켰는데도 리포트가 길다면 지적이 많은 것이므로 그건 줄일 대상이 아닙니다.
+- **Improvements 최대 7건, Nitpicks 최대 5건.** 넘으면 반복되는 패턴 하나로 묶습니다.
 
 ### 6. 정리 (원격 PR 모드 — 실패해도 반드시 수행)
 
@@ -251,13 +237,9 @@ Approved ✅ / Request Changes 🔄 / Comment 💬 — <이유 한 줄>
 git -C "<REPO>" update-ref -d "refs/pr-review/<PR>-<SHA7>"
 ```
 
-> 같은 PR을 같은 커밋에서 두 실행이 동시에 리뷰하면 `REF_NAME`이 겹칩니다.
-> **ref 자체는 문제되지 않습니다** — fetch는 같은 커밋을 다시 쓰는 것이고, worktree는
-> `--detach`라 ref가 먼저 지워져도 계속 유효합니다(worktree 등록이 그 커밋을 GC로부터 보호).
->
-> **경로는 다릅니다.** 다른 세션이면 scratchpad가 달라 안 겹치지만, 같은 세션의 병렬
-> 서브에이전트면 `<WT_PATH>`까지 같아지고 한쪽 정리가 다른 쪽을 지웁니다. 공통 규약의
-> "경로 충돌"대로 `worktree add` 전에 경로 사용 여부를 확인하고, 겹치면 접미사를 붙입니다.
+> 두 실행이 같은 PR·같은 커밋을 동시에 보면 `REF_NAME`이 겹칩니다. **ref는 무해합니다** —
+> 같은 커밋을 다시 쓰는 것이고, `--detach`라 ref가 먼저 지워져도 worktree는 유효합니다.
+> **경로는 다릅니다** — 공통 규약 "경로 충돌"을 따르세요. 여기서 nonce를 되살리지 마세요.
 
 정리 후 실제로 사라졌는지 확인합니다.
 

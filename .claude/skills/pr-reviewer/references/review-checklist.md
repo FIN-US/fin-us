@@ -1,8 +1,8 @@
 # PR 리뷰 체크리스트 (fin-us 전용)
 
-**CI가 이미 잡는 것은 여기 없습니다.** `.github/workflows/ci.yml`이 backend·finus_nat pytest,
-mcp-trading·mcp-news·mcp-dart npm test, Unity `Assets`/`Build` 드리프트, hadolint, `nginx -t`를 돌립니다.
-빨간불이 나면 그건 리뷰할 일이 아니라 고칠 일입니다. 이 목록은 **CI가 못 잡는 것**만 담습니다.
+CI(`ci.yml`)가 돌리는 것 — backend·finus_nat pytest, mcp-trading·mcp-news·mcp-dart npm test,
+Unity `Assets`/`Build` 드리프트, hadolint, `nginx -t` — 은 **결과만 확인**하고 여기서 반복하지
+않습니다. 빨간불은 리뷰할 일이 아니라 고칠 일입니다.
 
 ## 돈이 나가는 경로 (`backend/trading_orders.py`, `mcp-trading/`)
 
@@ -43,3 +43,10 @@ mcp-trading·mcp-news·mcp-dart npm test, Unity `Assets`/`Build` 드리프트, h
 
 - [ ] 새 가드가 **제거됐을 때 실제로 빨간불이 되는가** — 통과만 확인한 테스트는 공허할 수 있다
 - [ ] 엣지케이스: 취소·재시작·부분 실패 이후의 재실행 경로
+
+## 일반 (CI도 §4 분석 기준도 안 덮는 것)
+
+- [ ] SQL을 문자열로 조립한 곳이 없는가 (`database.py`, `catalyst_repo.py`가 SQL을 다룬다)
+- [ ] 새 의존성에 알려진 취약점이 없는가 — CI에 `npm audit`/`pip audit` 잡이 없다
+- [ ] 외부 응답·옵셔널 필드를 null 체크 없이 바로 쓰지 않는가
+- [ ] 새로 등장한 매직 넘버·문자열이 상수로 올라갔는가 (타임아웃·재시도 횟수·한도)
