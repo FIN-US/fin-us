@@ -306,9 +306,10 @@ class RedisTelegramPollerStore:
         # json.dumps)하는 지속 비용이다 (PR #251 리뷰). 한계에 걸리면 상태를 버리고 중복이
         # 생기므로 도달 가능한 최댓값에서 넉넉히 떨어뜨렸다: 전송 실패 창 335초 동안 최소
         # 간격 5초로 폴링하면 67배치이고, 배치당 최대치는 _get_updates가 넘기는 limit이다.
-        # 지금은 limit을 지정하지 않아 Telegram 기본값 100이므로 67 × 100 = 6,700이 상한이고,
-        # limit을 명시하면 그만큼 더 작아진다(#253의 GET_UPDATES_LIMIT=10이면 670). 즉 6,700은
-        # 도달 가능한 최댓값의 상계이고, MAX_HANDLED_AHEAD는 그것의 15배 이상이다.
+        # limit을 지정하지 않으면 Telegram 기본값 100이라 67 × 100 = 6,700이 상한이다.
+        # 실제로는 telegram_commands.GET_UPDATES_LIMIT(=10)을 명시하므로 67 × 10 = 670이고
+        # (#253), 6,700은 limit을 지우는 회귀까지 덮는 상계다. MAX_HANDLED_AHEAD는 그 상계의
+        # 15배 이상이므로, limit이 바뀌어도 이 상한을 함께 고칠 일은 없다.
         if len(handled_ahead) > MAX_HANDLED_AHEAD:
             raise ValueError(
                 f"handled_ahead too large ({len(handled_ahead)} > {MAX_HANDLED_AHEAD})"

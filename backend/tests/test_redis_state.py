@@ -277,8 +277,9 @@ async def test_poller_state_load_keeps_realistic_handled_ahead_size():
 
     상한에 걸리면 상태를 버려 중복 실행이 생긴다 — 정상 상태를 버리는 상한은 이 PR이
     고치려는 버그를 되살린다. 전송 실패 창 335초 / 최소 간격 5초 = 67배치이고, 배치당
-    최대치는 getUpdates의 limit이다(미지정 = 기본값 100 → 6,700). limit을 명시하면 그만큼
-    작아지므로 6,700은 상계이고, 이 단언은 그 아래 모든 값에 대해서도 성립한다.
+    최대치는 getUpdates의 limit이다(미지정 = 기본값 100 → 6,700). 실제 도달 가능한 값은
+    GET_UPDATES_LIMIT(=10)이 걸려 67 × 10 = 670이므로(#253), 6,700은 limit을 지우는 회귀까지
+    덮는 상계다 — 이 단언은 그 아래 모든 값에 대해서도 성립한다.
     """
     redis = FakeRedis()
     reachable = list(range(6_700))

@@ -128,6 +128,34 @@ UPDATE_LABEL_LIMIT = 40
 STATE_STORE_TIMEOUT_SECONDS = 3.0
 
 
+# 부수효과가 확정된 뒤의 전송은 update 재시도로 되살릴 수 없다(#247). 대신 그 자리에서
+# 짧게 재시도해 429 같은 일시 장애를 흡수한다 — "전송만 별도로 재시도"에 해당한다.
+#
+# 이 값을 키우면 안 되는 이유가 둘이다.
+#   1. 폴러 루프를 그 시간만큼 붙잡으므로, 같은 배치에서 재시도를 기다리는 다른 update가
+#      시도 없이 예산(일반 실패 60초)만 잃는다. PR #242가 넓힌 예산을 되돌리는 방향이다.
+#   2. /buy 확인 프롬프트는 대기 주문의 60초 만료 창을 나눠 쓴다. 늦게 도착할수록 사용자가
+#      확인 버튼을 누를 시간이 줄어든다.
+#
+# 429의 retry_after를 읽을 수 없어(notifier.send_text가 bool만 돌려준다) 간격은 추측이다.
+# Telegram이 더 긴 ban을 주면 4시도가 모두 그 안에서 소진되고 메시지는 버려진다.
+SETTLED_SEND_RETRY_BACKOFF_SECONDS = (1.0, 3.0, 9.0)
+# 위 백오프 합(13초)은 상한이 아니다. 시도마다 HTTP 왕복이 붙고 telegram_notifier의 httpx
+# 타임아웃이 10초라, Telegram이 429로 즉답하지 않고 무응답이면 4시도 × 10초 + 13초 = 53초까지
+# 늘어난다. 그러면 위 두 대가가 모두 한계까지 간다 — /buy 프롬프트가 60초 만료 창을 거의
+# 다 먹고, 같은 배치의 update는 예산을 통째로 잃는다 (PR #253 리뷰).
+#
+# 그래서 백오프 합이 아니라 벽시계로 상한을 강제한다. 429는 즉답이라 현실 경로는 여전히
+# 백오프 합에 가깝고, 이 상한은 무응답·행 같은 병리적 경우만 잘라낸다.
+# 상한이 있다는 사실과 그 값이 만료 창 안에 든다는 것을 테스트가 고정한다
+# (test_settled_send_retry_is_bounded, test_settled_send_gives_up_at_the_wall_clock_bound).
+SETTLED_SEND_TIMEOUT_SECONDS = 20.0
+# getUpdates 배치 크기. 명시하지 않으면 Telegram 기본값이 100이라, 배치 전체가 settled
+# 전송에 닿으면 한 루프의 점유가 100 × SETTLED_SEND_TIMEOUT_SECONDS까지 늘어나 사실상
+# 상한이 없어진다. 배치를 작게 끊으면 최악이 유계가 된다 (PR #253 2차 리뷰).
+GET_UPDATES_LIMIT = 10
+
+
 class TelegramSendError(RuntimeError):
     """텔레그램 전송 실패. handle_update가 던지는 예외 중 유일하게 update와 무관하다.
 
@@ -399,9 +427,107 @@ class TelegramCommandHandler:
         *,
         reply_markup: dict[str, Any] | None = None,
     ) -> None:
+        """재시도 가능한 지점의 전송. 실패하면 폴러가 update 전체를 다시 실행한다.
+
+        호출부가 "여기서 실패해도 다시 실행하면 같은 결과가 나온다"를 보장할 때만 쓴다.
+        부수효과가 확정된 뒤라면 _send_text_settled를 쓴다 (#247).
+
+        이 호출이 든 try 블록은 TelegramSendError를 반드시 재던져야 한다. 전송 실패를
+        사용자 메시지로 변환하면 무의미한 중복 메시지가 한 번 더 나간다.
+        test_every_try_containing_a_retryable_send_reraises_it이 이를 강제한다 (#249).
+        """
         sent = await self.notifier.send_text(text, reply_markup=reply_markup)
         if sent is False:
             raise TelegramSendError("telegram send failed")
+
+    async def _send_text_settled(
+        self,
+        text: str,
+        *,
+        reply_markup: dict[str, Any] | None = None,
+    ) -> bool:
+        """부수효과가 확정된 뒤의 전송. 실패해도 update를 재시도하지 않는다 (#247).
+
+        재시도하면 원래 의도를 달성하지 못하고 다른 메시지로 끝나기 때문이다. /buy는 대기
+        주문이 이미 저장돼 재실행이 "이미 대기 중인 주문이 있습니다"로 끝나 사용자가 확인
+        버튼을 영영 못 받고, /confirm은 claim(GETDEL)으로 주문이 소비돼 재실행이 "확정할
+        대기 주문이 없습니다"로 끝나 체결된 주문을 미체결로 인식하게 만든다.
+
+        대신 전송만 그 자리에서 재시도해 429 같은 일시 장애를 흡수한다. 그래도 실패하면
+        로그만 남긴다 — 사용자에게 말을 걸 수 없는 상태에서 할 수 있는 일이 없다.
+
+        재시도가 폴러 루프를 붙잡는 시간의 상한과 그 대가는 SETTLED_SEND_TIMEOUT_SECONDS
+        주석에 적어 두었다.
+
+        반환값은 전송 성공 여부다. 호출부가 "통지가 나갔는가"로 뒷정리를 갈라야 하는
+        경우가 있다(/buy는 실패 시 대기 주문을 지운다).
+        """
+        attempts = len(SETTLED_SEND_RETRY_BACKOFF_SECONDS) + 1
+        started_at = time.monotonic()
+        try:
+            # 시도 횟수가 아니라 벽시계로 상한을 강제한다. 무응답이면 시도마다 httpx
+            # 타임아웃(10초)이 그대로 붙어 횟수만으로는 상한이 서지 않기 때문이다.
+            # asyncio.timeout은 자기 데드라인이 아닌 외부 취소는 CancelledError로 그대로
+            # 통과시키므로 폴러의 graceful shutdown을 방해하지 않는다.
+            async with asyncio.timeout(SETTLED_SEND_TIMEOUT_SECONDS):
+                for index in range(attempts):
+                    sent = await self.notifier.send_text(text, reply_markup=reply_markup)
+                    if sent is not False:
+                        return True
+                    if index >= len(SETTLED_SEND_RETRY_BACKOFF_SECONDS):
+                        break
+
+                    delay = SETTLED_SEND_RETRY_BACKOFF_SECONDS[index]
+                    # 429의 flood-wait은 흔히 30초 이상이라 (1, 3, 9) 추측으로는 4시도가
+                    # 전부 ban 구간에 소진된다. 게다가 ban 중 재요청은 대기 시간을 늘리는
+                    # 방향으로 작용한다 — 남은 예산 안에 안 풀리면 재시도가 무의미할 뿐
+                    # 아니라 해롭다 (PR #253 2차 리뷰).
+                    #
+                    # last_retry_after_seconds는 notifier에 걸린 공유 가변 상태다. 이 읽기가
+                    # 방금 그 send_text의 결과를 보는 근거는 둘뿐이다: send_text가 성공·실패
+                    # 양쪽에서 값을 갱신해 호출 간 이월이 없다는 것과, 위 send_text 반환과
+                    # 이 줄 사이에 await가 없어 이벤트 루프가 다른 코루틴에 넘어가지 않는다는
+                    # 것. 사이에 await를 하나 넣으면(로깅을 비동기로 바꾸는 정도로도) 다른
+                    # 전송의 flood-wait을 읽게 된다 (PR #253 3차 리뷰).
+                    retry_after = getattr(self.notifier, "last_retry_after_seconds", None)
+                    if retry_after is not None:
+                        remaining = SETTLED_SEND_TIMEOUT_SECONDS - (
+                            time.monotonic() - started_at
+                        )
+                        if retry_after > remaining:
+                            logger.error(
+                                "확정된 부수효과의 결과를 전송하지 못했습니다 "
+                                "(%s자, flood-wait %s초 > 남은 예산 %.1f초 — 재시도 포기)",
+                                len(text),
+                                retry_after,
+                                max(0.0, remaining),
+                            )
+                            return False
+                        delay = max(delay, float(retry_after))
+                    await self._sleep(delay)
+        except TimeoutError:
+            logger.error(
+                "확정된 부수효과의 결과를 전송하지 못했습니다 (%s자, 벽시계 상한 %s초 초과)",
+                len(text),
+                SETTLED_SEND_TIMEOUT_SECONDS,
+            )
+            return False
+        # 본문은 남기지 않는다. 이 경로에는 체결 내역·잔고가 실려 있고, 진단에 필요한 것은
+        # "어느 지점에서 몇 번 만에 포기했는가"이지 사용자에게 보내려던 문장이 아니다.
+        logger.error(
+            "확정된 부수효과의 결과를 전송하지 못했습니다 (%s자, %s시도 후 포기)",
+            len(text),
+            attempts,
+        )
+        return False
+
+    async def _sleep(self, seconds: float) -> None:
+        """테스트가 전역 asyncio.sleep 대신 이 인스턴스만 대체할 수 있게 하는 간접층.
+
+        _handle_watch의 조회 간격은 의도적으로 전역 asyncio.sleep을 그대로 쓴다 —
+        기존 테스트가 그 sleep을 전역 패치로 가로채는 데 의존한다.
+        """
+        await asyncio.sleep(seconds)
 
     async def _handle_callback_query(self, callback_query: dict[str, Any]) -> None:
         message = callback_query.get("message") or {}
@@ -575,7 +701,11 @@ class TelegramCommandHandler:
         data: str,
     ) -> None:
         token = self._extract_callback_token(data)
-        context = self.market_callbacks.pop(token, None) if token else None
+        # pop이 아니라 get이다. pop하면 조회 결과 전송이 실패했을 때 폴러 재시도가
+        # MARKET_STALE_CALLBACK_TEXT로 끝나 방금 누른 버튼에 "이전 조회 버튼입니다"가 뜬다.
+        # 토큰 소비는 되돌릴 수 있는 부수효과라 확정시킬 이유가 없다 — 전송이 성공한 뒤에
+        # 소비해 재시도 경계를 전송 뒤로 옮긴다 (PR #253 2차 리뷰).
+        context = self.market_callbacks.get(token) if token else None
         if context is None:
             await self._answer_callback_query(
                 callback_query_id,
@@ -594,8 +724,11 @@ class TelegramCommandHandler:
         await self._answer_callback_query(callback_query_id)
         if action == "quote":
             await self._handle_quote(stock, chat_id)
-            return
-        await self._handle_trend(stock, chat_id)
+        else:
+            await self._handle_trend(stock, chat_id)
+        # 전송이 성공한 뒤에만 소비한다. 위에서 TelegramSendError가 나면 여기 도달하지
+        # 않으므로 재시도가 같은 토큰으로 같은 조회를 다시 수행한다.
+        self.market_callbacks.pop(token, None)
 
     def _matches_command(self, command: str, bot_username: str, expected: str) -> bool:
         if command != expected:
@@ -827,6 +960,18 @@ class TelegramCommandHandler:
                 ),
                 self.mcp_runner(TRADING_MCP_PARAMS, "get_balance", {}),
             )
+        except TelegramSendError:
+            # 위 검증 실패 메시지(종목코드 미확인·미등록 종목·주문 불가 코드)의 전송이
+            # 실패한 경우다. 전송 실패는 "이 명령을 처리하다 생긴 오류"가 아니라 "사용자에게
+            # 말을 걸 수 없는 상태"라 사용자 메시지로 변환하는 것 자체가 무의미하다.
+            #
+            # 이 분기가 막는 것은 폴러가 실패를 못 보는 것이 아니다 — 변환한 메시지가
+            # 실패하면 그것도 TelegramSendError라 어차피 폴러에 도달한다. 실제로 막는 것은
+            # 변환한 메시지가 성공했을 때 "주문 준비 실패: telegram send failed"라는
+            # 무의미한 중복 메시지가 사용자에게 한 번 더 가는 것이다 (PR #253 2차 리뷰).
+            #
+            # 이 지점은 아직 부수효과가 없어 재시도가 안전하다 (#249).
+            raise
         except Exception as exc:
             await self._send_text_or_raise(f"주문 준비 실패: {_short_error(exc)}")
             return
@@ -838,7 +983,12 @@ class TelegramCommandHandler:
             side=side,
             quantity=quantity,
             price=price,
-            created_at=now,
+            # now(명령 수신 시각)가 아니라 저장 직전 시각으로 스탬프한다. 위 MCP 조회는
+            # run_mcp_tool의 wait_for(30초)를 두 구간(resolve, gather) 쓰므로 최대 60초가
+            # 걸리고, now를 쓰면 프롬프트가 도착하기도 전에 만료 시각이 지나 있다 —
+            # 절대 시각 표기가 "과거 시각에 만료됩니다"가 된다 (PR #253 2차 리뷰).
+            # now는 장 운영 판정과 만료 스윕에 그대로 쓴다.
+            created_at=self.now_factory(),
             order_type=order_type,
             callback_token=secrets.token_urlsafe(8),
         )
@@ -853,10 +1003,20 @@ class TelegramCommandHandler:
                 "이미 대기 중인 주문이 있습니다. /confirm 또는 /cancel로 먼저 처리하세요."
             )
             return
-        await self._send_text_or_raise(
+        # 대기 주문이 저장된 뒤다 — 재실행은 has_pending에 걸려 "이미 대기 중인 주문이
+        # 있습니다"로 끝나고, 사용자는 확인 버튼을 영영 받지 못한다 (#247).
+        notified = await self._send_text_settled(
             self._format_order_prompt(order, str(quote_result), str(balance_result)),
             reply_markup=self._order_reply_markup(order),
         )
+        if not notified:
+            # 프롬프트가 끝내 안 나갔으면 사용자는 대기 주문의 존재를 모른다. 그대로 두면
+            # 60초 안의 다음 /buy가 영문 모를 "이미 대기 중인 주문이 있습니다"로 막힌다.
+            # 아직 아무것도 체결되지 않았으므로 지우는 쪽이 안전하다 (PR #253 2차 리뷰).
+            try:
+                await self.pending_orders.delete(chat_id)
+            except Exception as exc:
+                logger.error("프롬프트 미전달 후 대기 주문 정리 실패: %s", exc)
 
     async def _handle_cancel(self, chat_id: str) -> None:
         try:
@@ -873,7 +1033,8 @@ class TelegramCommandHandler:
         except Exception as exc:
             await self._send_text_or_raise(f"주문 저장소 오류: {_short_error(exc)}")
             return
-        await self._send_text_or_raise("대기 주문을 취소했습니다.")
+        # 대기 주문이 삭제된 뒤다 — 재실행은 "취소할 대기 주문이 없습니다"로 끝난다 (#247).
+        await self._send_text_settled("대기 주문을 취소했습니다.")
 
     async def _handle_confirm(self, chat_id: str) -> None:
         # order_gateway 부재 체크를 claim 전에 수행해 주문이 소비되지 않게 한다.
@@ -900,6 +1061,7 @@ class TelegramCommandHandler:
                 # 403 = 실계좌 가드 미충족: 주문 미실행이 확실하므로 대기 주문 복원.
                 # created_at을 유지하므로 앱 레벨 60초 만료는 그대로 적용된다.
                 # set_if_absent: 복원 도중 새 /buy가 들어온 경우 새 주문을 보호한다.
+                restored = False
                 try:
                     restored = await self.pending_orders.set_if_absent(chat_id, order)
                 except Exception as put_exc:
@@ -909,11 +1071,25 @@ class TelegramCommandHandler:
                         logger.warning(
                             "403 복원 생략 — 그 사이 새 대기 주문이 생성됨: %s", chat_id
                         )
-                await self._send_text_or_raise(f"주문 실패: {_short_error(exc)}")
+                message = f"주문 실패: {_short_error(exc)}"
+                if restored:
+                    # 대기 주문이 claim 이전 상태로 돌아갔다. 재실행하면 같은 403으로
+                    # 같은 메시지에 도달하므로 재시도가 안전하다 — 단 만료 창이 남아 있는
+                    # 동안만이다. 전송 실패 창(300초)이 주문 만료(60초)의 5배라, 60초를
+                    # 넘겨 재시도하면 _drop_expired_pending_order가 먼저 지워 "확정할 대기
+                    # 주문이 없습니다"가 나가고 원래 거절 사유는 유실된다. 403은 미체결이
+                    # 확실해 위험하지는 않다 (PR #253 2차 리뷰).
+                    await self._send_text_or_raise(message)
+                else:
+                    # 복원에 실패했거나 새 주문이 선점했다 — 재실행은 "확정할 대기 주문이
+                    # 없습니다"로 끝나 원래 사유를 전하지 못한다 (#247).
+                    await self._send_text_settled(message)
                 return
 
-            # 주문 실행 결과 불명확: claim으로 이미 삭제됨 — 추가 delete 불필요
-            await self._send_text_or_raise(
+            # 주문 실행 결과 불명확: claim으로 이미 삭제됨 — 추가 delete 불필요.
+            # 재실행은 claim이 비어 "확정할 대기 주문이 없습니다"로 끝나므로 확인 요청이
+            # 사라진다 (#247).
+            await self._send_text_settled(
                 "주문 실패 또는 상태 확인 필요: "
                 f"{_short_error(exc)}\n"
                 "중복 주문 방지를 위해 대기 주문을 제거했습니다."
@@ -928,7 +1104,9 @@ class TelegramCommandHandler:
             except Exception as exc:
                 logger.warning("Trade history recording failed: %s", exc)
                 record_warning = f"\n거래 이력 기록 실패: {_short_error(exc)}"
-        await self._send_text_or_raise(f"주문 완료: {result.message}{record_warning}")
+        # 주문이 체결된 뒤다 — 재실행은 "확정할 대기 주문이 없습니다"로 끝나, 체결된 주문을
+        # 사용자가 미체결로 인식하게 만든다 (#247).
+        await self._send_text_settled(f"주문 완료: {result.message}{record_warning}")
 
     def _parse_order_argument(self, argument: str) -> tuple[str, int, int, OrderType] | None:
         parts = argument.split()
@@ -1217,12 +1395,20 @@ class TelegramCommandHandler:
         if order.stock_name == order.stock_code:
             lines.append(UNRESOLVED_STOCK_WARNING)
 
+        # 만료를 "60초 후"로 쓰면 메시지가 언제 도착하든 60초를 약속하게 된다. 실제로는
+        # created_at이 MCP 조회 전(_handle_order_command의 now = self.now_factory())에 찍히고,
+        # 전송이 429로 밀리면 _send_text_settled가 SETTLED_SEND_TIMEOUT_SECONDS까지 더 쓴다
+        # — 사용자가 확인 버튼을 받는 시점엔 이미 상당히 지나 있다.
+        # 절대 시각은 도착이 늦어도 어긋나지 않는다.
+        expires_at = order.created_at + ORDER_EXPIRES_AFTER
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=KST)
         lines.extend(
             [
                 "",
                 "/confirm 입력 시 대기 주문을 확정합니다.",
                 "/cancel 입력 시 대기 주문을 취소합니다.",
-                "이 주문은 60초 후 만료됩니다.",
+                f"이 주문은 {expires_at.astimezone(KST):%H:%M:%S}에 만료됩니다.",
             ]
         )
         return "\n".join(lines)
@@ -1292,7 +1478,11 @@ class TelegramCommandHandler:
             await self._send_text_or_raise(f"조회 실패: {_short_error(exc)}")
             return
 
-        await self._send_text_or_raise(_telegram_text(self._format_earnings_response(str(result))))
+        # LLM 호출이 끝난 뒤다 — 재실행은 DART·뉴스 조회와 LLM 호출을 그대로 반복해
+        # 예산만큼 재과금된다 (#247).
+        await self._send_text_settled(
+            _telegram_text(self._format_earnings_response(str(result)))
+        )
 
     def _parse_earnings_argument(self, argument: str) -> tuple[str, str | None] | None:
         parts = argument.split()
@@ -1385,7 +1575,9 @@ class TelegramCommandHandler:
         except Exception as exc:
             await self._send_text_or_raise(f"응답 생성 실패: {_short_error(exc)}")
             return
-        await self._send_text_or_raise(_telegram_text(str(result)))
+        # LLM 호출이 끝난 뒤다. 재실행은 같은 conversation_id로 NAT를 다시 호출해 대화
+        # 이력을 오염시키고 예산만큼 재과금된다 — 전송 실패 예산으로는 최대 10회다 (#247).
+        await self._send_text_settled(_telegram_text(str(result)))
 
     @asynccontextmanager
     async def _state(self):
@@ -1585,15 +1777,15 @@ class TelegramCommandPoller:
     ) -> _UpdateOutcome:
         """update 처리 결과를 반환한다: 완료 / 재시도 대기 / 예산 소진 후 스킵 (#241).
 
-        주의: 재시도는 handle_update가 멱등하다는 전제 위에 있다. 부수효과가 확정된 뒤
-        전송에서 실패하는 경로(/buy의 set_if_absent 후 프롬프트 전송, /confirm의 체결 후
-        결과 전송)는 재시도해도 원래 의도를 달성하지 못하고 다른 메시지로 끝난다.
-        이 PR 범위 밖이라 별도 이슈로 다룬다 (PR #242 리뷰).
+        재시도는 handle_update가 멱등하다는 전제 위에 있고, 그 전제는 핸들러가 지킨다:
+        부수효과가 확정된 뒤의 전송은 _send_text_settled를 써서 예외를 던지지 않으므로
+        여기까지 오지 않는다. 즉 재실행되는 것은 부수효과 이전 구간뿐이다 (#247).
 
-        그 경로의 재실행 횟수는 예산과 같다 — 일반 실패 4회, 전송 실패 10회다.
-        예산을 시간 기반으로 넓히면서 기존 3회보다 늘었다. 자연어 메시지처럼 부수효과가
-        LLM 호출인 경로는 429 구간에서 최대 10번 호출·과금된다(주문은 GETDEL·set_if_absent로
-        보호되어 금전 피해는 없다). 멱등성 이슈의 노출량 근거다 (PR #242 리뷰).
+        반대로 부수효과 이전의 전송 실패는 변환 경로(except Exception)에 삼켜지지 않고
+        반드시 여기 도달한다 — 전송을 본문에 둔 try는 TelegramSendError를 재던져야 하고,
+        test_every_try_containing_a_retryable_send_reraises_it이 그것을 정적으로 강제한다
+        (#249). 그 가드는 직접 호출만 보므로, 전송을 감싼 헬퍼를 try 안에서 부르는 코드가
+        생기면 이 전제가 조용히 깨진다.
         """
         try:
             await self.handler.handle_update(update)
@@ -1775,7 +1967,7 @@ class TelegramCommandPoller:
 
     async def _get_updates(self) -> list[dict[str, Any]]:
         url = f"https://api.telegram.org/bot{self.notifier.bot_token}/getUpdates"
-        payload: dict[str, Any] = {"timeout": 25}
+        payload: dict[str, Any] = {"timeout": 25, "limit": GET_UPDATES_LIMIT}
         if self.offset is not None:
             payload["offset"] = self.offset
 
