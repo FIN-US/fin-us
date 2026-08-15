@@ -32,8 +32,13 @@ class ConnectionManager:
         # 걷어내 버린다. 여기서 걸러 내면 그 두 가지가 모두 생기지 않는다.
         # 예외를 올리지 않고 로그만 남기는 것은 기존 동작(루프 안 except가 삼킴)과 같다 —
         # 호출처(scheduler)는 브로드캐스트 실패로 감시 루프가 멈추지 않기를 기대한다.
+        # separators와 ensure_ascii는 Starlette send_json과 와이어 포맷을 맞추기 위한
+        # 것이다. ensure_ascii를 기본값(True)으로 두면 "삼성전자" 같은 한글이 유니코드
+        # 이스케이프로 나가 payload가 3배로 부풀고, 같은 엔드포인트의
+        # 에코 응답(main.py — 여전히 send_json)과 인코딩이 갈린다. 디코더에는 동등하지만
+        # 직렬화 위치를 옮기는 변경이 프로토콜을 건드릴 이유는 없다(PR #261 리뷰).
         try:
-            payload = json.dumps(message, separators=(",", ":"))
+            payload = json.dumps(message, separators=(",", ":"), ensure_ascii=False)
         except (TypeError, ValueError) as e:
             logger.error("WebSocket 브로드캐스트 payload 직렬화 실패: %s", e, exc_info=True)
             return

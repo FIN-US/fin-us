@@ -67,35 +67,46 @@ def test_wildcard_allows_any_origin(monkeypatch):
 
 
 # --- 엔드포인트 통합 테스트 -------------------------------------------------
+#
+# TestClient를 with 없이 쓴다. with는 main.py의 lifespan을 실행해 init_db()·
+# start_scheduler()까지 돌리는데, 그러면 테스트 도중 monitor_market_task가 실제로 떠서
+# MCP 호출을 시도하고 backend/finus.db가 생긴다. websocket_connect는 lifespan 없이도
+# 동작하므로 이 파일에는 필요 없다(PR #261 리뷰 🔵2).
 
 
 def test_websocket_rejects_disallowed_origin(monkeypatch):
-    """허용되지 않은 Origin은 accept 전에 끊겨 브로드캐스트를 한 건도 받지 못합니다.
+    """허용되지 않은 Origin은 핸드셰이크 자체가 거부됩니다.
 
     이 테스트가 잡는 mutation: 거부 처리를 manager.connect(websocket) 뒤로 옮기는 회귀.
     그러면 핸드셰이크가 완성돼 커넥션이 잠시 active_connections에 들어가고, 그사이
     브로드캐스트가 나갈 수 있다.
     """
     monkeypatch.setattr("backend.main.ALLOW_ORIGINS", ["http://localhost:8080"])
+    client = TestClient(app)
 
-    with TestClient(app) as client:
-        with pytest.raises(WebSocketDisconnect):
-            with client.websocket_connect(
-                "/api/v1/ws", headers={"origin": "http://evil.example"}
-            ) as websocket:
-                websocket.receive_text()
+    # 블록 안에서 receive_text()를 부르지 않는 것이 이 검사의 핵심이다. accept() 전에
+    # close()하면 핸드셰이크가 완성되지 않아 websocket_connect() 진입 자체가 실패한다.
+    # 거부를 accept() 뒤로 옮기면 진입은 성공하고 이 pytest.raises가 DID NOT RAISE로
+    # 떨어진다. receive_text()를 부르면 accept 후 거부에서도 거기서 예외가 나므로
+    # pytest.raises가 두 경우를 구분하지 못한다 — 지키려는 성질이 순서인데 순서를 보지
+    # 못하게 된다(PR #261 리뷰 🟡1).
+    with pytest.raises(WebSocketDisconnect):
+        with client.websocket_connect(
+            "/api/v1/ws", headers={"origin": "http://evil.example"}
+        ):
+            pass
 
 
 def test_websocket_accepts_allowed_origin(monkeypatch):
     """허용 목록에 있는 Origin은 정상 연결되고 에코 응답을 받습니다."""
     monkeypatch.setattr("backend.main.ALLOW_ORIGINS", ["http://localhost:8080"])
+    client = TestClient(app)
 
-    with TestClient(app) as client:
-        with client.websocket_connect(
-            "/api/v1/ws", headers={"origin": "http://localhost:8080"}
-        ) as websocket:
-            websocket.send_text("ping")
-            assert websocket.receive_json() == {"status": "received", "message": "ping"}
+    with client.websocket_connect(
+        "/api/v1/ws", headers={"origin": "http://localhost:8080"}
+    ) as websocket:
+        websocket.send_text("ping")
+        assert websocket.receive_json() == {"status": "received", "message": "ping"}
 
 
 def test_websocket_rejection_does_not_register_connection(monkeypatch):
@@ -106,13 +117,13 @@ def test_websocket_rejection_does_not_register_connection(monkeypatch):
     from backend.ws_manager import manager
 
     monkeypatch.setattr("backend.main.ALLOW_ORIGINS", ["http://localhost:8080"])
+    client = TestClient(app)
     before = len(manager.active_connections)
 
-    with TestClient(app) as client:
-        with pytest.raises(WebSocketDisconnect):
-            with client.websocket_connect(
-                "/api/v1/ws", headers={"origin": "http://evil.example"}
-            ) as websocket:
-                websocket.receive_text()
+    with pytest.raises(WebSocketDisconnect):
+        with client.websocket_connect(
+            "/api/v1/ws", headers={"origin": "http://evil.example"}
+        ):
+            pass
 
     assert len(manager.active_connections) == before

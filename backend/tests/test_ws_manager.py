@@ -44,6 +44,11 @@ async def test_broadcast_delivers_to_every_connection():
     assert a.sent == b.sent
     assert json.loads(a.sent[0]) == {"type": "SYSTEM_PING", "message": "안녕"}
 
+    # 바이트 단위로 Starlette send_json과 같아야 한다. json.loads 비교만으로는
+    # ensure_ascii 기본값(True)으로 되돌아가도 통과한다 — 한글이 \uXXXX로 escape돼
+    # payload가 3배가 되고 에코 응답과 인코딩이 갈리는데 위 단언은 초록이다.
+    assert a.sent[0] == '{"type":"SYSTEM_PING","message":"안녕"}'
+
 
 @pytest.mark.asyncio
 async def test_broadcast_does_not_skip_when_list_shrinks_mid_iteration():

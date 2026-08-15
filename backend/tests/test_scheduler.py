@@ -659,7 +659,7 @@ async def test_monitor_market_task_processes_multiple_signal_sources_independent
 async def test_agent_analysis_broadcast_carries_no_analysis_body(monkeypatch):
     """#256: AGENT_ANALYSIS는 갱신 신호만 싣고 분석 전문은 싣지 않습니다.
 
-    WebSocket에는 인증이 없다. Origin 허용목록 검사(#256)로 브라우저발 CSWSH는 막지만
+    WebSocket에는 인증이 없다(#266). Origin 허용목록 검사(#256)로 브라우저발 CSWSH는 막지만
     Origin 헤더를 보내지 않는 비브라우저 클라이언트는 여전히 붙을 수 있으므로,
     PORTFOLIO_UPDATE(#229)와 같이 신호만 보내고 클라이언트가 /api/v1/db/reports를
     재조회하게 한다.
@@ -1801,7 +1801,7 @@ async def test_monitor_market_task_broadcasts_portfolio_update_on_sync_success(m
     assert payload["holdings_count"] == 3
     # broadcast_at은 ISO 8601로 파싱 가능해야 한다.
     datetime.fromisoformat(payload["broadcast_at"])
-    # 보유 내역 원본(종목명·수량 등)은 인증 없는 WebSocket으로 나가면 안 된다(#256).
+    # 보유 내역 원본(종목명·수량 등)은 인증 없는 WebSocket으로 나가면 안 된다(#266).
     assert "holdings" not in payload
     assert "stocks" not in payload
 
