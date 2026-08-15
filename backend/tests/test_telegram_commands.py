@@ -3379,7 +3379,11 @@ async def test_pending_order_is_stamped_at_store_time_not_command_time():
 
 
 def test_get_updates_bounds_the_batch_size():
-    """배치 크기를 명시하지 않으면 Telegram 기본값이 100이라 루프 점유가 무계가 된다."""
+    """배치 크기를 명시하지 않으면 Telegram 기본값이 100이라 루프 점유가 무계가 된다.
+
+    상수 invariant만 본다 — limit이 payload에 실제로 실리는지는
+    test_get_updates_sends_the_batch_limit이 검사한다 (PR #253 3차 리뷰).
+    """
     assert telegram_commands.GET_UPDATES_LIMIT <= 10
     worst_case = (
         telegram_commands.GET_UPDATES_LIMIT * telegram_commands.SETTLED_SEND_TIMEOUT_SECONDS
@@ -3387,10 +3391,59 @@ def test_get_updates_bounds_the_batch_size():
     assert worst_case <= 200.0
 
 
-def _try_blocks_missing_send_failure_reraise() -> list[int]:
+@pytest.mark.asyncio
+async def test_get_updates_sends_the_batch_limit(monkeypatch):
+    """limit을 payload에 실제로 실어야 배치가 유계가 된다 (PR #253 3차 리뷰).
+
+    앞의 상수 검사는 _get_updates를 부르지 않아, payload에서 limit을 빼도 초록이었다 —
+    Telegram 기본값 100으로 되돌아가는 회귀에 아무 신호가 없었다.
+    """
+    captured = {}
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def post(self, url, json):
+            captured["payload"] = json
+            return SimpleNamespace(
+                raise_for_status=lambda: None,
+                json=lambda: {"ok": True, "result": []},
+            )
+
+    monkeypatch.setattr(
+        telegram_commands.httpx, "AsyncClient", lambda **kwargs: FakeClient()
+    )
+    notifier = FakeNotifier()
+    notifier.bot_token = "token"
+    poller = TelegramCommandPoller(notifier=notifier, handler=object())
+
+    assert await poller._get_updates() == []
+    assert captured["payload"]["limit"] == telegram_commands.GET_UPDATES_LIMIT
+
+
+# TelegramSendError(RuntimeError)를 삼키는 except 이름들. 이 중 하나라도 먼저 걸리면
+# 그 핸들러가 실효 핸들러이고, 뒤에 오는 except TelegramSendError는 도달하지 않는다.
+_SEND_ERROR_CATCHING_NAMES = frozenset(
+    {"TelegramSendError", "RuntimeError", "Exception", "BaseException"}
+)
+
+
+def _try_blocks_missing_send_failure_reraise(source: str | None = None) -> list[int]:
     """본문에 _send_text_or_raise가 있는데 TelegramSendError를 재던지지 않는 try의 행 번호.
 
-    한계: 직접 호출만 본다. 전송을 감싼 헬퍼를 try 안에서 부르면 잡지 못한다.
+    source를 주면 그 소스를, 없으면 telegram_commands.py를 본다. 파라미터화한 이유는
+    test_the_static_send_failure_guard_actually_detects_a_violation이 판정 로직을 다시
+    구현하는 대신 이 함수를 직접 부르게 하기 위해서다 — 인라인 재구현은 가드 본체를
+    무력화해도 초록으로 남았다 (PR #253 3차 리뷰).
+
+    한계 (이 목록에 없는 위반은 잡히지 않는다):
+    - 직접 호출만 본다. 전송을 감싼 헬퍼를 try 안에서 부르면 잡지 못한다.
+    - 강제하는 것은 "재던지기"이지 "변환 금지"가 아니다. 재던지기 전에 중복 메시지를
+      보내는 핸들러는 통과한다.
     """
 
     def calls_retryable_send(statements) -> bool:
@@ -3404,27 +3457,43 @@ def _try_blocks_missing_send_failure_reraise() -> list[int]:
                     return True
         return False
 
-    def reraises_send_error(handler: ast.ExceptHandler) -> bool:
+    def caught_names(handler: ast.ExceptHandler) -> set[str]:
         caught = handler.type
+        if caught is None:  # bare except: 전부 잡는다
+            return set(_SEND_ERROR_CATCHING_NAMES)
         names = caught.elts if isinstance(caught, ast.Tuple) else [caught]
-        if not any(
-            isinstance(name, ast.Name) and name.id == "TelegramSendError"
-            for name in names
-        ):
-            return False
-        return any(
-            isinstance(node, ast.Raise) and node.exc is None for node in handler.body
-        )
+        return {name.id for name in names if isinstance(name, ast.Name)}
+
+    def effective_handler_reraises(node: ast.Try) -> bool:
+        """TelegramSendError를 실제로 잡는 첫 핸들러가 bare raise로 끝나는가.
+
+        any(...)로 "어딘가에 except TelegramSendError가 있다"만 보면
+        `except Exception` → `except TelegramSendError: raise` 순서를 통과시킨다.
+        파이썬은 이 순서를 문법 오류로 보지 않으므로 리팩터링 사고로 나올 수 있다.
+        첫 매칭 핸들러만 보면 그 사각이 닫힌다 (PR #253 3차 리뷰).
+
+        아무 핸들러도 잡지 않으면(try/finally 등) 예외는 그대로 전파되므로 안전하다.
+        """
+        for handler in node.handlers:
+            if not (caught_names(handler) & _SEND_ERROR_CATCHING_NAMES):
+                continue
+            return any(
+                isinstance(inner, ast.Raise) and inner.exc is None
+                for inner in handler.body
+            )
+        return True
 
     tree = ast.parse(
-        Path(telegram_commands.__file__).read_text(encoding="utf-8")
+        source
+        if source is not None
+        else Path(telegram_commands.__file__).read_text(encoding="utf-8")
     )
     return [
         node.lineno
         for node in ast.walk(tree)
         if isinstance(node, ast.Try)
         and calls_retryable_send(node.body)
-        and not any(reraises_send_error(h) for h in node.handlers)
+        and not effective_handler_reraises(node)
     ]
 
 
@@ -3447,7 +3516,13 @@ def test_every_try_containing_a_retryable_send_reraises_it():
 
 
 def test_the_static_send_failure_guard_actually_detects_a_violation():
-    """위 가드가 tautology가 아님을 고정한다 — 위반을 실제로 잡는지 확인한다."""
+    """위 가드가 tautology가 아님을 고정한다 — 위반을 실제로 잡는지 확인한다.
+
+    가드 본체를 부르지 않고 판정 로직을 인라인으로 다시 구현하면, 검증 대상이 가드가
+    아니라 ast 모듈이 된다. 실제로 그 형태였을 때 가드를 `return []`로 무력화해도
+    스위트가 초록이었다 — backstop을 걷어낸 지금 이 가드가 #249의 유일한 구조적
+    보장이라 무커버로 둘 수 없다 (PR #253 3차 리뷰).
+    """
     violating = textwrap.dedent(
         """
         async def handler(self):
@@ -3457,17 +3532,56 @@ def test_the_static_send_failure_guard_actually_detects_a_violation():
                 await self._send_text_or_raise(f"처리 실패: {exc}")
         """
     )
-    tree = ast.parse(violating)
-    try_node = next(n for n in ast.walk(tree) if isinstance(n, ast.Try))
+    assert _try_blocks_missing_send_failure_reraise(violating) == [3]
 
-    # 본문에 전송이 있고 TelegramSendError 핸들러가 없다 = 위반.
-    assert any(
-        isinstance(n, ast.Call)
-        and isinstance(n.func, ast.Attribute)
-        and n.func.attr == "_send_text_or_raise"
-        for n in ast.walk(try_node.body[0])
+
+def test_the_static_send_failure_guard_sees_through_handler_order():
+    """앞선 except Exception이 먼저 삼키면 뒤의 재던지기는 도달하지 않는다 (PR #253 3차 리뷰).
+
+    "어딘가에 except TelegramSendError가 있는가"만 보면 이 형태가 통과한다. 파이썬은
+    이 순서를 문법 오류로 보지 않으므로 리팩터링 사고로 충분히 나온다.
+    """
+    shadowed = textwrap.dedent(
+        """
+        async def handler(self):
+            try:
+                await self._send_text_or_raise("원래 메시지")
+            except Exception as exc:
+                await self._send_text_or_raise(f"처리 실패: {exc}")
+            except TelegramSendError:
+                raise
+        """
     )
-    assert not any(
-        isinstance(h.type, ast.Name) and h.type.id == "TelegramSendError"
-        for h in try_node.handlers
+    assert _try_blocks_missing_send_failure_reraise(shadowed) == [3]
+
+    # 순서를 바로잡으면 통과한다 — 가드가 순서만 보고 무조건 막는 것은 아니다.
+    correct = textwrap.dedent(
+        """
+        async def handler(self):
+            try:
+                await self._send_text_or_raise("원래 메시지")
+            except TelegramSendError:
+                raise
+            except Exception as exc:
+                await self._send_text_or_raise(f"처리 실패: {exc}")
+        """
     )
+    assert _try_blocks_missing_send_failure_reraise(correct) == []
+
+
+def test_the_static_send_failure_guard_allows_try_finally():
+    """핸들러가 없으면 예외는 그대로 전파된다 — 무의미한 재던지기를 요구하지 않는다.
+
+    앞선 구현은 "재던지는 핸들러가 하나도 없다"만 보고 try/finally를 위반으로 셌다
+    (PR #253 3차 리뷰).
+    """
+    with_finally = textwrap.dedent(
+        """
+        async def handler(self):
+            try:
+                await self._send_text_or_raise("원래 메시지")
+            finally:
+                self._cleanup()
+        """
+    )
+    assert _try_blocks_missing_send_failure_reraise(with_finally) == []

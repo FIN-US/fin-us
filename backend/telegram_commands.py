@@ -454,6 +454,13 @@ class TelegramCommandHandler:
                     # 전부 ban 구간에 소진된다. 게다가 ban 중 재요청은 대기 시간을 늘리는
                     # 방향으로 작용한다 — 남은 예산 안에 안 풀리면 재시도가 무의미할 뿐
                     # 아니라 해롭다 (PR #253 2차 리뷰).
+                    #
+                    # last_retry_after_seconds는 notifier에 걸린 공유 가변 상태다. 이 읽기가
+                    # 방금 그 send_text의 결과를 보는 근거는 둘뿐이다: send_text가 성공·실패
+                    # 양쪽에서 값을 갱신해 호출 간 이월이 없다는 것과, 위 send_text 반환과
+                    # 이 줄 사이에 await가 없어 이벤트 루프가 다른 코루틴에 넘어가지 않는다는
+                    # 것. 사이에 await를 하나 넣으면(로깅을 비동기로 바꾸는 정도로도) 다른
+                    # 전송의 flood-wait을 읽게 된다 (PR #253 3차 리뷰).
                     retry_after = getattr(self.notifier, "last_retry_after_seconds", None)
                     if retry_after is not None:
                         remaining = SETTLED_SEND_TIMEOUT_SECONDS - (
@@ -1715,7 +1722,10 @@ class TelegramCommandPoller:
         여기까지 오지 않는다. 즉 재실행되는 것은 부수효과 이전 구간뿐이다 (#247).
 
         반대로 부수효과 이전의 전송 실패는 변환 경로(except Exception)에 삼켜지지 않고
-        반드시 여기 도달한다 — handle_update가 종료 시점에 다시 던진다 (#249).
+        반드시 여기 도달한다 — 전송을 본문에 둔 try는 TelegramSendError를 재던져야 하고,
+        test_every_try_containing_a_retryable_send_reraises_it이 그것을 정적으로 강제한다
+        (#249). 그 가드는 직접 호출만 보므로, 전송을 감싼 헬퍼를 try 안에서 부르는 코드가
+        생기면 이 전제가 조용히 깨진다.
         """
         try:
             await self.handler.handle_update(update)

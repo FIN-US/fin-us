@@ -417,3 +417,60 @@ async def test_send_text_failure_log_redacts_bot_token(monkeypatch, caplog):
     assert "bot<redacted>" in caplog.text
     # 진단에 필요한 정보는 남아 있어야 한다.
     assert "retry_after=42s" in caplog.text
+
+
+def test_polling_error_log_redacts_bot_token(caplog):
+    """폴러의 getUpdates 실패 로그에도 리댁션이 걸린다 (PR #253 3차 리뷰).
+
+    _get_updates가 URL에 토큰을 넣고 raise_for_status를 호출하며, 401·409(인스턴스 중복)·
+    429·5xx에서 폴링 루프가 5초마다 재시도하므로 전송 경로보다 트리거가 잦다.
+
+    기존 test_telegram_error_log_redacts_bot_token도 getUpdates URL을 쓰지만 로거가
+    httpx라 이 항목을 검증하지 않는다. allowlist에서 backend.telegram_commands만 빼도
+    스위트 전체가 초록이었다 — 자격증명 누출은 조용히 되돌아가면 알 방법이 없다.
+    """
+    token = "8666951614:SECRET"
+    url = f"https://api.telegram.org/bot{token}/getUpdates"
+
+    with caplog.at_level(logging.ERROR, logger="backend.telegram_commands"):
+        logging.getLogger("backend.telegram_commands").error(
+            "Telegram command polling failed: %s", httpx.HTTPError(url)
+        )
+
+    assert token not in caplog.text
+    assert "https://api.telegram.org/bot<redacted>/getUpdates" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_send_text_publishes_and_clears_retry_after(monkeypatch):
+    """429의 flood-wait을 호출부가 읽을 수 있게 남기고, 성공하면 지운다 (PR #253 3차 리뷰).
+
+    telegram_commands._send_text_settled가 이 값 하나로 "재시도할 가치가 있는가"를 가른다.
+    소비 측 두 분기는 고정돼 있었지만 생산 측이 무커버라, 두 대입을 지워도 스위트가
+    초록이었다 — 재시도가 조용히 (1, 3, 9) 추측 백오프로 되돌아간다.
+    """
+    notifier = TelegramNotifier("token", "123")
+
+    async def fail(text, *, reply_markup=None):
+        raise _http_status_error(429, {"ok": False, "parameters": {"retry_after": 42}})
+
+    monkeypatch.setattr(notifier, "_post_message", fail)
+    assert await notifier.send_text("안녕") is False
+    assert notifier.last_retry_after_seconds == 42
+
+    # 429가 아닌 실패는 값을 남기지 않는다 — 이월되면 다음 재시도가 엉뚱한 값을 기다린다.
+    async def fail_500(text, *, reply_markup=None):
+        raise _http_status_error(500, {"ok": False})
+
+    monkeypatch.setattr(notifier, "_post_message", fail_500)
+    assert await notifier.send_text("안녕") is False
+    assert notifier.last_retry_after_seconds is None
+
+    async def succeed(text, *, reply_markup=None):
+        return None
+
+    monkeypatch.setattr(notifier, "_post_message", fail)
+    assert await notifier.send_text("안녕") is False
+    monkeypatch.setattr(notifier, "_post_message", succeed)
+    assert await notifier.send_text("안녕") is True
+    assert notifier.last_retry_after_seconds is None
