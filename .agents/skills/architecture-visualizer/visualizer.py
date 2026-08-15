@@ -1,22 +1,26 @@
 import os
 from pathlib import Path
 
+# 점으로 시작하는 디렉토리는 이름을 나열하지 않고 일괄 제외한다(_is_excluded 참조).
+# 예전에는 이 집합에 하나씩 적었는데, `venv`는 있고 `.venv`는 없어서 루트의 `.venv`,
+# `.venv-1`, `.pytest_cache`, `.codex-worktrees` 등이 전부 "핵심 모듈"로 출력됐다.
 EXCLUDE = {
-    ".git",
-    ".agents",
     "__pycache__",
     "venv",
     "node_modules",
-    ".idea",
-    ".vscode",
-    ".DS_Store",
-    ".claude",
-    ".gemini",
-    ".github",
-    ".cursor",
     "legacy",
+    "dist",
+    "build",
 }
 SOURCE_EXTS = (".py", ".java", ".ts", ".tsx", ".js", ".jsx", ".md", ".yml", ".yaml", ".json")
+
+# _collect_signals가 훑는 파일 수 상한. 신호 판정은 몇 개만 봐도 충분한데, 상한이 없으면
+# Unity 프로젝트(frontend)나 실수로 걸린 .venv를 통째로 rglob해 수 초씩 멈춘다.
+SIGNAL_FILE_LIMIT = 2000
+
+
+def _is_excluded(name: str) -> bool:
+    return name.startswith(".") or name in EXCLUDE
 
 
 def _safe_read(path: Path) -> str:
@@ -30,16 +34,24 @@ def _top_level_dirs(start_path: str) -> list[Path]:
     root = Path(start_path).resolve()
     dirs = []
     for child in root.iterdir():
-        if child.is_dir() and child.name not in EXCLUDE:
+        if child.is_dir() and not _is_excluded(child.name):
             dirs.append(child)
     return sorted(dirs, key=lambda p: p.name)
 
 
 def _collect_signals(dir_path: Path) -> dict[str, bool]:
-    files = list(dir_path.rglob("*"))
-    names = {f.name for f in files if f.is_file()}
-    paths_text = "\n".join(str(f) for f in files if f.is_file())
-    joined = f"{' '.join(names)}\n{paths_text}".lower()
+    # os.walk로 훑으면서 제외 대상 디렉토리는 내려가기 전에 쳐낸다. rglob은 가지치기가
+    # 안 돼서 node_modules/.venv 안까지 다 들어간다.
+    paths: list[str] = []
+    for current, subdirs, filenames in os.walk(dir_path):
+        subdirs[:] = [d for d in subdirs if not _is_excluded(d)]
+        for filename in filenames:
+            paths.append(f"{filename}\n{os.path.join(current, filename)}")
+            if len(paths) >= SIGNAL_FILE_LIMIT:
+                break
+        if len(paths) >= SIGNAL_FILE_LIMIT:
+            break
+    joined = "\n".join(paths).lower()
     return {
         "fastapi": "fastapi" in joined or "uvicorn" in joined,
         "unity": "projectsettings" in joined or ".unity" in joined or "build.wasm" in joined,
@@ -61,8 +73,12 @@ def _infer_role(dir_path: Path, signals: dict[str, bool]) -> str:
         return "뉴스/수급/리서치 데이터를 제공하는 MCP 서버입니다."
     if name == "mcp-trading":
         return "잔고 조회 및 주문 실행 등 트레이딩 기능을 제공하는 MCP 서버입니다."
+    if name == "mcp-dart":
+        return "OpenDART 공시 신호를 제공하는 MCP 서버입니다."
     if name == "scripts":
         return "로컬/도커 실행, 의존성 설치, 환경 점검 등 운영 자동화를 담당합니다."
+    if name == "docs":
+        return "설계·조사 문서를 모아 둡니다. 실행 코드는 없습니다."
     if signals["fastapi"]:
         return "API 서버 역할의 백엔드 모듈입니다."
     if signals["unity"]:
@@ -94,6 +110,8 @@ def _detect_relationships(start_path: str) -> list[tuple[str, str, str]]:
         rels.append(("backend", "mcp-news", "MCP tool 호출"))
     if "mcp-trading" in backend_text or "TRADING_MCP_PARAMS" in backend_text:
         rels.append(("backend", "mcp-trading", "MCP tool 호출"))
+    if "mcp-dart" in backend_text or "DART_MCP_PARAMS" in backend_text:
+        rels.append(("backend", "mcp-dart", "MCP tool 호출"))
     if "nat_finus_nat" in backend_text:
         rels.append(("backend", "finus_nat", "NAT 함수/워크플로 활용"))
 
@@ -102,6 +120,8 @@ def _detect_relationships(start_path: str) -> list[tuple[str, str, str]]:
         rels.append(("finus_nat", "mcp-news", "MCP 서버 래핑"))
     if "subdir=\"mcp-trading\"" in finus_text:
         rels.append(("finus_nat", "mcp-trading", "MCP 서버 래핑"))
+    if "subdir=\"mcp-dart\"" in finus_text:
+        rels.append(("finus_nat", "mcp-dart", "MCP 서버 래핑"))
 
     if scripts_dir.is_dir():
         rels.append(("scripts", "backend", "실행/배포 스크립트"))

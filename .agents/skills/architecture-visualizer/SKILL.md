@@ -17,9 +17,13 @@ description: >
 
 ### 1. 사전 준비 (Scan)
 
-프로젝트 루트 디렉토리를 탐색합니다. 다음 제외 대상은 반드시 무시합니다.
+프로젝트 루트 디렉토리를 탐색합니다. 다음은 반드시 무시합니다.
 
-- 제외: `['.git', '.agents', '__pycache__', 'venv', 'node_modules', '.idea', '.vscode', '.DS_Store', '.claude', '.gemini', '.github', '.cursor', '.vscode', 'legacy']`
+- **점으로 시작하는 디렉토리 전부** (`.git`, `.agents`, `.claude`, `.github`, `.venv`, `.pytest_cache` …)
+- 이름으로 지정한 제외 대상: `__pycache__`, `venv`, `node_modules`, `legacy`, `dist`, `build`
+
+점 디렉토리를 이름으로 하나씩 나열하지 않습니다. 그렇게 하면 `venv`는 막고 `.venv`는 놓치는
+식으로 빠지는 것이 생깁니다.
 
 ### 2. 구조 분석 (Analyze)
 
@@ -27,7 +31,7 @@ description: >
 - 단순 폴더 나열을 금지하고, **각 모듈의 책임(역할)과 데이터/호출 흐름**을 추출합니다.
 - 아래 관계를 우선 매핑합니다.
   - UI(Unity WebGL `frontend`) → API(`backend`) 호출
-  - API(`backend`) → MCP 서버(`mcp-news`, `mcp-trading`) 호출
+  - API(`backend`) → MCP 서버(`mcp-news`, `mcp-trading`, `mcp-dart`) 호출
   - NAT(`finus_nat`) ↔ MCP 서버 연결 및 라우팅
   - `scripts`가 어떤 실행 경로를 묶는지
 
