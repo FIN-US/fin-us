@@ -99,6 +99,30 @@ jobs:
       - name: mcp-trading 테스트 실행
         run: npm test
 
+  # mcp-news는 tests/와 npm test를 갖고 있으면서도 잡이 없어 CI에서 한 번도 돌지
+  # 않았다(hadolint 매트릭스에만 들어 있었다). mcp-trading·mcp-dart와 같은 구성이다.
+  mcp-news-test:
+    name: mcp-news npm test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mcp-news
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Node 24 설치 (npm 캐시 활성화)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+          cache-dependency-path: mcp-news/package-lock.json
+
+      - name: npm 의존성 설치
+        run: npm ci
+
+      - name: mcp-news 테스트 실행
+        run: npm test
+
   mcp-dart-test:
     name: mcp-dart npm test
     runs-on: ubuntu-latest

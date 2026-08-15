@@ -1,7 +1,7 @@
 # PR 리뷰 체크리스트 (fin-us 전용)
 
 **CI가 이미 잡는 것은 여기 없습니다.** `.github/workflows/ci.yml`이 backend·finus_nat pytest,
-mcp-trading·mcp-dart npm test, Unity `Assets`/`Build` 드리프트, hadolint, `nginx -t`를 돌립니다.
+mcp-trading·mcp-news·mcp-dart npm test, Unity `Assets`/`Build` 드리프트, hadolint, `nginx -t`를 돌립니다.
 빨간불이 나면 그건 리뷰할 일이 아니라 고칠 일입니다. 이 목록은 **CI가 못 잡는 것**만 담습니다.
 
 ## 돈이 나가는 경로 (`backend/trading_orders.py`, `mcp-trading/`)
@@ -35,7 +35,6 @@ mcp-trading·mcp-dart npm test, Unity `Assets`/`Build` 드리프트, hadolint, `
 ## 의존성·빌드
 
 - [ ] `finus_nat` 의존성을 바꿨다면 `scripts/patch_vendor.py`의 **네 대상**에 패치가 여전히 붙는가
-- [ ] `mcp-news`를 고쳤다면 테스트를 **직접** 돌렸는가 (CI에 mcp-news 잡이 없다)
 - [ ] `frontend/Assets/`를 고쳤다면 `frontend/Build/` 재빌드가 동반됐는가
 
 ## 테스트
