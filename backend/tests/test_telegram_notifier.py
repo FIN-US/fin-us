@@ -6,6 +6,7 @@ import pytest
 from backend.telegram_notifier import (
     TELEGRAM_MESSAGE_LIMIT,
     TelegramNotifier,
+    _retry_after_seconds,
     should_send_telegram_alert,
 )
 
@@ -544,3 +545,133 @@ async def test_delete_message_returns_false_on_failure(monkeypatch):
 @pytest.mark.asyncio
 async def test_delete_message_is_inert_when_notifier_disabled():
     assert await TelegramNotifier("", "").delete_message(1) is False
+def _http_status_error(status_code, body):
+    request = httpx.Request("POST", "https://api.telegram.org/bottoken/sendMessage")
+    response = httpx.Response(status_code, json=body, request=request)
+    return httpx.HTTPStatusError("error", request=request, response=response)
+
+
+def test_retry_after_seconds_reads_429_parameters():
+    """429의 retry_after를 로그에 남길 수 있어야 한다 (#247 자가리뷰).
+
+    send_text가 bool만 돌려주는 탓에 호출부의 재시도 간격은 고정 추측값이다.
+    실제 ban 길이가 그 가정과 맞는지 판단할 근거가 로그에 있어야 한다.
+    """
+    exc = _http_status_error(429, {"ok": False, "parameters": {"retry_after": 37}})
+    assert _retry_after_seconds(exc) == 37
+
+
+def test_retry_after_seconds_returns_none_for_non_429_or_malformed_body():
+    assert _retry_after_seconds(_http_status_error(500, {"ok": False})) is None
+    assert _retry_after_seconds(_http_status_error(429, {"ok": False})) is None
+    assert _retry_after_seconds(_http_status_error(429, {"parameters": {}})) is None
+    assert (
+        _retry_after_seconds(_http_status_error(429, {"parameters": {"retry_after": "30"}}))
+        is None
+    )
+    # bool은 int의 서브클래스라 가드가 없으면 True가 1로 통과한다 (PR #253 리뷰).
+    assert (
+        _retry_after_seconds(_http_status_error(429, {"parameters": {"retry_after": True}}))
+        is None
+    )
+    assert _retry_after_seconds(httpx.ConnectError("boom")) is None
+
+
+@pytest.mark.asyncio
+async def test_send_text_logs_retry_after_on_429(monkeypatch, caplog):
+    async def raise_429(text, *, reply_markup=None):
+        raise _http_status_error(429, {"ok": False, "parameters": {"retry_after": 42}})
+
+    notifier = TelegramNotifier("token", "123")
+    monkeypatch.setattr(notifier, "_post_message", raise_429)
+
+    with caplog.at_level(logging.ERROR):
+        assert await notifier.send_text("안녕") is False
+
+    assert "retry_after=42s" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_send_text_failure_log_redacts_bot_token(monkeypatch, caplog):
+    """전송 실패 로그에 봇 토큰이 평문으로 남지 않아야 한다 (PR #253 리뷰).
+
+    raise_for_status가 만드는 str(HTTPStatusError)에는 요청 URL이 들어 있고, 그 URL에
+    토큰이 포함된다. 리댁션 필터가 httpx/httpcore 로거에만 걸려 있어 이 모듈 자신의
+    로거로 찍는 경로는 걸러지지 않았다.
+    """
+    token = "SECRET-BOT-TOKEN-123"
+    request = httpx.Request("POST", f"https://api.telegram.org/bot{token}/sendMessage")
+    response = httpx.Response(
+        429, json={"ok": False, "parameters": {"retry_after": 42}}, request=request
+    )
+
+    async def raise_for_status(text, *, reply_markup=None):
+        response.raise_for_status()
+
+    notifier = TelegramNotifier(token, "123")
+    monkeypatch.setattr(notifier, "_post_message", raise_for_status)
+
+    with caplog.at_level(logging.ERROR):
+        assert await notifier.send_text("안녕") is False
+
+    assert token not in caplog.text
+    assert "bot<redacted>" in caplog.text
+    # 진단에 필요한 정보는 남아 있어야 한다.
+    assert "retry_after=42s" in caplog.text
+
+
+def test_polling_error_log_redacts_bot_token(caplog):
+    """폴러의 getUpdates 실패 로그에도 리댁션이 걸린다 (PR #253 3차 리뷰).
+
+    _get_updates가 URL에 토큰을 넣고 raise_for_status를 호출하며, 401·409(인스턴스 중복)·
+    429·5xx에서 폴링 루프가 5초마다 재시도하므로 전송 경로보다 트리거가 잦다.
+
+    기존 test_telegram_error_log_redacts_bot_token도 getUpdates URL을 쓰지만 로거가
+    httpx라 이 항목을 검증하지 않는다. allowlist에서 backend.telegram_commands만 빼도
+    스위트 전체가 초록이었다 — 자격증명 누출은 조용히 되돌아가면 알 방법이 없다.
+    """
+    token = "8666951614:SECRET"
+    url = f"https://api.telegram.org/bot{token}/getUpdates"
+
+    with caplog.at_level(logging.ERROR, logger="backend.telegram_commands"):
+        logging.getLogger("backend.telegram_commands").error(
+            "Telegram command polling failed: %s", httpx.HTTPError(url)
+        )
+
+    assert token not in caplog.text
+    assert "https://api.telegram.org/bot<redacted>/getUpdates" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_send_text_publishes_and_clears_retry_after(monkeypatch):
+    """429의 flood-wait을 호출부가 읽을 수 있게 남기고, 성공하면 지운다 (PR #253 3차 리뷰).
+
+    telegram_commands._send_text_settled가 이 값 하나로 "재시도할 가치가 있는가"를 가른다.
+    소비 측 두 분기는 고정돼 있었지만 생산 측이 무커버라, 두 대입을 지워도 스위트가
+    초록이었다 — 재시도가 조용히 (1, 3, 9) 추측 백오프로 되돌아간다.
+    """
+    notifier = TelegramNotifier("token", "123")
+
+    async def fail(text, *, reply_markup=None):
+        raise _http_status_error(429, {"ok": False, "parameters": {"retry_after": 42}})
+
+    monkeypatch.setattr(notifier, "_post_message", fail)
+    assert await notifier.send_text("안녕") is False
+    assert notifier.last_retry_after_seconds == 42
+
+    # 429가 아닌 실패는 값을 남기지 않는다 — 이월되면 다음 재시도가 엉뚱한 값을 기다린다.
+    async def fail_500(text, *, reply_markup=None):
+        raise _http_status_error(500, {"ok": False})
+
+    monkeypatch.setattr(notifier, "_post_message", fail_500)
+    assert await notifier.send_text("안녕") is False
+    assert notifier.last_retry_after_seconds is None
+
+    async def succeed(text, *, reply_markup=None):
+        return None
+
+    monkeypatch.setattr(notifier, "_post_message", fail)
+    assert await notifier.send_text("안녕") is False
+    monkeypatch.setattr(notifier, "_post_message", succeed)
+    assert await notifier.send_text("안녕") is True
+    assert notifier.last_retry_after_seconds is None
