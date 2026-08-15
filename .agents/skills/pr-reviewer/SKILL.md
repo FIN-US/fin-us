@@ -141,8 +141,13 @@ git -C "<REPO>" log --oneline -10          # 최근 커밋 이력
 
 ### 2. 프리플라이트 체크
 
-새 worktree에는 gitignore 대상인 의존성 디렉토리가 없습니다.
-이 레포의 해당 디렉토리는 `backend/.venv`, `finus_nat/.venv`, `mcp-dart/node_modules` 입니다.
+새 worktree에는 gitignore 대상인 의존성 디렉토리가 없습니다. 이 레포의 해당 디렉토리는
+`backend/.venv`, `finus_nat/.venv`, 그리고 **`mcp-dart`·`mcp-news`·`mcp-trading` 각각의
+`node_modules`** 입니다.
+
+**대상 목록은 `.github/workflows/ci.yml`의 잡과 맞춰 둡니다.** 목록을 좁게 적어두면 CI가
+검증하는 영역을 리뷰가 조용히 건너뜁니다(실제로 `mcp-trading`이 그랬습니다).
+node 패키지가 추가되면 이 목록과 CI 잡을 함께 갱신합니다.
 
 #### 절대 실행하지 않는 명령
 
@@ -174,22 +179,26 @@ uv run --no-sync --project "<WT_PATH>/backend" pytest
 참고: 이 레포의 CI가 쓰는 실제 명령은 `uv sync --project backend` / `uv run --project backend pytest`
 입니다. `pytest`나 `ruff check .`를 worktree에서 venv 활성화 없이 그냥 실행하면 해석되지 않습니다.
 
-#### Node 영역(`mcp-dart`)은 링크 후 실행 가능
+#### Node 영역(`mcp-dart`, `mcp-news`, `mcp-trading`)은 링크 후 실행 가능
 
 `node_modules`는 실행만으로 재설치되지 않으므로 링크해도 안전합니다.
+**diff가 건드린 패키지만** 검증합니다 — 안 바뀐 패키지까지 돌릴 이유가 없습니다.
 
 ```bash
-ln -s "<REPO>/mcp-dart/node_modules" "<WT_PATH>/mcp-dart/node_modules" \
-  || cmd //c mklink //J "<WT_PATH>/mcp-dart/node_modules" "<REPO>/mcp-dart/node_modules"
+# <PKG>는 이 PR이 실제로 건드린 패키지로 치환한다. 여러 개면 각각 반복한다.
+ln -s "<REPO>/<PKG>/node_modules" "<WT_PATH>/<PKG>/node_modules" \
+  || cmd //c mklink //J "<WT_PATH>/<PKG>/node_modules" "<REPO>/<PKG>/node_modules"
 # ln -s는 Windows에서 개발자 모드가 꺼져 있고 MSYS=winsymlinks도 미설정이면 실패한다.
 # 그 경우 junction(mklink //J)으로 폴백한다.
 
 # 링크가 실제로 디렉토리로 해석되는지 확인하고, 성공한 경우에만 검증을 실행한다.
 # 확인을 && 로 묶어 실패 시 npm이 실행되지 않도록 한다.
-[ -d "<WT_PATH>/mcp-dart/node_modules" ] \
-  && npm --prefix "<WT_PATH>/mcp-dart" test \
-  || echo "PREFLIGHT SKIP: node_modules 링크 실패 — 리포트에 사유를 명시할 것"
+[ -d "<WT_PATH>/<PKG>/node_modules" ] \
+  && npm --prefix "<WT_PATH>/<PKG>" test \
+  || echo "PREFLIGHT SKIP: <PKG> node_modules 링크 실패 — 리포트에 사유를 명시할 것"
 ```
+
+세 패키지 모두 `npm test`(`node --test tests/*.test.js`)를 가지고 있습니다.
 
 > `frontend/`는 Unity 프로젝트라 node 의존성이 없습니다. 프론트엔드 변경은 추적 중인
 > WebGL 번들(`frontend/Build/`)과 소스가 어긋나지 않았는지를 보는 것이 검증 지점입니다
