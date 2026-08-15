@@ -273,10 +273,12 @@ async def test_poller_state_load_rejects_oversized_handled_ahead():
 
 @pytest.mark.asyncio
 async def test_poller_state_load_keeps_realistic_handled_ahead_size():
-    """도달 가능한 최댓값(약 6,700)은 상한에 걸리지 않아야 한다 (PR #251 리뷰).
+    """도달 가능한 최댓값의 상계(6,700)는 상한에 걸리지 않아야 한다 (PR #251 리뷰).
 
     상한에 걸리면 상태를 버려 중복 실행이 생긴다 — 정상 상태를 버리는 상한은 이 PR이
-    고치려는 버그를 되살린다. 전송 실패 창 335초 / 최소 간격 5초 = 67배치 × limit 100.
+    고치려는 버그를 되살린다. 전송 실패 창 335초 / 최소 간격 5초 = 67배치이고, 배치당
+    최대치는 getUpdates의 limit이다(미지정 = 기본값 100 → 6,700). limit을 명시하면 그만큼
+    작아지므로 6,700은 상계이고, 이 단언은 그 아래 모든 값에 대해서도 성립한다.
     """
     redis = FakeRedis()
     reachable = list(range(6_700))
@@ -321,10 +323,14 @@ async def test_poller_state_save_warns_when_handled_ahead_nears_limit(caplog):
 
 @pytest.mark.asyncio
 async def test_poller_state_save_is_quiet_below_warning_threshold(caplog):
-    """도달 가능한 크기(약 6,700)에서 경고가 울리면 로그가 무의미해진다 (PR #251 리뷰)."""
+    """도달 가능한 크기의 상계(6,700)에서 경고가 울리면 로그가 무의미해진다 (PR #251 리뷰).
+
+    단언을 caplog.text == ""로 두면 무관한 라이브러리 경고 하나에 깨지고, 원인이 이 PR과
+    무관해 보여 추적이 어렵다. 뮤테이션 감지력은 이 문구 검사와 동일하다 (PR #251 리뷰).
+    """
     store = RedisTelegramPollerStore(FakeRedis())
 
     with caplog.at_level("WARNING"):
         await store.save(TelegramPollerState(offset=1, handled_ahead=frozenset(range(6_700))))
 
-    assert caplog.text == ""
+    assert "상한의 절반을 넘었다" not in caplog.text

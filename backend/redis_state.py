@@ -20,11 +20,13 @@ DEFAULT_TELEGRAM_ALERT_MODE = "urgent"
 # 폴러 상태(offset·handled_ahead) TTL: 7일.
 # Telegram 서버는 미확정 update를 24시간만 보관하므로, 그보다 오래된 offset은 보호할 대상이
 # 이미 없다. TTL은 값의 유효기간이 아니라 폴러가 영구히 내려간 뒤 남는 키를 정리하는 장치다.
-# 쓰기마다 갱신되므로 폴러가 살아 있는 한 만료되지 않는다.
+# 쓰기는 update를 처리할 때만 일어나므로 7일 내내 update가 없으면 만료된다 — 폴러가 살아
+# 있다는 것만으로는 갱신되지 않는다. 이 값을 줄이려면 RedisTelegramPollerStore 독스트링의
+# "유휴 기간 < TTL" 조건을 먼저 따져야 한다 (PR #251 리뷰).
 TELEGRAM_POLLER_STATE_TTL_SEC = 60 * 60 * 24 * 7
-# 저장된 handled_ahead의 허용 상한. 도달 가능한 최댓값(약 6,700 — 산출 근거는
-# RedisTelegramPollerStore._deserialize)의 15배로, 오염된 값만 걸러내고 정상 상태는
-# 절대 버리지 않도록 잡았다. 상한에 걸리면 상태를 버리므로 중복 실행이 생긴다.
+# 저장된 handled_ahead의 허용 상한. 도달 가능한 최댓값(산출 근거는
+# RedisTelegramPollerStore._deserialize)에서 넉넉히 떨어뜨렸다 — 오염된 값만 걸러내고
+# 정상 상태는 절대 버리지 않도록 잡았다. 상한에 걸리면 상태를 버리므로 중복 실행이 생긴다.
 MAX_HANDLED_AHEAD = 100_000
 # offset의 허용 상한. Telegram update_id는 32비트라 정상값이 넘을 수 없다.
 # 왜 위쪽도 닫는지는 RedisTelegramPollerStore._deserialize 참조.
@@ -303,7 +305,10 @@ class RedisTelegramPollerStore:
         # 막지 못한다 — 실제로 막는 것은 그 값을 save()가 매 update마다 재직렬화(sorted +
         # json.dumps)하는 지속 비용이다 (PR #251 리뷰). 한계에 걸리면 상태를 버리고 중복이
         # 생기므로 도달 가능한 최댓값에서 넉넉히 떨어뜨렸다: 전송 실패 창 335초 동안 최소
-        # 간격 5초로 폴링하면 67배치 × getUpdates 기본 limit 100 = 6,700이 이론적 상한이다.
+        # 간격 5초로 폴링하면 67배치이고, 배치당 최대치는 _get_updates가 넘기는 limit이다.
+        # 지금은 limit을 지정하지 않아 Telegram 기본값 100이므로 67 × 100 = 6,700이 상한이고,
+        # limit을 명시하면 그만큼 더 작아진다(#253의 GET_UPDATES_LIMIT=10이면 670). 즉 6,700은
+        # 도달 가능한 최댓값의 상계이고, MAX_HANDLED_AHEAD는 그것의 15배 이상이다.
         if len(handled_ahead) > MAX_HANDLED_AHEAD:
             raise ValueError(
                 f"handled_ahead too large ({len(handled_ahead)} > {MAX_HANDLED_AHEAD})"
@@ -325,6 +330,11 @@ class RedisTelegramPollerStore:
                 len(state.handled_ahead),
                 MAX_HANDLED_AHEAD,
             )
+        # 상태가 그대로여도(blocked 재배달 배치처럼) 같은 payload를 다시 쓴다. dirty check를
+        # 두지 않은 이유는 TTL 갱신이 아니라 비용 대비다 — blocked 구간은 재시도 예산으로
+        # 유계(≤335초)이고 TTL은 7일(604,800초)이라 만료까지 3자릿수 배수의 여유가 있고,
+        # 쓰기가 진짜 0인 유휴 구간은 dirty check가 있든 없든 같다. 단일 채팅 규모에서 중복
+        # SET의 비용이 무시 가능해 상태를 하나 더 들일 값어치가 없다고 봤다 (PR #251 리뷰).
         payload = json.dumps(
             {"offset": state.offset, "handled_ahead": sorted(state.handled_ahead)}
         )

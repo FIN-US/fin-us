@@ -121,6 +121,10 @@ UPDATE_LABEL_LIMIT = 40
 # 값은 사용자 체감(폴링 지연)과 일시적 지연 흡수 사이의 절충이다. 정상 redis는 1ms 수준이라
 # 이 상한에 닿는 것은 이미 비정상이며, docker-compose에서 가장 흔한 장애(컨테이너 다운)는
 # 즉시 ECONNREFUSED를 내므로 이 경로를 타지 않는다.
+#
+# 값을 조정할 때 알아둘 성질: 타임아웃은 update마다 걸리므로 hang 중 배치 하나가 멈추는
+# 시간은 "배치 크기 × 이 값"으로 선형이다(응답 자체는 handle_update가 먼저 끝내 나간 뒤,
+# 그 뒤에 죽은 시간이 붙는다). getUpdates limit이 100이면 최악 약 300초다 (PR #251 리뷰).
 STATE_STORE_TIMEOUT_SECONDS = 3.0
 
 
@@ -1469,8 +1473,16 @@ class TelegramCommandPoller:
         # offset과 _handled_ahead는 redis에 함께 영속화된다 (#248). 둘 다 인메모리였을 때는
         # blocked 구간에 프로세스가 죽으면 여기 기록된 update들이 "실행됐지만 서버에 미확정"
         # 상태로 남아 재시작 후 전부 재실행됐다. 창의 길이가 재시도 예산과 같아
-        # (일반 실패 65초, 전송 실패 335초) 무시할 수 없었다 — 게다가 429와 재시작은
-        # "배포"라는 원인을 공유해 겹칠 이유가 있다.
+        # (일반 실패 65초, 전송 실패 335초) 무시할 수 없었다.
+        #
+        # "429와 재시작이 배포라는 원인을 공유한다"는 근거는 폐기했다 — 배포는 자기가 죽이는
+        # 프로세스의 poison을 만들 수 없고(_handled_ahead는 blocked가 이미 True일 때만 차므로
+        # poison이 사망보다 먼저, 같은 프로세스 안에서 일어나야 한다), 애초에 이 레포엔 CD도
+        # restart: 정책도 없다. 실제 재시작 계기는 Dockerfile의 uvicorn --reload + .:/app
+        # bind mount이며, 그 재시작은 SIGTERM → lifespan → stop_telegram_commands()의 취소
+        # 경로를 탄다. 근거는 확률이 아니라 비용 대비다: _handled_ahead는 Telegram이 원리적으로
+        # 보호해줄 수 없는 유일한 상태인데(서버는 미확정 update만 알 뿐 무엇을 이미 실행했는지
+        # 모른다) 영속화 비용은 이미 쓰는 키에 필드 하나다 (PR #251 리뷰).
         self.state_store = state_store if state_store is not None else _create_poller_state_store()
         self.offset: int | None = None
         # update_id -> 재시도 예산. 유실돼도 poison 폐기가 미뤄질 뿐 중복 실행으로 이어지지
