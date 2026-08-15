@@ -19,7 +19,7 @@ description: >
 
 프로젝트 루트 디렉토리를 탐색합니다. 다음은 반드시 무시합니다.
 
-- **점으로 시작하는 디렉토리 전부** (`.git`, `.agents`, `.claude`, `.github`, `.venv`, `.pytest_cache` …)
+- **점으로 시작하는 디렉토리 전부** (`.git`, `.claude`, `.github`, `.venv`, `.pytest_cache` …)
 - 이름으로 지정한 제외 대상: `__pycache__`, `venv`, `node_modules`, `legacy`, `dist`, `build`
 
 점 디렉토리를 이름으로 하나씩 나열하지 않습니다. 그렇게 하면 `venv`는 막고 `.venv`는 놓치는
@@ -68,7 +68,7 @@ graph TD
 요청이 들어오면 다음 명령어를 실행하여 시각화 파일을 생성하세요:
 
 ```bash
-python .agents/skills/architecture-visualizer/visualizer.py
+python .claude/skills/architecture-visualizer/visualizer.py
 ```
 
 ## 에러 핸들링

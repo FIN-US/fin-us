@@ -25,10 +25,8 @@ description: >
 
 ## 병렬 실행 규칙 (원격 PR 모드)
 
-**시작 전에 레포 루트 기준 `.agents/skills/_shared/worktree-conventions.md`를 읽습니다.**
-(상대 경로로 찾지 마세요 — 이 파일은 `.claude/skills/` 아래 링크를 통해 열릴 수 있어
-`../`가 다른 곳을 가리킵니다.)
-worktree 생성·경로·정리, 리터럴 기록, `git -C`/`gh -R` 호출 규약은 전부 거기에 있습니다.
+**시작 전에 [`.claude/skills/_shared/worktree-conventions.md`](../_shared/worktree-conventions.md)를
+읽습니다.** worktree 생성·경로·정리, 리터럴 기록, `git -C`/`gh -R` 호출 규약은 전부 거기에 있습니다.
 아래는 이 스킬에만 해당하는 규칙입니다.
 
 1. **`gh pr checkout`을 절대 사용하지 않습니다.** 이 명령은 공유 워킹 트리의 브랜치를 갈아치웁니다.
