@@ -25,22 +25,19 @@ description: "PR을 생성합니다. 'PR 올려줘', 'PR 만들어줘'라고 하
 서로가 만든 인덱스/HEAD 변화를 "변경사항"으로 오인해 매번 다른 diff를 보게 됩니다.
 worktree는 `.git`은 공유하되 인덱스와 HEAD는 분리되므로, 실행마다 독립된 스냅샷을 갖습니다.
 
+**경로 충돌은 이름 규칙이 아니라 실행 환경이 막습니다.** worktree를 이 실행에 주어진
+scratchpad 디렉토리 아래 두면 그 경로가 세션마다 이미 고유하므로, 실행마다 다른 경로가
+보장됩니다. 이름에 nonce를 섞거나 남의 잔재를 훑는 스윕을 돌릴 이유가 없습니다.
+
 ## 값 확정과 기록 (중요)
 
-이 스킬을 실행하는 에이전트는 **셸 호출마다 새 프로세스**를 씁니다. 환경변수는 호출 간에 유지되지 않고,
-`$$`(PID)는 호출마다 다른 값이 됩니다. 0단계에서 정한 `$WT`를 7단계 정리에서 그대로 참조하면
-빈 문자열이 되어 정리가 조용히 실패하고, worktree가 PR을 올릴 때마다 누적됩니다.
+이 스킬을 실행하는 에이전트는 **셸 호출마다 새 프로세스**를 씁니다. 환경변수는 호출 간에 유지되지 않습니다.
+0단계에서 정한 `$WT`를 7단계 정리에서 그대로 참조하면 빈 문자열이 되어
+`git worktree remove --force ""`가 되고, 정리가 조용히 실패해 worktree가 누적됩니다.
 
-**복구 가능성을 주는 것은 아래의 "리터럴 기록"이지 이름의 결정성이 아닙니다.**
-따라서 이름은 고유해야 하고, 동시에 기록되어야 합니다.
-
-- 이름에 **nonce를 반드시 포함**합니다: `pr-<SLUG>-<SHA7>-<nonce>`.
-  결정적 이름만 쓰면 같은 브랜치를 같은 커밋에서 두 번 동시에 처리할 때 경로가 완전히 같아지고,
-  7단계의 `worktree remove --force`가 **아직 작업 중인 다른 실행의 worktree를 통째로 지웁니다.**
-- `<nonce>`는 0단계에서 **한 번만** 만들어 리터럴로 기록합니다. `$$`를 쓰지 않습니다 —
-  호출마다 달라지는 것이 원래 문제였습니다.
-- 0단계에서 확정한 **`REPO`, `WT_PATH`, `OWNER`, `BASE`, `BRANCH`의 리터럴 값을 출력해 기록**하고,
-  이후 모든 단계에서는 셸 변수가 아니라 그 리터럴 문자열을 직접 사용합니다.
+따라서 0단계에서 확정한 **`REPO`, `WT_PATH`, `OWNER`, `BASE`, `BRANCH`의 리터럴 값을 출력해 기록**하고,
+이후 모든 단계에서는 셸 변수가 아니라 그 리터럴 문자열을 직접 사용합니다.
+여러 명령을 한 셸 호출에 이어 붙여도 되지만, 그렇게 했다는 이유로 리터럴 기록을 생략하지 않습니다.
 
 ## 워크플로
 
@@ -80,33 +77,16 @@ id가 다르면 push한 브랜치와 `gh pr create`가 바라보는 레포가 �
 
 ```
 SLUG     = <BRANCH의 "/"를 "-"로 치환>
-SHA7     = git -C "<REPO>" rev-parse --short=7 <BRANCH>
-nonce    = 이 실행에서 한 번만 생성한 6자 영숫자
-WT_PATH  = <REPO의 부모>/.fin-us-worktrees/pr-<SLUG>-<SHA7>-<nonce>
+WT_PATH  = <이 실행의 scratchpad 디렉토리>/pr-<SLUG>
 ```
 
-worktree는 **레포 바깥**에 둡니다. 레포 안에 두면 소스 트리 전체 사본이 생겨, 누군가 루트에서
+`WT_PATH`는 **레포 바깥**이어야 합니다. 레포 안에 두면 소스 트리 전체 사본이 생겨, 누군가 루트에서
 범위 넓은 명령(pytest 수집, 전체 grep, 린트)을 돌릴 때 중첩 사본까지 훑습니다. 특히 pytest는
 같은 이름의 테스트 모듈이 두 벌 잡히면 `import file mismatch`로 죽습니다.
+scratchpad 디렉토리는 레포 바깥이면서 세션마다 고유하므로 두 조건을 모두 만족합니다.
+scratchpad를 받지 못했다면 `<REPO의 부모>/.fin-us-worktrees/pr-<SLUG>`를 씁니다.
 
 ### 1. 격리된 worktree 생성
-
-먼저 stale 스윕으로 이전 실행이 남긴 누수를 회수합니다. `pr-reviewer`와 `.fin-us-worktrees`
-루트를 공유하므로, **`pr-*` 디렉토리만** 대상으로 합니다(`rv-*`는 pr-reviewer의 것입니다).
-
-```bash
-git -C "<REPO>" worktree prune
-WTROOT="<REPO의 부모>/.fin-us-worktrees"
-# 등록된 worktree가 아닌 pr-* 잔여 디렉토리를 회수한다.
-# 디렉토리 mtime은 우리가 만든 시각이라 신뢰할 수 있다. 1시간 미만은 진행 중일 수 있으므로 제외.
-find "$WTROOT" -mindepth 1 -maxdepth 1 -type d -name 'pr-*' -mmin +60 2>/dev/null | while read -r d; do
-  git -C "<REPO>" worktree list --porcelain | grep -qF "$d" && continue
-  rm -rf "$d"
-done
-git -C "<REPO>" worktree prune
-```
-
-이어서 이 실행의 worktree를 만듭니다.
 
 ```bash
 # base는 refspec을 명시한다. --single-branch 클론에서는 refs/remotes/origin/<BASE>가
@@ -182,7 +162,7 @@ gh pr create \
 ```bash
 # 1차: 정상 경로
 git -C "<REPO>" worktree remove --force "<WT_PATH>"
-# 실패했다면 폴백 — 경로가 <WTROOT> 하위인지 확인한 뒤에만 실행한다
+# 실패했다면 폴백 — 경로가 이 실행의 <WT_PATH>가 맞는지 확인한 뒤에만 실행한다
 rm -rf "<WT_PATH>"
 git -C "<REPO>" worktree prune
 git -C "<REPO>" worktree list          # 실제로 사라졌는지 확인
@@ -190,10 +170,7 @@ git -C "<REPO>" worktree list          # 실제로 사라졌는지 확인
 
 **`worktree remove`가 실패하면 반드시 폴백을 실행합니다.** Windows에서 프로세스가 파일을
 잡고 있으면 흔히 실패하고, `worktree prune`은 디렉토리가 남아 있는 한 등록을 유지하므로
-회수하지 못합니다(실측 확인). 1단계 스윕은 1시간이 지나야 회수하므로 그때까지 누수가 남습니다.
-
-`<WT_PATH>`는 **이 실행의 nonce가 붙은 것**입니다. 다른 실행의 worktree를 지우지 않도록
-0단계에서 기록한 리터럴을 그대로 씁니다.
+회수하지 못합니다(실측 확인). 이 정리가 유일한 회수 지점이므로, 건너뛰면 누수가 그대로 남습니다.
 
 중간 단계에서 오류가 나거나 사용자가 5단계에서 취소하더라도 worktree는 제거합니다.
 정리에 실패하면 `<WT_PATH>`를 사용자에게 알려 수동으로 지울 수 있게 합니다.
