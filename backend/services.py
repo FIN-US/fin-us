@@ -598,16 +598,23 @@ async def _llm_ollama_chat(user_msg: str) -> str:
 
 
 class NatToolUse(NamedTuple):
-    """각주에 실을 도구 한 건 — 도구명과 성공 여부 (#260).
+    """각주에 실을 도구 한 건 — 도구명과 결과 상태 (#260).
 
-    finus_nat이 도구 강제 원장에서 만들어 보내는 ``{"name": ..., "ok": ...}``에 대응한다.
-    ``ok=False``는 도구를 호출했지만 오류 응답을 받았다는 뜻이다 — 각주에서 성공과
-    구분해 표시해야 한다. 실패한 호출을 "확인한 자료"로 보여주면 사용자는 답변이
-    그 데이터에 근거했다고 읽지만 실제로는 아니다.
+    finus_nat이 도구 강제 원장에서 만들어 보내는
+    ``{"name": ..., "ok": ..., "empty": ...}``에 대응한다.
+
+    ``ok=False``는 도구를 호출했지만 오류 응답을 받았다는 뜻이고,
+    ``ok=True, empty=True``는 호출은 성공했지만 결과 집합이 비었다는 뜻이다(#209).
+    셋 다 각주에서 구분해 표시해야 한다 — 실패나 빈 결과를 그냥 "확인한 자료"로
+    보여주면 사용자는 답변이 그 데이터에 근거했다고 읽지만 실제로는 아니다.
+
+    ``empty``에 기본값이 있는 이유: 이 필드를 싣지 않는 구버전 finus_nat과 섞일 수
+    있다. 기본값 ``False``는 "빈 결과라는 관측이 없음"이지 "데이터가 있었음"이 아니다.
     """
 
     name: str
     ok: bool
+    empty: bool = False
 
 
 class NatAnswer(str):
@@ -621,6 +628,12 @@ class NatAnswer(str):
 
     두 속성은 NAT 응답 페이로드의 **최상위 필드**에서 그대로 온다 — 답변 텍스트
     (``choices[0].message.content``)를 파싱해 만들지 않는다 (#129와 같은 원칙).
+
+    **주의 — 이 타입은 문자열 연산 한 번이면 소실된다.** ``str`` 서브클래스라
+    ``strip()``·``re.sub()``·f-string 등의 결과는 전부 plain ``str``이다. 답변
+    텍스트를 가공하는 계층이 ``llm_chat`` 경계 안에 새로 생기면
+    :meth:`with_text`로 갈아끼워야 한다. 그냥 반환하면 backend는 각주를 **조용히**
+    생략하도록 설계돼 있어(로그도 예외도 없다) 기능만 사라진다.
     """
 
     routed_agent: str | None
@@ -638,6 +651,15 @@ class NatAnswer(str):
         answer.tools_used = tuple(tools_used)
         return answer
 
+    def with_text(self, text: str) -> "NatAnswer":
+        """텍스트만 교체하고 추론 메타데이터를 유지한다 (#260).
+
+        ``llm_chat`` 안에서 응답 텍스트를 가공하는 계층(#230 PII 역치환 등)이 추가될 때
+        ``return transform(raw)``로 끝내면 서브클래스가 소실된다. 그 자리에
+        ``raw.with_text(transform(raw))``를 쓰면 각주가 살아남는다.
+        """
+        return NatAnswer(text, routed_agent=self.routed_agent, tools_used=self.tools_used)
+
 
 # 각주에 실을 도구 개수 상한. tools_used는 다른 서비스(NAT)가 보내는 값이라
 # 개수·길이가 backend에서 보장되지 않는다 — 비정상적으로 긴 목록이 텔레그램 메시지의
@@ -654,7 +676,8 @@ def _nat_reasoning_trace_from_payload(
     실어 보내는 값이다. 여기서는 **읽기만** 한다 — 답변 텍스트를 뒤져서 도구명이나
     에이전트명을 추측하지 않는다.
 
-    ``tools_used``는 ``[{"name": str, "ok": bool}]`` 형태다. 필드가 없거나 타입이
+    ``tools_used``는 ``[{"name": str, "ok": bool, "empty": bool}]`` 형태다
+    (``empty``는 구버전 finus_nat에는 없다). 필드가 없거나 타입이
     어긋나면 조용히 비운다. 두 필드를 싣지 않는 구버전 finus_nat과 혼용될 수 있고,
     각주는 답변에 덧붙는 부가 정보이므로 없다고 해서 응답 자체를 실패로 만들 이유가
     없다. 개수는 :data:`NAT_MAX_TOOLS_USED`로 자른다.
@@ -678,8 +701,11 @@ def _nat_reasoning_trace_from_payload(
             if name in seen:
                 continue
             seen.add(name)
-            # ok가 빠졌거나 bool이 아니면 실패로 본다 — 근거를 과장하지 않는 쪽으로 기운다.
-            tools_used.append(NatToolUse(name, item.get("ok") is True))
+            # ok/empty가 빠졌거나 bool이 아니면 각각 실패·비어있지 않음으로 본다.
+            # ok는 근거를 과장하지 않는 쪽으로 기울고, empty는 관측이 없다는 뜻이므로
+            # ok=False와 겹쳐 "실패인데 빈 결과"가 되지 않도록 ok일 때만 읽는다.
+            ok = item.get("ok") is True
+            tools_used.append(NatToolUse(name, ok, ok and item.get("empty") is True))
             if len(tools_used) >= NAT_MAX_TOOLS_USED:
                 logger.warning(
                     "NAT tools_used가 %d개를 넘어 잘라냅니다 (수신 %d개)",

@@ -19,6 +19,12 @@ router.yml과 router_nomemory.yml은 기본적으로 최근 대화 히스토리�
 응답에 담당 에이전트와 실제 실행된 도구 목록을 실어 보내, 텔레그램 봇이 답변 하단에
 근거 각주를 렌더링합니다 (#260).
 
+`tools_used`의 각 항목은 `{"name": str, "ok": bool, "empty": bool}`입니다. 도구 강제
+원장이 구분하는 세 상태를 그대로 넘깁니다 — 오류(`ok=false`), 성공했지만 0행
+(`ok=true, empty=true`, #209), 데이터 있음(`ok=true, empty=false`). 상태를 빼고 이름만
+넘기면 소비자가 실패·빈 결과까지 "확인한 자료"로 표시해, 답변이 근거하지 않은 데이터를
+근거로 제시하게 됩니다. 표기는 소비자가 정합니다(backend는 `(실패)`/`(결과 없음)`).
+
 **router_nomemory.yml(기본값)에서만 동작합니다.** router.yml(`--memory`)은 최상위
 workflow가 vendor `auto_memory_agent`인데, 그 `_response_fn` 시그니처가
 `(input_message: str) -> str`이라 안쪽에서 `ChatResponse`에 붙인 두 필드가 래퍼를

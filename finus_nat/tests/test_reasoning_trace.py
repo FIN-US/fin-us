@@ -188,6 +188,118 @@ def test_repeated_failure_stays_not_ok():
 
 
 # ---------------------------------------------------------------------------
+# 빈 결과(ok=True, empty=True) — 성공과도 실패와도 다른 세 번째 상태 (PR #263 리뷰)
+# ---------------------------------------------------------------------------
+
+def test_empty_result_is_carried_as_its_own_state():
+    """ok=True지만 0행인 호출을 데이터를 얻은 호출과 구분해 싣는다 (#209).
+
+    구분하지 않으면 게이트가 only_empty_reads()로 돌려주는 '[조회 결과 없음]' 답변에도
+    각주가 "확인한 자료: 뉴스 검색"이라고 적혀, 본문과 각주가 정면으로 충돌한다.
+    답변은 그 데이터에 근거하지 않았다 — ok=False에 대해 세운 논리가 그대로 성립한다.
+    """
+    ledger = DataToolLedger()
+    ledger.record("finus_market_news", ok=True, produced_rows=False, empty=True)
+    trace = ReasoningTrace()
+
+    trace.record_ledger_tools(ledger)
+
+    assert trace.tools_used == [ToolUse("finus_market_news", ok=True, empty=True)]
+
+
+def test_a_failed_call_is_never_marked_empty():
+    """오류 응답은 결과 집합이 비었는지를 말하지 않는다 — 두 필드가 모순되지 않게 눕힌다."""
+    ledger = DataToolLedger()
+    ledger.record("finus_market_news", ok=False, produced_rows=False, empty=True)
+    trace = ReasoningTrace()
+
+    trace.record_ledger_tools(ledger)
+
+    assert trace.tools_used == [ToolUse("finus_market_news", ok=False, empty=False)]
+
+
+def test_data_result_upgrades_an_earlier_empty_result():
+    """재시도에서 데이터를 얻었으면 결국 얻은 것이다 — 각주도 그렇게 말해야 한다."""
+    ledger = DataToolLedger()
+    ledger.record("finus_market_news", ok=True, produced_rows=False, empty=True)
+    ledger.record("finus_market_news", ok=True, produced_rows=True, empty=False)
+    trace = ReasoningTrace()
+
+    trace.record_ledger_tools(ledger)
+
+    assert trace.tools_used == [ToolUse("finus_market_news", ok=True, empty=False)]
+
+
+def test_empty_result_upgrades_an_earlier_failure():
+    """실패 < 빈 결과 — 오류로 끝난 게 아니라 조회에는 성공했다는 정보가 더 정확하다."""
+    ledger = DataToolLedger()
+    ledger.record("finus_market_news", ok=False, produced_rows=False)
+    ledger.record("finus_market_news", ok=True, produced_rows=False, empty=True)
+    trace = ReasoningTrace()
+
+    trace.record_ledger_tools(ledger)
+
+    assert trace.tools_used == [ToolUse("finus_market_news", ok=True, empty=True)]
+
+
+def test_a_later_empty_result_does_not_downgrade_obtained_data():
+    """한 번 얻은 데이터는 뒤 호출의 빈 결과·실패로 사라지지 않는다."""
+    ledger = DataToolLedger()
+    ledger.record("finus_market_news", ok=True, produced_rows=True, empty=False)
+    ledger.record("finus_market_news", ok=True, produced_rows=False, empty=True)
+    ledger.record("finus_market_news", ok=False, produced_rows=False)
+    trace = ReasoningTrace()
+
+    trace.record_ledger_tools(ledger)
+
+    assert trace.tools_used == [ToolUse("finus_market_news", ok=True, empty=False)]
+
+
+def test_successful_write_tool_is_not_reported_as_empty():
+    """쓰기 도구는 produced_rows=False여도 '실제로 저장했다'는 뜻이다 — 빈 결과가 아니다."""
+    ledger = DataToolLedger()
+    ledger.record("finus_save_diary", ok=True, produced_rows=False, empty=False)
+    trace = ReasoningTrace()
+
+    trace.record_ledger_tools(ledger)
+
+    assert trace.tools_used == [ToolUse("finus_save_diary", ok=True, empty=False)]
+
+
+@pytest.mark.asyncio
+async def test_empty_read_path_reports_empty_not_success():
+    """게이트의 빈 결과 경로 전체를 통과시켜 상태가 각주까지 살아 오는지 본다.
+
+    only_empty_reads()가 True면 게이트는 재시도 없이 _EMPTY_RESULT_REJECTION을
+    돌려준다. 그 답변에 붙는 각주의 근거가 이 tools_used다.
+    """
+
+    async def ainvoke(_request):
+        # mcp-news가 결과 없음일 때 내는 리터럴 (_EMPTY_RESULT_LITERALS).
+        _record_to_ledger("finus_market_news", "'삼성전자'에 대한 뉴스를 찾지 못했습니다.")
+        # 수치 주장이 있어야 게이트가 트립한다(_check_tool_enforcement).
+        return ChatResponse.from_string("삼성전자는 74,200원입니다.", usage=Usage())
+
+    inner = MagicMock()
+    inner.ainvoke = AsyncMock(side_effect=ainvoke)
+
+    trace = ReasoningTrace()
+    token = REASONING_TRACE.set(trace)
+    try:
+        answer = await _run_with_gate(
+            inner=inner,
+            query="삼성전자 뉴스 알려줘",
+            chat_request=_simple_req(),
+            inner_name="news_agent",
+        )
+    finally:
+        REASONING_TRACE.reset(token)
+
+    assert answer.startswith("[조회 결과 없음]"), "빈 결과 경로를 타는 시나리오여야 한다"
+    assert trace.tools_used == [ToolUse("finus_market_news", ok=True, empty=True)]
+
+
+# ---------------------------------------------------------------------------
 # 라우팅 → routed_agent
 # ---------------------------------------------------------------------------
 
@@ -218,6 +330,7 @@ def test_with_reasoning_trace_adds_fields_without_touching_existing_ones():
         routed_agent="news_agent",
         tools_used=[
             ToolUse("finus_market_news", ok=True),
+            ToolUse("finus_earnings_report", ok=True, empty=True),
             ToolUse("finus_account_balance", ok=False),
         ],
     )
@@ -227,8 +340,9 @@ def test_with_reasoning_trace_adds_fields_without_touching_existing_ones():
 
     assert dumped["routed_agent"] == "news_agent"
     assert dumped["tools_used"] == [
-        {"name": "finus_market_news", "ok": True},
-        {"name": "finus_account_balance", "ok": False},
+        {"name": "finus_market_news", "ok": True, "empty": False},
+        {"name": "finus_earnings_report", "ok": True, "empty": True},
+        {"name": "finus_account_balance", "ok": False, "empty": False},
     ]
     # 기존 필드 전부 불변 — 백엔드 파서와 scheduler가 이 필드들만 읽는다.
     for field_name in ("id", "object", "model", "created", "choices", "usage"):
@@ -255,6 +369,47 @@ def test_with_reasoning_trace_adds_nothing_when_nothing_observed():
 
     assert "routed_agent" not in dumped
     assert "tools_used" not in dumped
+
+
+def test_extra_fields_survive_the_fastapi_response_model_boundary():
+    """두 필드가 실제 HTTP 응답 본문까지 나가는지 고정한다 (PR #263 리뷰 🔵6).
+
+    model_dump()가 필드를 담는다고 HTTP 응답에 나간다는 보장은 없다. FastAPI는
+    response_model로 반환값을 한 번 더 검증·직렬화하는데, 그 경로에서 extra 필드가
+    떨어지면 backend는 필드가 없는 것으로 보고 각주를 **조용히** 생략한다 — 양 끝
+    (model_dump / backend 파싱)만 덮여 있고 그 사이가 비어 있던 구간이다.
+
+    response_model은 vendor 라우트와 같은 형태를 쓴다:
+      nat/front_ends/fastapi/routes/v1_chat_completions.py:158
+        response_model=ChatResponse | ChatResponseChunk
+    vendor가 이 시그니처를 바꾸면 이 테스트는 더 이상 그 경계를 대변하지 않는다.
+    """
+    fastapi = pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+    from nat.data_models.api_server import ChatResponseChunk
+
+    tagged = with_reasoning_trace(
+        ChatResponse.from_string("답변 본문", usage=Usage()),
+        ReasoningTrace(
+            routed_agent="news_agent",
+            tools_used=[ToolUse("finus_market_news", ok=True, empty=True)],
+        ),
+    )
+
+    app = fastapi.FastAPI()
+
+    @app.post("/v1/chat/completions", response_model=ChatResponse | ChatResponseChunk)
+    async def _endpoint():
+        return tagged
+
+    body = TestClient(app).post("/v1/chat/completions").json()
+
+    assert body["routed_agent"] == "news_agent"
+    assert body["tools_used"] == [
+        {"name": "finus_market_news", "ok": True, "empty": True}
+    ]
+    # 기존 필드도 그대로 나간다 — backend의 _nat_message_from_payload가 이걸 읽는다.
+    assert body["choices"][0]["message"]["content"] == "답변 본문"
 
 
 # ---------------------------------------------------------------------------
@@ -301,7 +456,7 @@ async def test_transcript_agent_attaches_trace_to_response(tmp_path):
     dumped = result.model_dump()
 
     assert dumped["routed_agent"] == "news_agent"
-    assert dumped["tools_used"] == [{"name": "finus_market_news", "ok": True}]
+    assert dumped["tools_used"] == [{"name": "finus_market_news", "ok": True, "empty": False}]
     assert dumped["choices"][0]["message"]["content"] == "삼성전자 뉴스입니다."
 
 

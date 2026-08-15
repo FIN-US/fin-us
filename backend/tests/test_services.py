@@ -1082,6 +1082,85 @@ def test_nat_reasoning_trace_caps_tool_count():
     assert len(tools_used) == services.NAT_MAX_TOOLS_USED
 
 
+def test_nat_reasoning_trace_reads_the_empty_result_flag():
+    """ok=True지만 결과가 비었던 호출을 데이터를 얻은 호출과 구분해 싣는다 (#209).
+
+    각주에서 '(결과 없음)'으로 표시하려면 이 경계에서 상태가 살아 있어야 한다.
+    empty를 버리면 NAT가 '[조회 결과 없음]'을 본문으로 돌려준 답변에도 각주는
+    '확인한 자료: 뉴스 검색'이라고 적어 본문과 정면으로 어긋난다.
+    """
+    _, tools_used = services._nat_reasoning_trace_from_payload(
+        {
+            "routed_agent": "news_agent",
+            "tools_used": [
+                {"name": "finus_market_news", "ok": True, "empty": True},
+                {"name": "finus_earnings_report", "ok": True, "empty": False},
+                {"name": "finus_account_balance", "ok": True},
+            ],
+        }
+    )
+
+    assert tools_used == (
+        services.NatToolUse("finus_market_news", ok=True, empty=True),
+        services.NatToolUse("finus_earnings_report", ok=True, empty=False),
+        # empty를 싣지 않는 구버전 finus_nat — '빈 결과라는 관측이 없음'으로 읽는다.
+        services.NatToolUse("finus_account_balance", ok=True, empty=False),
+    )
+
+
+def test_nat_reasoning_trace_never_marks_a_failed_call_as_empty():
+    """ok=False와 empty=True가 동시에 서지 않게 한다 — 각주 표기가 갈라지지 않는다."""
+    _, tools_used = services._nat_reasoning_trace_from_payload(
+        {"tools_used": [{"name": "finus_market_news", "ok": False, "empty": True}]}
+    )
+
+    assert tools_used == (services.NatToolUse("finus_market_news", ok=False, empty=False),)
+
+
+@pytest.mark.asyncio
+async def test_llm_chat_preserves_nat_reasoning_metadata(monkeypatch):
+    """llm_chat 경계를 통과해도 NatAnswer가 살아남아야 한다 (PR #263 리뷰).
+
+    NatAnswer는 str 서브클래스라 문자열 연산 한 번(strip/sub/f-string)이면 메타데이터가
+    소실된다. 프로덕션 경로는 TelegramCommandHandler(llm_runner=llm_chat)인데 기존
+    테스트는 _llm_nat_chat을 직접 부르거나 llm_runner를 가짜로 주입해서, 정작 이 경계는
+    아무도 덮지 않았다. 각주는 설계상 '조용히' 생략되므로 — 로그도 예외도 남지 않는다 —
+    이 경계에서는 테스트가 유일한 방어선이다. 특히 #230(PII 마스킹)처럼 llm_chat 안에서
+    응답 텍스트를 가공하는 계층이 추가될 때 여기서 걸린다.
+    """
+
+    async def fake_nat(user_msg, *, conversation_id=None):
+        return services.NatAnswer(
+            "답변",
+            routed_agent="news_agent",
+            tools_used=(services.NatToolUse("finus_market_news", ok=True),),
+        )
+
+    monkeypatch.setattr(services, "_llm_nat_chat", fake_nat)
+
+    result = await services.llm_chat("nat", "질의")
+
+    assert isinstance(result, services.NatAnswer)
+    assert result.routed_agent == "news_agent"
+    assert result.tools_used == (services.NatToolUse("finus_market_news", ok=True),)
+
+
+def test_nat_answer_with_text_keeps_reasoning_metadata():
+    """텍스트를 가공하는 계층은 with_text로 갈아끼워야 각주가 살아남는다 (PR #263 리뷰)."""
+    original = services.NatAnswer(
+        "원본 답변",
+        routed_agent="trading_agent",
+        tools_used=(services.NatToolUse("finus_account_balance", ok=True, empty=True),),
+    )
+
+    replaced = original.with_text(original.replace("원본", "가공된"))
+
+    assert isinstance(replaced, services.NatAnswer)
+    assert str(replaced) == "가공된 답변"
+    assert replaced.routed_agent == "trading_agent"
+    assert replaced.tools_used == original.tools_used
+
+
 # ── A (#162): 도구 없는 provider 출력 범위 축소 ──────────────────────────────
 
 

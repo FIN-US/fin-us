@@ -245,10 +245,12 @@ def _reasoning_footnote(routed_agent: Any, tools_used: Any) -> str:
     도구가 하나도 실행되지 않은 경우는 "없음"으로 드러낸다 — 도구 없이 나온 답변이라는
     사실 자체가 사용자가 알아야 할 근거다.
 
-    호출했지만 실패한 도구는 ``(실패)``를 붙여 성공과 구분한다. 실패를 그냥 "확인한
-    자료"로 적으면 사용자는 답변이 그 데이터에 근거했다고 읽는다 — 실제로는 아니므로,
-    근거를 보여준다는 이 기능의 목적과 정반대의 오독이 된다. 그렇다고 목록에서 빼면
-    시도조차 안 한 것처럼 보이므로, 빼지 않고 결과를 함께 적는다.
+    호출했지만 실패한 도구는 ``(실패)``, 성공했지만 결과가 비었던 도구는 ``(결과 없음)``을
+    붙여 데이터를 얻은 호출과 구분한다. 둘 다 그냥 "확인한 자료"로 적으면 사용자는 답변이
+    그 데이터에 근거했다고 읽는다 — 실제로는 아니므로, 근거를 보여준다는 이 기능의 목적과
+    정반대의 오독이 된다. 빈 결과는 특히 NAT가 "[조회 결과 없음] ..."을 본문으로 돌려주는
+    경로(#209)와 겹쳐, 본문은 데이터가 없다고 말하는데 각주만 자료를 확인했다고 말하게
+    된다. 그렇다고 목록에서 빼면 시도조차 안 한 것처럼 보이므로, 빼지 않고 결과를 함께 적는다.
     """
     agent = routed_agent.strip() if isinstance(routed_agent, str) else ""
     tools = list(tools_used) if isinstance(tools_used, (list, tuple)) else []
@@ -263,6 +265,8 @@ def _reasoning_footnote(routed_agent: Any, tools_used: Any) -> str:
         entry = TOOL_LABELS.get(name.strip(), name.strip())
         if getattr(tool, "ok", False) is not True:
             entry = f"{entry}(실패)"
+        elif getattr(tool, "empty", False) is True:
+            entry = f"{entry}(결과 없음)"
         if entry not in entries:  # 서로 다른 내부 도구가 같은 라벨로 접힐 수 있다
             entries.append(entry)
 
@@ -1465,13 +1469,21 @@ class TelegramCommandHandler:
         message_id를 돌려주지 못하는 notifier에서는 일반 전송만 하고 ``None``을
         반환한다 — 이 경우 진행 메시지는 대화에 그대로 남는다.
 
-        전송 실패는 삼킨다. 진행 표시는 답변에 덧붙는 편의 기능이므로, 이걸로
-        질의 처리 자체를 실패시키면 사용자는 답도 못 받는다.
+        전송 실패는 여기서 잡지 않고 삼켜져서 들어온다: ``TelegramNotifier``의
+        ``send_text_returning_id``/``send_text``가 내부에서 예외를 잡아 각각 ``None``·
+        무시로 떨어뜨린다. 진행 표시는 답변에 덧붙는 편의 기능이므로 이걸로 질의 처리
+        자체를 실패시키면 사용자는 답도 못 받는다 — 그 성질이 필요해서 여기서 다시
+        감싸 두었다. notifier는 생성자로 주입 가능하므로 대역이 예외를 던질 수 있다.
         """
-        send_returning_id = getattr(self.notifier, "send_text_returning_id", None)
-        if callable(send_returning_id):
-            return await send_returning_id(text)
-        await self.notifier.send_text(text)
+        try:
+            send_returning_id = getattr(self.notifier, "send_text_returning_id", None)
+            if callable(send_returning_id):
+                return await send_returning_id(text)
+            await self.notifier.send_text(text)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error("진행 메시지를 보내지 못했습니다: %s", exc)
         return None
 
     async def _clear_progress_message(self, message_id: int | None) -> None:
@@ -1688,6 +1700,13 @@ class TelegramCommandPoller:
         전송에서 실패하는 경로(/buy의 set_if_absent 후 프롬프트 전송, /confirm의 체결 후
         결과 전송)는 재시도해도 원래 의도를 달성하지 못하고 다른 메시지로 끝난다.
         이 PR 범위 밖이라 별도 이슈로 다룬다 (PR #242 리뷰).
+
+        자연어 경로(_handle_chat_fallback)도 같은 성질을 갖는다 (#260): 재시도마다
+        진행 메시지를 새로 보낸다. 전송 실패 재시도는 대개 429 flood-wait 구간이라
+        정리(deleteMessage/editMessageText)도 함께 실패하기 쉽고, 그 경우 "분석 중"
+        메시지가 최대 예산 횟수만큼 채팅에 남는다. 진행 메시지 전송 실패는 notifier가
+        삼켜 예산에도 잡히지 않으므로, 답변 전송이 막혀 있는 동안에도 같은 채팅의
+        rate limit을 추가로 소모한다. 예산을 손볼 때 함께 보라 (PR #263 리뷰).
 
         그 경로의 재실행 횟수는 예산과 같다 — 일반 실패 4회, 전송 실패 10회다.
         예산을 시간 기반으로 넓히면서 기존 3회보다 늘었다. 자연어 메시지처럼 부수효과가

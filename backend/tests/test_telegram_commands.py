@@ -1,6 +1,7 @@
 import asyncio
 from datetime import date, datetime
 from types import SimpleNamespace
+from typing import NamedTuple
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -2955,6 +2956,42 @@ async def _ask(handler, text="삼성전자 뉴스 알려줘", chat_id=123):
     await handler.handle_update({"message": {"chat": {"id": chat_id}, "text": text}})
 
 
+def test_progress_messages_are_actually_visible_text():
+    """진행 문구 상수 자체를 고정한다 (PR #263 리뷰 — 뮤테이션 생존).
+
+    아래 진행 메시지 테스트들은 전부 NAT_PROGRESS_MESSAGE 상수를 참조해 비교하므로,
+    문구가 빈 문자열이 되어도 전부 초록이다. 실제로 빈 텍스트를 보내면 텔레그램이
+    'Bad Request: message text is empty'로 거부해 진행 표시가 통째로 사라진다.
+    """
+    assert NAT_PROGRESS_MESSAGE.strip()
+    assert PROGRESS_DONE_MESSAGE.strip()
+
+
+@pytest.mark.asyncio
+async def test_progress_message_send_failure_does_not_block_the_answer():
+    """notifier가 예외를 던져도 답변은 나간다 (PR #263 리뷰).
+
+    TelegramNotifier는 전송 실패를 내부에서 삼키지만 notifier는 생성자로 주입 가능하다.
+    진행 표시는 답변에 덧붙는 편의 기능이므로, 이걸로 질의 처리를 실패시키면 사용자는
+    답도 못 받는다.
+    """
+    notifier = ProgressFakeNotifier()
+
+    async def exploding_send(text, *, reply_markup=None):
+        raise RuntimeError("sendMessage 실패")
+
+    notifier.send_text_returning_id = exploding_send
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        llm_runner=_nat_runner(NatAnswer("최종 답변")),
+    )
+
+    await _ask(handler)
+
+    assert notifier.messages == ["최종 답변"]
+    assert notifier.deletes == []  # message_id가 없으니 정리도 건너뛴다
+
+
 @pytest.mark.asyncio
 async def test_progress_message_is_sent_then_cleared_and_answer_is_a_new_message():
     """최종 답변은 편집이 아니라 새 메시지로 나간다.
@@ -3100,6 +3137,71 @@ async def test_failed_tool_is_marked_in_the_footnote():
     assert notifier.messages[-1].endswith(
         "🤖 트레이딩 에이전트 · 📚 확인한 자료: KIS 시세·계좌 조회(실패)"
     )
+
+
+@pytest.mark.asyncio
+async def test_empty_result_tool_is_marked_in_the_footnote():
+    """빈 결과를 그냥 '확인한 자료'로 적으면 본문과 각주가 정면으로 어긋난다 (PR #263 리뷰).
+
+    NAT는 읽기 도구가 전부 빈 결과일 때 '[조회 결과 없음] ...'을 본문으로 돌려준다(#209).
+    그 답변에 '확인한 자료: 뉴스 검색'이라고만 적으면, 본문은 데이터가 없다고 말하는데
+    각주는 자료를 확인했다고 말하게 된다 — 답변은 그 데이터에 근거하지 않았다.
+    """
+    notifier = ProgressFakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        llm_runner=_nat_runner(
+            NatAnswer(
+                "[조회 결과 없음] 요청하신 조건으로 조회했으나 데이터가 없습니다.",
+                routed_agent="news_agent",
+                tools_used=(NatToolUse("finus_market_news", ok=True, empty=True),),
+            )
+        ),
+    )
+
+    await _ask(handler)
+
+    assert notifier.messages[-1].endswith(
+        "🤖 뉴스 에이전트 · 📚 확인한 자료: 뉴스 검색(결과 없음)"
+    )
+
+
+def test_footnote_separates_data_empty_and_failure():
+    """세 상태가 각각 다른 표기를 얻는다 — 성공만 무표기다."""
+    footnote = _reasoning_footnote(
+        "news_agent",
+        (
+            NatToolUse("finus_market_news", ok=True),
+            NatToolUse("finus_earnings_report", ok=True, empty=True),
+            NatToolUse("finus_account_balance", ok=False),
+        ),
+    )
+
+    assert footnote.endswith(
+        "📚 확인한 자료: 뉴스 검색, DART 실적 조회(결과 없음), KIS 시세·계좌 조회(실패)"
+    )
+
+
+def test_failure_marker_wins_over_empty_marker():
+    """ok=False면 empty는 읽지 않는다 — '실패인데 빈 결과'라는 표기가 나오지 않는다."""
+    footnote = _reasoning_footnote(
+        "news_agent", (NatToolUse("finus_market_news", ok=False, empty=True),)
+    )
+
+    assert footnote.endswith("📚 확인한 자료: 뉴스 검색(실패)")
+    assert "결과 없음" not in footnote
+
+
+def test_footnote_tolerates_tools_without_the_empty_attribute():
+    """empty를 싣지 않는 구버전 finus_nat 값도 각주를 만든다 (getattr 기본값 경로)."""
+
+    class LegacyToolUse(NamedTuple):
+        name: str
+        ok: bool
+
+    footnote = _reasoning_footnote("news_agent", (LegacyToolUse("finus_market_news", True),))
+
+    assert footnote.endswith("📚 확인한 자료: 뉴스 검색")
 
 
 @pytest.mark.asyncio

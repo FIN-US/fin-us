@@ -356,7 +356,7 @@ class TelegramNotifier:
         text: str,
         *,
         reply_markup: dict[str, Any] | None = None,
-    ) -> Any:
+    ) -> httpx.Response:
         """sendMessage를 호출하고 HTTP 응답을 반환한다.
 
         반환값은 message_id가 필요한 :meth:`send_text_returning_id`만 사용한다.

@@ -3,7 +3,11 @@ import logging
 import httpx
 import pytest
 
-from backend.telegram_notifier import TelegramNotifier, should_send_telegram_alert
+from backend.telegram_notifier import (
+    TELEGRAM_MESSAGE_LIMIT,
+    TelegramNotifier,
+    should_send_telegram_alert,
+)
 
 
 def test_should_send_telegram_alert_requires_high_or_critical_with_flag():
@@ -406,6 +410,22 @@ async def test_send_text_returning_id_returns_none_on_unusable_body(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_send_text_returning_id_rejects_a_body_that_says_not_ok(monkeypatch):
+    """2xx + ok:false 본문의 message_id는 쓰지 않는다 (PR #263 리뷰 — 뮤테이션 생존).
+
+    ok:false면 result가 무엇이든 그 메시지는 만들어지지 않았다. 그 id로 삭제·편집을
+    시도하면 남의 메시지를 건드리거나 조용히 실패한다.
+    """
+    monkeypatch.setattr(
+        "backend.telegram_notifier.httpx.AsyncClient",
+        _fake_client_factory([], _FakeResponse({"ok": False, "result": {"message_id": 4242}})),
+    )
+    notifier = TelegramNotifier("token", "123")
+
+    assert await notifier.send_text_returning_id("⏳") is None
+
+
+@pytest.mark.asyncio
 async def test_send_text_returning_id_returns_none_on_send_failure(monkeypatch):
     monkeypatch.setattr(
         "backend.telegram_notifier.httpx.AsyncClient",
@@ -437,6 +457,38 @@ async def test_edit_message_text_posts_edit_payload(monkeypatch):
             },
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_edit_message_text_truncates_to_the_telegram_limit(monkeypatch):
+    """공개 API이므로 한도를 넘는 본문이 들어와도 잘라 보낸다 (PR #263 리뷰 — 뮤테이션 생존).
+
+    현재 호출부는 짧은 종료 표시 하나뿐이라 절단이 발동하지 않지만, 넘겨 보내면
+    텔레그램이 400으로 거부하고 진행 메시지가 '분석 중'인 채로 남는다.
+    """
+    calls = []
+    monkeypatch.setattr(
+        "backend.telegram_notifier.httpx.AsyncClient",
+        _fake_client_factory(calls, _FakeResponse({"ok": True})),
+    )
+    notifier = TelegramNotifier("token", "123")
+
+    assert await notifier.edit_message_text(4242, "가" * (TELEGRAM_MESSAGE_LIMIT + 500)) is True
+    assert len(calls[0][1]["text"]) == TELEGRAM_MESSAGE_LIMIT
+
+
+@pytest.mark.asyncio
+async def test_send_text_truncates_to_the_telegram_limit(monkeypatch):
+    """sendMessage도 같은 한도로 자른다 — 각주 계산이 이 상수를 전제로 한다."""
+    calls = []
+    monkeypatch.setattr(
+        "backend.telegram_notifier.httpx.AsyncClient",
+        _fake_client_factory(calls, _FakeResponse({"ok": True, "result": {"message_id": 1}})),
+    )
+    notifier = TelegramNotifier("token", "123")
+
+    assert await notifier.send_text("나" * (TELEGRAM_MESSAGE_LIMIT + 500)) is True
+    assert len(calls[0][1]["text"]) == TELEGRAM_MESSAGE_LIMIT
 
 
 @pytest.mark.asyncio
