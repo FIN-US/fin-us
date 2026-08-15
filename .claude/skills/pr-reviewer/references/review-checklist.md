@@ -21,13 +21,15 @@ mcp-trading·mcp-news·mcp-dart npm test, Unity `Assets`/`Build` 드리프트, h
 ## 텔레그램 (`backend/telegram_commands.py`, `telegram_notifier.py`)
 
 - [ ] 새 `except Exception`이 `TelegramSendError` 재전파를 가로막지 않는가
-      (구조 불변식 테스트가 강제하지만, allowlist 추가는 리뷰 대상이다)
+      (`tests/test_telegram_commands.py`의 ast 기반 구조 검사가 강제한다. **allowlist에
+      항목을 추가했다면 그 사유가 타당한지가 리뷰 대상이다** — 검사를 통과시키는 우회로다)
 - [ ] 재시도에 벽시계 상한이 있는가 — 백오프 합만 계산하고 HTTP 타임아웃을 빠뜨리지 않았는가
 - [ ] 로그·에러 메시지에 봇 토큰이나 사용자 식별자가 실리지 않는가
 
 ## 외부로 나가는 데이터
 
-- [ ] 외부 LLM 호출 직전 PII 마스킹 계층을 우회하는 경로가 아닌가
+- [ ] 외부 LLM·외부 API로 나가는 페이로드에 계좌번호·연락처·실명이 실리지 않는가
+      (전용 마스킹 계층은 PR #254에서 도입 중이다. 머지되면 "그 계층을 우회하는가"로 바꿀 것)
 - [ ] 새 API 엔드포인트에 인증·Origin 검사·레이트리밋 중 필요한 것이 붙었는가
       (`/api/v1/ws`, `/api/v1/analyze`가 이 문제를 겪었다)
 - [ ] 시크릿이 `.env.example`에는 이름만, 실제 값은 `.env`에만 있는가

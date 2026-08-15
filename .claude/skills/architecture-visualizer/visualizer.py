@@ -12,8 +12,6 @@ EXCLUDE = {
     "dist",
     "build",
 }
-SOURCE_EXTS = (".py", ".java", ".ts", ".tsx", ".js", ".jsx", ".md", ".yml", ".yaml", ".json")
-
 # _collect_signals가 훑는 파일 수 상한. 신호 판정은 몇 개만 봐도 충분한데, 상한이 없으면
 # Unity 프로젝트(frontend)나 실수로 걸린 .venv를 통째로 rglob해 수 초씩 멈춘다.
 SIGNAL_FILE_LIMIT = 2000
