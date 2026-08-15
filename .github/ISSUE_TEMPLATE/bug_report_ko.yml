@@ -1,7 +1,7 @@
 name: "🐛 버그 리포트"
 description: "문제를 보고하고 개선하는 데 도움을 주세요."
-title: "[BUG] "
-labels: ["bug"]
+title: "[FIX] "
+labels: ["유형: 버그"]
 assignees: []
 
 body:
@@ -47,3 +47,16 @@ body:
       label: "환경 정보"
       description: "브라우저, OS, 버전 등 관련 정보를 작성해 주세요."
       placeholder: "예: Chrome 120.0, macOS Sonoma"
+  - type: dropdown
+    id: priority
+    attributes:
+      label: "우선순위"
+      description: "판단이 서지 않으면 P2를 선택해 주세요."
+      options:
+        - "P0 (긴급)"
+        - "P1 (높음)"
+        - "P2 (보통)"
+        - "P3 (낮음)"
+      default: 2
+    validations:
+      required: true
