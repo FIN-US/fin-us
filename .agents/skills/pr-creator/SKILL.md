@@ -7,37 +7,20 @@ description: "PR을 생성합니다. 'PR 올려줘', 'PR 만들어줘'라고 하
 
 ## 필수 규칙
 
+**시작 전에 레포 루트 기준 `.agents/skills/_shared/worktree-conventions.md`를 읽습니다.**
+(상대 경로로 찾지 마세요 — 이 파일은 `.claude/skills/` 아래 링크를 통해 열릴 수 있어
+`../`가 다른 곳을 가리킵니다.)
+worktree 생성·경로·정리, 리터럴 기록, `git -C`/`gh -R` 호출 규약은 전부 거기에 있습니다.
+아래는 이 스킬에만 해당하는 규칙입니다.
+
 1. PR 생성 시 반드시 `.github/PULL_REQUEST_TEMPLATE.md` 템플릿을 사용합니다.
 2. **모든 작업은 전용 git worktree 안에서 수행합니다.** 메인 작업 디렉토리의 워킹 트리는
    절대 읽지도 건드리지도 않습니다.
 3. **커밋 범위(commit range) 기반으로만 변경사항을 파악합니다.** `git status`,
    `git diff`(인자 없이), `HEAD` 기준 비교처럼 워킹 트리 상태에 의존하는 명령은 금지입니다.
-4. `cd`, `git checkout`, `git switch`, `git stash`, `git add`, `git commit`은 사용하지 않습니다.
-   git은 `git -C <경로>`로, gh는 `gh ... -R <owner/repo>`로 호출해 프로세스의 현재 디렉토리에
-   전혀 의존하지 않게 만듭니다.
-5. **셸 변수가 호출 간에 살아남는다고 가정하지 않습니다.** 아래 "값 확정과 기록" 참조.
-6. **`worktree add`와 `fetch`는 락 경합으로 실패할 수 있습니다.** 병렬 실행에서 `.git/worktrees`와
-   `packed-refs` 락이 경합합니다. 실패하면 몇 초 후 1회 재시도하고, 그래도 실패하면 사용자에게 보고합니다.
+4. `git add`, `git commit`은 사용하지 않습니다. 커밋은 이미 되어 있다는 전제입니다.
 
-### 왜 이렇게 하는가 (병렬 실행 안전성)
-
-이 스킬은 여러 PR에 대해 동시에 실행될 수 있습니다. 여러 실행이 같은 워킹 트리를 공유하면
-서로가 만든 인덱스/HEAD 변화를 "변경사항"으로 오인해 매번 다른 diff를 보게 됩니다.
-worktree는 `.git`은 공유하되 인덱스와 HEAD는 분리되므로, 실행마다 독립된 스냅샷을 갖습니다.
-
-**경로 충돌은 이름 규칙이 아니라 실행 환경이 막습니다.** worktree를 이 실행에 주어진
-scratchpad 디렉토리 아래 두면 그 경로가 세션마다 이미 고유하므로, 실행마다 다른 경로가
-보장됩니다. 이름에 nonce를 섞거나 남의 잔재를 훑는 스윕을 돌릴 이유가 없습니다.
-
-## 값 확정과 기록 (중요)
-
-이 스킬을 실행하는 에이전트는 **셸 호출마다 새 프로세스**를 씁니다. 환경변수는 호출 간에 유지되지 않습니다.
-0단계에서 정한 `$WT`를 7단계 정리에서 그대로 참조하면 빈 문자열이 되어
-`git worktree remove --force ""`가 되고, 정리가 조용히 실패해 worktree가 누적됩니다.
-
-따라서 0단계에서 확정한 **`REPO`, `WT_PATH`, `OWNER`, `BASE`, `BRANCH`의 리터럴 값을 출력해 기록**하고,
-이후 모든 단계에서는 셸 변수가 아니라 그 리터럴 문자열을 직접 사용합니다.
-여러 명령을 한 셸 호출에 이어 붙여도 되지만, 그렇게 했다는 이유로 리터럴 기록을 생략하지 않습니다.
+0단계에서 확정해 기록할 리터럴은 `REPO`, `WT_PATH`, `OWNER`, `BASE`, `BRANCH`입니다.
 
 ## 워크플로
 
@@ -55,18 +38,8 @@ gh repo view --json defaultBranchRef -q .defaultBranchRef.name   # → <BASE> �
 `<BASE>`를 리터럴 `main`으로 하드코딩하지 않습니다. 사용자가 지정하지 않았으면 위의
 `defaultBranchRef`로 조회한 값을 씁니다.
 
-remote가 여러 개면 `git -C "<REPO>" remote -v`로 `origin`이 `<OWNER>`와 같은 레포인지 확인합니다.
-**단순 문자열 비교는 하지 마세요** — 레포가 전송/이름변경된 경우 origin URL은 옛 이름이고 `gh`는
-새 이름으로 해석하므로 정상 상태에서도 어긋나 보입니다(이 레포가 실제로 그렇습니다:
-origin은 `sorocode/fin-us`, `gh`는 `FIN-US/fin-us`). 레포 동일성은 id로 비교합니다.
-
-```bash
-gh api "repos/<origin URL의 owner/repo>" --jq .id      # vs
-gh api "repos/<OWNER>" --jq .id
-```
-
-id가 다르면 push한 브랜치와 `gh pr create`가 바라보는 레포가 달라지므로 **경고하고** 사용자에게
-계속할지 확인합니다. 중단이 아니라 경고입니다 — 오탐 여지가 있습니다.
+remote가 여러 개면 공통 규약의 "origin과 gh가 같은 레포인지"를 따릅니다. 어긋나면 push한
+브랜치와 `gh pr create`가 바라보는 레포가 달라집니다.
 
 > **규칙 2·3의 예외:** 브랜치를 지정받지 못했을 때만 `git branch --show-current`로 공유 HEAD를
 > 읽습니다. 이는 규칙 2·3이 금지한 가변 상태이지만, 대상 브랜치를 알아낼 다른 방법이 없어
@@ -80,19 +53,14 @@ SLUG     = <BRANCH의 "/"를 "-"로 치환>
 WT_PATH  = <이 실행의 scratchpad 디렉토리>/pr-<SLUG>
 ```
 
-`WT_PATH`는 **레포 바깥**이어야 합니다. 레포 안에 두면 소스 트리 전체 사본이 생겨, 누군가 루트에서
-범위 넓은 명령(pytest 수집, 전체 grep, 린트)을 돌릴 때 중첩 사본까지 훑습니다. 특히 pytest는
-같은 이름의 테스트 모듈이 두 벌 잡히면 `import file mismatch`로 죽습니다.
-scratchpad 디렉토리는 레포 바깥이면서 세션마다 고유하므로 두 조건을 모두 만족합니다.
-scratchpad를 받지 못했다면 `<REPO의 부모>/.fin-us-worktrees/pr-<SLUG>`를 씁니다.
+`WT_PATH`가 왜 레포 바깥이어야 하는지, scratchpad를 못 받았을 때 어디에 두는지는
+공통 규약의 "WT_PATH"를 따릅니다.
 
 ### 1. 격리된 worktree 생성
 
+공통 규약의 "worktree 생성"대로 하되, 대상 ref는 로컬 브랜치입니다.
+
 ```bash
-# base는 refspec을 명시한다. --single-branch 클론에서는 refs/remotes/origin/<BASE>가
-# 갱신되지 않아 3단계의 origin/<BASE> 참조가 unknown revision으로 죽는다.
-# 선두의 '+'는 필수다. 없으면 base가 rebase/force-push된 뒤 non-fast-forward로 거부되어
-# ! [rejected] (non-fast-forward)로 죽는다. 기본 refspec에 '+'가 있어서 원래는 없던 실패 모드다.
 git -C "<REPO>" fetch origin "+<BASE>:refs/remotes/origin/<BASE>" --quiet
 git -C "<REPO>" worktree add --detach "<WT_PATH>" "<BRANCH>"
 ```
@@ -100,10 +68,6 @@ git -C "<REPO>" worktree add --detach "<WT_PATH>" "<BRANCH>"
 `<BRANCH>`는 fetch하지 않습니다. PR을 올리기 전이라 원격에 아직 없는 것이 정상이며,
 `fetch origin "<BRANCH>"`는 `couldn't find remote ref`로 실패합니다.
 worktree는 로컬 브랜치 ref에서 바로 만듭니다.
-
-`--detach`가 핵심입니다. git은 같은 브랜치를 두 worktree에서 동시에 체크아웃할 수 없기 때문에,
-`--detach` 없이는 메인 디렉토리나 다른 병렬 실행이 이미 그 브랜치를 쓰고 있을 때 실패합니다.
-detached HEAD는 브랜치 커밋의 읽기 전용 스냅샷이며 PR 생성에는 이것으로 충분합니다.
 
 ### 2. 템플릿 로드
 
@@ -168,22 +132,8 @@ gh pr create \
 
 ### 7. 정리 (실패해도 반드시 수행)
 
-**0단계에서 기록해 둔 리터럴 경로를 그대로 씁니다. 셸 변수를 참조하지 마세요** —
-이 호출은 0단계와 다른 프로세스라 변수가 비어 있고, `git worktree remove --force ""`가 되어
-정리가 조용히 실패합니다.
-
-```bash
-# 1차: 정상 경로
-git -C "<REPO>" worktree remove --force "<WT_PATH>"
-# 실패했다면 폴백 — 경로가 이 실행의 <WT_PATH>가 맞는지 확인한 뒤에만 실행한다
-rm -rf "<WT_PATH>"
-git -C "<REPO>" worktree prune
-git -C "<REPO>" worktree list          # 실제로 사라졌는지 확인
-```
-
-**`worktree remove`가 실패하면 반드시 폴백을 실행합니다.** Windows에서 프로세스가 파일을
-잡고 있으면 흔히 실패하고, `worktree prune`은 디렉토리가 남아 있는 한 등록을 유지하므로
-회수하지 못합니다(실측 확인). 이 정리가 유일한 회수 지점이므로, 건너뛰면 누수가 그대로 남습니다.
+공통 규약의 "정리"를 그대로 수행합니다. 5단계에서 사용자가 취소했거나 중간에 오류가 나도
+반드시 실행합니다.
 
 중간 단계에서 오류가 나거나 사용자가 5단계에서 취소하더라도 worktree는 제거합니다.
 정리에 실패하면 `<WT_PATH>`를 사용자에게 알려 수동으로 지울 수 있게 합니다.

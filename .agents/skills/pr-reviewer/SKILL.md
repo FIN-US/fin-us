@@ -25,30 +25,19 @@ description: >
 
 ## 병렬 실행 규칙 (원격 PR 모드)
 
-이 스킬은 여러 PR에 대해 동시에 실행되는 경우가 많습니다. 다음을 반드시 지킵니다.
+**시작 전에 레포 루트 기준 `.agents/skills/_shared/worktree-conventions.md`를 읽습니다.**
+(상대 경로로 찾지 마세요 — 이 파일은 `.claude/skills/` 아래 링크를 통해 열릴 수 있어
+`../`가 다른 곳을 가리킵니다.)
+worktree 생성·경로·정리, 리터럴 기록, `git -C`/`gh -R` 호출 규약은 전부 거기에 있습니다.
+아래는 이 스킬에만 해당하는 규칙입니다.
 
 1. **`gh pr checkout`을 절대 사용하지 않습니다.** 이 명령은 공유 워킹 트리의 브랜치를 갈아치웁니다.
    병렬 실행 시 서로의 체크아웃을 빼앗아 매 실행마다 다른 코드를 보게 되는 원인입니다.
 2. **`FETCH_HEAD`를 참조하지 않습니다.** `.git/FETCH_HEAD`는 레포당 하나뿐이라 동시 fetch가 서로를 덮어씁니다.
    PR마다 고유한 named ref로 fetch합니다.
-3. **`cd`, `git checkout`, `git switch`, `git stash`를 사용하지 않습니다.**
-   git은 `git -C <경로>`, gh는 `gh ... -R <owner/repo>`로 호출해 현재 디렉토리에 의존하지 않게 합니다.
-4. worktree는 **이 실행에 주어진 scratchpad 디렉토리 아래**에 만듭니다. 그 경로가 세션마다
-   이미 고유하므로 실행 간 경로 충돌이 생기지 않습니다.
-5. **셸 변수가 호출 간에 살아남는다고 가정하지 않습니다.** 아래 "값 확정과 기록" 참조.
-6. **`worktree add`와 `fetch`는 락 경합으로 실패할 수 있습니다.** 병렬 실행에서 `.git/worktrees`와
-   `packed-refs` 락이 경합합니다. 실패하면 몇 초 후 1회 재시도하고, 그래도 실패하면 사용자에게 보고합니다.
 
-## 값 확정과 기록 (중요)
-
-이 스킬을 실행하는 에이전트는 **셸 호출마다 새 프로세스**를 씁니다. 환경변수는 호출 간에 유지되지 않습니다.
-1단계에서 정한 `$WT`를 6단계 정리에서 그대로 참조하면 빈 문자열이 되어
-`git -C "" worktree remove --force ""`가 되고, 정리가 조용히 실패해
-worktree와 `refs/pr-review/*`가 리뷰할 때마다 누적됩니다.
-
-따라서 1단계에서 확정한 **`REPO`, `WT_PATH`, `REF_NAME`, `OWNER`, `BASE`의 리터럴 값을 출력해 기록**하고,
-이후 모든 단계(특히 6단계 정리)에서는 셸 변수가 아니라 **그 리터럴 문자열을 직접 사용**합니다.
-여러 명령을 한 셸 호출에 이어 붙여도 되지만, 그렇게 했다는 이유로 리터럴 기록을 생략하지 않습니다.
+1단계에서 확정해 기록할 리터럴은 `REPO`, `WT_PATH`, `REF_NAME`, `OWNER`, `BASE`입니다.
+기록을 빠뜨리면 6단계에서 worktree와 `refs/pr-review/*`가 리뷰할 때마다 누적됩니다.
 
 ## 워크플로
 
@@ -68,18 +57,8 @@ gh repo view --json nameWithOwner -q .nameWithOwner       # → <OWNER>
 gh pr view <PR번호> -R "<OWNER>" --json baseRefName,headRefOid,title,url
 ```
 
-remote가 여러 개면 `git -C "<REPO>" remote -v`로 `origin`이 이 base 레포인지 확인합니다.
-**단순 문자열 비교는 하지 마세요** — 레포가 전송/이름변경된 경우 origin URL은 옛 이름이고
-`gh`는 새 이름으로 해석하므로 정상 상태에서도 어긋나 보입니다(이 레포가 실제로 그렇습니다:
-origin은 `sorocode/fin-us`, `gh`는 `FIN-US/fin-us`). 레포 동일성은 id로 비교합니다.
-
-```bash
-gh api "repos/<origin URL의 owner/repo>" --jq .id      # vs
-gh api "repos/<OWNER>" --jq .id
-```
-
-id가 다르면 fetch한 코드와 `gh`로 읽은 메타데이터가 서로 다른 레포의 것이 되므로 **경고하고**,
-사용자에게 계속할지 확인합니다. 중단이 아니라 경고입니다 — 오탐 여지가 있습니다.
+remote가 여러 개면 공통 규약의 "origin과 gh가 같은 레포인지"를 따릅니다. 어긋나면 fetch한
+코드와 `gh`로 읽은 메타데이터가 서로 다른 레포의 것이 됩니다.
 
 위 조회 결과로 리터럴 값을 확정하고 **출력해 기록**합니다 —
 `<PR>`, `<BASE>`(baseRefName), `<SHA7>`(headRefOid 앞 7자).
@@ -92,22 +71,13 @@ id가 다르면 fetch한 코드와 `gh`로 읽은 메타데이터가 서로 다�
 
 # PR head를 고유 named ref로 가져온다 (FETCH_HEAD 미사용 → 병렬 안전)
 git -C "<REPO>" fetch origin "pull/<PR>/head:refs/pr-review/<PR>-<SHA7>"
-# base는 refspec을 명시한다. --single-branch 클론에서는 refs/remotes/origin/<BASE>가
-# 갱신되지 않아 바로 아래 origin/<BASE> 참조가 unknown revision으로 죽는다.
-# 선두의 '+'는 필수다. 없으면 base가 rebase/force-push된 뒤 non-fast-forward로 거부되어
-# ! [rejected] (non-fast-forward)로 죽는다. 기본 refspec에 '+'가 있어서 원래는 없던 실패 모드다.
 git -C "<REPO>" fetch origin "+<BASE>:refs/remotes/origin/<BASE>" --quiet
 git -C "<REPO>" worktree add --detach "<WT_PATH>" "refs/pr-review/<PR>-<SHA7>"
 ```
 
-`--detach`가 핵심입니다. git은 같은 브랜치를 두 worktree에서 동시에 체크아웃할 수 없어서,
-`--detach` 없이는 메인 디렉토리나 다른 병렬 실행과 충돌합니다.
-
-worktree는 **레포 바깥**에 둡니다. 레포 안에 두면 소스 트리 전체 사본이 생겨, 리뷰 중 누군가
-루트에서 범위 넓은 명령을 돌릴 때 중첩 사본까지 훑습니다. 특히 pytest는 같은 이름의 테스트
-모듈이 두 벌 잡히면 `import file mismatch`로 죽습니다. `.gitignore`에 걸려 git 상태가 깨끗한
-것과는 별개의 문제입니다. scratchpad 디렉토리는 레포 바깥이면서 세션마다 고유하므로 두 조건을
-모두 만족합니다. scratchpad를 받지 못했다면 `<REPO의 부모>/.fin-us-worktrees/rv-<PR>-<SHA7>`를 씁니다.
+base refspec 선두의 `+`가 왜 필수인지, `--detach`가 왜 핵심인지, `WT_PATH`를 왜 레포 바깥에
+두는지는 공통 규약을 따릅니다. scratchpad를 받지 못했다면
+`<REPO의 부모>/.fin-us-worktrees/rv-<PR>-<SHA7>`를 씁니다.
 
 메타데이터와 diff 조회는 워킹 트리와 무관하므로 `-R`로 안전하게 호출합니다.
 
@@ -274,23 +244,11 @@ Approved ✅ / Request Changes 🔄 / Comment 💬 — <이유 한 줄>
 
 ### 6. 정리 (원격 PR 모드 — 실패해도 반드시 수행)
 
-**1단계에서 기록해 둔 리터럴 값을 그대로 씁니다. 셸 변수를 참조하지 마세요** —
-이 호출은 1단계와 다른 프로세스라 변수가 비어 있고, `git -C "" worktree remove --force ""`가 되어
-정리가 조용히 실패합니다.
+공통 규약의 "정리"를 수행하고, **임시 ref 삭제를 추가로** 합니다.
 
 ```bash
-# 1차: 정상 경로
-git -C "<REPO>" worktree remove --force "<WT_PATH>"
-# 실패했다면 폴백 — 경로가 이 실행의 <WT_PATH>가 맞는지 확인한 뒤에만 실행한다
-rm -rf "<WT_PATH>"
-git -C "<REPO>" worktree prune
 git -C "<REPO>" update-ref -d "refs/pr-review/<PR>-<SHA7>"
 ```
-
-**`worktree remove`가 실패하면 반드시 폴백을 실행합니다.** Windows에서 node 테스트 러너가 파일을
-잡고 있으면 흔히 실패합니다. `rmdir`은 디렉토리가 비어 있지 않아 실패하고(`Directory not empty`),
-`worktree prune`도 디렉토리가 남아 있는 한 등록을 유지하므로 회수하지 못합니다(실측 확인).
-이 정리가 유일한 회수 지점이므로, 건너뛰면 worktree와 ref가 그대로 남습니다.
 
 > 같은 PR을 같은 커밋에서 두 실행이 동시에 리뷰하면 `REF_NAME`이 겹칩니다. **문제되지 않습니다** —
 > fetch는 같은 커밋을 다시 쓰는 것이고, worktree는 `--detach`라 ref가 먼저 지워져도 계속 유효합니다
