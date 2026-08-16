@@ -474,6 +474,48 @@ def test_readonly_config_accepts_asset_classes(name: str):
     assert config.trading_tool_name == name
 
 
+# ---------------------------------------------------------------------------
+# #273 회귀 가드 — 두 라우터의 최상위 workflow가 각주 부착 지점을 공유하는지
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("config_path", _ROUTER_PATHS, ids=[p.name for p in _ROUTER_PATHS])
+def test_router_workflow_is_the_reasoning_trace_agent(config_path: Path):
+    """#273: 두 라우터 모두 최상위 workflow가 finus_reasoning_trace_agent여야 한다.
+
+    각주(#260)는 이 한 지점에서만 붙는다. 위에 다른 래퍼를 얹으면 — 특히 vendor
+    ``auto_memory_agent``처럼 ``(input_message: str) -> str`` 시그니처인 래퍼를 —
+    ``routed_agent``/``tools_used``가 그 경계에서 버려지고, backend는 필드가 없으면
+    각주를 **조용히** 생략한다. 관측 형태가 "각주가 안 나온다"뿐이라 런타임에는
+    드러나지 않으므로 config 모양을 여기서 고정한다.
+    """
+    import nat_finus_nat.register  # noqa: F401 - 등록 트리거만 필요
+    from nat.runtime.loader import load_config
+    from nat_finus_nat.agents import FinusReasoningTraceAgentConfig
+
+    workflow = load_config(config_path).workflow
+    assert isinstance(workflow, FinusReasoningTraceAgentConfig), (
+        f"{config_path.name}: 최상위 workflow는 finus_reasoning_trace_agent여야 합니다. "
+        f"실제 타입: {type(workflow).__name__}"
+    )
+
+
+def test_memory_router_wraps_the_transcript_agent_below_the_trace_agent():
+    """#273: router.yml의 auto_memory_agent는 workflow가 아니라 그 아래 함수여야 한다.
+
+    체인은 finus_reasoning_trace_agent → auto_memory_agent → finus_sqlite_transcript_agent다.
+    auto_memory_agent가 다시 최상위로 올라가면 각주가 그 str 경계에서 사라진다.
+    """
+    import nat_finus_nat.register  # noqa: F401 - 등록 트리거만 필요
+    from nat.runtime.loader import load_config
+
+    config = load_config(CONFIGS_ROOT / "router.yml")
+    assert str(config.workflow.inner_agent_name) == "memory_router_agent"
+
+    memory_agent = config.functions["memory_router_agent"]
+    assert type(memory_agent).static_type() == "auto_memory_agent"
+    assert str(memory_agent.inner_agent_name) == "transcript_router_agent"
+
+
 def test_kis_agents_share_identical_system_prompt():
     """monitoring/trading의 최종 system_prompt는 의도적으로 바이트 동일하다.
 

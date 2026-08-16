@@ -61,18 +61,21 @@ functions:
     db_path: ${FINUS_TRANSCRIPT_DB_PATH:-.state/conversations.sqlite3}
     max_history_messages: 30
 
-# ⚠️ 이 모드에서는 추론 각주(#260)가 표시되지 않습니다.
-# 최상위 workflow인 vendor auto_memory_agent의 _response_fn 시그니처가
-# (input_message: str) -> str 이라, 안쪽 transcript_router_agent가 ChatResponse에
-# 붙인 routed_agent/tools_used가 이 래퍼를 통과하면서 버려집니다.
-# backend는 두 필드가 없으면 각주를 조용히 생략하므로 경고 없이 각주만 사라집니다.
-# router_nomemory.yml(기본값)에서는 정상 동작합니다.
-workflow: # Mem0 auto_memory_agent를 설정합니다.
-  _type: auto_memory_agent
-  inner_agent_name: transcript_router_agent
-  memory_name: router_mem0_memory
-  llm_name: router_openai_llm
-  add_params:
-    infer: false
-  verbose: true
-  description: "Fin-Us router supervisor with separate Mem0 memory"
+  memory_router_agent: # Mem0 auto_memory_agent를 설정합니다.
+    _type: auto_memory_agent
+    inner_agent_name: transcript_router_agent
+    memory_name: router_mem0_memory
+    llm_name: router_openai_llm
+    add_params:
+      infer: false
+    verbose: true
+    description: "Fin-Us router supervisor with separate Mem0 memory"
+
+# 추론 각주(#260)는 최상위 finus_reasoning_trace_agent가 붙입니다 — vendor
+# auto_memory_agent 바깥입니다(#273). vendor _response_fn 시그니처가
+# (input_message: str) -> str 이라, 안쪽에서 ChatResponse에 붙인
+# routed_agent/tools_used는 이 래퍼를 통과하면서 버려집니다. 부착 지점을 그 위로
+# 올렸으므로 router_nomemory.yml과 같은 자리에서 각주가 실립니다.
+workflow:
+  _type: finus_reasoning_trace_agent
+  inner_agent_name: memory_router_agent

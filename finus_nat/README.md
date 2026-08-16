@@ -25,11 +25,26 @@ router.yml과 router_nomemory.yml은 기본적으로 최근 대화 히스토리�
 넘기면 소비자가 실패·빈 결과까지 "확인한 자료"로 표시해, 답변이 근거하지 않은 데이터를
 근거로 제시하게 됩니다. 표기는 소비자가 정합니다(backend는 `(실패)`/`(결과 없음)`).
 
-**router_nomemory.yml(기본값)에서만 동작합니다.** router.yml(`--memory`)은 최상위
-workflow가 vendor `auto_memory_agent`인데, 그 `_response_fn` 시그니처가
-`(input_message: str) -> str`이라 안쪽에서 `ChatResponse`에 붙인 두 필드가 래퍼를
-통과하면서 버려집니다. backend는 필드가 없으면 각주를 조용히 생략하므로, 메모리
-모드에서는 경고 없이 각주만 사라집니다.
+**두 라우터 모두 동작합니다.** 두 config의 최상위 `workflow`는
+`finus_reasoning_trace_agent`이고, 각주는 오직 여기서만 붙습니다(#273). 그 아래에
+무엇이 오든 — router.yml처럼 vendor `auto_memory_agent`가 끼든, router_nomemory.yml처럼
+바로 `finus_sqlite_transcript_agent`가 오든 — 부착 지점은 같습니다.
+
+**단일 문자열 입력은 각주 없이 평문만 돌려줍니다.** `nat run --input ...`처럼 단일
+문자열로 워크플로를 부르면 각주를 실을 응답 객체가 없으므로 본문 텍스트만 반환합니다.
+종전 `finus_sqlite_transcript_agent`는 이 경우에도 각주가 실린 `ChatResponse`를
+돌려줬으니 **동작이 바뀐 지점입니다**(#273).
+
+`run.sh`에서 이 경로를 타는 것은 **`--once`뿐입니다.** 기본 모드는 채팅 REPL(`nat serve`
++ `finus-chat`)이고, REPL은 HTTP로 `messages`를 보내므로 각주가 그대로 나옵니다.
+backend·scheduler도 마찬가지로 영향받지 않습니다. 즉 각주가 안 보이는 경우는
+`run.sh --once`와 `nat run --input` 두 가지뿐입니다.
+
+이 지점을 vendor 바깥으로 올린 이유: `auto_memory_agent`의 `_response_fn` 시그니처가
+`(input_message: str) -> str`이라, 안쪽에서 `ChatResponse`에 붙인 두 필드가 그 래퍼를
+통과하면서 버려집니다. backend는 필드가 없으면 각주를 조용히 생략하므로, 예전
+router.yml에서는 경고도 예외도 없이 각주만 사라졌습니다(#273). vendor를 감싸는 대신
+부착 지점을 올렸으므로 NAT 업그레이드로 vendor 시그니처가 바뀌어도 깨지지 않습니다.
 
 ## 1. Mem0 self-hosted server 설정
 
