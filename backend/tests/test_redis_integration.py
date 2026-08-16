@@ -31,7 +31,11 @@ async def _redis_client():
         await client.ping()
     except Exception as exc:
         await client.aclose()
-        pytest.skip(f"Redis integration server unavailable: {exc}")
+        # 접속 실패를 skip으로 넘기면, CI에서 서비스 컨테이너가 죽거나 주소가 어긋난
+        # 순간 이 파일 전체가 조용히 사라지고 잡은 초록불로 끝난다 — #267이 없애려는
+        # "실 redis 커버리지 0" 상태로 아무 신호 없이 되돌아간다. URL을 준 것은
+        # "여기 redis가 있다"는 선언이므로, 없으면 skip이 아니라 실패다.
+        pytest.fail(f"REDIS_INTEGRATION_URL={url} 에 접속하지 못했습니다: {exc}")
     return client
 
 
