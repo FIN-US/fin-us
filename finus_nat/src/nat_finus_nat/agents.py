@@ -622,6 +622,55 @@ def with_reasoning_trace(response: ChatResponse, trace: ReasoningTrace) -> ChatR
     )
 
 
+class FinusReasoningTraceAgentConfig(FunctionBaseConfig, name="finus_reasoning_trace_agent"):
+    inner_agent_name: FunctionRef = Field(..., description="Agent/workflow to invoke with a reasoning-trace box installed.")
+    description: str = Field(default="Fin-Us agent that attaches the reasoning trace footnote (#260)")
+
+
+@register_function(config_type=FinusReasoningTraceAgentConfig, framework_wrappers=[LLMFrameworkEnum.LANGCHAIN])
+async def finus_reasoning_trace_agent(config: FinusReasoningTraceAgentConfig, builder: Builder):
+    """추론 각주(#260)의 **유일한** 소유 지점 — 박스를 심고, 결과를 응답에 붙인다 (#273).
+
+    두 라우터 config가 이 함수를 최상위 ``workflow``로 쓰고, 그 아래 무엇이 오든
+    (``auto_memory_agent``가 끼든 안 끼든) 각주는 같은 자리에서 붙는다. 부착 지점이
+    config에 따라 갈리지 않는 것이 이 함수가 존재하는 이유의 전부다.
+
+    이전에는 ``finus_sqlite_transcript_agent``가 그 역할을 겸했는데, ``router.yml``에서는
+    그 위에 vendor ``auto_memory_agent``가 얹힌다. vendor ``_response_fn``의 시그니처가
+    ``(input_message: str) -> str``이라 안쪽이 ``ChatResponse``에 붙인 ``routed_agent``/
+    ``tools_used``가 래퍼를 통과하면서 사라졌다. backend는 두 필드가 없으면 각주를
+    조용히 생략하므로(#260) 메모리 모드에서는 로그도 예외도 없이 기능만 없어졌다.
+
+    vendor 래퍼를 ``ChatResponse``가 통과하도록 감싸는 대안도 있었으나, vendor
+    시그니처에 의존하므로 NAT 업그레이드 때 같은 방식으로 다시 깨진다. 부착 지점을
+    vendor 바깥으로 올리면 vendor가 무엇을 버리든 무관해진다.
+    """
+    inner_agent = await builder.get_function(config.inner_agent_name)
+
+    async def _response_fn(chat_request_or_message: ChatRequestOrMessage) -> ChatResponse | str:
+        # 박스는 여기서 한 번만 심는다. 안쪽(supervisor, _run_with_gate)은 mutate만 한다 —
+        # ContextVar.set()은 LangGraph의 copy_context() 경계를 넘어 바깥으로 전파되지
+        # 않기 때문이다(DataToolLedger와 동일). 반대 방향(바깥→안쪽)은 전파되므로
+        # vendor auto_memory_agent가 중간에 끼어 있어도 안쪽이 같은 박스를 본다.
+        trace = ReasoningTrace()
+        trace_token = REASONING_TRACE.set(trace)
+        try:
+            result = await inner_agent.ainvoke(chat_request_or_message)
+        finally:
+            REASONING_TRACE.reset(trace_token)
+
+        if chat_request_or_message.is_string:
+            # 문자열 반환 경로(`nat run --input` 등)는 각주를 실을 곳이 없다.
+            return chat_response_plain_text(result)
+        if isinstance(result, ChatResponse):
+            return with_reasoning_trace(result, trace)
+        # vendor auto_memory_agent는 str을 돌려준다 — 여기서 ChatResponse로 만들며
+        # 각주를 붙이므로, 안쪽에서 무엇이 버려졌는지와 무관하게 필드가 실린다.
+        return with_reasoning_trace(ChatResponse.from_string(str(result), usage=Usage()), trace)
+
+    yield FunctionInfo.from_fn(_response_fn, description=config.description)
+
+
 def nat_chat_extra_headers(conversation_id: str) -> dict[str, str]:
     return {
         "Content-Type": "application/json",
@@ -785,15 +834,11 @@ async def finus_sqlite_transcript_agent(config: FinusSqliteTranscriptAgentConfig
         forward_messages = history + chat_request.messages
         forward = _chat_request_with_messages(chat_request, forward_messages)
 
-        # #260: 추론 기록 박스를 workflow 최상단에서 한 번만 심는다. 안쪽(supervisor,
-        # _run_with_gate)은 박스를 mutate하기만 한다 — ContextVar.set()은 LangGraph의
-        # copy_context() 경계를 넘어 바깥으로 전파되지 않기 때문이다(DataToolLedger와 동일).
-        trace = ReasoningTrace()
-        trace_token = REASONING_TRACE.set(trace)
-        try:
-            result = await inner_agent.ainvoke(forward)
-        finally:
-            REASONING_TRACE.reset(trace_token)
+        # 추론 기록 박스(#260)는 이 에이전트가 심지 않는다 — 최상위
+        # finus_reasoning_trace_agent가 심고 붙인다(#273). 여기서 겸하면
+        # router.yml처럼 위에 vendor auto_memory_agent가 얹히는 config에서
+        # 부착 결과가 그 래퍼에 막혀 조용히 사라진다.
+        result = await inner_agent.ainvoke(forward)
         assistant = chat_response_plain_text(result)
 
         to_store: list[tuple[str, str]] = []
@@ -808,11 +853,10 @@ async def finus_sqlite_transcript_agent(config: FinusSqliteTranscriptAgentConfig
         _append_messages(db_path, conversation_id, to_store)
 
         if isinstance(result, ChatResponse):
-            return with_reasoning_trace(result, trace)
+            return result
         if chat_request_or_message.is_string:
-            # 문자열 반환 경로(chat_cli 등)는 실을 곳이 없으므로 각주 메타데이터를 붙이지 않는다.
             return str(result)
-        return with_reasoning_trace(ChatResponse.from_string(str(result), usage=Usage()), trace)
+        return ChatResponse.from_string(str(result), usage=Usage())
 
     yield FunctionInfo.from_fn(_response_fn, description=config.description)
 

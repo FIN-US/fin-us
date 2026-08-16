@@ -23,10 +23,15 @@ from nat.data_models.api_server import (
     UserMessageContentRoleType,
 )
 
+from nat.utils.type_converter import GlobalTypeConverter
+
 from nat_finus_nat.agents import (
+    FinusReasoningTraceAgentConfig,
     FinusSqliteTranscriptAgentConfig,
     _run_with_gate,
     _trace_route,
+    chat_response_plain_text,
+    finus_reasoning_trace_agent,
     finus_sqlite_transcript_agent,
     with_reasoning_trace,
 )
@@ -414,42 +419,110 @@ def test_extra_fields_survive_the_fastapi_response_model_boundary():
 
 # ---------------------------------------------------------------------------
 # workflow 최상단 통합 — 실제 응답에 실리는지
+#
+# 각주는 최상위 finus_reasoning_trace_agent 한 곳에서만 붙는다(#273). 아래 두
+# 헬퍼는 두 라우터 config의 체인을 그대로 재현한다 — 부착 지점이 같으므로 같은
+# 단언이 양쪽에 걸린다.
 # ---------------------------------------------------------------------------
 
-@asynccontextmanager
-async def _transcript_agent_fn(tmp_path, inner_response_fn):
-    """finus_sqlite_transcript_agent를 만들어 내부 호출 함수를 넘긴다."""
-    inner = MagicMock()
-    inner.ainvoke = AsyncMock(side_effect=inner_response_fn)
+def _branch_recording(route: str, *tool_names: str, answer: str = "답변"):
+    """supervisor + 브랜치가 하는 일을 흉내내는 가짜 내부 에이전트 함수.
 
-    builder = MagicMock()
-    builder.get_function = AsyncMock(return_value=inner)
-
-    config = FinusSqliteTranscriptAgentConfig(
-        inner_agent_name="router_supervisor_agent",
-        db_path=str(tmp_path / "conversations.sqlite3"),
-    )
-    async with finus_sqlite_transcript_agent(config, builder) as function_info:
-        yield function_info.single_fn
-
-
-@pytest.mark.asyncio
-async def test_transcript_agent_attaches_trace_to_response(tmp_path):
-    """최상단이 심은 박스에 안쪽이 기록하고, 그 결과가 응답에 실린다."""
+    최상단이 심은 박스를 mutate하기만 한다 — 실제 _trace_route/_trace_ledger_tools와 같다.
+    """
 
     async def inner_response(_request):
-        # supervisor와 브랜치가 하는 일을 그대로 흉내낸다 — 박스를 mutate한다.
-        _trace_route("news_agent")
+        _trace_route(route)
         ledger = DataToolLedger()
         ledger_token = DATA_TOOL_LEDGER.set(ledger)
         try:
-            _record_to_ledger("finus_market_news", "뉴스 3건")
+            for name in tool_names:
+                _record_to_ledger(name, "뉴스 3건")
         finally:
             DATA_TOOL_LEDGER.reset(ledger_token)
-        REASONING_TRACE.get().record_ledger_tools(ledger)
-        return ChatResponse.from_string("삼성전자 뉴스입니다.", usage=Usage())
+        trace = REASONING_TRACE.get()
+        assert trace is not None, "최상단이 박스를 심어 안쪽까지 전파돼야 한다"
+        trace.record_ledger_tools(ledger)
+        return ChatResponse.from_string(answer, usage=Usage())
 
-    async with _transcript_agent_fn(tmp_path, inner_response) as response_fn:
+    return inner_response
+
+
+def _as_function(response_fn) -> MagicMock:
+    fn = MagicMock()
+    fn.ainvoke = AsyncMock(side_effect=response_fn)
+    return fn
+
+
+def _builder_returning(function_mock: MagicMock) -> MagicMock:
+    builder = MagicMock()
+    builder.get_function = AsyncMock(return_value=function_mock)
+    return builder
+
+
+@asynccontextmanager
+async def _nomemory_chain(tmp_path, inner_response_fn):
+    """router_nomemory.yml 체인: trace_agent → transcript_agent → 브랜치."""
+    transcript_config = FinusSqliteTranscriptAgentConfig(
+        inner_agent_name="router_supervisor_agent",
+        db_path=str(tmp_path / "conversations.sqlite3"),
+    )
+    async with finus_sqlite_transcript_agent(
+        transcript_config, _builder_returning(_as_function(inner_response_fn))
+    ) as transcript_info:
+        transcript_fn = transcript_info.single_fn
+        async with finus_reasoning_trace_agent(
+            FinusReasoningTraceAgentConfig(inner_agent_name="transcript_router_agent"),
+            _builder_returning(_as_function(transcript_fn)),
+        ) as trace_info:
+            yield trace_info.single_fn
+
+
+@asynccontextmanager
+async def _memory_chain(tmp_path, inner_response_fn):
+    """router.yml 체인: trace_agent → auto_memory_agent(vendor) → transcript_agent → 브랜치.
+
+    가운데 vendor 흉내는 실제 `_response_fn(input_message: str) -> str` 시그니처를
+    그대로 재현한다 — NAT 타입 변환이 요청을 문자열로 눕히고, 반환도 문자열이라
+    안쪽이 ChatResponse에 붙인 추가 필드는 **여기서 전부 사라진다**. #273의 원인이
+    바로 이 지점이므로, 흉내를 느슨하게 만들면 회귀 테스트가 아무것도 지키지 않는다.
+    """
+    transcript_config = FinusSqliteTranscriptAgentConfig(
+        inner_agent_name="router_supervisor_agent",
+        db_path=str(tmp_path / "conversations.sqlite3"),
+    )
+    async with finus_sqlite_transcript_agent(
+        transcript_config, _builder_returning(_as_function(inner_response_fn))
+    ) as transcript_info:
+        transcript_fn = transcript_info.single_fn
+
+        async def vendor_auto_memory(request):
+            text = GlobalTypeConverter.get().convert(request, to_type=str)
+            result = await transcript_fn(ChatRequestOrMessage(input_message=text))
+            return chat_response_plain_text(result)
+
+        async with finus_reasoning_trace_agent(
+            FinusReasoningTraceAgentConfig(inner_agent_name="memory_router_agent"),
+            _builder_returning(_as_function(vendor_auto_memory)),
+        ) as trace_info:
+            yield trace_info.single_fn
+
+
+_CHAINS = [(_nomemory_chain, "router_nomemory.yml"), (_memory_chain, "router.yml")]
+_CHAIN_IDS = [name for _, name in _CHAINS]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("chain,_config_name", _CHAINS, ids=_CHAIN_IDS)
+async def test_workflow_attaches_trace_to_response(chain, _config_name, tmp_path):
+    """최상단이 심은 박스에 안쪽이 기록하고, 그 결과가 응답에 실린다.
+
+    router.yml 파라미터가 #273의 회귀 가드다 — 부착 지점이 vendor 안쪽으로 돌아가면
+    두 필드가 str 경계에서 버려져 red가 된다.
+    """
+    async with chain(tmp_path, _branch_recording(
+        "news_agent", "finus_market_news", answer="삼성전자 뉴스입니다."
+    )) as response_fn:
         result = await response_fn(
             ChatRequestOrMessage(messages=[{"role": "user", "content": "삼성전자 뉴스"}])
         )
@@ -461,15 +534,15 @@ async def test_transcript_agent_attaches_trace_to_response(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_transcript_agent_does_not_leak_trace_between_requests(tmp_path):
+@pytest.mark.parametrize("chain,_config_name", _CHAINS, ids=_CHAIN_IDS)
+async def test_workflow_does_not_leak_trace_between_requests(chain, _config_name, tmp_path):
     """앞선 요청의 라우팅·도구가 다음 요청의 각주로 새지 않는다."""
     routes = ["news_agent", "trading_agent"]
 
-    async def inner_response(_request):
-        _trace_route(routes.pop(0))
-        return ChatResponse.from_string("답변", usage=Usage())
+    async def inner_response(request):
+        return await _branch_recording(routes.pop(0))(request)
 
-    async with _transcript_agent_fn(tmp_path, inner_response) as response_fn:
+    async with chain(tmp_path, inner_response) as response_fn:
         first = await response_fn(
             ChatRequestOrMessage(messages=[{"role": "user", "content": "뉴스"}])
         )
@@ -480,3 +553,45 @@ async def test_transcript_agent_does_not_leak_trace_between_requests(tmp_path):
     assert first.model_dump()["routed_agent"] == "news_agent"
     assert second.model_dump()["routed_agent"] == "trading_agent"
     assert second.model_dump()["tools_used"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("chain,_config_name", _CHAINS, ids=_CHAIN_IDS)
+async def test_workflow_returns_plain_text_for_string_input(chain, _config_name, tmp_path):
+    """`nat run --input` 같은 문자열 경로는 각주를 실을 곳이 없으므로 본문만 돌려준다."""
+    async with chain(tmp_path, _branch_recording(
+        "news_agent", "finus_market_news", answer="삼성전자 뉴스입니다."
+    )) as response_fn:
+        result = await response_fn(ChatRequestOrMessage(input_message="삼성전자 뉴스"))
+
+    assert result == "삼성전자 뉴스입니다."
+
+
+@pytest.mark.asyncio
+async def test_transcript_agent_no_longer_owns_the_trace_box(tmp_path):
+    """transcript_agent는 박스를 심지도 붙이지도 않는다 (#273).
+
+    겸하면 박스가 두 겹이 되어(안쪽 set이 바깥 박스를 가림) 최상단이 심은 박스는
+    빈 채로 남고, router.yml에서는 다시 각주가 조용히 사라진다.
+    """
+    seen: list[object] = []
+
+    async def inner_response(_request):
+        seen.append(REASONING_TRACE.get())
+        return ChatResponse.from_string("답변", usage=Usage())
+
+    transcript_config = FinusSqliteTranscriptAgentConfig(
+        inner_agent_name="router_supervisor_agent",
+        db_path=str(tmp_path / "conversations.sqlite3"),
+    )
+    async with finus_sqlite_transcript_agent(
+        transcript_config, _builder_returning(_as_function(inner_response))
+    ) as transcript_info:
+        result = await transcript_info.single_fn(
+            ChatRequestOrMessage(messages=[{"role": "user", "content": "뉴스"}])
+        )
+
+    assert seen == [None], "transcript_agent가 박스를 심으면 최상단 박스를 가린다"
+    dumped = result.model_dump()
+    assert "routed_agent" not in dumped
+    assert "tools_used" not in dumped
