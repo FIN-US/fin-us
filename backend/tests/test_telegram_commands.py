@@ -44,7 +44,8 @@ def _make_poller(notifier, handler, *, state_store: TelegramPollerStore | None =
     state_store 기본값은 redis 클라이언트라, 주입하지 않으면 테스트가 실제 연결을 시도한다.
     재시작 시나리오는 같은 state_store를 두 폴러에 넘겨 재현한다.
 
-    타입을 명시해야 여기를 지나는 테스트 더블도 TelegramPollerStore로 검증된다 (#271).
+    타입을 명시해야 타입 체커를 돌릴 때 여기를 지나는 테스트 더블까지 TelegramPollerStore로
+    검증된다. CI에는 타입 체크 잡이 없어 자동으로 강제되지는 않는다 (#271).
     """
     return TelegramCommandPoller(
         notifier=notifier,

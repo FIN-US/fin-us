@@ -1,3 +1,4 @@
+import inspect
 import json
 
 import pytest
@@ -6,9 +7,14 @@ from backend.redis_state import (
     MAX_HANDLED_AHEAD,
     SIGNAL_HASH_TTL_SEC,
     TELEGRAM_POLLER_STATE_TTL_SEC,
+    InMemoryPendingOrderStore,
+    InMemoryTelegramPollerStore,
+    PendingOrderStore,
+    RedisPendingOrderStore,
     RedisSchedulerState,
     RedisTelegramPollerStore,
     TelegramPollerState,
+    TelegramPollerStore,
     signal_hash,
     normalize_signal_text,
 )
@@ -335,3 +341,60 @@ async def test_poller_state_save_is_quiet_below_warning_threshold(caplog):
         await store.save(TelegramPollerState(offset=1, handled_ahead=frozenset(range(6_700))))
 
     assert "상한의 절반을 넘었다" not in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# 저장소 프로토콜 적합성 (#271)
+# ---------------------------------------------------------------------------
+
+
+def _protocol_methods(protocol) -> dict:
+    """Protocol이 선언한 메서드만 추린다 (typing이 붙이는 내부 속성 제외)."""
+    return {
+        name: member
+        for name, member in vars(protocol).items()
+        if inspect.isfunction(member) and not name.startswith("_")
+    }
+
+
+def _shape(signature: inspect.Signature) -> list:
+    """self를 뺀 (이름, 종류, 필수 여부). 애노테이션은 타입 체커의 몫이라 보지 않는다."""
+    return [
+        (name, parameter.kind, parameter.default is inspect.Parameter.empty)
+        for name, parameter in signature.parameters.items()
+        if name != "self"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("protocol", "implementation"),
+    [
+        (TelegramPollerStore, RedisTelegramPollerStore),
+        (TelegramPollerStore, InMemoryTelegramPollerStore),
+        (PendingOrderStore, RedisPendingOrderStore),
+        (PendingOrderStore, InMemoryPendingOrderStore),
+    ],
+    ids=lambda obj: obj.__name__,
+)
+def test_store_matches_protocol_shape(protocol, implementation):
+    """구현체의 메서드 이름·인자 모양이 Protocol과 어긋나지 않는다 (#271).
+
+    Protocol은 정적 검사 장치인데 이 레포의 CI에는 타입 체크 잡이 없다. 어긋남이 런타임까지
+    살아남으면 두 주입 지점 모두 그것을 조용히 삼킨다 — TelegramCommandPoller의
+    _persist_state·_restore_state에 있는 except Exception이 TypeError를 로그 한 줄로
+    흘려보내고, 폴러는 "영속화 없음"으로 degrade한다. #248이 닫으려던 중복 실행 창이
+    그대로 열리는데 예외는 어디에도 오르지 않는다.
+
+    그래서 타입 체커 없이도 CI가 잡을 수 있는 만큼(이름·인자 모양)을 여기서 고정한다.
+    타입의 적합성 자체는 여전히 체커의 몫이다.
+
+    이 테스트가 잡는 mutation: 구현체의 메서드 이름 변경(save → save_state),
+    인자 추가·삭제(save(self)), 위치 인자의 키워드 전용 전환.
+    """
+    for name, declared in _protocol_methods(protocol).items():
+        actual = getattr(implementation, name, None)
+        assert actual is not None, f"{implementation.__name__}에 {name}이 없다"
+        assert inspect.iscoroutinefunction(actual), f"{name}은 async여야 한다"
+        assert _shape(inspect.signature(actual)) == _shape(inspect.signature(declared)), (
+            f"{implementation.__name__}.{name}의 인자가 {protocol.__name__}과 다르다"
+        )

@@ -196,8 +196,11 @@ class TelegramPollerState:
 class TelegramPollerStore(Protocol):
     """TelegramCommandPoller가 상태 저장소에 요구하는 전부 (#271).
 
-    구조적 타이핑이라 구현체가 이 클래스를 상속할 필요는 없다. 프로덕션
-    (RedisTelegramPollerStore)·인메모리·테스트 더블이 주입 지점에서 함께 검증된다.
+    구조적 타이핑이라 구현체가 이 클래스를 상속할 필요는 없다. 대신 적합성은 타입 체커를
+    돌려야 드러나는데, 이 레포의 CI에는 타입 체크 잡이 없다 — 여기서 어긋난 스토어가
+    주입돼도 폴러의 except Exception이 TypeError를 삼켜 "영속화 없음"으로 조용히 degrade한다
+    (#248이 닫으려던 중복 실행 창이 그대로 열린다). 그래서 이름·인자 모양만큼은
+    test_redis_state.test_store_matches_protocol_shape가 CI에서 고정한다.
 
     두 값을 한 덩어리(TelegramPollerState)로 주고받는 이유는 그 dataclass의 독스트링에 있다.
     """
@@ -372,6 +375,9 @@ class PendingOrderStore(Protocol):
 
     InMemoryPendingOrderStore의 동기 dict 인터페이스(__getitem__ 등)도 계약이 아니다.
     프로덕션 구현이 제공할 수 없는 테스트 편의이므로 그 클래스에만 있다.
+
+    적합성 검증은 TelegramPollerStore와 같다 — 정적으로는 체커가 있어야 보이고, CI에서는
+    test_redis_state.test_store_matches_protocol_shape가 이름·인자 모양을 고정한다.
     """
 
     async def get(self, chat_id: str) -> "PendingOrder | None": ...
@@ -423,8 +429,8 @@ class InMemoryPendingOrderStore:
         self._store[chat_id] = order
         return True
 
-    # 동기 dict 인터페이스: 기존 테스트의 handler.pending_orders[...] 접근용
-    def __getitem__(self, chat_id: str) -> Any:
+    # 동기 dict 인터페이스: 테스트의 store[...] 접근용
+    def __getitem__(self, chat_id: str) -> "PendingOrder":
         return self._store[chat_id]
 
     def __contains__(self, chat_id: object) -> bool:
