@@ -644,6 +644,13 @@ async def finus_reasoning_trace_agent(config: FinusReasoningTraceAgentConfig, bu
     vendor 래퍼를 ``ChatResponse``가 통과하도록 감싸는 대안도 있었으나, vendor
     시그니처에 의존하므로 NAT 업그레이드 때 같은 방식으로 다시 깨진다. 부착 지점을
     vendor 바깥으로 올리면 vendor가 무엇을 버리든 무관해진다.
+
+    **알려진 한계 (#273 리뷰):** vendor ``_response_fn``은 예외를 삼키고 ``str(ex)``를
+    답변으로 돌려준다(``router.yml``이 ``verbose: true``). supervisor는 브랜치를 부르기
+    **전에** ``_trace_route()``를 부르므로, 브랜치가 터지면 ``routed_agent``가 남은 채
+    에러 텍스트가 올라오고 여기서 그 텍스트에 각주가 붙는다. 메모리 모드는 여태 각주가
+    없었으니 이 PR로 새로 도달 가능해진 경로다. 막으려면 vendor의 실패 문자열을
+    알아봐야 하는데, 그게 바로 이 함수가 없애려던 결합이라 그대로 둔다.
     """
     inner_agent = await builder.get_function(config.inner_agent_name)
 
@@ -659,8 +666,14 @@ async def finus_reasoning_trace_agent(config: FinusReasoningTraceAgentConfig, bu
         finally:
             REASONING_TRACE.reset(trace_token)
 
+        # 문자열 입력(`nat run --input`)은 평문으로 돌려준다 — 각주를 실을 곳이 없다.
+        # **종전 동작과 다르다.** 옛 transcript agent는 isinstance 검사가 먼저라
+        # 문자열 입력에도 각주가 실린 ChatResponse를 돌려줬고, 그 아래 `is_string`
+        # 분기는 안쪽(supervisor)이 항상 ChatResponse를 반환하므로 도달하지 않는
+        # 죽은 코드였다 — "실을 곳이 없다"는 주석이 실행되지 않는 분기에 붙어 있었다.
+        # 여기서는 검사 순서를 뒤집어 그 의도를 실제로 실행한다. HTTP 경로(backend·
+        # scheduler)는 messages를 보내므로 영향받지 않는다.
         if chat_request_or_message.is_string:
-            # 문자열 반환 경로(`nat run --input` 등)는 각주를 실을 곳이 없다.
             return chat_response_plain_text(result)
         if isinstance(result, ChatResponse):
             return with_reasoning_trace(result, trace)

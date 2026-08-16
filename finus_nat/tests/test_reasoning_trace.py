@@ -12,6 +12,7 @@
 
 import pytest
 from contextlib import asynccontextmanager
+from typing import TypedDict
 from unittest.mock import AsyncMock, MagicMock
 
 from nat.data_models.api_server import (
@@ -478,14 +479,50 @@ async def _nomemory_chain(tmp_path, inner_response_fn):
             yield trace_info.single_fn
 
 
+class _VendorState(TypedDict):
+    """vendor AutoMemoryWrapperState 자리 — 홉을 재현하는 데 필요한 최소 필드."""
+
+    text: str
+
+
+def _compiled_vendor_graph(transcript_fn):
+    """vendor가 안쪽을 부르는 방식(CompiledStateGraph.ainvoke)까지 재현한다.
+
+    #273 수정은 두 가정 위에 서 있다.
+
+    1. vendor의 str 경계에서 ChatResponse의 추가 필드가 버려진다 — 그래서 부착
+       지점을 그 **바깥**으로 올려야 한다.
+    2. 최상단이 심은 박스가 그 경계를 **안쪽으로는** 넘어간다 — 그래서 올려도
+       supervisor/브랜치가 같은 박스를 기록할 수 있다.
+
+    transcript_fn을 같은 컨텍스트에서 그냥 await하면 1번만 덮이고 2번은 검증되지
+    않는다. LangGraph는 노드를 copy_context()로 감싸 실행하므로, 실제로 건너야
+    하는 경계는 이 홉이다. 노드 하나짜리 그래프면 그 경계를 그대로 만든다.
+    """
+    from langgraph.graph import END, START, StateGraph
+
+    async def inner_node(state: _VendorState) -> _VendorState:
+        result = await transcript_fn(ChatRequestOrMessage(input_message=state["text"]))
+        # vendor는 마지막 메시지의 content(str)만 상태에 남긴다 — 필드 소실 지점.
+        return {"text": chat_response_plain_text(result)}
+
+    graph = StateGraph(_VendorState)
+    graph.add_node("inner", inner_node)
+    graph.add_edge(START, "inner")
+    graph.add_edge("inner", END)
+    return graph.compile()
+
+
 @asynccontextmanager
 async def _memory_chain(tmp_path, inner_response_fn):
     """router.yml 체인: trace_agent → auto_memory_agent(vendor) → transcript_agent → 브랜치.
 
-    가운데 vendor 흉내는 실제 `_response_fn(input_message: str) -> str` 시그니처를
-    그대로 재현한다 — NAT 타입 변환이 요청을 문자열로 눕히고, 반환도 문자열이라
-    안쪽이 ChatResponse에 붙인 추가 필드는 **여기서 전부 사라진다**. #273의 원인이
-    바로 이 지점이므로, 흉내를 느슨하게 만들면 회귀 테스트가 아무것도 지키지 않는다.
+    가운데 vendor 흉내는 실제 `_response_fn(input_message: str) -> str` 시그니처와
+    `graph.ainvoke(state)` 홉을 함께 재현한다 — NAT 타입 변환이 요청을 문자열로
+    눕히고, 반환도 문자열이라 안쪽이 ChatResponse에 붙인 추가 필드는 **여기서 전부
+    사라진다**. #273의 원인이 바로 이 지점이므로, 흉내를 느슨하게 만들면 회귀
+    테스트가 아무것도 지키지 않는다. LangGraph 홉을 넣는 이유는
+    :func:`_compiled_vendor_graph` 참고.
     """
     transcript_config = FinusSqliteTranscriptAgentConfig(
         inner_agent_name="router_supervisor_agent",
@@ -494,12 +531,12 @@ async def _memory_chain(tmp_path, inner_response_fn):
     async with finus_sqlite_transcript_agent(
         transcript_config, _builder_returning(_as_function(inner_response_fn))
     ) as transcript_info:
-        transcript_fn = transcript_info.single_fn
+        vendor_graph = _compiled_vendor_graph(transcript_info.single_fn)
 
         async def vendor_auto_memory(request):
             text = GlobalTypeConverter.get().convert(request, to_type=str)
-            result = await transcript_fn(ChatRequestOrMessage(input_message=text))
-            return chat_response_plain_text(result)
+            result_state = await vendor_graph.ainvoke({"text": text})
+            return str(result_state["text"])
 
         async with finus_reasoning_trace_agent(
             FinusReasoningTraceAgentConfig(inner_agent_name="memory_router_agent"),
