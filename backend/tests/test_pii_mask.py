@@ -66,17 +66,22 @@ class TestPlaceholderScope:
             scopes.add(_SCOPED_PLACEHOLDER_RE.fullmatch(key).group(0))
         assert len(scopes) > 1, "호출마다 같은 scope가 나왔다 — nonce가 고정값이다"
 
-    def test_placeholder_from_other_call_is_not_restored(self):
-        """다른 호출의 자리표시자는 현재 매핑에 없으므로 역치환되지 않아야 한다."""
+    def test_placeholder_from_other_call_returns_neutral_phrase(self):
+        """다른 호출의 자리표시자는 현재 매핑에 없으므로 중립 문구로 치환되어야 한다.
+
+        이전 턴 값도, 내부 토큰도 사용자에게 노출되어서는 안 된다.
+        텔레그램 스레드(conversation_id="telegram:{chat_id}")는 max_history_messages=30
+        창에서 이전 자리표시자가 재등장하는 상시 경로이므로 이 동작이 중요하다.
+        """
         _, mapping_turn1 = mask_pii("잔고 12,345,000원")
         (placeholder_turn1,) = mapping_turn1
         _, mapping_turn2 = mask_pii("5,000,000원 더")
 
         restored = unmask_pii(f"앞서 말씀하신 {placeholder_turn1} 기준으로는", mapping_turn2)
-        assert "5,000,000원" not in restored, (
-            "이전 턴 자리표시자가 현재 턴 값으로 잘못 복원됐다"
-        )
-        assert placeholder_turn1 in restored
+        assert "5,000,000원" not in restored, "이전 턴 자리표시자가 현재 턴 값으로 잘못 복원됐다"
+        assert "12,345,000원" not in restored, "이전 턴의 원값이 노출됐다"
+        assert placeholder_turn1 not in restored, "내부 토큰이 사용자 화면에 노출됐다"
+        assert "이전에 언급된 금액" in restored
 
 
 class TestAccountRecognizer:
@@ -115,6 +120,61 @@ class TestAmountRecognizer:
         masked, mapping = mask_pii("평단가 123만원 수준")
         assert _norm(masked) == "평단가 <AMOUNT_1> 수준"
         assert _norm_mapping(mapping) == {"<AMOUNT_1>": "123만원"}
+
+    def test_masks_comma_grouped_unit_amount_entirely(self):
+        """콤마가 들어간 만/억 단위 금액은 앞자리까지 통째로 마스킹돼야 한다.
+
+        기존 `(?<!\\d)` lookbehind만으로는 "3,000만원"에서 매치가 콤마 **뒤**
+        ("000만원")부터 시작돼 앞자리 "3,"가 마스킹되지 않고 남아 외부 LLM으로
+        나간다. _QTY_RE가 이미 고친 것과 같은 결함이다
+        (TestQuantityRecognizer.test_masks_comma_grouped_quantity_entirely가 수량판으로
+        같은 결함을 고정하고 있다).
+
+        이 테스트가 잡는 mutation:
+        - `(?:,\\d{3})*` 제거: 정상 콤마 표기("3,000만원")에서 "000만원"만
+          자리표시자가 되고 "3,"가 남는다 (아래 루프 1이 FAILED).
+        - `(?<![\\d,])` → `(?<!\\d)` (콤마 배제 제거): 비정상 콤마 표기에서
+          앞자리가 유출된 채 뒷부분만 자리표시자가 되는 부분 마스킹이 발생한다
+          — "1,23만원" → "1,<AMOUNT_1>" 형태 (아래 루프 2가 FAILED).
+
+        대조군(`test_masks_man_won_unit` 등)이 깨지지 않는지 함께 확인한다.
+        """
+        # 루프 1: 정상 콤마 표기가 통째로 마스킹된다.
+        # 잡는 mutation: `(?:,\\d{3})*` 제거.
+        for text, expected_masked, expected_original in [
+            ("3,000만원", "<AMOUNT_1>", "3,000만원"),
+            ("1,234만원", "<AMOUNT_1>", "1,234만원"),
+            ("평가금액 12,345만원", "평가금액 <AMOUNT_1>", "12,345만원"),
+            ("1,000억원 규모", "<AMOUNT_1> 규모", "1,000억원"),
+        ]:
+            masked, mapping = mask_pii(text)
+            assert _norm(masked) == expected_masked, (
+                f"콤마 포함 만/억 단위 금액이 통째로 마스킹되지 않았다: {text!r} -> {masked!r}"
+            )
+            (ph,) = mapping
+            assert mapping[ph] == expected_original, (
+                f"매핑 원값이 틀렸다: {mapping[ph]!r} != {expected_original!r}"
+            )
+            assert unmask_pii(masked, mapping) == text
+
+        # 루프 2: 비정상 콤마 표기(3자리로 끊기지 않은 표기)에서 부분 마스킹이 없어야 한다.
+        # 잡는 mutation: `(?<![\d,])` → `(?<!\d)` (콤마 배제 제거).
+        # mutant에서는 "1,23만원" → "1,<AMOUNT_1>"처럼 콤마 앞자리가 유출된 채
+        # 뒷부분만 자리표시자가 된다 — "숫자,<AMOUNT" 패턴으로 관측된다.
+        # 현재 정규식은 비정상 콤마 표기를 아예 매치하지 않아 원문이 그대로 남는다
+        # (과소탐이지만 유출이 없는 안전한 쪽이다).
+        for text in [
+            "1,23만원",      # 2자리 그룹 — 앞자리 "1," 유출 위험
+            "12,34만원",     # 2자리 그룹 — 앞자리 "12," 유출 위험
+            "1,0000만원",    # 4자리 그룹 — 앞자리 "1," 유출 위험
+            "1,23,456만원",  # 혼합 비정상 — 앞자리 "1," 유출 위험
+        ]:
+            masked, mapping = mask_pii(text)
+            normed = _norm(masked)
+            assert not re.search(r"\d,<AMOUNT", normed), (
+                f"비정상 콤마 표기에서 앞자리가 유출된 채 뒷부분만 마스킹됐다: "
+                f"{text!r} -> {normed!r} (앞자리 숫자와 콤마가 자리표시자 앞에 남음)"
+            )
 
     def test_masks_labeled_bare_digits_without_won_suffix(self):
         """'원' 접미사가 없는 표기 편차(예: 총자산 1234567)는 금액 라벨 컨텍스트에서만 마스킹한다."""
@@ -395,22 +455,24 @@ class TestUnmaskFailOpen:
     """역치환 실패가 분석 결과를 죽이지 않아야 한다(#230 필수 요구사항).
 
     두 갈래를 모두 고정한다:
-    (1) 형식은 맞지만(=_PLACEHOLDER_RE에 매치) 매핑에 없는 자리표시자 -> 원문 유지 + 경고 로그
+    (1) 형식은 맞지만(=_PLACEHOLDER_RE에 매치) 매핑에 없는 자리표시자 -> 중립 문구로 치환 + 경고 로그
     (2) 형식 자체가 어긋난 변형(scope 없는 구형식 포함) -> 정규식에 안 걸려 자연히 원문 유지
     """
 
-    def test_unknown_scoped_placeholder_is_left_as_is_with_warning(self, caplog):
-        """LLM이 존재하지 않는 자리표시자를 지어내도 예외 없이 원문을 보존하고 경고를 남긴다.
+    def test_unknown_scoped_placeholder_returns_neutral_phrase_with_warning(self, caplog):
+        """LLM이 존재하지 않는 자리표시자를 지어내면 중립 문구로 치환하고 경고를 남긴다.
 
         scope 도입 후 "매핑에 없는 자리표시자"의 대표 사례는 다른 호출(=이전 대화 턴)의
         scope를 가진 자리표시자다. 형식은 유효하므로 _PLACEHOLDER_RE에 매치되고,
-        매핑에 없으니 경고 로그 경로를 탄다.
+        매핑에 없으니 중립 문구 치환 + 경고 로그 경로를 탄다. 내부 토큰이 사용자
+        화면에 노출되어서는 안 된다.
         """
         mapping = {"<AMOUNT_deadbe_1>": "12,345,000원"}
         text = "평가금액은 <AMOUNT_deadbe_1>이고 총자산은 <AMOUNT_deadbe_9>이다."
         with caplog.at_level("WARNING", logger="backend.pii_mask"):
             restored = unmask_pii(text, mapping)
-        assert restored == "평가금액은 12,345,000원이고 총자산은 <AMOUNT_deadbe_9>이다."
+        assert restored == "평가금액은 12,345,000원이고 총자산은 이전에 언급된 금액이다."
+        assert "<AMOUNT_deadbe_9>" not in restored, "내부 토큰이 사용자 화면에 노출됐다"
         assert "<AMOUNT_deadbe_9>" in caplog.text, (
             "매핑에 없는 자리표시자를 만났는데 경고 로그가 남지 않았다"
         )

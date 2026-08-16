@@ -68,8 +68,14 @@ _ACCOUNT_RE = re.compile(r"(?<!\d)(\d{8})-?(\d{2})(?!\d)")
 # 끊긴 표기와 "1234567"처럼 끊기지 않은 표기를 하나의 패턴으로 함께 다룰 수 있다.
 _AMOUNT_WON_RE = re.compile(r"(?<!\d)\d+(?:,\d{3})*(?:\.\d+)?원")
 
-# "123만원" / "1.5억원" 처럼 만/억 단위가 붙는 표기.
-_AMOUNT_UNIT_RE = re.compile(r"(?<!\d)\d+(?:\.\d+)?(?:만|억)\s?원")
+# "123만원" / "1.5억원" / "3,000만원" 처럼 만/억 단위가 붙는 표기.
+#
+# _QTY_RE가 이미 고친 것과 같은 결함이 기존 `(?<!\d)`에 존재했다:
+# "3,000만원"처럼 콤마가 들어간 표기에서 매치가 콤마 **뒤**("000만원")부터
+# 시작돼 앞자리 "3,"가 원문에 남은 채 외부 LLM으로 나간다.
+# (?<![\d,]) + (?:,\d{3})* 조합이 이를 막는다: lookbehind로 콤마 중간 시작을
+# 차단하고, (?:,\d{3})*로 3자리씩 끊긴 콤마 표기를 통째로 매치한다.
+_AMOUNT_UNIT_RE = re.compile(r"(?<![\d,])\d+(?:,\d{3})*(?:\.\d+)?(?:만|억)\s?원")
 
 # 금액 라벨(잔고 리포트·프롬프트에서 실제로 쓰이는 어휘) 바로 뒤에 "원" 접미사 없이
 # 나오는 숫자 — 원화 금액 표기 편차("1234567"처럼 단위 없이 그대로 나오는 값)를 위해
@@ -144,6 +150,16 @@ _QTY_RE = re.compile(
 # scope가 없으면(구형식 <AMOUNT_1>) 이 정규식에 매치되지 않아 unmask_pii의 fail-open
 # 경로로 떨어진다. _Counter의 docstring에 그 이유를 적었다.
 _PLACEHOLDER_RE = re.compile(r"<(ACCOUNT|AMOUNT|QTY)_[0-9a-f]{6}_(\d+)>")
+
+# 매핑에 없는 자리표시자(다른 대화 턴의 scope를 가진 것 포함)의 폴백 레이블.
+# 사용자 화면에 내부 토큰(<AMOUNT_xxx_1> 등)이 그대로 노출되는 대신 중립적인
+# 자연어로 대체한다 — 값을 지어내지 않으면서 토큰 노출을 막는 균형점이다.
+# 알 수 없는 종류가 와도 KeyError로 죽지 않도록 .get() 기본값을 둔다.
+_FALLBACK_LABEL: dict[str, str] = {
+    "ACCOUNT": "이전에 언급된 계좌",
+    "AMOUNT": "이전에 언급된 금액",
+    "QTY": "이전에 언급된 수량",
+}
 
 
 class _Counter:
@@ -277,10 +293,11 @@ def unmask_pii(text: str, mapping: dict[str, str]) -> str:
     LLM 응답에서 자리표시자가 변형되거나(예: <AMOUNT_9f2a1c_1> -> <AMOUNT1>) 존재하지
     않는 자리표시자가 지어질 수 있다(예: <AMOUNT_9f2a1c_9>). 이 함수는 어떤 경우에도
     예외를 던지지 않는다 — 역치환 실패가 분석 결과 전체를 죽이면 안 되므로, 실패한
-    자리표시자는 원문 그대로 남기고 경고 로그만 남긴다(fail-open).
+    자리표시자는 _FALLBACK_LABEL의 중립 문구로 치환하고 경고 로그만 남긴다(fail-open).
+    내부 토큰이 사용자 화면에 그대로 노출되는 것을 막기 위함이다.
 
     두 갈래로 갈린다: (1) 형식은 맞지만 매핑에 없는 자리표시자(다른 호출의 scope를 가진
-    것 포함)는 원문 유지 + 경고 로그, (2) _PLACEHOLDER_RE에 아예 매치되지 않는 변형
+    것 포함)는 중립 문구로 치환 + 경고 로그, (2) _PLACEHOLDER_RE에 아예 매치되지 않는 변형
     (<AMOUNT1>, scope 없는 구형식 <AMOUNT_1> 등)은 손대지 않아 자연히 원문이 유지된다.
 
     입력이 str 서브클래스면 반환값도 같은 타입·같은 인스턴스 속성으로 유지한다
@@ -296,7 +313,10 @@ def unmask_pii(text: str, mapping: dict[str, str]) -> str:
         value = mapping.get(placeholder)
         if value is None:
             missing.append(placeholder)
-            return placeholder
+            # 내부 토큰을 그대로 돌려주면 텔레그램 메시지에 "<AMOUNT_xxx_1>"이
+            # 노출된다. 값을 지어내는 대신 중립 문구로 대체해 토큰 노출만 막는다.
+            # match.group(1)은 _PLACEHOLDER_RE의 첫 캡처 그룹(ACCOUNT/AMOUNT/QTY).
+            return _FALLBACK_LABEL.get(match.group(1), "이전에 언급된 값")
         return value
 
     try:
@@ -311,7 +331,7 @@ def unmask_pii(text: str, mapping: dict[str, str]) -> str:
 
     if missing:
         logger.warning(
-            "LLM 응답에서 매핑에 없는 PII 자리표시자를 발견해 원문 그대로 남겼습니다: %s",
+            "LLM 응답에서 매핑에 없는 PII 자리표시자를 발견해 중립 문구로 치환했습니다: %s",
             missing,
         )
 
@@ -319,6 +339,14 @@ def unmask_pii(text: str, mapping: dict[str, str]) -> str:
     # plain str을 반환하므로, 호출자가 str을 상속해 메타데이터를 얹은 값을 넘기면
     # (#260의 services.NatAnswer — 답변 텍스트에 routed_agent/tools_used를 얹어 각주를
     # 만든다) 역치환을 통과하는 순간 그 메타데이터가 조용히 사라진다.
+    #
+    # #263의 NatAnswer.with_text()는 같은 불변식(타입·속성 보존)을 지키는 전용 API로
+    # 이미 존재하며, 해당 메서드 docstring이 #230을 지목하고 있다. 머지 순서에 따라
+    # 아래 중 하나를 택한다:
+    # - 이 PR(#230)이 먼저 머지되면: #263 리뷰 시점에 NatAnswer.with_text()를 제거하고
+    #   여기서 구현한 제네릭 복원이 유일한 장치가 된다.
+    # - #263이 먼저 머지되면: 이 브랜치 리베이스 시점에 `raw.with_text(unmask_pii(...))`
+    #   패턴과 여기서 구현한 제네릭 복원 중 하나를 택한다(중복 보존은 불필요).
     #
     # 마스킹 대상이 없어 조기 반환하는 경로(위의 `not mapping`)에서는 원본이 그대로
     # 유지되므로, 이 보존이 없으면 "PII가 있는 질의에서만 메타데이터가 사라지는"

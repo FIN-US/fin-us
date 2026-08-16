@@ -2,6 +2,7 @@ import ast
 import asyncio
 import inspect
 import logging
+import pathlib
 import re
 import typing
 from datetime import date
@@ -1597,8 +1598,10 @@ async def test_llm_chat_unmask_fails_open_on_unknown_placeholder(monkeypatch):
     이 테스트가 잡는 mutation: unmask_pii(또는 그 호출부)가 매핑에 없는 자리표시자를
     만났을 때 예외를 던지도록 바뀌는 경우 - 그러면 이 테스트가 예외로 실패해야 한다.
 
-    두 갈래를 함께 넣는다: 형식은 유효하지만 매핑에 없는 자리표시자
-    (<AMOUNT_deadbe_9> - scope가 이번 호출과 다르다)와 scope 없는 구형식(<AMOUNT_9>).
+    두 갈래를 함께 넣는다:
+    - 형식은 유효하지만 매핑에 없는 자리표시자(<AMOUNT_deadbe_9> - scope가 이번 호출과 다름):
+      내부 토큰이 사용자에게 노출되지 않도록 _FALLBACK_LABEL 중립 문구로 치환된다.
+    - scope 없는 구형식(<AMOUNT_9>): _PLACEHOLDER_RE에 매치되지 않아 원문 그대로 남는다.
     """
 
     async def fake_openai(user_msg):
@@ -1609,7 +1612,11 @@ async def test_llm_chat_unmask_fails_open_on_unknown_placeholder(monkeypatch):
 
     result = await services.llm_chat("openai", "평가금액 12,345,000원")
 
-    assert result == "총자산은 <AMOUNT_deadbe_9>이고 예수금은 <AMOUNT_9>입니다."
+    # <AMOUNT_deadbe_9>: 형식 유효, 매핑에 없음 -> 중립 문구로 치환
+    assert "이전에 언급된 금액" in result
+    assert "<AMOUNT_deadbe_9>" not in result, "내부 토큰이 사용자 화면에 노출됐다"
+    # <AMOUNT_9>: _PLACEHOLDER_RE에 매치 안 됨 -> 원문 그대로
+    assert "<AMOUNT_9>" in result
 
 
 @pytest.mark.asyncio
@@ -1719,9 +1726,11 @@ def test_no_bypass_of_llm_chat_masking_layer():
 
     ast.Attribute 분기(`services._llm_openai_chat()`처럼 속성 접근으로 부르는 형태)는
     visit_Name으로 잡히지 않으므로 visit_Call에 남겨 둔다.
+
+    스캔 범위: backend/*.py (tests/ 제외). _llm_*_chat은 services.py 전용 구현이므로
+    다른 backend 파일에서 참조되는 순간 곧바로 마스킹 우회가 된다.
     """
-    source = inspect.getsource(services)
-    tree = ast.parse(source)
+    backend_dir = pathlib.Path(inspect.getfile(services)).parent
     provider_fns = {
         "_llm_openai_chat",
         "_llm_anthropic_chat",
@@ -1762,7 +1771,11 @@ def test_no_bypass_of_llm_chat_masking_layer():
                 self._record(node.func.attr)
             self.generic_visit(node)
 
-    _CallerVisitor().visit(tree)
+    visitor = _CallerVisitor()
+    for py_file in sorted(backend_dir.glob("*.py")):
+        source = py_file.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(py_file))
+        visitor.visit(tree)
 
     for fn_name, caller_set in callers.items():
         assert caller_set == {"llm_chat"}, (
