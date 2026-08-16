@@ -5,8 +5,13 @@ import re
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime
-from typing import Any, AsyncIterator
+from typing import TYPE_CHECKING, Any, AsyncIterator, Protocol
 from uuid import uuid4
+
+if TYPE_CHECKING:
+    # 런타임 import는 _deserialize 안에 그대로 둔다. 여기서 끌어오는 것은 타입뿐이라
+    # import 시점을 바꾸지 않는다.
+    from .trading_orders import PendingOrder
 
 logger = logging.getLogger(__name__)
 
@@ -188,6 +193,20 @@ class TelegramPollerState:
     handled_ahead: frozenset[int] = frozenset()
 
 
+class TelegramPollerStore(Protocol):
+    """TelegramCommandPoller가 상태 저장소에 요구하는 전부 (#271).
+
+    구조적 타이핑이라 구현체가 이 클래스를 상속할 필요는 없다. 프로덕션
+    (RedisTelegramPollerStore)·인메모리·테스트 더블이 주입 지점에서 함께 검증된다.
+
+    두 값을 한 덩어리(TelegramPollerState)로 주고받는 이유는 그 dataclass의 독스트링에 있다.
+    """
+
+    async def load(self) -> TelegramPollerState: ...
+
+    async def save(self, state: TelegramPollerState) -> None: ...
+
+
 class InMemoryTelegramPollerStore:
     """테스트 전용 인메모리 폴러 상태 저장소.
 
@@ -344,25 +363,47 @@ class RedisTelegramPollerStore:
         )
 
 
+class PendingOrderStore(Protocol):
+    """TelegramCommandHandler가 pending_order 저장소에 요구하는 전부 (#271).
+
+    set()은 일부러 뺐다. 핸들러는 경합하는 /buy의 승자를 하나로 고정해야 해서 항상
+    set_if_absent를 쓴다 — 여기에 set을 올리면 무조건 덮어쓰는 경로가 계약이 되어,
+    그 구분이 흐려진다. 두 구현체는 여전히 set을 제공하고 저장소 단위 테스트가 쓴다.
+
+    InMemoryPendingOrderStore의 동기 dict 인터페이스(__getitem__ 등)도 계약이 아니다.
+    프로덕션 구현이 제공할 수 없는 테스트 편의이므로 그 클래스에만 있다.
+    """
+
+    async def get(self, chat_id: str) -> "PendingOrder | None": ...
+
+    async def claim(self, chat_id: str) -> "PendingOrder | None": ...
+
+    async def set_if_absent(self, chat_id: str, order: "PendingOrder") -> bool: ...
+
+    async def delete(self, chat_id: str) -> None: ...
+
+    async def has(self, chat_id: str) -> bool: ...
+
+
 class InMemoryPendingOrderStore:
     """테스트 전용 인메모리 pending_order 저장소.
 
-    async 메서드(get/set/delete/has)와 동기 dict 인터페이스(__getitem__,
-    __contains__, __eq__)를 동시에 제공해, 기존 테스트 코드의
-    ``handler.pending_orders['123']``, ``handler.pending_orders == {}`` 등을
-    수정 없이 유지할 수 있게 한다.
+    PendingOrderStore를 만족하는 async 메서드에 더해 동기 dict 인터페이스(__getitem__,
+    __contains__, __eq__)를 제공해, 테스트가 ``store['123']``·``store == {}``로
+    상태를 단언할 수 있게 한다. 이쪽은 프로토콜 밖이라 이 클래스에만 있고,
+    핸들러를 거쳐 쓰는 테스트는 test_telegram_commands._orders로 내려온다 (#271).
 
     멀티워커 프로덕션 환경에서는 사용하지 말 것.
     프로세스 간 격리로 이슈 #63의 주문 유실 버그가 재현된다.
     """
 
     def __init__(self) -> None:
-        self._store: dict[str, Any] = {}
+        self._store: dict[str, "PendingOrder"] = {}
 
-    async def get(self, chat_id: str) -> Any:
+    async def get(self, chat_id: str) -> "PendingOrder | None":
         return self._store.get(chat_id)
 
-    async def set(self, chat_id: str, order: Any) -> None:
+    async def set(self, chat_id: str, order: "PendingOrder") -> None:
         self._store[chat_id] = order
 
     async def delete(self, chat_id: str) -> None:
@@ -371,11 +412,11 @@ class InMemoryPendingOrderStore:
     async def has(self, chat_id: str) -> bool:
         return chat_id in self._store
 
-    async def claim(self, chat_id: str) -> Any:
+    async def claim(self, chat_id: str) -> "PendingOrder | None":
         """주문을 원자적으로 꺼내며 삭제한다. 재전송 update의 중복 체결을 방지한다."""
         return self._store.pop(chat_id, None)
 
-    async def set_if_absent(self, chat_id: str, order: Any) -> bool:
+    async def set_if_absent(self, chat_id: str, order: "PendingOrder") -> bool:
         """이미 대기 주문이 있으면 False. 경합하는 /buy 요청 중 승자를 하나로 고정한다."""
         if chat_id in self._store:
             return False
@@ -428,13 +469,13 @@ class RedisPendingOrderStore:
         self.ttl_sec = ttl_sec
         self._keys = keys or RedisKeys()
 
-    def _serialize(self, order: Any) -> str:
+    def _serialize(self, order: "PendingOrder") -> str:
         """PendingOrder → JSON 문자열. set/set_if_absent가 공유한다."""
         data = asdict(order)
         data["created_at"] = data["created_at"].isoformat()
         return json.dumps(data, ensure_ascii=False)
 
-    def _deserialize(self, raw: str | bytes) -> Any:
+    def _deserialize(self, raw: str | bytes) -> "PendingOrder":
         """raw JSON → PendingOrder. ValueError/TypeError/KeyError는 호출자가 처리한다."""
         from .trading_orders import PendingOrder
 
@@ -442,7 +483,7 @@ class RedisPendingOrderStore:
         data["created_at"] = datetime.fromisoformat(data["created_at"])
         return PendingOrder(**data)
 
-    async def get(self, chat_id: str) -> Any:
+    async def get(self, chat_id: str) -> "PendingOrder | None":
         """PendingOrder를 반환하거나, 없으면(TTL 만료 포함) None을 반환한다.
 
         역직렬화 오류(스키마 변경·손상 키)는 해당 키를 삭제하고 None을 반환한다.
@@ -459,7 +500,7 @@ class RedisPendingOrderStore:
             await self.delete(chat_id)
             return None
 
-    async def claim(self, chat_id: str) -> Any:
+    async def claim(self, chat_id: str) -> "PendingOrder | None":
         """주문을 원자적으로 읽으며 삭제한다(GETDEL). 재전송된 Telegram update가
         같은 주문을 두 번 체결하는 것을 방지한다. 경합하는 두 호출 중 정확히 하나만
         order를 받고, 나머지는 None을 받는다.
@@ -474,7 +515,7 @@ class RedisPendingOrderStore:
             logger.error("pending_order 역직렬화 실패 (claim): %s", exc)
             return None
 
-    async def set(self, chat_id: str, order: Any) -> None:
+    async def set(self, chat_id: str, order: "PendingOrder") -> None:
         """PendingOrder를 JSON 직렬화하여 TTL과 함께 저장한다."""
         await self.redis.set(
             self._keys.pending_order(chat_id),
@@ -482,7 +523,7 @@ class RedisPendingOrderStore:
             ex=self.ttl_sec,
         )
 
-    async def set_if_absent(self, chat_id: str, order: Any) -> bool:
+    async def set_if_absent(self, chat_id: str, order: "PendingOrder") -> bool:
         """이미 대기 주문이 있으면 False. 경합하는 /buy 요청 중 승자를 하나로 고정한다.
         RedisSchedulerState.acquire_*_lock과 같은 NX 관용구를 따른다.
         """

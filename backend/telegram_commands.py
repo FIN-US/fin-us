@@ -26,10 +26,12 @@ from .catalyst_repo import SqliteCatalystEventRepo
 from .database import engine
 from .redis_state import (
     InMemoryPendingOrderStore,
+    PendingOrderStore,
     RedisSchedulerState,
     RedisPendingOrderStore,
     RedisTelegramPollerStore,
     TelegramPollerState,
+    TelegramPollerStore,
     create_redis_client,
     redis_state,
 )
@@ -304,7 +306,7 @@ class TelegramCommandHandler:
         trade_recorder: Any | None = None,
         now_factory: Callable[[], datetime] | None = None,
         visualization_url: str = VISUALIZATION_URL,
-        pending_order_store: Any | None = None,
+        pending_order_store: PendingOrderStore | None = None,
     ):
         self.notifier = notifier
         self.state_factory = state_factory
@@ -316,16 +318,16 @@ class TelegramCommandHandler:
         self.trade_recorder = trade_recorder
         self.now_factory = now_factory or (lambda: datetime.now(KST))
         self.visualization_url = visualization_url.strip()
-        # pending_orders: 기존 테스트 코드(handler.pending_orders['123'] 등)와
-        # 호환되도록 InMemoryPendingOrderStore가 동기 dict 인터페이스를 제공한다.
         # 프로덕션에서는 TelegramCommandPoller가 RedisPendingOrderStore를 주입한다.
+        # 미주입 시의 InMemoryPendingOrderStore는 동기 dict 인터페이스도 함께 제공하지만
+        # 그건 PendingOrderStore 계약 밖이라, 여기서는 프로토콜이 보장하는 것만 쓴다.
         if pending_order_store is None:
             logger.warning(
                 "pending_order_store 미주입 — InMemoryPendingOrderStore 사용. "
                 "멀티워커 환경에서는 주문이 프로세스 간 격리된다(#63)."
             )
             pending_order_store = InMemoryPendingOrderStore()
-        self.pending_orders: Any = pending_order_store
+        self.pending_orders: PendingOrderStore = pending_order_store
         self.market_callbacks: dict[str, tuple[str, str]] = {}
 
     async def handle_update(self, update: dict[str, Any]) -> None:
@@ -1651,7 +1653,7 @@ class TelegramCommandPoller:
         *,
         notifier: TelegramNotifier = telegram_notifier,
         handler: TelegramCommandHandler | None = None,
-        state_store: Any | None = None,
+        state_store: TelegramPollerStore | None = None,
     ):
         self.notifier = notifier
         if handler is None:
@@ -1675,7 +1677,9 @@ class TelegramCommandPoller:
         # 경로를 탄다. 근거는 확률이 아니라 비용 대비다: _handled_ahead는 Telegram이 원리적으로
         # 보호해줄 수 없는 유일한 상태인데(서버는 미확정 update만 알 뿐 무엇을 이미 실행했는지
         # 모른다) 영속화 비용은 이미 쓰는 키에 필드 하나다 (PR #251 리뷰).
-        self.state_store = state_store if state_store is not None else _create_poller_state_store()
+        self.state_store: TelegramPollerStore = (
+            state_store if state_store is not None else _create_poller_state_store()
+        )
         self.offset: int | None = None
         # update_id -> 재시도 예산. 유실돼도 poison 폐기가 미뤄질 뿐 중복 실행으로 이어지지
         # 않으므로 영속화하지 않는다. 매 update 쓰기에 얹을 값이 아니다 (#248).

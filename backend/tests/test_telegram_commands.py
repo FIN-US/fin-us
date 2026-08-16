@@ -27,23 +27,42 @@ from backend.telegram_commands import (
     TelegramCommandHandler,
     TelegramCommandPoller,
 )
-from backend.redis_state import InMemoryTelegramPollerStore, TelegramPollerState
+from backend.redis_state import (
+    InMemoryPendingOrderStore,
+    InMemoryTelegramPollerStore,
+    TelegramPollerState,
+    TelegramPollerStore,
+)
 from backend.trading_orders import OrderExecutionResult, PendingOrder
 
 KST = ZoneInfo("Asia/Seoul")
 
 
-def _make_poller(notifier, handler, *, state_store=None):
+def _make_poller(notifier, handler, *, state_store: TelegramPollerStore | None = None):
     """폴러 테스트용 생성기 — 상태 저장소를 인메모리로 고정한다 (#248).
 
     state_store 기본값은 redis 클라이언트라, 주입하지 않으면 테스트가 실제 연결을 시도한다.
     재시작 시나리오는 같은 state_store를 두 폴러에 넘겨 재현한다.
+
+    타입을 명시해야 여기를 지나는 테스트 더블도 TelegramPollerStore로 검증된다 (#271).
     """
     return TelegramCommandPoller(
         notifier=notifier,
         handler=handler,
         state_store=state_store if state_store is not None else InMemoryTelegramPollerStore(),
     )
+
+
+def _orders(handler: TelegramCommandHandler) -> InMemoryPendingOrderStore:
+    """미주입 기본값인 인메모리 저장소의 동기 dict 인터페이스로 내려간다 (#271).
+
+    핸들러가 약속하는 것은 PendingOrderStore(async 5종)까지다. 아래 단언들이 쓰는
+    ``[...]``·``in``·``== {}``는 인메모리 더블에만 있는 테스트 편의라, 그 사실을
+    타입으로 드러내고 다른 저장소가 주입되면 여기서 끊는다.
+    """
+    store = handler.pending_orders
+    assert isinstance(store, InMemoryPendingOrderStore)
+    return store
 
 
 class FakeState:
@@ -894,13 +913,13 @@ async def test_buy_command_creates_pending_order_and_prompts_confirmation():
                 {
                     "text": "✅ 확정",
                     "callback_data": (
-                        f"order:confirm:{handler.pending_orders['123'].callback_token}"
+                        f"order:confirm:{_orders(handler)['123'].callback_token}"
                     ),
                 },
                 {
                     "text": "❌ 취소",
                     "callback_data": (
-                        f"order:cancel:{handler.pending_orders['123'].callback_token}"
+                        f"order:cancel:{_orders(handler)['123'].callback_token}"
                     ),
                 },
             ]
@@ -908,12 +927,12 @@ async def test_buy_command_creates_pending_order_and_prompts_confirmation():
     }
     assert "현재가: 현재가" not in notifier.messages[-1]
     assert "잔고: 주문가능금액" not in notifier.messages[-1]
-    assert handler.pending_orders["123"].stock_name == "삼성전자"
-    assert handler.pending_orders["123"].stock_code == "005930"
-    assert handler.pending_orders["123"].side == "BUY"
-    assert handler.pending_orders["123"].quantity == 10
-    assert handler.pending_orders["123"].price == 75000
-    assert handler.pending_orders["123"].order_type == "LIMIT"
+    assert _orders(handler)["123"].stock_name == "삼성전자"
+    assert _orders(handler)["123"].stock_code == "005930"
+    assert _orders(handler)["123"].side == "BUY"
+    assert _orders(handler)["123"].quantity == 10
+    assert _orders(handler)["123"].price == 75000
+    assert _orders(handler)["123"].order_type == "LIMIT"
 
 
 @pytest.mark.asyncio
@@ -979,12 +998,12 @@ async def test_buy_command_without_price_creates_market_order_and_prompts_confir
     assert "주문금액:" not in notifier.messages[-1]
     assert "/confirm" in notifier.messages[-1]
     assert "/cancel" in notifier.messages[-1]
-    assert handler.pending_orders["123"].stock_name == "삼성전자"
-    assert handler.pending_orders["123"].stock_code == "005930"
-    assert handler.pending_orders["123"].side == "BUY"
-    assert handler.pending_orders["123"].quantity == 10
-    assert handler.pending_orders["123"].price == 0
-    assert handler.pending_orders["123"].order_type == "MARKET"
+    assert _orders(handler)["123"].stock_name == "삼성전자"
+    assert _orders(handler)["123"].stock_code == "005930"
+    assert _orders(handler)["123"].side == "BUY"
+    assert _orders(handler)["123"].quantity == 10
+    assert _orders(handler)["123"].price == 0
+    assert _orders(handler)["123"].order_type == "MARKET"
 
 
 @pytest.mark.asyncio
@@ -1032,23 +1051,23 @@ async def test_natural_language_market_buy_creates_pending_order_without_nat():
                 {
                     "text": "✅ 확정",
                     "callback_data": (
-                        f"order:confirm:{handler.pending_orders['123'].callback_token}"
+                        f"order:confirm:{_orders(handler)['123'].callback_token}"
                     ),
                 },
                 {
                     "text": "❌ 취소",
                     "callback_data": (
-                        f"order:cancel:{handler.pending_orders['123'].callback_token}"
+                        f"order:cancel:{_orders(handler)['123'].callback_token}"
                     ),
                 },
             ]
         ]
     }
-    assert handler.pending_orders["123"].stock_name == "삼성전자"
-    assert handler.pending_orders["123"].side == "BUY"
-    assert handler.pending_orders["123"].quantity == 1
-    assert handler.pending_orders["123"].price == 0
-    assert handler.pending_orders["123"].order_type == "MARKET"
+    assert _orders(handler)["123"].stock_name == "삼성전자"
+    assert _orders(handler)["123"].side == "BUY"
+    assert _orders(handler)["123"].quantity == 1
+    assert _orders(handler)["123"].price == 0
+    assert _orders(handler)["123"].order_type == "MARKET"
 
 
 @pytest.mark.asyncio
@@ -1091,11 +1110,11 @@ async def test_natural_language_limit_sell_creates_pending_order_without_nat():
     assert "NAVER 매도 주문 확인" in notifier.messages[-1]
     assert "주문유형: 지정가" in notifier.messages[-1]
     assert "지정가: 200,000원" in notifier.messages[-1]
-    assert handler.pending_orders["123"].stock_name == "NAVER"
-    assert handler.pending_orders["123"].side == "SELL"
-    assert handler.pending_orders["123"].quantity == 2
-    assert handler.pending_orders["123"].price == 200000
-    assert handler.pending_orders["123"].order_type == "LIMIT"
+    assert _orders(handler)["123"].stock_name == "NAVER"
+    assert _orders(handler)["123"].side == "SELL"
+    assert _orders(handler)["123"].quantity == 2
+    assert _orders(handler)["123"].price == 200000
+    assert _orders(handler)["123"].order_type == "LIMIT"
 
 
 @pytest.mark.asyncio
@@ -1121,7 +1140,7 @@ async def test_ambiguous_natural_language_order_replies_with_usage_without_nat()
     assert notifier.messages == [
         "자연어 주문을 해석할 수 없습니다. /buy 또는 /sell 형식으로 입력하세요."
     ]
-    assert handler.pending_orders == {}
+    assert _orders(handler) == {}
 
 
 @pytest.mark.asyncio
@@ -1155,10 +1174,10 @@ async def test_buy_command_accepts_stock_name_with_spaces():
         {"stock_name": "LG 화학"},
     )
     assert "LG 화학 매수 주문 확인" in notifier.messages[-1]
-    assert handler.pending_orders["123"].stock_name == "LG 화학"
-    assert handler.pending_orders["123"].quantity == 10
-    assert handler.pending_orders["123"].price == 75000
-    assert handler.pending_orders["123"].order_type == "LIMIT"
+    assert _orders(handler)["123"].stock_name == "LG 화학"
+    assert _orders(handler)["123"].quantity == 10
+    assert _orders(handler)["123"].price == 75000
+    assert _orders(handler)["123"].order_type == "LIMIT"
 
 
 @pytest.mark.asyncio
@@ -1186,7 +1205,7 @@ async def test_buy_command_rejects_unresolved_stock_code_before_quote_and_balanc
         (TRADING_MCP_PARAMS, "resolve_stock_code", {"stock_name": "알수없는종목"})
     ]
     assert notifier.messages[-1] == "주문 준비 실패: 종목코드를 확인할 수 없습니다."
-    assert handler.pending_orders == {}
+    assert _orders(handler) == {}
 
 
 def test_extract_stock_code_numeric():
@@ -1308,7 +1327,7 @@ async def test_order_command_rejects_unorderable_stock_code_before_quote_and_bal
     assert "주문을 지원하지 않습니다" in message
     # 왜 안 되는지를 설명하는 문장이 이 수정의 핵심이므로 함께 고정한다.
     assert "ETN·펀드 등 영숫자 종목코드는 아직 주문 대상이 아닙니다." in message
-    assert handler.pending_orders == {}
+    assert _orders(handler) == {}
 
 
 @pytest.mark.asyncio
@@ -1335,7 +1354,7 @@ async def test_cancel_removes_pending_order():
     await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/cancel"}})
 
     assert "대기 주문을 취소했습니다." in notifier.messages[-1]
-    assert handler.pending_orders == {}
+    assert _orders(handler) == {}
 
 
 @pytest.mark.asyncio
@@ -1372,7 +1391,7 @@ async def test_cancel_button_removes_pending_order():
 
     assert notifier.callback_answers == [("callback-1", None)]
     assert "대기 주문을 취소했습니다." in notifier.messages[-1]
-    assert handler.pending_orders == {}
+    assert _orders(handler) == {}
 
 
 @pytest.mark.asyncio
@@ -1409,8 +1428,8 @@ async def test_buy_with_stock_code_resolves_name_and_shows_no_warning():
         {"message": {"chat": {"id": 123}, "text": "/buy 005930 10"}}
     )
 
-    assert handler.pending_orders["123"].stock_name == "삼성전자"
-    assert handler.pending_orders["123"].stock_code == "005930"
+    assert _orders(handler)["123"].stock_name == "삼성전자"
+    assert _orders(handler)["123"].stock_code == "005930"
     assert "삼성전자 매수 주문 확인" in notifier.messages[-1]
     assert UNRESOLVED_STOCK_WARNING not in notifier.messages[-1]
 
@@ -1449,7 +1468,7 @@ async def test_buy_with_unresolved_echo_is_rejected(code):
         {"message": {"chat": {"id": 123}, "text": f"/buy {code} 10"}}
     )
 
-    assert handler.pending_orders == {}
+    assert _orders(handler) == {}
     assert "종목마스터에 없는 종목입니다" in notifier.messages[-1]
     assert code in notifier.messages[-1]
 
@@ -1515,7 +1534,7 @@ async def test_confirm_executes_gateway_and_records_trade():
     assert recorder.results[0].stock_code == "005930"
     assert notifier.actions == ["typing", "typing"]
     assert "주문 완료" in notifier.messages[-1]
-    assert handler.pending_orders == {}
+    assert _orders(handler) == {}
 
 
 @pytest.mark.asyncio
@@ -1558,7 +1577,7 @@ async def test_confirm_button_executes_gateway_and_records_trade():
     assert len(gateway.orders) == 1
     assert len(recorder.results) == 1
     assert "주문 완료" in notifier.messages[-1]
-    assert handler.pending_orders == {}
+    assert _orders(handler) == {}
 
 
 @pytest.mark.asyncio
@@ -1598,7 +1617,7 @@ async def test_tokenless_old_confirm_button_does_not_execute_current_pending_ord
         ("old-callback", "이전 주문 버튼입니다. 최신 주문 메시지에서 다시 선택하세요.")
     ]
     assert gateway.orders == []
-    assert "123" in handler.pending_orders
+    assert "123" in _orders(handler)
 
 
 @pytest.mark.asyncio
@@ -1633,7 +1652,7 @@ async def test_confirm_gateway_success_recorder_failure_clears_pending_order():
     assert len(recorder.results) == 1
     assert notifier.messages[-2] == "주문 완료: 주문 접수\n거래 이력 기록 실패: db commit failed"
     assert notifier.messages[-1] == "확정할 대기 주문이 없습니다."
-    assert handler.pending_orders == {}
+    assert _orders(handler) == {}
 
 
 @pytest.mark.asyncio
@@ -1660,7 +1679,7 @@ async def test_confirm_without_gateway_keeps_pending_order():
     await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/confirm"}})
 
     assert notifier.messages[-1] == "주문 실행 설정이 준비되지 않았습니다."
-    assert "123" in handler.pending_orders
+    assert "123" in _orders(handler)
 
 
 @pytest.mark.asyncio
@@ -1695,7 +1714,7 @@ async def test_confirm_gateway_ambiguous_failure_clears_pending_order_and_blocks
         "중복 주문 방지를 위해 대기 주문을 제거했습니다."
     )
     assert notifier.messages[-1] == "확정할 대기 주문이 없습니다."
-    assert handler.pending_orders == {}
+    assert _orders(handler) == {}
 
 
 @pytest.mark.asyncio
@@ -1731,7 +1750,7 @@ async def test_confirm_real_order_guard_failure_keeps_pending_order():
     assert notifier.messages[-1] == (
         "주문 실패: 실계좌 주문은 KIS_REAL_ORDER_ENABLED=true 설정이 필요합니다."
     )
-    assert "123" in handler.pending_orders
+    assert "123" in _orders(handler)
 
 
 @pytest.mark.asyncio
@@ -1754,7 +1773,7 @@ async def test_sell_command_rejects_market_closed():
     )
 
     assert notifier.messages == ["주문 불가: 현재 장 운영 시간이 아닙니다. (평일 09:00~15:30)"]
-    assert handler.pending_orders == {}
+    assert _orders(handler) == {}
     assert calls == []
 
 
@@ -1800,7 +1819,7 @@ async def test_sell_command_rejects_duplicate_pending_order():
         notifier.messages[-1]
         == "이미 대기 중인 주문이 있습니다. /confirm 또는 /cancel로 먼저 처리하세요."
     )
-    assert handler.pending_orders["123"].side == "BUY"
+    assert _orders(handler)["123"].side == "BUY"
 
 
 @pytest.mark.asyncio
@@ -2718,7 +2737,7 @@ async def test_poller_persists_state_after_each_update(monkeypatch):
             return None
 
     class RecordingStore(InMemoryTelegramPollerStore):
-        async def save(self, state):
+        async def save(self, state: TelegramPollerState) -> None:
             saved.append(state.offset)
             await super().save(state)
 
@@ -2756,10 +2775,10 @@ async def test_poller_keeps_polling_when_state_store_fails(monkeypatch, caplog):
             handled.append(update["update_id"])
 
     class BrokenStore:
-        async def load(self):
+        async def load(self) -> TelegramPollerState:
             raise RuntimeError("redis unavailable")
 
-        async def save(self, state):
+        async def save(self, state: TelegramPollerState) -> None:
             raise RuntimeError("redis unavailable")
 
     poller = _make_poller(notifier, handler=NoopHandler(), state_store=BrokenStore())
@@ -3261,7 +3280,7 @@ async def test_buy_prompt_send_failure_does_not_ask_poller_to_retry(monkeypatch)
     assert all("삼성전자 매수 주문 확인" in message for message in notifier.messages)
     # 프롬프트가 끝내 안 나갔으므로 대기 주문을 남기지 않는다. 남기면 사용자는 존재를
     # 모르는 주문 때문에 다음 /buy가 "이미 대기 중"으로 막힌다 (PR #253 2차 리뷰).
-    assert handler.pending_orders == {}
+    assert _orders(handler) == {}
 
 
 @pytest.mark.asyncio
@@ -3312,7 +3331,7 @@ async def test_confirm_result_send_failure_does_not_ask_poller_to_retry(monkeypa
     assert len(gateway.orders) == 1
     assert sleeps == list(telegram_commands.SETTLED_SEND_RETRY_BACKOFF_SECONDS)
     assert notifier.messages == ["주문 완료: 주문 접수"] * (len(sleeps) + 1)
-    assert handler.pending_orders == {}
+    assert _orders(handler) == {}
 
 
 @pytest.mark.asyncio
@@ -3348,7 +3367,7 @@ async def test_confirm_unclear_result_send_failure_does_not_ask_poller_to_retry(
         for message in notifier.messages
     )
     # 403과 달리 복원하지 않는다 — 중복 주문 방지가 우선이다.
-    assert handler.pending_orders == {}
+    assert _orders(handler) == {}
 
 
 @pytest.mark.asyncio
@@ -3374,7 +3393,7 @@ async def test_confirm_403_keeps_update_retryable_when_order_is_restored():
 
     # 인플레이스 재시도 없이 한 번만 시도하고 폴러에 넘긴다.
     assert notifier.messages == ["주문 실패: 실계좌 가드"]
-    assert handler.pending_orders["123"].stock_code == "005930"
+    assert _orders(handler)["123"].stock_code == "005930"
 
 
 @pytest.mark.asyncio
@@ -3400,7 +3419,7 @@ async def test_cancel_confirmation_send_failure_does_not_ask_poller_to_retry(mon
     await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/cancel"}})
 
     assert notifier.messages == ["대기 주문을 취소했습니다."] * (len(sleeps) + 1)
-    assert handler.pending_orders == {}
+    assert _orders(handler) == {}
 
 
 @pytest.mark.asyncio
@@ -3461,7 +3480,7 @@ async def test_order_prepare_does_not_convert_send_failure_into_user_message():
         )
 
     assert notifier.messages == ["주문 준비 실패: 종목코드를 확인할 수 없습니다."]
-    assert "123" not in handler.pending_orders
+    assert "123" not in _orders(handler)
 
 
 @pytest.mark.asyncio
@@ -3564,7 +3583,7 @@ async def test_pending_order_is_stamped_at_store_time_not_command_time():
         {"message": {"chat": {"id": 123}, "text": "/buy 삼성전자 10"}}
     )
 
-    order = handler.pending_orders["123"]
+    order = _orders(handler)["123"]
     # 명령 수신 시각(10:00:00)이었다면 만료가 10:01:00 — 이미 지난 뒤다.
     assert order.created_at > datetime(2026, 5, 20, 10, 0, 0, tzinfo=KST)
     expires_at = order.created_at + telegram_commands.ORDER_EXPIRES_AFTER
@@ -3800,10 +3819,11 @@ async def test_poller_keeps_polling_when_state_store_hangs(monkeypatch, caplog):
             handled.append(update["update_id"])
 
     class HangingStore:
-        async def load(self):
+        async def load(self) -> TelegramPollerState:
             await asyncio.Event().wait()  # 영원히 깨어나지 않는다
+            raise AssertionError("도달하지 않는다")  # 반환 타입을 지키기 위한 종결
 
-        async def save(self, state):
+        async def save(self, state: TelegramPollerState) -> None:
             await asyncio.Event().wait()
 
     monkeypatch.setattr(telegram_commands, "STATE_STORE_TIMEOUT_SECONDS", 0.01)
