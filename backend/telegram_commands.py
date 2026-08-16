@@ -384,19 +384,23 @@ def _create_trade_recorder() -> TradeRecorder:
     return TradeRecorder(lambda: Session(engine))
 
 
-def _create_pending_order_store() -> RedisPendingOrderStore:
+def _create_pending_order_store() -> PendingOrderStore:
     """프로덕션 Redis pending_order 저장소를 생성한다.
 
     단일 Redis 클라이언트 인스턴스를 생성해 커넥션 풀을 재사용한다.
     핸들러 인스턴스당 한 번만 호출되므로 클라이언트 누적 없음.
+
+    반환 타입은 구체 클래스가 아니라 Protocol이다. 유일한 호출부인 주입 지점이 계약 밖의
+    것을 집어들지 못하게 막아, 구현체 교체가 그 지점으로 번지지 않게 한다 (PR #287 리뷰).
     """
     return RedisPendingOrderStore(create_redis_client())
 
 
-def _create_poller_state_store() -> RedisTelegramPollerStore:
+def _create_poller_state_store() -> TelegramPollerStore:
     """프로덕션 폴러 상태 저장소를 생성한다 (#248).
 
-    _create_pending_order_store와 같은 이유로 클라이언트를 하나만 만들어 풀을 재사용한다.
+    _create_pending_order_store와 같은 이유로 클라이언트를 하나만 만들어 풀을 재사용하고,
+    같은 이유로 반환 타입을 Protocol로 좁힌다.
     """
     return RedisTelegramPollerStore(create_redis_client())
 

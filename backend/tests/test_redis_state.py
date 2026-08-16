@@ -349,7 +349,12 @@ async def test_poller_state_save_is_quiet_below_warning_threshold(caplog):
 
 
 def _protocol_methods(protocol) -> dict:
-    """Protocol이 선언한 메서드만 추린다 (typing이 붙이는 내부 속성 제외)."""
+    """Protocol이 선언한 메서드만 추린다 (typing이 붙이는 내부 속성 제외).
+
+    isfunction은 staticmethod·classmethod를 걸러낸다. 두 Protocol 모두 인스턴스 메서드만
+    선언하고 있어 지금은 빠지는 것이 없지만, 나중에 그런 멤버가 추가되면 이 테스트가
+    실패하는 대신 조용히 검사 대상에서 빠진다. 그때 여기를 함께 고쳐야 한다 (PR #287 리뷰).
+    """
     return {
         name: member
         for name, member in vars(protocol).items()
