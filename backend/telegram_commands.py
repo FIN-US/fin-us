@@ -1687,11 +1687,11 @@ class TelegramCommandHandler:
         message_id를 돌려주지 못하는 notifier에서는 일반 전송만 하고 ``None``을
         반환한다 — 이 경우 진행 메시지는 대화에 그대로 남는다.
 
-        전송 실패는 여기서 잡지 않고 삼켜져서 들어온다: ``TelegramNotifier``의
-        ``send_text_returning_id``/``send_text``가 내부에서 예외를 잡아 각각 ``None``·
-        무시로 떨어뜨린다. 진행 표시는 답변에 덧붙는 편의 기능이므로 이걸로 질의 처리
-        자체를 실패시키면 사용자는 답도 못 받는다 — 그 성질이 필요해서 여기서 다시
-        감싸 두었다. notifier는 생성자로 주입 가능하므로 대역이 예외를 던질 수 있다.
+        전송 실패는 여기서 삼킨다. ``TelegramNotifier``의 ``send_text_returning_id``/
+        ``send_text``는 이미 내부에서 예외를 잡아 각각 ``None``·무시로 떨어뜨리지만,
+        notifier는 생성자로 주입 가능하므로 대역이 예외를 던질 수 있다. 진행 표시는
+        답변에 덧붙는 편의 기능이라 이걸로 질의 처리 자체를 실패시키면 사용자는 답도
+        못 받는다 — 그래서 주입된 구현이 무엇이든 여기서 한 겹 감싼다.
         """
         try:
             send_returning_id = getattr(self.notifier, "send_text_returning_id", None)

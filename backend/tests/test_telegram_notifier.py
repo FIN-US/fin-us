@@ -545,6 +545,8 @@ async def test_delete_message_returns_false_on_failure(monkeypatch):
 @pytest.mark.asyncio
 async def test_delete_message_is_inert_when_notifier_disabled():
     assert await TelegramNotifier("", "").delete_message(1) is False
+
+
 def _http_status_error(status_code, body):
     request = httpx.Request("POST", "https://api.telegram.org/bottoken/sendMessage")
     response = httpx.Response(status_code, json=body, request=request)
