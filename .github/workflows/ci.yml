@@ -16,6 +16,25 @@ jobs:
   backend-test:
     name: Backend pytest
     runs-on: ubuntu-latest
+
+    # backend/tests/test_redis_integration.py는 REDIS_INTEGRATION_URL이 없으면 전부
+    # skip한다. 이 변수가 CI에 없던 동안 실 redis 커버리지는 0이었고, redis를 지나는
+    # 코드는 전부 테스트 안 FakeRedis만 통과했다 — 즉 FakeRedis와 실제 redis-py의
+    # 반환 규약(특히 set(..., nx=True, ex=...))이 어디에서도 대조되지 않았다(#267).
+    # 락 획득 여부를 그 반환값으로 판정하므로, 어긋나면 테스트는 초록불인 채
+    # 프로덕션 락만 깨진다. 서비스 컨테이너를 붙여 실제 서버와 대조한다.
+    services:
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        # 서비스가 뜨자마자 스텝이 시작되면 접속이 거부돼 테스트가 skip으로 새 나간다.
+        # health check가 통과할 때까지 잡을 붙잡아 둔다.
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
     steps:
       - uses: actions/checkout@v4
 
@@ -31,6 +50,9 @@ jobs:
         run: uv sync --project backend
 
       - name: backend 테스트 실행
+        # 서비스 컨테이너는 잡 컨테이너가 아닌 러너 호스트에 포트를 매핑하므로 localhost로 닿는다.
+        env:
+          REDIS_INTEGRATION_URL: redis://localhost:6379/0
         run: uv run --project backend pytest backend/tests/
 
   nat-test:
