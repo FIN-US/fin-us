@@ -28,7 +28,12 @@ from nat.data_models.component_ref import FunctionRef
 from nat.data_models.component_ref import LLMRef
 from nat.data_models.function import FunctionBaseConfig
 from nat.utils.type_converter import GlobalTypeConverter
-from nat_finus_nat.finus_api import DATA_TOOL_LEDGER, DataToolLedger
+from nat_finus_nat.finus_api import (
+    DATA_TOOL_LEDGER,
+    REASONING_TRACE,
+    DataToolLedger,
+    ReasoningTrace,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -154,6 +159,34 @@ _CORRECTIVE_TOOL_PREFIX = (
 )
 
 
+# ---- Reasoning trace recording (#260) ----
+
+
+def _trace_ledger_tools(ledger: DataToolLedger) -> None:
+    """*ledger*에 기록된 도구를 현재 요청의 추론 기록에 병합한다.
+
+    기록 원천은 도구 강제 원장뿐이다 — 모델 출력 텍스트를 파싱하지 않는다
+    (#129와 같은 원칙: provenance는 코드가 관측한 것에서만 만든다).
+
+    추론 기록 박스가 없으면(박스를 심지 않는 config나 CLI 경로) 조용히 no-op한다.
+    각주는 답변에 덧붙는 부가 정보이므로, 없다고 해서 답변 경로를 막지 않는다.
+    """
+    trace = REASONING_TRACE.get()
+    if trace is not None:
+        trace.record_ledger_tools(ledger)
+
+
+def _trace_route(branch_name: str) -> None:
+    """supervisor가 고른 브랜치명을 현재 요청의 추론 기록에 남긴다.
+
+    ``_choose_branch``가 ``_normalize_branch``로 허용 목록에 정규화한 뒤의 값만
+    들어온다 — LLM이 출력한 원문 문자열이 그대로 흘러가지 않는다.
+    """
+    trace = REASONING_TRACE.get()
+    if trace is not None:
+        trace.record_route(branch_name)
+
+
 async def _run_with_gate(
     *,
     inner: Any,
@@ -178,6 +211,7 @@ async def _run_with_gate(
         result = await inner.ainvoke(ChatRequestOrMessage(input_message=query))
     finally:
         DATA_TOOL_LEDGER.reset(token)
+        _trace_ledger_tools(ledger)  # #260: 실행된 도구를 각주용 기록에 병합
     answer = chat_response_plain_text(result)
 
     if not _check_tool_enforcement(answer, ledger, chat_request):
@@ -225,6 +259,7 @@ async def _run_with_gate(
         result2 = await inner.ainvoke(ChatRequestOrMessage(input_message=corrective_query))
     finally:
         DATA_TOOL_LEDGER.reset(token2)
+        _trace_ledger_tools(ledger2)  # #260: 재시도에서 실행된 도구도 병합(중복 제거)
     answer2 = chat_response_plain_text(result2)
 
     if not _check_tool_enforcement(answer2, ledger2, chat_request):
@@ -428,11 +463,15 @@ async def fe_branch(config: FeBranchConfig, builder: Builder):
             # Deterministic path: assembles tool output directly without going through
             # _run_with_gate. A ledger box is still required so that _record_to_ledger
             # inside the news tool does not log a spurious ERROR on every happy-path call.
-            token = DATA_TOOL_LEDGER.set(DataToolLedger())
+            ledger = DataToolLedger()
+            token = DATA_TOOL_LEDGER.set(ledger)
             try:
                 direct = await _holdings_news_answer(builder, chat_request)
             finally:
                 DATA_TOOL_LEDGER.reset(token)
+                # #260: 게이트를 거치지 않는 경로지만 도구는 실제로 실행됐다.
+                # 각주에서 이 뉴스 조회가 누락되지 않도록 여기서도 병합한다.
+                _trace_ledger_tools(ledger)
             if direct is not None:
                 return direct
         inner = await builder.get_function(inner_name)
@@ -539,6 +578,7 @@ async def finus_supervisor_agent(config: FinusSupervisorAgentConfig, builder: Bu
     async def _response_fn(chat_request_or_message: ChatRequestOrMessage) -> ChatResponse:
         chat_request = GlobalTypeConverter.get().convert(chat_request_or_message, to_type=ChatRequest)
         selected = await _choose_branch(chat_request)
+        _trace_route(selected)  # #260: 라우팅 결과는 코드가 고른 값 — 각주의 담당 에이전트
         forward = chat_request.model_copy(update={"messages": messages_without_memory(chat_request.messages)})
         result = await branch_functions[selected].ainvoke(forward)
         if isinstance(result, ChatResponse):
@@ -546,6 +586,40 @@ async def finus_supervisor_agent(config: FinusSupervisorAgentConfig, builder: Bu
         return ChatResponse.from_string(str(result), usage=Usage())
 
     yield FunctionInfo.from_fn(_response_fn, description=config.description)
+
+
+def with_reasoning_trace(response: ChatResponse, trace: ReasoningTrace) -> ChatResponse:
+    """*response*에 ``routed_agent``/``tools_used``를 **추가**한다 (#260).
+
+    기존 필드(``choices``/``usage``/``model`` 등)는 건드리지 않는다 — backend의
+    ``_nat_message_from_payload``와 scheduler의 ``analysis_from_nat_text``가
+    그대로 동작해야 한다. ``ChatResponse.model_config``가 ``extra="allow"``라
+    추가 필드는 그대로 직렬화되고, 두 필드를 모르는 소비자는 무시하면 된다.
+
+    두 값의 출처는 코드 기록뿐이다 — supervisor의 분기 선택 결과와 도구 강제
+    원장이며, 모델 출력 텍스트에서 파싱하지 않는다 (#129와 같은 원칙).
+    :class:`ReasoningTrace` docstring 참고.
+
+    관측된 것이 아무것도 없으면(라우팅도 도구 실행도 없음) 필드를 붙이지 않는다.
+    빈 값을 실어 보내는 것보다 없는 편이 소비자 입장에서 명확하다 — backend는
+    필드가 없으면 각주를 조용히 생략한다. 반대로 라우팅은 됐는데 도구가 하나도
+    실행되지 않은 경우는 관측 결과 그 자체이므로 ``tools_used: []``로 싣는다.
+
+    ``tools_used``는 ``[{"name": ..., "ok": ..., "empty": ...}]`` 형태다. 결과 상태를
+    빼고 이름만 실어 보내면 소비자가 실패한 호출과 빈 결과까지 "확인한 자료"로
+    표시하게 된다 — :class:`ToolUse` docstring 참고.
+    """
+    if trace.routed_agent is None and not trace.tools_used:
+        return response
+    return response.model_copy(
+        update={
+            "routed_agent": trace.routed_agent,
+            "tools_used": [
+                {"name": tool.name, "ok": tool.ok, "empty": tool.empty}
+                for tool in trace.tools_used
+            ],
+        }
+    )
 
 
 def nat_chat_extra_headers(conversation_id: str) -> dict[str, str]:
@@ -711,7 +785,15 @@ async def finus_sqlite_transcript_agent(config: FinusSqliteTranscriptAgentConfig
         forward_messages = history + chat_request.messages
         forward = _chat_request_with_messages(chat_request, forward_messages)
 
-        result = await inner_agent.ainvoke(forward)
+        # #260: 추론 기록 박스를 workflow 최상단에서 한 번만 심는다. 안쪽(supervisor,
+        # _run_with_gate)은 박스를 mutate하기만 한다 — ContextVar.set()은 LangGraph의
+        # copy_context() 경계를 넘어 바깥으로 전파되지 않기 때문이다(DataToolLedger와 동일).
+        trace = ReasoningTrace()
+        trace_token = REASONING_TRACE.set(trace)
+        try:
+            result = await inner_agent.ainvoke(forward)
+        finally:
+            REASONING_TRACE.reset(trace_token)
         assistant = chat_response_plain_text(result)
 
         to_store: list[tuple[str, str]] = []
@@ -726,10 +808,11 @@ async def finus_sqlite_transcript_agent(config: FinusSqliteTranscriptAgentConfig
         _append_messages(db_path, conversation_id, to_store)
 
         if isinstance(result, ChatResponse):
-            return result
+            return with_reasoning_trace(result, trace)
         if chat_request_or_message.is_string:
+            # 문자열 반환 경로(chat_cli 등)는 실을 곳이 없으므로 각주 메타데이터를 붙이지 않는다.
             return str(result)
-        return ChatResponse.from_string(str(result), usage=Usage())
+        return with_reasoning_trace(ChatResponse.from_string(str(result), usage=Usage()), trace)
 
     yield FunctionInfo.from_fn(_response_fn, description=config.description)
 

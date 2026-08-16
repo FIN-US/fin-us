@@ -84,6 +84,113 @@ DATA_TOOL_LEDGER: ContextVar["DataToolLedger | None"] = ContextVar(
     "finus_data_tool_ledger", default=None
 )
 
+
+# ---- Reasoning trace for the response footnote (#260) ----
+
+
+class ToolUse(NamedTuple):
+    """각주에 실을 도구 한 건 — 도구명과 결과 상태.
+
+    ``ok``는 원장의 ``DataToolRecord.ok``를 그대로 옮긴 값이다(오류 응답이 아님).
+    성공 여부를 함께 싣는 이유: 이름만 보내면 소비자가 실패한 호출까지 "확인한
+    자료"로 표시하게 되고, 사용자는 답변이 그 데이터에 근거했다고 읽는다. 실제로는
+    아니므로, 근거를 보여준다는 이 기능의 목적과 정반대의 오독이 된다.
+
+    ``empty``는 같은 논리의 세 번째 상태다 — ``ok=True``지만 결과 집합이 비어 있는
+    경우(#209). 오류가 아니므로 실패로 적으면 틀리지만, 표시 없이 "확인한 자료"로
+    적으면 **답변이 근거하지 않은 데이터**를 근거로 제시하게 된다. 특히
+    ``_run_with_gate``가 ``only_empty_reads()``에서 반환하는 `[조회 결과 없음]` 답변은
+    본문이 "데이터가 없다"고 말하는데 각주만 "자료를 확인했다"고 말하는 정면 충돌이
+    된다. 세 상태를 그대로 넘기고 표기는 소비자가 정한다.
+
+    기본값이 있는 이유: 이 필드를 모르는 구버전 소비자·호출부와 섞여도 깨지지 않게
+    한다. 기본값 ``False``는 "빈 결과라는 관측이 없음"이지 "데이터가 있었음"이
+    아니므로, ``ok``와 함께 읽어야 한다.
+    """
+
+    name: str
+    ok: bool
+    empty: bool = False
+
+
+def _tool_use_from_record(record: DataToolRecord) -> ToolUse:
+    """원장 기록 한 건을 각주용 :class:`ToolUse`로 옮긴다.
+
+    ``empty``는 ``ok=True``일 때만 의미가 있다 — 오류 응답은 결과 집합이 비었는지를
+    말하지 않는다. ``ok=False``면 항상 ``empty=False``로 눕혀, 소비자가 두 필드를
+    따로 읽어도 "실패인데 빈 결과"라는 모순된 조합을 보지 않게 한다.
+    """
+    return ToolUse(record.tool_name, record.ok, record.ok and record.empty)
+
+
+def _tool_use_rank(tool: ToolUse) -> int:
+    """도구 결과의 '좋음' 순위 — 실패(0) < 빈 결과(1) < 데이터 있음(2).
+
+    같은 도구를 여러 번 호출했을 때 어느 결과를 각주에 남길지 정하는 데만 쓴다.
+    쓰기 도구(``finus_save_diary``)는 성공해도 ``empty=False``이므로 2가 된다 —
+    조회 결과가 아니라 "실제로 저장했다"는 뜻이라 맞는 순위다.
+    """
+    if not tool.ok:
+        return 0
+    return 1 if tool.empty else 2
+
+
+@dataclass
+class ReasoningTrace:
+    """한 요청에서 코드가 관측한 추론 경로 — 어느 브랜치로 갔고 어떤 도구가 실행됐는지.
+
+    **출처 원칙 (#129와 같은 원칙):** 두 값 모두 코드가 남긴 기록에서만 만든다.
+
+    - ``routed_agent`` — supervisor의 ``_choose_branch``가 반환한 브랜치명. 브랜치
+      허용 목록으로 정규화된 값이므로 임의 문자열이 들어올 수 없다.
+    - ``tools_used`` — 도구 강제 원장(:class:`DataToolLedger`)에 기록된 도구.
+      모든 Fin-Us 도구가 ``_record_to_ledger``를 거치므로 "실제로 실행된 도구"다.
+
+    LLM 출력 텍스트를 파싱해서 채우지 않는다. 파싱으로 만들면 "실행된 도구"가 아니라
+    "모델이 실행했다고 주장하는 도구"가 되어, 근거로 보여주는 각주가 오히려 환각을
+    사용자에게 사실처럼 전달하는 표면이 된다.
+
+    :class:`DataToolLedger`와 같은 이유로 **mutable box**다: ``ContextVar.set()``은
+    LangGraph가 내부적으로 만드는 ``copy_context()`` 경계를 넘어 바깥으로 전파되지
+    않는다. 최상단에서 박스 하나를 심고, 안쪽에서는 박스를 mutate하기만 한다.
+    """
+
+    routed_agent: str | None = None
+    tools_used: list[ToolUse] = field(default_factory=list)
+
+    def record_route(self, branch_name: str) -> None:
+        """supervisor가 고른 브랜치명을 기록한다 (마지막 라우팅이 최종 값)."""
+        self.routed_agent = branch_name
+
+    def record_ledger_tools(self, ledger: "DataToolLedger") -> None:
+        """*ledger*의 도구를 첫 호출 순서대로 병합한다 (도구명 기준 중복 제거).
+
+        게이트 재시도(``_run_with_gate``의 2차 시도)는 원장을 새로 만들므로 이
+        메서드가 여러 번 호출된다. 중복 제거는 "한 번이라도 실행된 도구" 집합을
+        순서를 유지한 채 만든다.
+
+        같은 도구를 여러 번 호출했다면 **가장 좋은 결과**를 남긴다
+        (:func:`_tool_use_rank` 기준: 실패 < 빈 결과 < 데이터 있음). 재시도 루프에서
+        흔한 경로다 — 1차에서 실패하거나 빈 결과였다가 2차에서 데이터를 얻으면,
+        결국 그 데이터를 얻은 것이므로 각주도 그렇게 말해야 한다. 반대 방향으로
+        내리지는 않는다: 한 번 얻은 데이터가 뒤 호출의 실패로 사라지지 않는다.
+        """
+        for record in ledger.records:
+            fresh = _tool_use_from_record(record)
+            for index, seen in enumerate(self.tools_used):
+                if seen.name != fresh.name:
+                    continue
+                if _tool_use_rank(fresh) > _tool_use_rank(seen):
+                    self.tools_used[index] = fresh
+                break
+            else:
+                self.tools_used.append(fresh)
+
+
+REASONING_TRACE: ContextVar["ReasoningTrace | None"] = ContextVar(
+    "finus_reasoning_trace", default=None
+)
+
 _ERROR_JSON_PREFIX_RE = re.compile(r'^\s*\{"error"')
 
 # 각 MCP 서버가 조회 결과가 없을 때 출력하는 리터럴 부분문자열.
