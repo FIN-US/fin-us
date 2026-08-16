@@ -37,7 +37,7 @@ from .watchlist_repo import SqliteWatchlistRepo
 from .telegram_notifier import (
     TELEGRAM_ALERT_MODES,
     TelegramNotifier,
-    call_telegram_api,
+    fetch_telegram_api,
     telegram_notifier,
 )
 from .timeutil import KST
@@ -1976,13 +1976,9 @@ class TelegramCommandPoller:
 
         # URL을 직접 만들지 않는다. 여기서 만들면 raise_for_status의 예외에 토큰이 실려
         # 아래 run()의 "polling failed" 로그로 흘러간다 — 실제로 그랬다 (PR #253 2차 리뷰).
-        # call_telegram_api가 URL 없는 TelegramApiError로 바꿔 던진다 (#257).
-        body = await call_telegram_api(
-            self.notifier.bot_token,
-            "getUpdates",
-            payload=payload,
-            timeout=30.0,
-            expect_body=True,
+        # fetch_telegram_api가 URL 없는 TelegramApiError로 바꿔 던진다 (#257).
+        body = await fetch_telegram_api(
+            self.notifier.bot_token, "getUpdates", payload=payload, timeout=30.0
         )
         if body.get("ok") is not True:
             return []

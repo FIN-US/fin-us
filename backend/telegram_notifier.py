@@ -77,17 +77,48 @@ async def call_telegram_api(
     *,
     payload: dict[str, Any] | None = None,
     timeout: float = 10.0,
-    expect_body: bool = False,
+) -> None:
+    """텔레그램 API를 호출하고 성공 여부만 본다. 응답 본문은 읽지 않는다.
+
+    본문이 필요하면 fetch_telegram_api를 쓴다. 플래그 하나로 합치지 않고 함수를 나눈
+    이유는, 합치면 "본문을 읽어야 하는데 플래그를 빠뜨린" 호출부가 조용히 빈 dict를
+    받기 때문이다 — getUpdates라면 로그도 백오프도 없이 "update 없음"으로 계속 돌고,
+    getMe라면 username이 ""로 퇴화한다. 나뉘어 있으면 잘못 고른 쪽이 None을 돌려주므로
+    첫 실행에서 깨진다 (#257 자가리뷰).
+    """
+    await _request_telegram_api(
+        bot_token, method, payload=payload, timeout=timeout, parse_body=False
+    )
+
+
+async def fetch_telegram_api(
+    bot_token: str,
+    method: str,
+    *,
+    payload: dict[str, Any] | None = None,
+    timeout: float = 10.0,
 ) -> dict[str, Any]:
-    """텔레그램 API를 한 번 호출한다.
+    """텔레그램 API를 호출하고 응답 본문을 파싱해 돌려준다.
 
-    봇 토큰이 URL에 실리는 지점이 이 함수 하나뿐이고, 여기서 나가는 실패는 전부
-    TelegramApiError다. httpx 예외는 이 경계를 넘지 않는다 (#257).
+    파싱 실패는 TelegramApiError다. 조용히 {}로 넘기면 폴러가 "update 없음"으로 읽고
+    로그도 백오프도 없이 다음 폴링으로 넘어간다.
+    """
+    return await _request_telegram_api(
+        bot_token, method, payload=payload, timeout=timeout, parse_body=True
+    )
 
-    expect_body는 응답 본문을 파싱할지 정한다. 본문을 읽는 호출은 getMe와 getUpdates
-    둘뿐이고, 나머지 넷은 성공 여부만 본다. 무조건 파싱하면 200에 비-JSON이 온 경우
-    본문을 쓰지도 않는 호출까지 실패하게 되는데, 이는 이 리팩터링 전에 없던 동작이다.
-    파싱하지 않을 때는 빈 dict를 돌려준다.
+
+async def _request_telegram_api(
+    bot_token: str,
+    method: str,
+    *,
+    payload: dict[str, Any] | None,
+    timeout: float,
+    parse_body: bool,
+) -> dict[str, Any]:
+    """봇 토큰이 URL에 실리는 유일한 지점.
+
+    여기서 나가는 실패는 전부 TelegramApiError다. httpx 예외는 이 경계를 넘지 않는다 (#257).
     """
     url = f"https://api.telegram.org/bot{bot_token}/{method}"
     try:
@@ -97,10 +128,10 @@ async def call_telegram_api(
             else:
                 response = await client.post(url, json=payload)
             response.raise_for_status()
-            # 본문을 쓰는 호출에서는 파싱 실패도 실패로 남긴다 — 이 역시 리팩터링 전
-            # 동작이다. 조용히 {}로 넘기면 폴러가 "update 없음"으로 읽고 로그도 없이
-            # 다음 폴링으로 넘어간다.
-            body = response.json() if expect_body else {}
+            # 본문을 쓰지 않는 호출은 파싱하지 않는다. 무조건 파싱하면 200에 비-JSON이
+            # 온 경우 본문을 읽지도 않는 sendMessage까지 실패하는데, 이는 이 리팩터링
+            # 전에 없던 동작이다 (#257 자가리뷰).
+            body = response.json() if parse_body else {}
     except httpx.HTTPStatusError as exc:
         raise TelegramApiError(
             method,
@@ -396,7 +427,7 @@ class TelegramNotifier:
             return self.bot_username
 
         try:
-            body = await call_telegram_api(self.bot_token, "getMe", expect_body=True)
+            body = await fetch_telegram_api(self.bot_token, "getMe")
             result = body.get("result") or {}
             username = str(result.get("username") or "").strip().lstrip("@")
             self.bot_username = username.lower()

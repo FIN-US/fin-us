@@ -8,6 +8,7 @@ from backend.telegram_notifier import (
     TelegramNotifier,
     _retry_after_seconds,
     call_telegram_api,
+    fetch_telegram_api,
     should_send_telegram_alert,
 )
 
@@ -464,9 +465,9 @@ async def test_call_telegram_api_raises_error_without_token(
 async def test_send_text_succeeds_when_200_body_is_not_json(monkeypatch):
     """본문을 쓰지 않는 호출은 200의 본문이 JSON이 아니어도 성공해야 한다 (#257 자가리뷰).
 
-    call_telegram_api가 무조건 response.json()을 부르면, 본문을 읽지도 않는 sendMessage가
-    파싱 실패로 실패한다 — 리팩터링 전에는 없던 동작이고, send_text가 False를 돌려주면
-    _send_text_settled가 최대 4회 재시도한다. expect_body가 그 비대칭을 막는다.
+    무조건 response.json()을 부르면 본문을 읽지도 않는 sendMessage가 파싱 실패로 실패한다 —
+    리팩터링 전에는 없던 동작이고, send_text가 False를 돌려주면 _send_text_settled가
+    최대 4회 재시도한다. call_telegram_api/fetch_telegram_api 분리가 그 비대칭을 막는다.
     """
 
     class FakeResponse:
@@ -497,7 +498,45 @@ async def test_send_text_succeeds_when_200_body_is_not_json(monkeypatch):
     # 반대로 본문을 읽는 호출은 파싱 실패를 실패로 남긴다. 조용히 {}로 넘기면 폴러가
     # "update 없음"으로 읽고 로그도 백오프도 없이 다음 폴링으로 넘어간다.
     with pytest.raises(TelegramApiError):
-        await call_telegram_api("token", "getUpdates", payload={}, expect_body=True)
+        await fetch_telegram_api("token", "getUpdates", payload={})
+
+
+@pytest.mark.asyncio
+async def test_call_telegram_api_returns_none_so_body_readers_cannot_use_it(monkeypatch):
+    """본문이 필요한 호출부가 call_telegram_api를 고르면 조용히가 아니라 즉시 깨져야 한다.
+
+    플래그 하나짜리 API였다면 빠뜨린 호출부가 빈 dict를 받아 getUpdates는 "update 없음",
+    getMe는 username ""으로 조용히 퇴화한다. 반환형을 나눠 그 실수를 불가능하게 만든
+    것이 이 분리의 목적이다 (#257 자가리뷰).
+    """
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"ok": True, "result": [{"update_id": 1}]}
+
+    class FakeAsyncClient:
+        def __init__(self, *, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return None
+
+        async def post(self, url, **kwargs):
+            return FakeResponse()
+
+    monkeypatch.setattr("backend.telegram_notifier.httpx.AsyncClient", FakeAsyncClient)
+
+    assert await call_telegram_api("token", "getUpdates", payload={}) is None
+    assert await fetch_telegram_api("token", "getUpdates", payload={}) == {
+        "ok": True,
+        "result": [{"update_id": 1}],
+    }
 
 
 @pytest.mark.asyncio

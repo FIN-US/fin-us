@@ -1888,7 +1888,7 @@ async def test_polling_failure_log_has_no_bot_token(
     재시도하며 매 회 기록하므로, 전송 경로보다 트리거가 잦다.
 
     예전에는 backend.telegram_commands가 리댁션 목록에 들어 있어야만 막혔다. 지금은
-    _get_updates가 URL을 직접 만들지 않고 call_telegram_api에 맡겨서 막힌다 — 이 테스트는
+    _get_updates가 URL을 직접 만들지 않고 fetch_telegram_api에 맡겨서 막힌다 — 이 테스트는
     목록이 아니라 그 위임을 지킨다. _get_updates에 URL 조립이 되돌아오면 여기서 깨진다.
     """
     token = "8666951614:SECRET"
@@ -3654,7 +3654,7 @@ async def test_get_updates_sends_the_batch_limit(monkeypatch):
                 json=lambda: {"ok": True, "result": []},
             )
 
-    # HTTP 호출은 telegram_notifier.call_telegram_api로 옮겨갔다 (#257). 패치 지점도
+    # HTTP 호출은 telegram_notifier.fetch_telegram_api로 옮겨갔다 (#257). 패치 지점도
     # 따라 옮긴다 — 여기서 검사하는 것은 폴러가 싣는 payload이지 호출 위치가 아니다.
     monkeypatch.setattr(
         "backend.telegram_notifier.httpx.AsyncClient", lambda **kwargs: FakeClient()
