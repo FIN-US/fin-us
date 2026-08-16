@@ -193,9 +193,10 @@ class _TelegramTokenRedactionFilter(logging.Filter):
 
 def _install_telegram_token_redaction_filter() -> None:
     # 애플리케이션 코드가 만드는 예외에는 더 이상 URL이 없다 — telegram 호출이 전부
-    # call_telegram_api를 지나고, 거기서 나오는 TelegramApiError는 str()에 URL을 담지
-    # 않는다 (#257). 그래서 backend.* 로거는 이 목록에 없어도 된다. 예전에는 있어야 했고,
-    # 빠뜨려서 두 번 뚫렸다 (PR #253 1·2차 리뷰).
+    # _request_telegram_api를 지나고(call_telegram_api와 fetch_telegram_api 둘 다 그리로
+    # 모인다), 거기서 나오는 TelegramApiError는 str()에 URL을 담지 않는다 (#257).
+    # 그래서 backend.* 로거는 이 목록에 없어도 된다. 예전에는 있어야 했고, 빠뜨려서
+    # 두 번 뚫렸다 (PR #253 1·2차 리뷰).
     #
     # httpx만 남는다. 이쪽은 예외 경로가 아니라 라이브러리 자신의 정상 로깅이 문제다 —
     # 요청마다 INFO로 'HTTP Request: %s %s ...'를 request.url과 함께 찍고, 그 URL에
