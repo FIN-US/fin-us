@@ -76,7 +76,8 @@ git -C "<REPO>" worktree add --detach "<WT_PATH>" "<대상 ref>"
 `worktree remove --force`는 junction을 따라 들어가 **원본을 지운다**(실측 확인).
 
 ```bash
-cmd //c rmdir "<WT_PATH>\<링크 경로>"    # 링크만 끊는다. 원본은 보존된다(실측 확인)
+cmd //c rmdir "<WT_PATH>\<링크 경로>"    # Windows: 링크만 끊는다. 원본 보존(실측 확인)
+rm "<WT_PATH>/<링크 경로>"               # macOS/Linux: 심볼릭 링크만 지운다
 ```
 
 ```bash

@@ -51,7 +51,7 @@ body:
     id: priority
     attributes:
       label: "우선순위"
-      description: "판단이 서지 않으면 P2를 선택해 주세요."
+      description: "판단이 서지 않으면 P2를 선택해 주세요. 선택값은 본문에만 남으므로, `우선순위: Px` 라벨은 별도로 붙여 주세요."
       options:
         - "P0 (긴급)"
         - "P1 (높음)"

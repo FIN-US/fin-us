@@ -127,7 +127,8 @@ venv를 동시에 건드리고, `finus_nat/.venv`의 `patch_vendor.py` 벤더 �
 
 ```bash
 # sync 없이, 링크된 venv를 읽기만 한다
-"<REPO>/backend/.venv/bin/python" -m pytest "<WT_PATH>/backend/tests/"
+"<REPO>/backend/.venv/Scripts/python.exe" -m pytest "<WT_PATH>/backend/tests/"   # Windows
+"<REPO>/backend/.venv/bin/python" -m pytest "<WT_PATH>/backend/tests/"           # macOS/Linux
 # uv를 쓴다면 --no-sync 필수
 uv run --no-sync --project "<WT_PATH>/backend" pytest
 ```
@@ -139,14 +140,16 @@ worktree에서 `pytest`나 `ruff check .`를 venv 활성화 없이 그냥 실행
 `node_modules`는 실행만으로 재설치되지 않아 링크해도 안전하다.
 **diff가 건드린 패키지만** 검증한다.
 
-**`ln -s`를 쓰지 않는다.** Git Bash에서 `MSYS=winsymlinks`가 없으면 `ln -s`는 실패하지 않고
-**디렉토리를 통째로 복사한다**(실측: 원본에 파일을 추가해도 사본에 반영되지 않았다).
-성공한 것처럼 보여서 `||` 폴백이 발화하지 않고, 리뷰마다 `node_modules` 전체를 복사한다.
-junction을 직접 만든다.
+**Windows/Git Bash에서 `ln -s`를 쓰지 않는다.** `MSYS=winsymlinks`가 없으면 `ln -s`는
+실패하지 않고 **디렉토리를 통째로 복사한다**(실측: 원본에 파일을 추가해도 사본에 반영되지
+않았다). 성공한 것처럼 보여 폴백이 발화하지 않고, 리뷰마다 `node_modules` 전체를 복사한다.
 
 ```bash
 # <PKG>는 이 PR이 실제로 건드린 패키지로 치환한다. 여러 개면 각각 반복한다.
+# Windows / Git Bash
 cmd //c mklink //J "<WT_PATH>\<PKG>\node_modules" "<REPO>\<PKG>\node_modules"
+# macOS / Linux
+ln -s "<REPO>/<PKG>/node_modules" "<WT_PATH>/<PKG>/node_modules"
 
 # 링크가 디렉토리로 해석되는 경우에만 검증한다.
 [ -d "<WT_PATH>/<PKG>/node_modules" ] \
@@ -163,7 +166,8 @@ cmd //c mklink //J "<WT_PATH>\<PKG>\node_modules" "<REPO>\<PKG>\node_modules"
 > 거짓이다.
 >
 > ```bash
-> cmd //c rmdir "<WT_PATH>\<PKG>\node_modules"   # junction만 끊는다(원본 보존, 실측 확인)
+> cmd //c rmdir "<WT_PATH>\<PKG>\node_modules"   # Windows: junction만 끊는다(원본 보존, 실측 확인)
+> rm "<WT_PATH>/<PKG>/node_modules"              # macOS/Linux: 심볼릭 링크만 지운다
 > ```
 >
 > 끊은 뒤 원본이 남아 있는지 확인하고 나서 6단계로 간다.
