@@ -36,7 +36,7 @@ Unity `Assets`/`Build` 드리프트, hadolint, `nginx -t` — 은 **결과만 �
 
 ## 의존성·빌드
 
-- [ ] `finus_nat` 의존성을 바꿨다면 `scripts/patch_vendor.py`의 **네 대상**에 패치가 여전히 붙는가
+- [ ] `finus_nat` 의존성을 바꿨다면 `finus_nat/scripts/patch_vendor.py`의 **네 대상**에 패치가 여전히 붙는가
 - [ ] `frontend/Assets/`를 고쳤다면 `frontend/Build/` 재빌드가 동반됐는가
 
 ## 테스트
