@@ -43,6 +43,37 @@ MAX_OFFSET = 2**31
 # 이슈 #63이 "5~10분" 범위를 제안했고, ORDER_EXPIRES_AFTER의 10× 여유를 택한다.
 PENDING_ORDER_TTL_SEC = 60 * 10
 
+# redis 소켓 하나가 응답을 기다릴 수 있는 상한 (#268).
+# redis-py asyncio 기본값은 socket_timeout·socket_connect_timeout 둘 다 None = 무한 대기다.
+# 호스트가 RST 없이 패킷을 drop하는 부류의 장애(네트워크 blackhole, 호스트 freeze, redis 스왑
+# 스래싱)에서 await가 돌아오지 않는데, 호출부의 `except Exception`은 예외가 나야 도는 방어라
+# hang에는 발화하지 않는다 — 로그조차 남지 않는다.
+#
+# 무엇이 멈추는가: pending_order·alert_mode를 만지는 await들은 폴러 배치 루프 안
+# (handle_update 내부)에 있어, 하나가 hang하면 폴러 태스크가 통째로 멈춘다. /help·자연어처럼
+# redis와 무관한 명령까지 무응답이 된다. #251은 폴러 상태 저장소 호출만 asyncio.wait_for로
+# 좁게 감쌌고, 여기는 클라이언트 레벨이라 그 밖의 모든 redis 호출을 함께 덮는다.
+#
+# 값은 telegram_commands.STATE_STORE_TIMEOUT_SECONDS(3.0)에 맞췄고 근거도 같다: 정상 redis는
+# 1ms 수준이라 3초에 닿는 것 자체가 이미 비정상이고, docker-compose에서 가장 흔한 장애인
+# 컨테이너 다운은 즉시 ECONNREFUSED를 내므로 이 경로를 타지 않는다.
+#
+# 이건 pending_order의 실패 모드를 바꾸는 결정이다 — 그쪽은 fail-closed라 예외가 곧 "주문
+# 저장소 오류"이므로, 느리지만 살아 있는 redis에서 3초를 넘기면 주문이 실패하기 시작한다.
+# 그래도 무응답보다 낫다고 판단했다: 실패는 사용자가 보고 다시 시도할 수 있지만 hang은
+# 사용자에게도 로그에도 아무 신호를 남기지 않는다 (#268).
+#
+# 저울질한 것은 pending_order지만 영향받는 곳은 더 있다 — 같은 클라이언트를 redis_state()로
+# 스케줄러도 쓰고, 거기엔 "타임아웃 ≠ 실패" 모호성이 새로 생긴다: acquire_scheduler_lock의
+# SET NX가 실제로는 도달했는데 응답 읽기만 잘리면 워커는 "못 잡았다"로 물러나지만 락은
+# SCHEDULER_LOCK_TTL_SEC 동안 redis에 남는다. 최악이 모니터링 1회 스킵이고 그 TTL 설계가 이미
+# 같은 경우를 흡수하므로 받아들인다 — 무한 hang보다 명백히 낫다.
+#
+# 이 상한은 블로킹 명령(BLPOP·XREAD BLOCK·SUBSCRIBE 같은 것)과 공존하지 못한다. 지금 이
+# 레포는 get/set/exists/getdel/delete/eval만 쓰므로 문제가 없지만, 블로킹 명령을 들이려면
+# 그 호출만 socket_timeout=None인 별도 클라이언트로 분리해야 한다.
+REDIS_SOCKET_TIMEOUT_SECONDS = 3.0
+
 
 def normalize_signal_text(signal_text: str) -> str:
     lines = []
@@ -549,11 +580,40 @@ class RedisPendingOrderStore:
 
 
 def create_redis_client() -> Any:
+    """소켓 타임아웃이 걸린 asyncio redis 클라이언트를 만든다 (#268).
+
+    socket_connect_timeout은 redis-py가 None일 때 socket_timeout으로 대신 채우지만, 둘은
+    다른 구간(TCP 연결 / 명령 응답)을 덮으므로 명시한다. 암묵적 대입에 기대면 나중에 한쪽만
+    조정할 때 다른 쪽이 조용히 따라 움직인다.
+
+    타임아웃이 커넥션 풀을 오염시키지 않는다는 근거(redis 7.4.0 기준):
+    AbstractConnection.read_response가 socket_timeout 만료 시 disconnect(nowait=True)를 부른
+    뒤 TimeoutError를 던지므로, 응답을 못 읽은 커넥션이 풀에 남아 다음 명령이 남의 응답을
+    받는 desync가 생기지 않는다.
+
+    재시도가 붙지 않는 이유는 retry_on_timeout이 아니라 from_url이다. redis 7.4.0의
+    Redis.__init__은 기본 retry가 이미 Retry(ExponentialWithJitterBackoff(base=1, cap=10),
+    retries=3)이고 그 supported_errors에 TimeoutError가 들어 있다 — retry_on_timeout=False는
+    거기에 손대지 않는다. 살아남는 것은 Redis.from_url → ConnectionPool.from_url 경로가 그
+    클라이언트 레벨 기본값을 connection_kwargs로 실어 보내지 않기 때문이고, 그래서 커넥션이
+    Retry(NoBackoff(), 0)으로 잡혀 명령당 한 번만 시도한다. 즉 명령 하나가 무는 시간의
+    상한이 곧 이 값이다.
+
+    그러니 여기서 from_url은 취향이 아니라 상한의 근거다. Redis(host=..., port=...)로 바꾸는
+    기계적으로 보이는 리팩터링만으로 상한이 4시도 + 백오프(≈20초)로 조용히 불어나 이 함수의
+    목적이 무너진다. test_create_redis_client_bounds_each_command가 커넥션의 재시도 횟수를
+    0으로 못 박아 그 회귀를 잡는다.
+    """
     from redis.asyncio import Redis
 
     from .config import REDIS_URL
 
-    return Redis.from_url(REDIS_URL, decode_responses=True)
+    return Redis.from_url(
+        REDIS_URL,
+        decode_responses=True,
+        socket_timeout=REDIS_SOCKET_TIMEOUT_SECONDS,
+        socket_connect_timeout=REDIS_SOCKET_TIMEOUT_SECONDS,
+    )
 
 
 @asynccontextmanager
