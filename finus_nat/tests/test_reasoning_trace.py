@@ -545,12 +545,12 @@ async def _memory_chain(tmp_path, inner_response_fn):
             yield trace_info.single_fn
 
 
-_CHAINS = [(_nomemory_chain, "router_nomemory.yml"), (_memory_chain, "router.yml")]
-_CHAIN_IDS = [name for _, name in _CHAINS]
+_ROUTER_CHAINS = [(_nomemory_chain, "router_nomemory.yml"), (_memory_chain, "router.yml")]
+_ROUTER_CHAIN_IDS = [name for _, name in _ROUTER_CHAINS]
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("chain,_config_name", _CHAINS, ids=_CHAIN_IDS)
+@pytest.mark.parametrize("chain,_config_name", _ROUTER_CHAINS, ids=_ROUTER_CHAIN_IDS)
 async def test_workflow_attaches_trace_to_response(chain, _config_name, tmp_path):
     """최상단이 심은 박스에 안쪽이 기록하고, 그 결과가 응답에 실린다.
 
@@ -571,7 +571,7 @@ async def test_workflow_attaches_trace_to_response(chain, _config_name, tmp_path
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("chain,_config_name", _CHAINS, ids=_CHAIN_IDS)
+@pytest.mark.parametrize("chain,_config_name", _ROUTER_CHAINS, ids=_ROUTER_CHAIN_IDS)
 async def test_workflow_does_not_leak_trace_between_requests(chain, _config_name, tmp_path):
     """앞선 요청의 라우팅·도구가 다음 요청의 각주로 새지 않는다."""
     routes = ["news_agent", "trading_agent"]
@@ -593,7 +593,7 @@ async def test_workflow_does_not_leak_trace_between_requests(chain, _config_name
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("chain,_config_name", _CHAINS, ids=_CHAIN_IDS)
+@pytest.mark.parametrize("chain,_config_name", _ROUTER_CHAINS, ids=_ROUTER_CHAIN_IDS)
 async def test_workflow_returns_plain_text_for_string_input(chain, _config_name, tmp_path):
     """`nat run --input` 같은 문자열 경로는 각주를 실을 곳이 없으므로 본문만 돌려준다."""
     async with chain(tmp_path, _branch_recording(
@@ -610,7 +610,12 @@ async def test_transcript_agent_no_longer_owns_the_trace_box(tmp_path):
 
     겸하면 박스가 두 겹이 되어(안쪽 set이 바깥 박스를 가림) 최상단이 심은 박스는
     빈 채로 남고, router.yml에서는 다시 각주가 조용히 사라진다.
+
+    최상단 역할을 대신해 sentinel 박스를 미리 심고, 안쪽이 **그 박스 그대로**를 보는지
+    동일성으로 확인한다. ``is None``으로 확인하면 ContextVar 기본값이 바뀌는 날
+    의도와 무관한 이유로 깨진다 (#291 리뷰).
     """
+    outer_box = ReasoningTrace()
     seen: list[object] = []
 
     async def inner_response(_request):
@@ -621,14 +626,18 @@ async def test_transcript_agent_no_longer_owns_the_trace_box(tmp_path):
         inner_agent_name="router_supervisor_agent",
         db_path=str(tmp_path / "conversations.sqlite3"),
     )
-    async with finus_sqlite_transcript_agent(
-        transcript_config, _builder_returning(_as_function(inner_response))
-    ) as transcript_info:
-        result = await transcript_info.single_fn(
-            ChatRequestOrMessage(messages=[{"role": "user", "content": "뉴스"}])
-        )
+    outer_token = REASONING_TRACE.set(outer_box)
+    try:
+        async with finus_sqlite_transcript_agent(
+            transcript_config, _builder_returning(_as_function(inner_response))
+        ) as transcript_info:
+            result = await transcript_info.single_fn(
+                ChatRequestOrMessage(messages=[{"role": "user", "content": "뉴스"}])
+            )
+    finally:
+        REASONING_TRACE.reset(outer_token)
 
-    assert seen == [None], "transcript_agent가 박스를 심으면 최상단 박스를 가린다"
+    assert seen and seen[0] is outer_box, "transcript_agent가 박스를 심으면 최상단 박스를 가린다"
     dumped = result.model_dump()
     assert "routed_agent" not in dumped
     assert "tools_used" not in dumped

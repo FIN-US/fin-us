@@ -30,6 +30,13 @@ router.yml과 router_nomemory.yml은 기본적으로 최근 대화 히스토리�
 무엇이 오든 — router.yml처럼 vendor `auto_memory_agent`가 끼든, router_nomemory.yml처럼
 바로 `finus_sqlite_transcript_agent`가 오든 — 부착 지점은 같습니다.
 
+**CLI 문자열 입력은 각주 없이 평문만 돌려줍니다.** `nat run --input ...`(= `run.sh`)처럼
+단일 문자열로 워크플로를 부르면 각주를 실을 응답 객체가 없으므로 본문 텍스트만
+반환합니다. 종전 `finus_sqlite_transcript_agent`는 이 경우에도 각주가 실린
+`ChatResponse`를 돌려줬으니 **동작이 바뀐 지점입니다**(#273). HTTP 경로(backend·
+scheduler)는 `messages`를 보내므로 영향받지 않습니다 — CLI에서 각주가 안 보인다면
+이것이 이유입니다.
+
 이 지점을 vendor 바깥으로 올린 이유: `auto_memory_agent`의 `_response_fn` 시그니처가
 `(input_message: str) -> str`이라, 안쪽에서 `ChatResponse`에 붙인 두 필드가 그 래퍼를
 통과하면서 버려집니다. backend는 필드가 없으면 각주를 조용히 생략하므로, 예전
