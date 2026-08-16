@@ -46,6 +46,10 @@ def _make_poller(notifier, handler, *, state_store=None):
     )
 
 
+async def _noop(*args, **kwargs):
+    return None
+
+
 class FakeState:
     def __init__(self):
         self.mode = "urgent"
@@ -1874,6 +1878,48 @@ async def test_alerts_command_ignores_other_chats():
     assert notifier.messages == []
 
 
+@pytest.mark.asyncio
+async def test_polling_failure_log_has_no_bot_token(
+    monkeypatch, caplog, failing_telegram_client
+):
+    """폴러의 getUpdates 실패 로그에 봇 토큰이 남지 않아야 한다 (PR #253 2차 리뷰, #257).
+
+    401(토큰 폐기)·409(인스턴스 중복 또는 웹훅 병행)·429·5xx에서 폴링 루프가 5초마다
+    재시도하며 매 회 기록하므로, 전송 경로보다 트리거가 잦다.
+
+    예전에는 backend.telegram_commands가 리댁션 목록에 들어 있어야만 막혔다. 지금은
+    _get_updates가 URL을 직접 만들지 않고 call_telegram_api에 맡겨서 막힌다 — 이 테스트는
+    목록이 아니라 그 위임을 지킨다. _get_updates에 URL 조립이 되돌아오면 여기서 깨진다.
+    """
+    token = "8666951614:SECRET"
+    notifier = FakeNotifier()
+    notifier.enabled = True
+    notifier.bot_token = token
+    poller = _make_poller(notifier, handler=TelegramCommandHandler(notifier=notifier))
+
+    monkeypatch.setattr(
+        "backend.telegram_notifier.httpx.AsyncClient",
+        failing_telegram_client(409, {"ok": False, "description": "Conflict"}),
+    )
+
+    async def stop_after_first_failure(delay):
+        raise pytest.fail.Exception("stop after first failed polling iteration")
+
+    monkeypatch.setattr(poller, "_sleep", stop_after_first_failure)
+    monkeypatch.setattr(poller, "_setup_bot_profile", _noop)
+    monkeypatch.setattr(poller, "_restore_state", _noop)
+
+    with caplog.at_level(logging.ERROR):
+        with pytest.raises(pytest.fail.Exception):
+            await poller.run()
+
+    assert "Telegram command polling failed" in caplog.text
+    assert token not in caplog.text
+    assert "api.telegram.org" not in caplog.text
+    # 진단 정보는 남아야 한다 — 409는 인스턴스 중복이라 상태 코드 없이는 원인을 못 좁힌다.
+    assert "409" in caplog.text
+
+
 def test_poller_default_handler_uses_order_gateway_and_trade_recorder_factories(monkeypatch):
     gateway = object()
     recorder = object()
@@ -3608,8 +3654,10 @@ async def test_get_updates_sends_the_batch_limit(monkeypatch):
                 json=lambda: {"ok": True, "result": []},
             )
 
+    # HTTP 호출은 telegram_notifier.call_telegram_api로 옮겨갔다 (#257). 패치 지점도
+    # 따라 옮긴다 — 여기서 검사하는 것은 폴러가 싣는 payload이지 호출 위치가 아니다.
     monkeypatch.setattr(
-        telegram_commands.httpx, "AsyncClient", lambda **kwargs: FakeClient()
+        "backend.telegram_notifier.httpx.AsyncClient", lambda **kwargs: FakeClient()
     )
     notifier = FakeNotifier()
     notifier.bot_token = "token"

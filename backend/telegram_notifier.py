@@ -18,18 +18,107 @@ def _redact_telegram_bot_token(value: str) -> str:
     return _TELEGRAM_BOT_URL_RE.sub(r"\1<redacted>", value)
 
 
+class TelegramApiError(Exception):
+    """텔레그램 API 호출 실패. str()에 요청 URL이 — 따라서 봇 토큰이 — 들어가지 않는다 (#257).
+
+    httpx가 만드는 예외, 특히 raise_for_status의 HTTPStatusError는 메시지에 요청 URL을
+    그대로 담는다. 텔레그램 URL은 경로에 봇 토큰이 있으므로 그 예외를 호출부까지 올려
+    보내면 "이 예외를 %s로 찍는 모든 로거"에 리댁션을 걸어야 한다. 그 로거 이름 목록은
+    두 번 뚫렸다 (PR #253 1차 리뷰: 이 모듈, 2차 리뷰: telegram_commands 폴러).
+
+    발생 지점에서 URL 없는 예외로 바꿔 던지면 목록을 유지할 이유 자체가 없어진다.
+    대신 httpx 예외 타입이 소비자에게 도달하지 않으므로, 429 판정에 필요한
+    status_code와 본문은 이 예외가 직접 들고 다닌다.
+    """
+
+    def __init__(
+        self,
+        method: str,
+        *,
+        status_code: int | None = None,
+        body: dict[str, Any] | None = None,
+        reason: str = "",
+    ) -> None:
+        self.method = method
+        self.status_code = status_code
+        self.body = body
+
+        # 텔레그램은 실패 본문에 사람이 읽을 수 있는 description을 준다
+        # ("Too Many Requests: retry after 42"). URL이 빠진 만큼 이쪽을 남겨야
+        # 진단 정보가 오히려 줄지 않는다.
+        description = (body or {}).get("description")
+        if isinstance(description, str) and description.strip():
+            reason = description.strip()
+
+        details = []
+        if status_code is not None:
+            details.append(f"HTTP {status_code}")
+        if reason:
+            # reason은 httpx 예외 메시지에서 오기도 한다. UnsupportedProtocol처럼 URL을
+            # 담는 타입이 있어 여기서 한 번 더 거른다 — 이 클래스의 계약은 "str()에
+            # 토큰 없음"이고, 그 계약이 리댁션 목록을 대신한다.
+            details.append(_redact_telegram_bot_token(reason))
+        super().__init__(
+            f"telegram {method} failed: {', '.join(details) or 'unknown error'}"
+        )
+
+
+def _response_body(response: httpx.Response) -> dict[str, Any] | None:
+    try:
+        body = response.json()
+    except Exception:
+        return None
+    return body if isinstance(body, dict) else None
+
+
+async def call_telegram_api(
+    bot_token: str,
+    method: str,
+    *,
+    payload: dict[str, Any] | None = None,
+    timeout: float = 10.0,
+) -> dict[str, Any]:
+    """텔레그램 API를 한 번 호출하고 응답 본문을 돌려준다.
+
+    봇 토큰이 URL에 실리는 지점이 이 함수 하나뿐이고, 여기서 나가는 실패는 전부
+    TelegramApiError다. httpx 예외는 이 경계를 넘지 않는다 (#257).
+    """
+    url = f"https://api.telegram.org/bot{bot_token}/{method}"
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            if payload is None:
+                response = await client.post(url)
+            else:
+                response = await client.post(url, json=payload)
+            response.raise_for_status()
+            body = response.json()
+    except httpx.HTTPStatusError as exc:
+        raise TelegramApiError(
+            method,
+            status_code=exc.response.status_code,
+            body=_response_body(exc.response),
+            reason=exc.response.reason_phrase,
+        ) from None
+    except Exception as exc:
+        # 네트워크 오류, 본문 파싱 실패 등. from None으로 예외 체인을 끊는다 —
+        # 원본 메시지에 URL이 들어 있을 수 있고, 체인이 남으면 exc_info 로깅이나
+        # 처리되지 않은 트레이스백이 그 원본을 그대로 찍는다.
+        raise TelegramApiError(method, reason=f"{type(exc).__name__}: {exc}") from None
+    return body if isinstance(body, dict) else {}
+
+
 def _retry_after_seconds(exc: Exception) -> int | None:
     """429 응답의 parameters.retry_after. 429가 아니거나 본문이 없으면 None.
 
     send_text가 bool만 돌려주는 탓에 호출부는 이 값을 볼 수 없다. 최소한 로그에는
     남겨 두어야 재시도 간격 가정이 실제 ban 길이와 맞는지 판단할 수 있다.
     """
-    if not isinstance(exc, httpx.HTTPStatusError) or exc.response.status_code != 429:
+    if not isinstance(exc, TelegramApiError) or exc.status_code != 429:
         return None
-    try:
-        retry_after = exc.response.json()["parameters"]["retry_after"]
-    except Exception:
+    parameters = (exc.body or {}).get("parameters")
+    if not isinstance(parameters, dict):
         return None
+    retry_after = parameters.get("retry_after")
     # bool은 int의 서브클래스라 isinstance만으로는 True/False가 통과한다 (PR #253 리뷰).
     if isinstance(retry_after, bool) or not isinstance(retry_after, int):
         return None
@@ -57,18 +146,18 @@ class _TelegramTokenRedactionFilter(logging.Filter):
 
 
 def _install_telegram_token_redaction_filter() -> None:
-    # raise_for_status가 만드는 str(HTTPStatusError)에는 요청 URL이 그대로 들어 있고,
-    # telegram URL에는 봇 토큰이 들어 있다. 그 예외를 %s로 찍는 모듈이 전부 여기 있어야 한다.
+    # 애플리케이션 코드가 만드는 예외에는 더 이상 URL이 없다 — telegram 호출이 전부
+    # call_telegram_api를 지나고, 거기서 나오는 TelegramApiError는 str()에 URL을 담지
+    # 않는다 (#257). 그래서 backend.* 로거는 이 목록에 없어도 된다. 예전에는 있어야 했고,
+    # 빠뜨려서 두 번 뚫렸다 (PR #253 1·2차 리뷰).
     #
-    # __name__(backend.telegram_notifier) — send_text 등 5곳 (PR #253 리뷰)
-    # backend.telegram_commands — 폴러의 _get_updates가 같은 형태로 URL을 만들고
-    #   "Telegram command polling failed: %s"로 찍는다. 401·409(인스턴스 중복)·429·5xx에서
-    #   폴링 루프가 5초마다 재시도하며 매 회 기록하므로 전송 경로보다 트리거가 잦다.
-    #   전송 경로만 막고 이쪽을 놓쳤었다 (PR #253 2차 리뷰).
+    # httpx/httpcore는 남는다. 이쪽은 예외 경로가 아니라 자신의 정상 로깅이 문제다 —
+    # httpx는 요청마다 INFO로 'HTTP Request: POST <full-url>'을 찍고, 그 URL에 토큰이
+    # 들어 있다. 우리 코드를 어떻게 고치든 이 로그는 라이브러리가 직접 만든다.
     #
-    # 이 목록은 로거 이름 allowlist라 구조적으로 취약하다 — telegram 예외를 로깅하는 모듈이
-    # 새로 생기면 같은 누출이 다시 열린다. 실제로 이미 한 번 그랬다. 근본 대응은 #257.
-    for logger_name in (__name__, "backend.telegram_commands", "httpx", "httpcore"):
+    # 이 두 이름은 서드파티 라이브러리 로거라 애플리케이션 모듈이 늘어도 따라 늘지 않는다.
+    # allowlist가 계속 자라던 원인이 backend.* 쪽이었다.
+    for logger_name in ("httpx", "httpcore"):
         target_logger = logging.getLogger(logger_name)
         if any(
             isinstance(filter_, _TelegramTokenRedactionFilter)
@@ -238,14 +327,13 @@ class TelegramNotifier:
         if not self.enabled:
             return False
 
-        url = f"https://api.telegram.org/bot{self.bot_token}/answerCallbackQuery"
         payload = {"callback_query_id": callback_query_id}
         if text:
             payload["text"] = text
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                response = await client.post(url, json=payload)
-                response.raise_for_status()
+            await call_telegram_api(
+                self.bot_token, "answerCallbackQuery", payload=payload
+            )
             return True
         except Exception as exc:
             logger.error("Telegram callback answer failed: %s", exc)
@@ -255,14 +343,12 @@ class TelegramNotifier:
         if not self.enabled:
             return False
 
-        url = f"https://api.telegram.org/bot{self.bot_token}/sendChatAction"
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                response = await client.post(
-                    url,
-                    json={"chat_id": self.chat_id, "action": action},
-                )
-                response.raise_for_status()
+            await call_telegram_api(
+                self.bot_token,
+                "sendChatAction",
+                payload={"chat_id": self.chat_id, "action": action},
+            )
             return True
         except Exception as exc:
             logger.error("Telegram chat action send failed: %s", exc)
@@ -272,11 +358,10 @@ class TelegramNotifier:
         if not self.enabled:
             return False
 
-        url = f"https://api.telegram.org/bot{self.bot_token}/setMyCommands"
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                response = await client.post(url, json={"commands": commands})
-                response.raise_for_status()
+            await call_telegram_api(
+                self.bot_token, "setMyCommands", payload={"commands": commands}
+            )
             return True
         except Exception as exc:
             logger.error("Telegram bot command menu setup failed: %s", exc)
@@ -288,12 +373,8 @@ class TelegramNotifier:
         if self.bot_username:
             return self.bot_username
 
-        url = f"https://api.telegram.org/bot{self.bot_token}/getMe"
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                response = await client.post(url)
-                response.raise_for_status()
-                body = response.json()
+            body = await call_telegram_api(self.bot_token, "getMe")
             result = body.get("result") or {}
             username = str(result.get("username") or "").strip().lstrip("@")
             self.bot_username = username.lower()
@@ -308,7 +389,6 @@ class TelegramNotifier:
         *,
         reply_markup: dict[str, Any] | None = None,
     ) -> None:
-        url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
         payload = {
             "chat_id": self.chat_id,
             "text": text,
@@ -316,9 +396,7 @@ class TelegramNotifier:
         }
         if reply_markup is not None:
             payload["reply_markup"] = reply_markup
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.post(url, json=payload)
-            response.raise_for_status()
+        await call_telegram_api(self.bot_token, "sendMessage", payload=payload)
 
 
 telegram_notifier = TelegramNotifier()

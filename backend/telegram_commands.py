@@ -10,7 +10,6 @@ from datetime import datetime, timedelta
 from typing import Any, Callable
 from urllib.parse import quote as _url_quote
 
-import httpx
 from fastapi import HTTPException
 from sqlmodel import Session
 
@@ -35,7 +34,12 @@ from .redis_state import (
 )
 from .services import llm_chat, run_mcp_tool
 from .watchlist_repo import SqliteWatchlistRepo
-from .telegram_notifier import TELEGRAM_ALERT_MODES, TelegramNotifier, telegram_notifier
+from .telegram_notifier import (
+    TELEGRAM_ALERT_MODES,
+    TelegramNotifier,
+    call_telegram_api,
+    telegram_notifier,
+)
 from .timeutil import KST
 from .trading_orders import (
     McpTradingOrderGateway,
@@ -1966,15 +1970,16 @@ class TelegramCommandPoller:
                 logger.error("Telegram bot command menu setup failed: %s", exc)
 
     async def _get_updates(self) -> list[dict[str, Any]]:
-        url = f"https://api.telegram.org/bot{self.notifier.bot_token}/getUpdates"
         payload: dict[str, Any] = {"timeout": 25, "limit": GET_UPDATES_LIMIT}
         if self.offset is not None:
             payload["offset"] = self.offset
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(url, json=payload)
-            response.raise_for_status()
-            body = response.json()
+        # URL을 직접 만들지 않는다. 여기서 만들면 raise_for_status의 예외에 토큰이 실려
+        # 아래 run()의 "polling failed" 로그로 흘러간다 — 실제로 그랬다 (PR #253 2차 리뷰).
+        # call_telegram_api가 URL 없는 TelegramApiError로 바꿔 던진다 (#257).
+        body = await call_telegram_api(
+            self.notifier.bot_token, "getUpdates", payload=payload, timeout=30.0
+        )
         if body.get("ok") is not True:
             return []
         return body.get("result") or []
