@@ -61,8 +61,6 @@ def _collect_signals(dir_path: Path) -> dict[str, bool]:
 
 
 def _infer_role(dir_path: Path) -> str:
-    # 이름으로 판정되는 디렉토리가 대부분이라 _collect_signals는 필요할 때만 부른다.
-    # 항상 먼저 계산하면 아는 디렉토리까지 트리를 훑는다.
     name = dir_path.name
     if name == "backend":
         return "FastAPI 오케스트레이션 계층으로, MCP/LLM 호출을 조합해 분석 API를 제공합니다."
@@ -80,7 +78,7 @@ def _infer_role(dir_path: Path) -> str:
         return "로컬/도커 실행, 의존성 설치, 환경 점검 등 운영 자동화를 담당합니다."
     if name == "docs":
         return "설계·조사 문서를 모아 둡니다. 실행 코드는 없습니다."
-    signals = _collect_signals(dir_path)
+    signals = _collect_signals(dir_path)   # 이름으로 못 정한 경우에만 트리를 훑는다
     if signals["fastapi"]:
         return "API 서버 역할의 백엔드 모듈입니다."
     if signals["unity"]:
@@ -182,9 +180,8 @@ def run_visualizer(output_file: str = "architecture.md"):
 
 
 if __name__ == "__main__":
-    # Windows 기본 콘솔은 cp949라 비ASCII 출력이 UnicodeEncodeError로 죽는다. 파일은 이미
-    # utf-8로 정상 생성된 뒤라 실제로는 성공인데 exit 1이 되어 실패로 보고된다.
-    # 인코딩을 못 바꾸는 스트림(리다이렉트 등)도 있으므로 실패해도 진행한다.
+    # Windows 기본 콘솔(cp949)에서 비ASCII 출력이 죽으면, 파일은 이미 만들어진 뒤라
+    # 성공인데도 exit 1이 된다. 인코딩을 못 바꾸는 스트림도 있으므로 실패는 무시한다.
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     except (AttributeError, OSError):
