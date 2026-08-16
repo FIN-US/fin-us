@@ -2,7 +2,7 @@
 
 CI(`ci.yml`)가 돌리는 것 — backend·finus_nat pytest, mcp-trading·mcp-news·mcp-dart npm test,
 Unity `Assets`/`Build` 드리프트, hadolint, `nginx -t` — 은 **결과만 확인**하고 여기서 반복하지
-않습니다. 빨간불은 리뷰할 일이 아니라 고칠 일입니다.
+않는다. 빨간불은 리뷰할 일이 아니라 고칠 일이다.
 
 ## 돈이 나가는 경로 (`backend/trading_orders.py`, `mcp-trading/`)
 
