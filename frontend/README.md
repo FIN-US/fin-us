@@ -113,15 +113,25 @@ backend를 기다리지 않아도 됩니다. backend가 없는 동안에는 `/ap
 `depends_on`을 뺀 위 설계가 그대로 무효가 됩니다.
 
 `/api/v1/ws`(WebSocket)는 `map $http_upgrade $connection_upgrade`로 업그레이드 헤더를
-조건부 중계합니다. `/api/v1/analyze`는 LLM 호출로 오래 걸려 `proxy_read_timeout`을 300s로
+조건부 중계합니다. **nginx 중계가 정상이어도 backend가 403을 줄 수 있습니다** — backend는
+핸드셰이크의 `Origin`을 `ALLOW_ORIGINS`와 대조하고 불일치 시 연결을 거부합니다(#256, 아래
+참고). nginx는 `Origin`을 그대로 넘기므로 브라우저가 보낸 페이지 오리진이 그대로 검사
+대상이 됩니다. `/api/v1/analyze`는 LLM 호출로 오래 걸려 `proxy_read_timeout`을 300s로
 올려 뒀습니다.
 
-> **CORS 설정은 아직 남겨 둡니다.** 현재 Unity 번들은 `http://localhost:8000`을 하드코딩해
-> 여전히 8000번을 직접 호출합니다. 번들이 상대 경로를 쓰도록 바뀌는 시점(이슈 #246,
-> WebGL 재빌드 필요)부터 프록시 경로만 타게 되며, 그때 `ALLOW_ORIGINS` 수동 관리가
-> 실제로 사라집니다. 그전까지는 backend의 CORS 허용 오리진에 `http://localhost:8080`이
-> 포함돼야 하고(`backend/config.py`의 `ALLOW_ORIGINS` 기본값, `.env.example` 참고),
-> 다른 호스트(예: Tailscale 주소)로 시연할 때는 해당 오리진을 `ALLOW_ORIGINS`에 추가하세요.
+> **`ALLOW_ORIGINS`는 #246 이후에도 계속 필요합니다.** 현재 Unity 번들은
+> `http://localhost:8000`을 하드코딩해 여전히 8000번을 직접 호출합니다. 번들이 상대 경로를
+> 쓰도록 바뀌는 시점(이슈 #246, WebGL 재빌드 필요)부터 프록시 경로만 타게 되어 **HTTP 쪽**
+> CORS 부담은 사라집니다. 하지만 `ALLOW_ORIGINS`는 지우면 안 됩니다 — WebSocket
+> (`/api/v1/ws`) 핸드셰이크의 Origin 허용목록을 겸하기 때문입니다(#256).
+> `CORSMiddleware`는 WebSocket 핸드셰이크에 적용되지 않아, 이 검사가 없으면 임의 사이트가
+> 브로드캐스트를 수신할 수 있습니다(Cross-Site WebSocket Hijacking).
+>
+> 따라서 `http://localhost:8080`은 계속 포함돼야 하고(`backend/config.py`의
+> `ALLOW_ORIGINS` 기본값, `.env.example` 참고), 다른 호스트(예: Tailscale 주소)로 시연할
+> 때는 해당 오리진을 `ALLOW_ORIGINS`에 추가해야 합니다. **#246 작업 시 이 변수를 정리
+> 대상으로 삼지 마세요** — 지우면 화면은 정상적으로 뜨는데 실시간 알림 연결만 403으로
+> 죽어서 원인을 찾기 어렵습니다.
 
 현재 번들은 비압축입니다(`Build/`에 `.br`·`.gz` 산출물 없음).
 
