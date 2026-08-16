@@ -27,6 +27,7 @@ from nat.data_models.api_server import (
 from nat.utils.type_converter import GlobalTypeConverter
 
 from nat_finus_nat.agents import (
+    MEMORY_PROMPT_PREFIX,
     FinusReasoningTraceAgentConfig,
     FinusSqliteTranscriptAgentConfig,
     _run_with_gate,
@@ -502,7 +503,15 @@ def _compiled_vendor_graph(transcript_fn):
     from langgraph.graph import END, START, StateGraph
 
     async def inner_node(state: _VendorState) -> _VendorState:
-        result = await transcript_fn(ChatRequestOrMessage(input_message=state["text"]))
+        # vendor `inner_agent_node`는 안쪽을 **문자열이 아니라** `ChatRequest(messages=...)`로
+        # 부른다 — 그 앞 `memory_retrieve_node`가 회수한 기억을 `MEMORY_PROMPT_PREFIX`
+        # 시스템 메시지로 마지막 user 앞에 끼워 넣기 때문이다. 여기를 `input_message=`로
+        # 흉내내면 transcript agent가 production에서 타지 않는 문자열 분기로 들어가고,
+        # 기억 시스템 메시지를 걸러내는 경로도 안 밟힌다 (#291 자가리뷰).
+        result = await transcript_fn(ChatRequestOrMessage(messages=[
+            {"role": "system", "content": f"{MEMORY_PROMPT_PREFIX}\n사용자는 삼성전자를 보유 중이다."},
+            {"role": "user", "content": state["text"]},
+        ]))
         # vendor는 마지막 메시지의 content(str)만 상태에 남긴다 — 필드 소실 지점.
         return {"text": chat_response_plain_text(result)}
 
