@@ -1,7 +1,5 @@
 base: monitoring_agent.yml
-# base:는 deep-merge 상속이다(nat/utils/io/yaml_tools.py, scripts/run.sh:120).
-# 다만 에이전트 간 체인은 파생 관계가 아니라 라우터가 6개 에이전트를 한 config로 모으기 위한 경로다.
-# 도구 정의(kis-trading-mcp-tool*)는 체인 끝 common.yml에 있다 (#284).
+# base: 체인의 성격과 공유 도구 정의 위치는 configs/common.yml 상단 주석을 참조한다 (#284).
 
 llms:
   news_openai_llm:
