@@ -4,6 +4,7 @@ import httpx
 import pytest
 
 from backend.telegram_notifier import (
+    TELEGRAM_MESSAGE_LIMIT,
     TelegramNotifier,
     _retry_after_seconds,
     should_send_telegram_alert,
@@ -342,6 +343,208 @@ async def test_load_bot_username_fetches_and_caches_get_me(monkeypatch):
     assert await notifier.load_bot_username() == "finus_bot"
     assert await notifier.load_bot_username() == "finus_bot"
     assert calls == [("https://api.telegram.org/bottoken/getMe", {})]
+
+
+# ── #260: 진행 메시지 전송(message_id 확보) · 편집 ──────────────────────────
+
+
+def _fake_client_factory(calls, response):
+    class FakeAsyncClient:
+        def __init__(self, *, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return None
+
+        async def post(self, url, *, json):
+            calls.append((url, json))
+            return response
+
+    return FakeAsyncClient
+
+
+class _FakeResponse:
+    def __init__(self, body=None, error=None):
+        self._body = body
+        self._error = error
+
+    def raise_for_status(self):
+        if self._error is not None:
+            raise self._error
+
+    def json(self):
+        if self._body is None:
+            raise ValueError("no body")
+        return self._body
+
+
+@pytest.mark.asyncio
+async def test_send_text_returning_id_extracts_message_id(monkeypatch):
+    calls = []
+    response = _FakeResponse({"ok": True, "result": {"message_id": 4242}})
+    monkeypatch.setattr(
+        "backend.telegram_notifier.httpx.AsyncClient",
+        _fake_client_factory(calls, response),
+    )
+    notifier = TelegramNotifier("token", "123")
+
+    message_id = await notifier.send_text_returning_id("⏳ 분석 중입니다...")
+
+    assert message_id == 4242
+    assert calls[0][0] == "https://api.telegram.org/bottoken/sendMessage"
+    assert calls[0][1]["text"] == "⏳ 분석 중입니다..."
+
+
+@pytest.mark.asyncio
+async def test_send_text_returning_id_returns_none_on_unusable_body(monkeypatch):
+    """본문을 읽을 수 없으면 전송은 성공했어도 '편집 불가'로 떨어뜨린다."""
+    monkeypatch.setattr(
+        "backend.telegram_notifier.httpx.AsyncClient",
+        _fake_client_factory([], _FakeResponse(body=None)),
+    )
+    notifier = TelegramNotifier("token", "123")
+
+    assert await notifier.send_text_returning_id("⏳") is None
+
+
+@pytest.mark.asyncio
+async def test_send_text_returning_id_rejects_a_body_that_says_not_ok(monkeypatch):
+    """2xx + ok:false 본문의 message_id는 쓰지 않는다 (PR #263 리뷰 — 뮤테이션 생존).
+
+    ok:false면 result가 무엇이든 그 메시지는 만들어지지 않았다. 그 id로 삭제·편집을
+    시도하면 남의 메시지를 건드리거나 조용히 실패한다.
+    """
+    monkeypatch.setattr(
+        "backend.telegram_notifier.httpx.AsyncClient",
+        _fake_client_factory([], _FakeResponse({"ok": False, "result": {"message_id": 4242}})),
+    )
+    notifier = TelegramNotifier("token", "123")
+
+    assert await notifier.send_text_returning_id("⏳") is None
+
+
+@pytest.mark.asyncio
+async def test_send_text_returning_id_returns_none_on_send_failure(monkeypatch):
+    monkeypatch.setattr(
+        "backend.telegram_notifier.httpx.AsyncClient",
+        _fake_client_factory([], _FakeResponse(error=httpx.HTTPError("boom"))),
+    )
+    notifier = TelegramNotifier("token", "123")
+
+    assert await notifier.send_text_returning_id("⏳") is None
+
+
+@pytest.mark.asyncio
+async def test_edit_message_text_posts_edit_payload(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        "backend.telegram_notifier.httpx.AsyncClient",
+        _fake_client_factory(calls, _FakeResponse({"ok": True})),
+    )
+    notifier = TelegramNotifier("token", "123")
+
+    assert await notifier.edit_message_text(4242, "최종 답변") is True
+    assert calls == [
+        (
+            "https://api.telegram.org/bottoken/editMessageText",
+            {
+                "chat_id": "123",
+                "message_id": 4242,
+                "text": "최종 답변",
+                "disable_web_page_preview": True,
+            },
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_edit_message_text_truncates_to_the_telegram_limit(monkeypatch):
+    """공개 API이므로 한도를 넘는 본문이 들어와도 잘라 보낸다 (PR #263 리뷰 — 뮤테이션 생존).
+
+    현재 호출부는 짧은 종료 표시 하나뿐이라 절단이 발동하지 않지만, 넘겨 보내면
+    텔레그램이 400으로 거부하고 진행 메시지가 '분석 중'인 채로 남는다.
+    """
+    calls = []
+    monkeypatch.setattr(
+        "backend.telegram_notifier.httpx.AsyncClient",
+        _fake_client_factory(calls, _FakeResponse({"ok": True})),
+    )
+    notifier = TelegramNotifier("token", "123")
+
+    assert await notifier.edit_message_text(4242, "가" * (TELEGRAM_MESSAGE_LIMIT + 500)) is True
+    assert len(calls[0][1]["text"]) == TELEGRAM_MESSAGE_LIMIT
+
+
+@pytest.mark.asyncio
+async def test_send_text_truncates_to_the_telegram_limit(monkeypatch):
+    """sendMessage도 같은 한도로 자른다 — 각주 계산이 이 상수를 전제로 한다."""
+    calls = []
+    monkeypatch.setattr(
+        "backend.telegram_notifier.httpx.AsyncClient",
+        _fake_client_factory(calls, _FakeResponse({"ok": True, "result": {"message_id": 1}})),
+    )
+    notifier = TelegramNotifier("token", "123")
+
+    assert await notifier.send_text("나" * (TELEGRAM_MESSAGE_LIMIT + 500)) is True
+    assert len(calls[0][1]["text"]) == TELEGRAM_MESSAGE_LIMIT
+
+
+@pytest.mark.asyncio
+async def test_edit_message_text_returns_false_on_failure(monkeypatch):
+    """편집 실패는 예외가 아니라 False — 호출부가 새 메시지로 폴백한다."""
+    monkeypatch.setattr(
+        "backend.telegram_notifier.httpx.AsyncClient",
+        _fake_client_factory([], _FakeResponse(error=httpx.HTTPError("message is too old"))),
+    )
+    notifier = TelegramNotifier("token", "123")
+
+    assert await notifier.edit_message_text(4242, "최종 답변") is False
+
+
+@pytest.mark.asyncio
+async def test_progress_helpers_are_inert_when_notifier_disabled():
+    notifier = TelegramNotifier("", "")
+
+    assert await notifier.send_text_returning_id("⏳") is None
+    assert await notifier.edit_message_text(1, "답변") is False
+
+
+@pytest.mark.asyncio
+async def test_delete_message_posts_delete_payload(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        "backend.telegram_notifier.httpx.AsyncClient",
+        _fake_client_factory(calls, _FakeResponse({"ok": True})),
+    )
+    notifier = TelegramNotifier("token", "123")
+
+    assert await notifier.delete_message(4242) is True
+    assert calls == [
+        (
+            "https://api.telegram.org/bottoken/deleteMessage",
+            {"chat_id": "123", "message_id": 4242},
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_delete_message_returns_false_on_failure(monkeypatch):
+    """삭제 거부는 예외가 아니라 False — 호출부가 종료 표시 편집으로 폴백한다."""
+    monkeypatch.setattr(
+        "backend.telegram_notifier.httpx.AsyncClient",
+        _fake_client_factory([], _FakeResponse(error=httpx.HTTPError("message can't be deleted"))),
+    )
+    notifier = TelegramNotifier("token", "123")
+
+    assert await notifier.delete_message(4242) is False
+
+
+@pytest.mark.asyncio
+async def test_delete_message_is_inert_when_notifier_disabled():
+    assert await TelegramNotifier("", "").delete_message(1) is False
 
 
 def _http_status_error(status_code, body):

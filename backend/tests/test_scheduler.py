@@ -1,5 +1,6 @@
 import pytest
 import asyncio
+import json
 from contextlib import asynccontextmanager
 from datetime import date, datetime
 from types import SimpleNamespace
@@ -652,6 +653,79 @@ async def test_monitor_market_task_processes_multiple_signal_sources_independent
         if call.args[0].get("type") == "AGENT_ANALYSIS"
     ]
     assert [payload["source"] for payload in analysis_broadcasts] == ["news", "sns"]
+
+
+@pytest.mark.asyncio
+async def test_agent_analysis_broadcast_carries_no_analysis_body(monkeypatch):
+    """#256: AGENT_ANALYSIS는 갱신 신호만 싣고 분석 전문은 싣지 않습니다.
+
+    WebSocket에는 인증이 없다(#266). Origin 허용목록 검사(#256)로 브라우저발 CSWSH는 막지만
+    Origin 헤더를 보내지 않는 비브라우저 클라이언트는 여전히 붙을 수 있으므로,
+    PORTFOLIO_UPDATE(#229)와 같이 신호만 보내고 클라이언트가 /api/v1/db/reports를
+    재조회하게 한다.
+
+    이 테스트가 잡는 mutation: payload에 "data": analysis_data를 되살리는 회귀.
+    키 이름만 보지 않고 분석 본문 문자열이 payload 어디에도 없는지까지 확인해,
+    "content" 등 다른 키로 같은 내용을 실어 보내는 변형도 함께 잡는다.
+    """
+    from ..scheduler import SignalSource, monitor_market_task
+
+    state = RedisSchedulerState(FakeRedis())
+    secret = "이 문장은 WebSocket으로 나가면 안 됩니다"
+
+    @asynccontextmanager
+    async def fake_redis_state():
+        yield state
+
+    async def mock_run_mcp_tool(params, name, args):
+        if name == "get_balance":
+            return "[보유 종목 리스트]\n- 삼성전자 (005930): 10주"
+        return f"{name}: {args['stock_name']}"
+
+    async def mock_check_significance(stock, current, last, *, source, provider):
+        _ = stock, current, last, source, provider
+        return True
+
+    mock_perform_analysis = MagicMock(return_value=asyncio.Future())
+    mock_perform_analysis.return_value.set_result({"summary": secret})
+    mock_broadcast = MagicMock(return_value=asyncio.Future())
+    mock_broadcast.return_value.set_result(None)
+
+    monkeypatch.setattr(
+        "backend.scheduler.SIGNAL_SOURCES",
+        [SignalSource(name="news", mcp_params=object(), tool_name="get_market_news")],
+    )
+    monkeypatch.setattr("backend.scheduler.redis_state", fake_redis_state)
+    monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
+    monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
+    monkeypatch.setattr("backend.scheduler.perform_stock_analysis", mock_perform_analysis)
+    monkeypatch.setattr("backend.scheduler.manager.broadcast", mock_broadcast)
+    # 텔레그램 알림에는 분석 전문이 그대로 가야 한다 — 인증된 채널이고, 이 이슈가 좁힌
+    # 것은 WS payload뿐이다. 실제 전송만 막고 인자는 아래에서 확인한다.
+    mock_alert = MagicMock(return_value=asyncio.Future())
+    mock_alert.return_value.set_result(None)
+    monkeypatch.setattr("backend.scheduler._send_telegram_alert_if_needed", mock_alert)
+
+    await monitor_market_task(watchlist_repo=FakeWatchlistRepo())
+
+    analysis_broadcasts = [
+        call.args[0] for call in mock_broadcast.call_args_list
+        if call.args[0].get("type") == "AGENT_ANALYSIS"
+    ]
+    assert len(analysis_broadcasts) == 1
+    payload = analysis_broadcasts[0]
+
+    assert payload == {
+        "type": "AGENT_ANALYSIS",
+        "stock": "삼성전자",
+        "source": "news",
+        "reason": "significant_change_detected",
+    }
+    assert secret not in json.dumps(payload, ensure_ascii=False)
+
+    # 분석 전문 자체는 계속 만들어져 텔레그램 알림으로 전달된다. 이 단언이 없으면
+    # perform_stock_analysis 호출을 통째로 지워도 위 단언들이 그대로 통과한다.
+    assert mock_alert.call_args.args[2] == {"summary": secret}
 
 
 @pytest.mark.asyncio
@@ -1727,7 +1801,7 @@ async def test_monitor_market_task_broadcasts_portfolio_update_on_sync_success(m
     assert payload["holdings_count"] == 3
     # broadcast_at은 ISO 8601로 파싱 가능해야 한다.
     datetime.fromisoformat(payload["broadcast_at"])
-    # 보유 내역 원본(종목명·수량 등)은 인증 없는 WebSocket으로 나가면 안 된다(#65).
+    # 보유 내역 원본(종목명·수량 등)은 인증 없는 WebSocket으로 나가면 안 된다(#266).
     assert "holdings" not in payload
     assert "stocks" not in payload
 

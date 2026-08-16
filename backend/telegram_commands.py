@@ -37,7 +37,12 @@ from .redis_state import (
 )
 from .services import llm_chat, run_mcp_tool
 from .watchlist_repo import SqliteWatchlistRepo
-from .telegram_notifier import TELEGRAM_ALERT_MODES, TelegramNotifier, telegram_notifier
+from .telegram_notifier import (
+    TELEGRAM_ALERT_MODES,
+    TELEGRAM_MESSAGE_LIMIT,
+    TelegramNotifier,
+    telegram_notifier,
+)
 from .timeutil import KST
 from .trading_orders import (
     McpTradingOrderGateway,
@@ -226,17 +231,129 @@ LOOKUP_COMMAND_HELP = "\n".join(
         f"{TREND_COMMAND_HELP}  예: /trend 삼성전자",
     ]
 )
-TELEGRAM_MESSAGE_LIMIT = 4000
 TELEGRAM_TRUNCATION_SUFFIX = "...(이하 생략)"
+
+# ---- 추론 과정 표시 (#260) ----
+
+NAT_PROGRESS_MESSAGE = "⏳ 분석 중입니다..."
+# 진행 메시지 삭제가 거부됐을 때 남길 종료 표시. "분석 중"이 영원히 남지 않게 한다.
+PROGRESS_DONE_MESSAGE = "✅ 분석 완료"
+REASONING_FOOTNOTE_SEPARATOR = "─────"
+# 각주 전체 길이 상한. 각주 자리를 먼저 확보하고 본문을 자르는 구조라, 각주가 길어지면
+# 본문 몫이 그만큼 줄어든다. 상한이 없으면 본문 예산이 음수가 되어 답변이 통째로
+# 사라진 채 각주만 남을 수 있다.
+REASONING_FOOTNOTE_MAX_CHARS = 300
+
+# NAT supervisor 브랜치명 → 사용자에게 보여줄 한국어 라벨.
+# 키는 finus_nat/configs/router*.yml의 branches[].name과 같아야 한다.
+AGENT_LABELS: dict[str, str] = {
+    "trading_agent": "트레이딩 에이전트",
+    "monitoring_agent": "모니터링 에이전트",
+    "news_agent": "뉴스 에이전트",
+    "recommend_agent": "추천 에이전트",
+    "strategy_agent": "전략 에이전트",
+    "diary_agent": "매매일지 에이전트",
+}
+
+# 도구 강제 원장(finus_nat/src/nat_finus_nat/finus_api.py의 _record_to_ledger 호출부)에
+# 기록되는 내부 도구명 → 사용자에게 보여줄 한국어 라벨.
+# 매핑에 없는 도구는 내부 이름을 그대로 노출한다 — 조용히 감추면 각주가 "확인한 자료"를
+# 실제보다 적게 보여주게 되어, 근거를 보여준다는 목적 자체가 무너진다.
+TOOL_LABELS: dict[str, str] = {
+    "finus_account_balance": "KIS 시세·계좌 조회",
+    "finus_market_news": "뉴스 검색",
+    "finus_disclosure_signal": "지분공시 조회",
+    "finus_earnings_report": "DART 실적 조회",
+    "finus_mcp_trading_today_orders": "당일 주문·체결 조회",
+    "finus_mcp_trading_get_balance": "계좌 잔고 조회",
+    "finus_mcp_trading_balance_rlz_pl": "실현손익 조회",
+    "finus_save_diary": "매매일지 저장",
+    "finus_list_diaries": "매매일지 조회",
+}
+
 _telegram_command_task: asyncio.Task | None = None
 
 
-def _telegram_text(text: str) -> str:
+def _telegram_text(text: str, limit: int = TELEGRAM_MESSAGE_LIMIT) -> str:
     stripped = text.strip()
-    if len(stripped) <= TELEGRAM_MESSAGE_LIMIT:
+    if len(stripped) <= limit:
         return stripped
-    keep = TELEGRAM_MESSAGE_LIMIT - len(TELEGRAM_TRUNCATION_SUFFIX)
+    # max(0, ...): limit이 말줄임 접미사보다 짧아도 음수 인덱스로 뒤집히지 않게 한다.
+    keep = max(0, limit - len(TELEGRAM_TRUNCATION_SUFFIX))
     return f"{stripped[:keep]}{TELEGRAM_TRUNCATION_SUFFIX}"
+
+
+def _reasoning_footnote(routed_agent: Any, tools_used: Any) -> str:
+    """담당 에이전트·확인한 자료 각주를 만든다. 근거가 없으면 빈 문자열 (#260).
+
+    입력은 NAT 응답의 ``routed_agent``/``tools_used`` 필드에서만 온다 — 답변 텍스트를
+    파싱해 에이전트명이나 도구명을 추측하지 않는다 (#129와 같은 원칙). 파싱으로 만들면
+    "실제로 호출한 도구"가 아니라 "모델이 호출했다고 주장하는 도구"가 되어, 근거로
+    보여주는 각주가 오히려 환각을 사실처럼 전달하는 표면이 된다.
+
+    두 값이 모두 없으면(구버전 finus_nat 등) 각주를 조용히 생략한다. 라우팅은 됐는데
+    도구가 하나도 실행되지 않은 경우는 "없음"으로 드러낸다 — 도구 없이 나온 답변이라는
+    사실 자체가 사용자가 알아야 할 근거다.
+
+    호출했지만 실패한 도구는 ``(실패)``, 성공했지만 결과가 비었던 도구는 ``(결과 없음)``을
+    붙여 데이터를 얻은 호출과 구분한다. 둘 다 그냥 "확인한 자료"로 적으면 사용자는 답변이
+    그 데이터에 근거했다고 읽는다 — 실제로는 아니므로, 근거를 보여준다는 이 기능의 목적과
+    정반대의 오독이 된다. 빈 결과는 특히 NAT가 "[조회 결과 없음] ..."을 본문으로 돌려주는
+    경로(#209)와 겹쳐, 본문은 데이터가 없다고 말하는데 각주만 자료를 확인했다고 말하게
+    된다. 그렇다고 목록에서 빼면 시도조차 안 한 것처럼 보이므로, 빼지 않고 결과를 함께 적는다.
+    """
+    agent = routed_agent.strip() if isinstance(routed_agent, str) else ""
+    tools = list(tools_used) if isinstance(tools_used, (list, tuple)) else []
+    if not agent and not tools:
+        return ""
+
+    entries: list[str] = []
+    for tool in tools:
+        name = getattr(tool, "name", None)
+        if not isinstance(name, str) or not name.strip():
+            continue
+        entry = TOOL_LABELS.get(name.strip(), name.strip())
+        if getattr(tool, "ok", False) is not True:
+            entry = f"{entry}(실패)"
+        elif getattr(tool, "empty", False) is True:
+            entry = f"{entry}(결과 없음)"
+        if entry not in entries:  # 서로 다른 내부 도구가 같은 라벨로 접힐 수 있다
+            entries.append(entry)
+
+    if not agent and not entries:
+        return ""
+
+    parts: list[str] = []
+    if agent:
+        parts.append(f"🤖 {AGENT_LABELS.get(agent, agent)}")
+    parts.append(f"📚 확인한 자료: {', '.join(entries) if entries else '없음'}")
+    footnote = f"{REASONING_FOOTNOTE_SEPARATOR}\n{' · '.join(parts)}"
+    return _telegram_text(footnote, REASONING_FOOTNOTE_MAX_CHARS)
+
+
+def _answer_with_footnote(answer: str, footnote: str) -> str:
+    """답변 본문과 각주를 텔레그램 길이 한도 안에 함께 담는다 (#260).
+
+    각주 자리를 먼저 확보한 뒤 본문을 나머지에 맞춰 자른다. 합친 뒤에 자르면 긴 답변에서
+    각주가 통째로 잘려나가, 정작 근거가 필요한 답변에서만 근거가 사라진다.
+    """
+    if not footnote:
+        return _telegram_text(answer)
+    block = f"\n\n{footnote}"
+    return f"{_telegram_text(answer, TELEGRAM_MESSAGE_LIMIT - len(block))}{block}"
+
+
+def _nat_answer_message(result: Any) -> str:
+    """NAT 응답을 각주까지 붙인 텔레그램 메시지로 만든다 (#260).
+
+    ``routed_agent``/``tools_used``는 ``services.NatAnswer``가 실어 오는 속성이다.
+    속성이 없는 값(구버전 경로, 문자열만 주는 대역)이면 각주 없이 본문만 보낸다.
+    """
+    footnote = _reasoning_footnote(
+        getattr(result, "routed_agent", None),
+        getattr(result, "tools_used", ()),
+    )
+    return _answer_with_footnote(str(result), footnote)
 
 
 def _short_error(exc: Exception) -> str:
@@ -1566,8 +1683,59 @@ class TelegramCommandHandler:
             lines.append(line)
         return "\n".join(lines).strip()
 
+    async def _send_progress_message(self, text: str) -> int | None:
+        """진행 메시지를 보내고 나중에 치울 message_id를 반환한다 (#260).
+
+        message_id를 돌려주지 못하는 notifier에서는 일반 전송만 하고 ``None``을
+        반환한다 — 이 경우 진행 메시지는 대화에 그대로 남는다.
+
+        전송 실패는 여기서 삼킨다. ``TelegramNotifier``의 ``send_text_returning_id``/
+        ``send_text``는 이미 내부에서 예외를 잡아 각각 ``None``·무시로 떨어뜨리지만,
+        notifier는 생성자로 주입 가능하므로 대역이 예외를 던질 수 있다. 진행 표시는
+        답변에 덧붙는 편의 기능이라 이걸로 질의 처리 자체를 실패시키면 사용자는 답도
+        못 받는다 — 그래서 주입된 구현이 무엇이든 여기서 한 겹 감싼다.
+        """
+        try:
+            send_returning_id = getattr(self.notifier, "send_text_returning_id", None)
+            if callable(send_returning_id):
+                return await send_returning_id(text)
+            await self.notifier.send_text(text)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error("진행 메시지를 보내지 못했습니다: %s", exc)
+        return None
+
+    async def _clear_progress_message(self, message_id: int | None) -> None:
+        """진행 메시지를 치운다 — 삭제하고, 삭제가 거부되면 종료 표시로 편집한다 (#260).
+
+        최종 답변을 이 메시지의 **편집으로 내보내지 않는 이유**: 텔레그램은 메시지
+        편집에 대해 푸시 알림을 보내지 않고 읽지 않음 표시도 갱신하지 않는다. 편집으로
+        답을 내보내면 수십 초를 기다리다 앱을 닫은 사용자가 정작 답변 도착 알림을 받지
+        못한다 — 체감 응답성을 높이려는 기능이 알림 가치를 뒤집는 셈이다.
+        답변은 항상 새 메시지로 보낸다.
+
+        실패는 삼킨다. 진행 메시지 정리는 답변 전달보다 덜 중요하다.
+        """
+        if message_id is None:
+            return
+
+        delete_message = getattr(self.notifier, "delete_message", None)
+        if callable(delete_message) and await delete_message(message_id):
+            return
+
+        edit_message_text = getattr(self.notifier, "edit_message_text", None)
+        if callable(edit_message_text) and await edit_message_text(message_id, PROGRESS_DONE_MESSAGE):
+            return
+
+        logger.info("진행 메시지를 정리하지 못했습니다 (message_id=%s)", message_id)
+
     async def _handle_chat_fallback(self, text: str, chat_id: str) -> None:
         await self.notifier.send_chat_action("typing")
+        # #260: NAT 응답까지 수십 초가 걸린다. typing 액션은 5초 뒤 사라지므로
+        # 접수 즉시 진행 메시지를 남기고, 응답이 오면 그 메시지를 치운 뒤 답변을
+        # 새 메시지로 보낸다(편집은 푸시 알림을 발생시키지 않는다).
+        progress_message_id = await self._send_progress_message(NAT_PROGRESS_MESSAGE)
         try:
             result = await self.llm_runner(
                 "nat",
@@ -1575,11 +1743,16 @@ class TelegramCommandHandler:
                 conversation_id=f"telegram:{chat_id}",
             )
         except Exception as exc:
+            # 통지보다 먼저 치운다 — 아래 전송이 실패해 재시도로 넘어가도
+            # "분석 중"이 채팅에 남지 않는다 (#260).
+            await self._clear_progress_message(progress_message_id)
             await self._send_text_or_raise(f"응답 생성 실패: {_short_error(exc)}")
             return
         # LLM 호출이 끝난 뒤다. 재실행은 같은 conversation_id로 NAT를 다시 호출해 대화
         # 이력을 오염시키고 예산만큼 재과금된다 — 전송 실패 예산으로는 최대 10회다 (#247).
-        await self._send_text_settled(_telegram_text(str(result)))
+        await self._clear_progress_message(progress_message_id)
+        # _nat_answer_message가 각주 자리를 확보한 뒤 본문을 길이 한도에 맞춘다 (#260).
+        await self._send_text_settled(_nat_answer_message(result))
 
     @asynccontextmanager
     async def _state(self):
@@ -1790,6 +1963,13 @@ class TelegramCommandPoller:
         test_every_try_containing_a_retryable_send_reraises_it이 그것을 정적으로 강제한다
         (#249). 그 가드는 직접 호출만 보므로, 전송을 감싼 헬퍼를 try 안에서 부르는 코드가
         생기면 이 전제가 조용히 깨진다.
+
+        자연어 경로(_handle_chat_fallback)에는 사용자에게 보이는 부수효과가 하나 더
+        있다 — 진행 메시지다 (#260). 답변 전송은 _send_text_settled라 여기 도달하지
+        않지만, LLM 실패 통지는 _send_text_or_raise이므로 그 전송이 실패하면 재시도가
+        걸리고 진행 메시지가 매번 새로 나간다. 진행 메시지 전송 실패는 notifier가 삼켜
+        예산에도 잡히지 않으므로 같은 채팅의 rate limit을 추가로 소모한다. 예산을 손볼
+        때 함께 보라 (PR #263 리뷰, #275).
         """
         try:
             await self.handler.handle_update(update)
