@@ -72,6 +72,13 @@ git -C "<REPO>" worktree add --detach "<WT_PATH>" "<대상 ref>"
 기록해 둔 리터럴 경로를 쓴다. 셸 변수를 참조하지 않는다.
 **`worktree add`에 성공한 경우에만** 수행한다("경로 충돌" 참조).
 
+**worktree 안에 다른 디렉토리로 건 링크(junction/심볼릭)가 있으면 먼저 끊는다.**
+`worktree remove --force`는 junction을 따라 들어가 **원본을 지운다**(실측 확인).
+
+```bash
+cmd //c rmdir "<WT_PATH>\<링크 경로>"    # 링크만 끊는다. 원본은 보존된다(실측 확인)
+```
+
 ```bash
 # 1차: 정상 경로
 git -C "<REPO>" worktree remove --force "<WT_PATH>"

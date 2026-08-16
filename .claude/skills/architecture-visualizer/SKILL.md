@@ -25,8 +25,9 @@ description: >
 
 ### 2. 구조 분석 (Analyze)
 
-- 디렉토리 계층과 주요 소스 파일(`.py`, `.cs`, `.js`, `.md`)을 식별한다.
 - 단순 폴더 나열을 하지 않는다. **각 모듈의 책임과 데이터/호출 흐름**을 뽑는다.
+- `visualizer.py`는 확장자로 거르지 않는다. 파일 이름과 경로에 나타나는 신호
+  (`fastapi`, `projectsettings`, `index.js` 등)로 모듈 성격을 판정한다.
 - 아래 관계를 우선 매핑한다.
   - UI(Unity WebGL `frontend`) → API(`backend`) 호출
   - API(`backend`) → MCP 서버(`mcp-news`, `mcp-trading`, `mcp-dart`) 호출

@@ -116,8 +116,12 @@ git -C "<REPO>" log --oneline -10          # 최근 커밋 이력
 
 `.venv`를 링크한 뒤 `uv run`을 돌리면 **개발자의 메인 트리 venv를 직접 mutate한다**
 (`uv run`이 프로젝트 환경을 자동 동기화하며 링크를 따라간다). 결과는 둘 — 병렬 리뷰가 같은
-venv를 동시에 건드리고, `finus_nat/.venv`에 적용된 `patch_vendor.py` 벤더 패치가 재설치로
-**조용히 벗겨져 로컬 NAT 환경이 깨진다.**
+venv를 동시에 건드리고, `finus_nat/.venv`의 `patch_vendor.py` 벤더 패치가 재설치로
+**조용히 벗겨진다.**
+
+패치 적용 여부는 `finus_nat/.venv/Lib/site-packages/.finus_vendor_patch.json` 마커로 확인한다.
+**확인만 하고 `patch_vendor.py`를 실행하지 않는다** — 이 스크립트는 점검이 아니라 적용이라,
+돌리는 순간 venv를 바꾼다(실측: 미적용 상태에서 돌렸더니 3개 파일에 패치가 적용됐다).
 
 굳이 파이썬 검증이 필요하면 sync를 막고 인터프리터를 직접 지목한다.
 
@@ -135,14 +139,16 @@ worktree에서 `pytest`나 `ruff check .`를 venv 활성화 없이 그냥 실행
 `node_modules`는 실행만으로 재설치되지 않아 링크해도 안전하다.
 **diff가 건드린 패키지만** 검증한다.
 
+**`ln -s`를 쓰지 않는다.** Git Bash에서 `MSYS=winsymlinks`가 없으면 `ln -s`는 실패하지 않고
+**디렉토리를 통째로 복사한다**(실측: 원본에 파일을 추가해도 사본에 반영되지 않았다).
+성공한 것처럼 보여서 `||` 폴백이 발화하지 않고, 리뷰마다 `node_modules` 전체를 복사한다.
+junction을 직접 만든다.
+
 ```bash
 # <PKG>는 이 PR이 실제로 건드린 패키지로 치환한다. 여러 개면 각각 반복한다.
-ln -s "<REPO>/<PKG>/node_modules" "<WT_PATH>/<PKG>/node_modules" \
-  || cmd //c mklink //J "<WT_PATH>/<PKG>/node_modules" "<REPO>/<PKG>/node_modules"
-# ln -s는 Windows에서 개발자 모드가 꺼져 있고 MSYS=winsymlinks도 미설정이면 실패한다.
-# 그 경우 junction(mklink //J)으로 폴백한다.
+cmd //c mklink //J "<WT_PATH>\<PKG>\node_modules" "<REPO>\<PKG>\node_modules"
 
-# 링크가 디렉토리로 해석되는지 확인하고 성공한 경우에만 검증한다.
+# 링크가 디렉토리로 해석되는 경우에만 검증한다.
 [ -d "<WT_PATH>/<PKG>/node_modules" ] \
   && npm --prefix "<WT_PATH>/<PKG>" test \
   || echo "PREFLIGHT SKIP: <PKG> node_modules 링크 실패 — 리포트에 사유를 명시할 것"
@@ -151,8 +157,16 @@ ln -s "<REPO>/<PKG>/node_modules" "<WT_PATH>/<PKG>/node_modules" \
 > `frontend/`는 Unity 프로젝트라 node 의존성이 없다. 검증 지점은 추적 중인 WebGL
 > 번들(`frontend/Build/`)과 소스가 어긋나지 않았는지다(`frontend/README.md` 재빌드 규칙).
 
-> 6단계의 `worktree remove --force`는 링크 자체만 제거하고 원본 `node_modules`는 보존한다
-> (심볼릭 링크·junction 모두 실측 확인). 링크를 지울까 걱정해 정리를 건너뛰지 않는다.
+> ⚠️ **링크를 걸었으면 6단계 전에 반드시 직접 끊는다.** `git worktree remove --force`는
+> junction을 **따라 들어가 원본을 지운다.** 실측했다 — `mcp-dart/node_modules`의 파일 98개가
+> 0개가 됐고 `npm ci`로 복구해야 했다. 이 스킬에 오래 "링크 자체만 제거한다"고 적혀 있었으나
+> 거짓이다.
+>
+> ```bash
+> cmd //c rmdir "<WT_PATH>\<PKG>\node_modules"   # junction만 끊는다(원본 보존, 실측 확인)
+> ```
+>
+> 끊은 뒤 원본이 남아 있는지 확인하고 나서 6단계로 간다.
 
 #### 건너뛴 경우
 
@@ -218,7 +232,10 @@ Approved ✅ / Request Changes 🔄 / Comment 💬 — <이유 한 줄>
 
 ### 6. 정리 (원격 PR 모드 — 실패해도 반드시 수행)
 
-공통 규약 "정리"를 수행하고 **임시 ref 삭제를 추가로** 한다.
+**2단계에서 건 의존성 링크가 있으면 먼저 끊는다**(2단계 경고 참조). 링크를 남긴 채
+`worktree remove`를 부르면 원본 `node_modules`가 날아간다.
+
+이어서 공통 규약 "정리"를 수행하고 **임시 ref 삭제를 추가로** 한다.
 
 ```bash
 git -C "<REPO>" update-ref -d "refs/pr-review/<PR>-<SHA7>"
