@@ -1952,9 +1952,7 @@ class TelegramCommandPoller:
                 #
                 # 이 창은 아직 열려 있다. #269가 그 사실을 회귀 테스트로 고정했고
                 # (test_confirmed_order_is_reexecuted_when_restart_lands_in_the_settled_send),
-                # 닫는 작업은 별도 이슈다. 그 이슈는 이 PR의 리뷰 승인 뒤에 등록하고, 번호를
-                # 여기와 위 테스트 독스트링에 채운다.
-                # TODO: 후속 이슈 번호 — 이 줄이 남아 있으면 머지하지 않는다.
+                # 닫는 작업은 #293이다.
                 await self._persist_state()
 
             if skipped:

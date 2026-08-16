@@ -4357,11 +4357,7 @@ async def test_confirmed_order_is_reexecuted_when_restart_lands_in_the_settled_s
     주문이 없습니다"로 끝난다 — 체결된 주문을 미체결로 오표시한다.
 
     이 테스트는 지금 열려 있는 창을 **기록**하는 것이지 승인하는 것이 아니다. 닫는 작업은
-    별도 이슈로 뺀다 — 그 이슈는 이 PR의 리뷰 승인 뒤에 등록하고, 번호를 여기와
-    telegram_commands.py의 _persist_state() 호출부 주석에 채운다. 그 이슈가 닫히면 아래
-    마지막 두 단언이 뒤집혀야 한다.
-
-    TODO: 후속 이슈 번호 — 이 줄이 남아 있으면 머지하지 않는다.
+    #293으로 뺐고, 그 이슈가 닫히면 아래 마지막 두 단언이 뒤집혀야 한다.
 
     심각도를 함께 고정한다: 중복 체결은 일어나지 않는다(gateway.orders가 1건). GETDEL claim이
     두 번째 실행에 주문을 주지 않고 체결 이력도 recorder에 그대로 남아, 피해는 오표시 문구
@@ -4469,7 +4465,7 @@ _BLACKHOLE_BOUND_SECONDS = 5.0
 
 
 @asynccontextmanager
-async def _blackholed_redis(monkeypatch):
+async def _blackhole_redis_url(monkeypatch):
     """REDIS_URL을 "SYN은 받지만 응답은 영원히 없는" TCP 엔드포인트로 돌린다 (#268).
 
     listen만 하고 accept를 하지 않는다. 커널이 백로그에서 3-way 핸드셰이크를 끝내주므로
@@ -4492,12 +4488,25 @@ async def _blackholed_redis(monkeypatch):
     monkeypatch.setattr(
         backend_config, "REDIS_URL", f"redis://127.0.0.1:{listener.getsockname()[1]}/0"
     )
-    client = redis_state_module.create_redis_client()
     try:
-        yield client
+        yield
     finally:
-        await client.aclose()
         listener.close()
+
+
+@asynccontextmanager
+async def _blackholed_redis(monkeypatch):
+    """블랙홀을 향하는 클라이언트까지 만들어 준다 (#268).
+
+    저장소를 직접 주입하는 테스트만 클라이언트가 필요하다. state_factory처럼 안에서 자기
+    클라이언트를 만드는 경로는 _blackhole_redis_url을 그대로 쓴다 (PR #289 리뷰).
+    """
+    async with _blackhole_redis_url(monkeypatch):
+        client = redis_state_module.create_redis_client()
+        try:
+            yield client
+        finally:
+            await client.aclose()
 
 
 @pytest.mark.asyncio
@@ -4565,7 +4574,7 @@ async def test_alerts_returns_bounded_when_redis_blackholes(monkeypatch):
 
     notifier = FakeNotifier()
 
-    async with _blackholed_redis(monkeypatch):
+    async with _blackhole_redis_url(monkeypatch):
         handler = TelegramCommandHandler(
             notifier=notifier,
             state_factory=redis_state_module.redis_state,
