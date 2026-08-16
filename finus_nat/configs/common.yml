@@ -1,5 +1,23 @@
 # 공용 LLM 및 함수 tools 등록
 functions:
+  # KIS Trading MCP 래퍼 2종. trading/monitoring은 전체 권한, news/recommend/strategy는
+  # 조회 전용을 참조한다 (#66). 여러 에이전트가 공유하므로 공용 파일에서 한 번만 정의한다 (#284).
+  kis-trading-mcp-tool:
+    _type: finus_account_balance
+    mcp_transport: sse
+    mcp_url: ${FINUS_KIS_TRADING_MCP_URL:-http://host.docker.internal:3300/sse}
+    trading_tool_name: ${FINUS_KIS_TRADING_TOOL_NAME:-domestic_stock}
+
+  # #66: news/recommend/strategy 에이전트용 조회 전용 래퍼를 별도 이름으로 등록한다.
+  # 병합된 라우터 설정에서 functions 딕셔너리는 이름이 전역인 평평한 네임스페이스이므로,
+  # 한 이름에 인스턴스는 하나뿐이다. 따라서 trading/monitoring의 kis-trading-mcp-tool
+  # (전체 권한 finus_account_balance)을 건드리지 않고 별도 이름으로 분리해야 한다.
+  kis-trading-mcp-tool-readonly:
+    _type: finus_account_balance_readonly
+    mcp_transport: sse
+    mcp_url: ${FINUS_KIS_TRADING_MCP_URL:-http://host.docker.internal:3300/sse}
+    trading_tool_name: ${FINUS_KIS_TRADING_TOOL_NAME:-domestic_stock}
+
   # router_nomemory.yml에서는 memory 도구를 no-op으로 둡니다.
   # router.yml(memory 모드)은 같은 이름을 실제 Mem0 도구로 덮어씁니다.
   add_user_memory:

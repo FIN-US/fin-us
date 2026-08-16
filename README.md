@@ -116,14 +116,17 @@ Fin-Us는 단일 모델이 모든 일을 처리하지 않고, 역할이 분리�
 
 에이전트의 페르소나, 도구 구성, 라우팅 지침은 NAT 레이어에서 정의합니다. `finus_nat/configs/agents/` 폴더 내의 YAML 파일을 수정하여 각 에이전트의 성격과 작업 지침을 관리할 수 있습니다.
 
+에이전트별 역할·지침은 각 YAML의 `additional_instructions`에 둡니다. 반면 모든 에이전트가 공유하는 ReAct 출력 골격(`Thought:` / `Action:` / `Action Input:` 형식 규칙)은 `finus_nat/configs/prompts/*.md` 5개로 분리되어 있고, YAML의 `system_prompt`가 `file://../prompts/<파일>.md`로 이를 참조합니다. `react_kis_full.md`는 trading·monitoring 두 에이전트가 공유하므로 고치면 양쪽에 함께 반영됩니다.
+
 ```yaml
 # 예시: finus_nat/configs/agents/news_agent.yml
 functions:
   news_agent:
     _type: react_agent
+    system_prompt: file://../prompts/react_news.md
     tool_names:
-      - finus_market_news
-      - finus_investor_trading
+      - mcp-news-get-market-news
+      - mcp-dart-get-disclosure-signal
     additional_instructions: |
       역할: 시장 심리 분석가
       뉴스와 외국인/기관 매매 동향을 종합 분석합니다.
