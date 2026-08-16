@@ -608,7 +608,20 @@ def test_no_module_builds_a_telegram_url_outside_the_gateway():
 
     offenders = []
     for path in sorted(backend_dir.rglob("*.py")):
-        if "tests" in path.parts:
+        # 우리 소스만 본다. CI는 backend/ 안에 가상환경을 만들고, 거기 설치된 서드파티
+        # 패키지에도 텔레그램 URL 문자열이 있다(실제로 이 가드가 처음 그걸로 깨졌다).
+        # 가상환경 이름은 .venv일 수도 venv일 수도 있어 이름으로 거르지 않고, 서드파티
+        # 코드가 반드시 들어가는 site-packages/dist-packages로 거른다.
+        #
+        # 판정은 반드시 backend_dir 기준 상대 경로로 한다. 절대 경로의 부분을 보면
+        # 체크아웃 위치에 점으로 시작하는 디렉토리가 하나만 있어도(worktree가 .claude/
+        # 아래 있는 경우처럼) 전부 걸러져 가드가 조용히 무력해진다 — 실측으로 확인했다.
+        relative = path.relative_to(backend_dir)
+        if any(
+            part.startswith(".")
+            or part in {"__pycache__", "site-packages", "dist-packages", "tests"}
+            for part in relative.parts
+        ):
             continue
         source = path.read_text(encoding="utf-8")
         for number, line in enumerate(source.splitlines(), 1):
@@ -617,7 +630,8 @@ def test_no_module_builds_a_telegram_url_outside_the_gateway():
             # 관문 안의 그 한 줄만 허용한다.
             if path.name == "telegram_notifier.py" and line in gateway_source:
                 continue
-            offenders.append(f"{path.name}:{number}: {line.strip()}")
+            # 상대 경로로 남긴다 — 파일명만 찍으면 어느 트리의 파일인지 알 수 없다.
+            offenders.append(f"{relative}:{number}: {line.strip()}")
 
     assert offenders == [], (
         "텔레그램 URL을 직접 만드는 곳이 생겼다. call_telegram_api / fetch_telegram_api를 "
