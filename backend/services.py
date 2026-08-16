@@ -3,7 +3,7 @@ import httpx
 import logging
 import re
 from datetime import date
-from typing import Any, Literal, Optional, get_args
+from typing import Any, Literal, NamedTuple, Optional, get_args, overload
 from urllib.parse import quote as _url_quote
 from fastapi import HTTPException
 from anthropic import AsyncAnthropic
@@ -597,6 +597,126 @@ async def _llm_ollama_chat(user_msg: str) -> str:
     return (choice or "").strip()
 
 
+class NatToolUse(NamedTuple):
+    """각주에 실을 도구 한 건 — 도구명과 결과 상태 (#260).
+
+    finus_nat이 도구 강제 원장에서 만들어 보내는
+    ``{"name": ..., "ok": ..., "empty": ...}``에 대응한다.
+
+    ``ok=False``는 도구를 호출했지만 오류 응답을 받았다는 뜻이고,
+    ``ok=True, empty=True``는 호출은 성공했지만 결과 집합이 비었다는 뜻이다(#209).
+    셋 다 각주에서 구분해 표시해야 한다 — 실패나 빈 결과를 그냥 "확인한 자료"로
+    보여주면 사용자는 답변이 그 데이터에 근거했다고 읽지만 실제로는 아니다.
+
+    ``empty``에 기본값이 있는 이유: 이 필드를 싣지 않는 구버전 finus_nat과 섞일 수
+    있다. 기본값 ``False``는 "빈 결과라는 관측이 없음"이지 "데이터가 있었음"이 아니다.
+    """
+
+    name: str
+    ok: bool
+    empty: bool = False
+
+
+class NatAnswer(str):
+    """NAT 답변 텍스트 + 추론 메타데이터 (#260).
+
+    ``str`` 서브클래스인 이유: ``llm_chat("nat", ...)``의 반환값은 scheduler의
+    ``analysis_from_nat_text``, Telegram ``/earnings`` 핸들러 등 여러 곳에서 이미
+    문자열로 소비된다. 별도 타입을 새로 반환하면 그 호출부를 전부 고쳐야 하고,
+    "기존 응답 파서를 건드리지 않는다"는 이 작업의 전제가 깨진다. ``str``을
+    상속하면 기존 호출부는 그대로 동작하고, 각주가 필요한 호출부만 두 속성을 읽는다.
+
+    두 속성은 NAT 응답 페이로드의 **최상위 필드**에서 그대로 온다 — 답변 텍스트
+    (``choices[0].message.content``)를 파싱해 만들지 않는다 (#129와 같은 원칙).
+
+    **주의 — 이 타입은 문자열 연산 한 번이면 소실된다.** ``str`` 서브클래스라
+    ``strip()``·``re.sub()``·f-string 등의 결과는 전부 plain ``str``이다. 답변
+    텍스트를 가공하는 계층이 ``llm_chat`` 경계 안에 새로 생기면
+    :meth:`with_text`로 갈아끼워야 한다. 그냥 반환하면 backend는 각주를 **조용히**
+    생략하도록 설계돼 있어(로그도 예외도 없다) 기능만 사라진다.
+    """
+
+    routed_agent: str | None
+    tools_used: tuple[NatToolUse, ...]
+
+    def __new__(
+        cls,
+        text: str,
+        *,
+        routed_agent: str | None = None,
+        tools_used: tuple[NatToolUse, ...] = (),
+    ) -> "NatAnswer":
+        answer = super().__new__(cls, text)
+        answer.routed_agent = routed_agent
+        answer.tools_used = tuple(tools_used)
+        return answer
+
+    def with_text(self, text: str) -> "NatAnswer":
+        """텍스트만 교체하고 추론 메타데이터를 유지한다 (#260).
+
+        ``llm_chat`` 안에서 응답 텍스트를 가공하는 계층(#230 PII 역치환 등)이 추가될 때
+        ``return transform(raw)``로 끝내면 서브클래스가 소실된다. 그 자리에
+        ``raw.with_text(transform(raw))``를 쓰면 각주가 살아남는다.
+        """
+        return NatAnswer(text, routed_agent=self.routed_agent, tools_used=self.tools_used)
+
+
+# 각주에 실을 도구 개수 상한. tools_used는 다른 서비스(NAT)가 보내는 값이라
+# 개수·길이가 backend에서 보장되지 않는다 — 비정상적으로 긴 목록이 텔레그램 메시지의
+# 본문 자리를 밀어내지 않도록 파싱 단계에서 잘라 둔다.
+NAT_MAX_TOOLS_USED = 16
+
+
+def _nat_reasoning_trace_from_payload(
+    payload: dict[str, Any],
+) -> tuple[str | None, tuple[NatToolUse, ...]]:
+    """NAT 응답 최상위의 ``routed_agent``/``tools_used``를 읽는다 (#260).
+
+    두 필드는 finus_nat이 supervisor의 라우팅 결과와 도구 강제 원장에서 만들어
+    실어 보내는 값이다. 여기서는 **읽기만** 한다 — 답변 텍스트를 뒤져서 도구명이나
+    에이전트명을 추측하지 않는다.
+
+    ``tools_used``는 ``[{"name": str, "ok": bool, "empty": bool}]`` 형태다
+    (``empty``는 구버전 finus_nat에는 없다). 필드가 없거나 타입이
+    어긋나면 조용히 비운다. 두 필드를 싣지 않는 구버전 finus_nat과 혼용될 수 있고,
+    각주는 답변에 덧붙는 부가 정보이므로 없다고 해서 응답 자체를 실패로 만들 이유가
+    없다. 개수는 :data:`NAT_MAX_TOOLS_USED`로 자른다.
+    """
+    routed_raw = payload.get("routed_agent")
+    routed_agent = routed_raw.strip() if isinstance(routed_raw, str) else ""
+
+    tools_raw = payload.get("tools_used")
+    tools_used: list[NatToolUse] = []
+    seen: set[str] = set()
+    if isinstance(tools_raw, list):
+        for item in tools_raw:
+            if not isinstance(item, dict):
+                continue
+            name = item.get("name")
+            if not isinstance(name, str) or not name.strip():
+                continue
+            name = name.strip()
+            # 호출 순서 유지 + 중복 제거. finus_nat이 이미 그렇게 보내지만,
+            # 신뢰 경계 밖의 값이므로 backend에서도 같은 불변식을 세운다.
+            if name in seen:
+                continue
+            seen.add(name)
+            # ok/empty가 빠졌거나 bool이 아니면 각각 실패·비어있지 않음으로 본다.
+            # ok는 근거를 과장하지 않는 쪽으로 기울고, empty는 관측이 없다는 뜻이므로
+            # ok=False와 겹쳐 "실패인데 빈 결과"가 되지 않도록 ok일 때만 읽는다.
+            ok = item.get("ok") is True
+            tools_used.append(NatToolUse(name, ok, ok and item.get("empty") is True))
+            if len(tools_used) >= NAT_MAX_TOOLS_USED:
+                logger.warning(
+                    "NAT tools_used가 %d개를 넘어 잘라냅니다 (수신 %d개)",
+                    NAT_MAX_TOOLS_USED,
+                    len(tools_raw),
+                )
+                break
+
+    return (routed_agent or None), tuple(tools_used)
+
+
 def _nat_message_from_payload(payload: dict[str, Any]) -> str:
     if "error" in payload:
         err = payload["error"]
@@ -632,7 +752,7 @@ def _log_nat_response(resp: httpx.Response) -> None:
         )
 
 
-async def _llm_nat_chat(user_msg: str, *, conversation_id: str | None = None) -> str:
+async def _llm_nat_chat(user_msg: str, *, conversation_id: str | None = None) -> NatAnswer:
     url = f"{NAT_BASE_URL}/v1/chat/completions"
     cid = (conversation_id or NAT_CONVERSATION_ID).strip()
     headers = {
@@ -681,7 +801,7 @@ async def _llm_nat_chat(user_msg: str, *, conversation_id: str | None = None) ->
         raise HTTPException(status_code=502, detail="NAT 응답이 JSON 객체가 아닙니다.")
 
     try:
-        return _nat_message_from_payload(payload)
+        message = _nat_message_from_payload(payload)
     except (KeyError, IndexError, TypeError) as exc:
         body_snip = resp.text[:1200] if resp.text else ""
         raise HTTPException(
@@ -691,6 +811,11 @@ async def _llm_nat_chat(user_msg: str, *, conversation_id: str | None = None) ->
                 f"body[:1200]={body_snip!r}"
             ),
         ) from exc
+
+    # #260: 답변 텍스트는 위에서 기존 파서가 그대로 뽑았고, 여기서는 추론 메타데이터만
+    # 덧붙인다. NatAnswer는 str이므로 이 반환값을 문자열로 쓰는 기존 호출부는 불변이다.
+    routed_agent, tools_used = _nat_reasoning_trace_from_payload(payload)
+    return NatAnswer(message, routed_agent=routed_agent, tools_used=tools_used)
 
 
 async def run_mcp_tool(
@@ -812,6 +937,28 @@ def normalize_llm_provider(
             "openai | anthropic | ollama | nat(API 전용) 중 하나를 사용하세요."
         ),
     )
+
+
+# provider별 반환 타입 오버로드 (#260): "nat"만 추론 메타데이터를 실은 NatAnswer를
+# 돌려준다. NatAnswer는 str 서브클래스라 단순 유니온(`str | NatAnswer`)으로는 타입
+# 체커에게 아무 정보도 못 준다 — str로 접히기 때문이다. Literal 오버로드로 갈라야
+# routed_agent/tools_used를 읽는 호출부가 체커의 도움을 받는다.
+@overload
+async def llm_chat(
+    provider_key: Literal["nat"],
+    user_msg: str,
+    *,
+    conversation_id: str | None = None,
+) -> NatAnswer: ...
+
+
+@overload
+async def llm_chat(
+    provider_key: Literal["openai", "anthropic", "ollama"],
+    user_msg: str,
+    *,
+    conversation_id: str | None = None,
+) -> str: ...
 
 
 async def llm_chat(
