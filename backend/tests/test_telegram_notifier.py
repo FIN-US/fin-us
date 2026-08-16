@@ -154,6 +154,32 @@ def test_httpx_telegram_bot_token_is_redacted_from_logs(caplog):
     assert "https://api.telegram.org/bot<redacted>/sendMessage" in caplog.text
 
 
+@pytest.mark.asyncio
+async def test_httpx_request_logging_is_redacted_end_to_end(caplog):
+    """httpx가 스스로 찍는 요청 로그에 토큰이 남지 않아야 한다 (#257).
+
+    이것만은 발생 지점 차단으로 못 막는다. 예외가 아니라 라이브러리의 정상 INFO 로그라
+    우리 코드를 어떻게 고쳐도 httpx가 request.url을 직접 찍는다. 그래서 리댁션 필터의
+    로거 이름 목록에 "httpx" 한 항목이 남아 있다.
+
+    로거 이름을 문자열로 비교하는 대신 실제 요청을 태워 잡는다 — httpx가 로거를
+    httpx._client 같은 이름으로 옮기면 필터는 조용히 무력화되는데(필터는 전파된
+    레코드에 걸리지 않는다), 이 테스트는 그때 빨갛게 깨진다. 목록에 기댄 리댁션이
+    조용히 되돌아가는 것이 이 이슈의 출발점이었다.
+    """
+    token = "8666951614:SECRET"
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, json={"ok": True}))
+
+    with caplog.at_level(logging.INFO):
+        async with httpx.AsyncClient(transport=transport) as client:
+            await client.post(url, json={"text": "안녕"})
+
+    assert "HTTP Request" in caplog.text
+    assert token not in caplog.text
+    assert "bot<redacted>" in caplog.text
+
+
 def test_telegram_error_log_redacts_bot_token(caplog):
     telegram_url = "https://api.telegram.org/bot8666951614:SECRET/getUpdates"
 
@@ -171,9 +197,6 @@ async def test_send_text_posts_reply_markup(monkeypatch):
     class FakeResponse:
         def raise_for_status(self):
             return None
-
-        def json(self):
-            return {"ok": True}
 
     class FakeAsyncClient:
         def __init__(self, *, timeout):
@@ -218,9 +241,6 @@ async def test_answer_callback_query_posts_payload(monkeypatch):
         def raise_for_status(self):
             return None
 
-        def json(self):
-            return {"ok": True}
-
     class FakeAsyncClient:
         def __init__(self, *, timeout):
             self.timeout = timeout
@@ -257,9 +277,6 @@ async def test_send_chat_action_posts_typing_payload(monkeypatch):
         def raise_for_status(self):
             return None
 
-        def json(self):
-            return {"ok": True}
-
     class FakeAsyncClient:
         def __init__(self, *, timeout):
             self.timeout = timeout
@@ -292,9 +309,6 @@ async def test_set_bot_commands_posts_command_menu_payload(monkeypatch):
     class FakeResponse:
         def raise_for_status(self):
             return None
-
-        def json(self):
-            return {"ok": True}
 
     class FakeAsyncClient:
         def __init__(self, *, timeout):
@@ -444,6 +458,46 @@ async def test_call_telegram_api_raises_error_without_token(
     assert exc.status_code == 429
     assert "HTTP 429" in str(exc)
     assert "Too Many Requests: retry after 42" in str(exc)
+
+
+@pytest.mark.asyncio
+async def test_send_text_succeeds_when_200_body_is_not_json(monkeypatch):
+    """본문을 쓰지 않는 호출은 200의 본문이 JSON이 아니어도 성공해야 한다 (#257 자가리뷰).
+
+    call_telegram_api가 무조건 response.json()을 부르면, 본문을 읽지도 않는 sendMessage가
+    파싱 실패로 실패한다 — 리팩터링 전에는 없던 동작이고, send_text가 False를 돌려주면
+    _send_text_settled가 최대 4회 재시도한다. expect_body가 그 비대칭을 막는다.
+    """
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            raise ValueError("Expecting value: line 1 column 1 (char 0)")
+
+    class FakeAsyncClient:
+        def __init__(self, *, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return None
+
+        async def post(self, url, **kwargs):
+            return FakeResponse()
+
+    monkeypatch.setattr("backend.telegram_notifier.httpx.AsyncClient", FakeAsyncClient)
+    notifier = TelegramNotifier("token", "123")
+
+    assert await notifier.send_text("안녕") is True
+
+    # 반대로 본문을 읽는 호출은 파싱 실패를 실패로 남긴다. 조용히 {}로 넘기면 폴러가
+    # "update 없음"으로 읽고 로그도 백오프도 없이 다음 폴링으로 넘어간다.
+    with pytest.raises(TelegramApiError):
+        await call_telegram_api("token", "getUpdates", payload={}, expect_body=True)
 
 
 @pytest.mark.asyncio

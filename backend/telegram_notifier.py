@@ -77,11 +77,17 @@ async def call_telegram_api(
     *,
     payload: dict[str, Any] | None = None,
     timeout: float = 10.0,
+    expect_body: bool = False,
 ) -> dict[str, Any]:
-    """텔레그램 API를 한 번 호출하고 응답 본문을 돌려준다.
+    """텔레그램 API를 한 번 호출한다.
 
     봇 토큰이 URL에 실리는 지점이 이 함수 하나뿐이고, 여기서 나가는 실패는 전부
     TelegramApiError다. httpx 예외는 이 경계를 넘지 않는다 (#257).
+
+    expect_body는 응답 본문을 파싱할지 정한다. 본문을 읽는 호출은 getMe와 getUpdates
+    둘뿐이고, 나머지 넷은 성공 여부만 본다. 무조건 파싱하면 200에 비-JSON이 온 경우
+    본문을 쓰지도 않는 호출까지 실패하게 되는데, 이는 이 리팩터링 전에 없던 동작이다.
+    파싱하지 않을 때는 빈 dict를 돌려준다.
     """
     url = f"https://api.telegram.org/bot{bot_token}/{method}"
     try:
@@ -91,7 +97,10 @@ async def call_telegram_api(
             else:
                 response = await client.post(url, json=payload)
             response.raise_for_status()
-            body = response.json()
+            # 본문을 쓰는 호출에서는 파싱 실패도 실패로 남긴다 — 이 역시 리팩터링 전
+            # 동작이다. 조용히 {}로 넘기면 폴러가 "update 없음"으로 읽고 로그도 없이
+            # 다음 폴링으로 넘어간다.
+            body = response.json() if expect_body else {}
     except httpx.HTTPStatusError as exc:
         raise TelegramApiError(
             method,
@@ -103,6 +112,12 @@ async def call_telegram_api(
         # 네트워크 오류, 본문 파싱 실패 등. from None으로 예외 체인을 끊는다 —
         # 원본 메시지에 URL이 들어 있을 수 있고, 체인이 남으면 exc_info 로깅이나
         # 처리되지 않은 트레이스백이 그 원본을 그대로 찍는다.
+        #
+        # 감수한 비용: except Exception이라 우리 쪽 버그(직렬화 불가한 payload로 나는
+        # TypeError 같은 것)도 한 줄로 뭉개지고 발생 위치를 잃는다. 그럼에도 넓게 잡는
+        # 이유는, 타입을 모르는 예외야말로 메시지에 URL이 없다고 가정할 수 없기
+        # 때문이다. 좁히려면 "URL을 담지 않는다고 확인된 타입"의 목록이 필요한데,
+        # 그건 이 이슈가 없애려는 allowlist와 같은 종류의 물건이다.
         raise TelegramApiError(method, reason=f"{type(exc).__name__}: {exc}") from None
     return body if isinstance(body, dict) else {}
 
@@ -151,13 +166,20 @@ def _install_telegram_token_redaction_filter() -> None:
     # 않는다 (#257). 그래서 backend.* 로거는 이 목록에 없어도 된다. 예전에는 있어야 했고,
     # 빠뜨려서 두 번 뚫렸다 (PR #253 1·2차 리뷰).
     #
-    # httpx/httpcore는 남는다. 이쪽은 예외 경로가 아니라 자신의 정상 로깅이 문제다 —
-    # httpx는 요청마다 INFO로 'HTTP Request: POST <full-url>'을 찍고, 그 URL에 토큰이
-    # 들어 있다. 우리 코드를 어떻게 고치든 이 로그는 라이브러리가 직접 만든다.
+    # httpx만 남는다. 이쪽은 예외 경로가 아니라 라이브러리 자신의 정상 로깅이 문제다 —
+    # 요청마다 INFO로 'HTTP Request: %s %s ...'를 request.url과 함께 찍고, 그 URL에
+    # 토큰이 들어 있다. 우리 코드를 어떻게 고치든 이 로그는 httpx가 직접 만든다.
     #
-    # 이 두 이름은 서드파티 라이브러리 로거라 애플리케이션 모듈이 늘어도 따라 늘지 않는다.
-    # allowlist가 계속 자라던 원인이 backend.* 쪽이었다.
-    for logger_name in ("httpx", "httpcore"):
+    # httpcore는 뺐다. 여기 있었지만 한 번도 동작한 적이 없다 — 필터는 그 로거가 직접
+    # 만든 레코드에만 걸리고 자식에서 전파된 레코드는 타지 않는데, httpcore가 맨
+    # "httpcore"로 찍는 곳은 없다(전부 httpcore.connection/.http11/.http2/.proxy/.socks).
+    # 애초에 걸 이유도 없었다: httpcore의 trace 로그는 request=%r로 찍고 그 repr이
+    # <Request [b'POST']>라 URL을 담지 않는다. httpx.Request의 repr과 달리 안전하다.
+    #
+    # 남은 항목이 하나라 해도 "httpx가 로거 이름을 바꾸면 조용히 무력화된다"는 성질은
+    # 그대로다. 그래서 test_httpx_request_logging_is_redacted_end_to_end가 실제 httpx
+    # 요청을 태워 이 결합을 검사한다 — 이름이 바뀌면 조용히가 아니라 빨갛게 깨진다.
+    for logger_name in ("httpx",):
         target_logger = logging.getLogger(logger_name)
         if any(
             isinstance(filter_, _TelegramTokenRedactionFilter)
@@ -374,7 +396,7 @@ class TelegramNotifier:
             return self.bot_username
 
         try:
-            body = await call_telegram_api(self.bot_token, "getMe")
+            body = await call_telegram_api(self.bot_token, "getMe", expect_body=True)
             result = body.get("result") or {}
             username = str(result.get("username") or "").strip().lstrip("@")
             self.bot_username = username.lower()

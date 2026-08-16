@@ -1978,7 +1978,11 @@ class TelegramCommandPoller:
         # 아래 run()의 "polling failed" 로그로 흘러간다 — 실제로 그랬다 (PR #253 2차 리뷰).
         # call_telegram_api가 URL 없는 TelegramApiError로 바꿔 던진다 (#257).
         body = await call_telegram_api(
-            self.notifier.bot_token, "getUpdates", payload=payload, timeout=30.0
+            self.notifier.bot_token,
+            "getUpdates",
+            payload=payload,
+            timeout=30.0,
+            expect_body=True,
         )
         if body.get("ok") is not True:
             return []
