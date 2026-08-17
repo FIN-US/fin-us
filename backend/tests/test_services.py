@@ -1912,6 +1912,59 @@ async def test_placeholders_do_not_collide_across_calls_in_same_conversation(mon
     assert "12,345,000원" not in result, "이전 턴 매핑이 호출을 넘어 살아 있으면 안 된다"
 
 
+@pytest.mark.asyncio
+async def test_llm_chat_nat_answer_preserves_metadata_through_masking(monkeypatch):
+    """llm_chat("nat", ...)이 마스킹 계층을 거친 뒤에도 NatAnswer의 각주를 유지해야 한다.
+
+    services.NatAnswer는 str 서브클래스라 re.sub(= unmask_pii 내부)를 거치면 plain str이
+    된다. unmask_pii의 타입 보존 로직이 routed_agent/tools_used를 살린다는 것을 고정한다.
+
+    PII가 있는 경우(텍스트가 실제로 바뀌는 경로)와 없는 경우(mapping이 비어 있는 경로)
+    양쪽을 모두 단언한다 — 어느 경로에서도 각주가 사라지면 안 된다.
+
+    이 테스트가 잡는 mutation: unmask_pii 반환부의 str 서브클래스 보존 로직을 제거하고
+    plain str(restored)을 그대로 반환하도록 되돌리는 변경. 제거하면 isinstance 단언이
+    실패한다.
+    """
+    def make_fake_nat(pii_in_response: bool):
+        async def fake_nat(user_msg, *, conversation_id=None):
+            if pii_in_response:
+                # 자리표시자가 응답에 섞여 unmask_pii가 실제로 텍스트를 바꾸는 경로.
+                ph = next(iter(_SCOPED_PLACEHOLDER_RE.finditer(user_msg))).group(0)
+                text = f"잔고는 {ph}입니다."
+            else:
+                text = "잔고 정보가 없습니다."
+            return services.NatAnswer(
+                text,
+                routed_agent="trading_agent",
+                tools_used=(services.NatToolUse(name="kis-trading", ok=True, empty=False),),
+            )
+        return fake_nat
+
+    # 경로 1: PII 있음 — unmask_pii가 텍스트를 실제로 바꾼다.
+    monkeypatch.setattr(services, "_llm_nat_chat", make_fake_nat(pii_in_response=True))
+    result = await services.llm_chat("nat", "잔고 12,345,000원")
+
+    assert isinstance(result, services.NatAnswer), (
+        "PII 있는 경로: 마스킹 계층을 거치며 NatAnswer가 plain str로 벗겨졌다"
+    )
+    assert result.routed_agent == "trading_agent", "PII 있는 경로: routed_agent 소실"
+    assert len(result.tools_used) == 1 and result.tools_used[0].name == "kis-trading", (
+        "PII 있는 경로: tools_used 소실"
+    )
+    assert "12,345,000원" in result, "PII 있는 경로: 역치환이 실패했다"
+
+    # 경로 2: PII 없음 — mapping이 비어 unmask_pii가 텍스트를 바꾸지 않는다.
+    monkeypatch.setattr(services, "_llm_nat_chat", make_fake_nat(pii_in_response=False))
+    result2 = await services.llm_chat("nat", "그럼 팔까?")
+
+    assert isinstance(result2, services.NatAnswer), (
+        "PII 없는 경로: NatAnswer가 plain str로 벗겨졌다"
+    )
+    assert result2.routed_agent == "trading_agent", "PII 없는 경로: routed_agent 소실"
+    assert len(result2.tools_used) == 1, "PII 없는 경로: tools_used 소실"
+
+
 def test_no_bypass_of_llm_chat_masking_layer():
     """provider별 구현(_llm_openai_chat 등)은 llm_chat() 밖에서 직접 호출되면 안 된다.
 

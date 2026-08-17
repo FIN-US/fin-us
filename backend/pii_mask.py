@@ -66,6 +66,12 @@ _ACCOUNT_RE = re.compile(r"(?<!\d)(\d{8})-?(\d{2})(?!\d)")
 # 콤마가 있으면 3자리씩 끊긴 형태만 인정해(오탐 방지) 임의의 콤마 위치는 매치하지 않는다.
 # 선두 \d+는 콤마를 만나면 자연히 멈추므로 "1,234,567"처럼 정상적으로 3자리씩
 # 끊긴 표기와 "1234567"처럼 끊기지 않은 표기를 하나의 패턴으로 함께 다룰 수 있다.
+#
+# (?<!\d) — 형제인 _AMOUNT_UNIT_RE의 (?<![\d,])보다 좁다. 비정상 콤마 표기
+# ("1,23원")에서 차이가 드러난다: (?<![\d,])이었다면 매치 자체가 없어("1,23원" 전체가
+# 원문에 남는다), (?<!\d)는 "23원"부터 잡아 앞자리 "1,"이 원문에 남는다. 두 방향 모두
+# 비정상 콤마 표기에서는 무손실이 아니다 — 정상 3자리 표기(실제 운용 경로)에는 어느 쪽도
+# 영향을 주지 않으므로 통일하지 않는다.
 _AMOUNT_WON_RE = re.compile(r"(?<!\d)\d+(?:,\d{3})*(?:\.\d+)?원")
 
 # "123만원" / "1.5억원" / "3,000만원" 처럼 만/억 단위가 붙는 표기.
@@ -146,20 +152,26 @@ _QTY_RE = re.compile(
     r"(?=주(?!일|째|차|간|년|기|당)(?![ \t]*(?:신고가|신저가|최고가|최저가)))"
 )
 
-# 자리표시자 형식: <KIND_{scope}_{n}> — scope는 mask_pii 호출마다 새로 뽑는 6자리 hex.
-# scope가 없으면(구형식 <AMOUNT_1>) 이 정규식에 매치되지 않아 unmask_pii의 fail-open
-# 경로로 떨어진다. _Counter의 docstring에 그 이유를 적었다.
-_PLACEHOLDER_RE = re.compile(r"<(ACCOUNT|AMOUNT|QTY)_[0-9a-f]{6}_(\d+)>")
-
 # 매핑에 없는 자리표시자(다른 대화 턴의 scope를 가진 것 포함)의 폴백 레이블.
 # 사용자 화면에 내부 토큰(<AMOUNT_xxx_1> 등)이 그대로 노출되는 대신 중립적인
 # 자연어로 대체한다 — 값을 지어내지 않으면서 토큰 노출을 막는 균형점이다.
-# 알 수 없는 종류가 와도 KeyError로 죽지 않도록 .get() 기본값을 둔다.
+# 종류를 추가할 때 여기만 수정하면 아래 _PLACEHOLDER_RE 얼터네이션이 자동으로 맞춰진다.
 _FALLBACK_LABEL: dict[str, str] = {
     "ACCOUNT": "이전에 언급된 계좌",
     "AMOUNT": "이전에 언급된 금액",
     "QTY": "이전에 언급된 수량",
 }
+
+# 자리표시자 형식: <KIND_{scope}_{n}> — scope는 mask_pii 호출마다 새로 뽑는 6자리 hex.
+# scope가 없으면(구형식 <AMOUNT_1>) 이 정규식에 매치되지 않아 unmask_pii의 fail-open
+# 경로로 떨어진다. _Counter의 docstring에 그 이유를 적었다.
+# 얼터네이션은 _FALLBACK_LABEL.keys()에서 조립한다 — 종류 추가 시 _Counter.values와
+# _FALLBACK_LABEL만 고치면 이 정규식도 자동으로 확장된다. _restore의 .get() 기본값은
+# 얼터네이션이 _FALLBACK_LABEL 키와 정확히 같아 실제로는 도달하지 않지만,
+# 미래 드리프트 방어로 남긴다.
+_PLACEHOLDER_RE = re.compile(
+    r"<(" + "|".join(_FALLBACK_LABEL) + r")_[0-9a-f]{6}_(\d+)>"
+)
 
 
 class _Counter:
@@ -303,8 +315,12 @@ def unmask_pii(text: str, mapping: dict[str, str]) -> str:
     입력이 str 서브클래스면 반환값도 같은 타입·같은 인스턴스 속성으로 유지한다
     (복원이 불가능한 서브클래스일 때만 plain str). 자세한 근거는 아래 반환부 주석 참고.
     """
-    if not text or not mapping:
+    if not text:
         return text
+    # mapping이 비어도 _PLACEHOLDER_RE.sub를 통과시킨다 — 이전 턴 자리표시자를
+    # 중립 문구로 치환하는 fail-open 경로가 발동해야 하고, str 서브클래스의 타입·속성
+    # 보존도 일관되게 적용돼야 하기 때문이다. _PLACEHOLDER_RE.sub는 텍스트 길이에
+    # 비례해(매핑 크기와 무관) 동작하므로 전형적인 LLM 응답(~수KB)에서 비용은 무시할 수 있다.
 
     missing: list[str] = []
 
@@ -340,17 +356,15 @@ def unmask_pii(text: str, mapping: dict[str, str]) -> str:
     # (#260의 services.NatAnswer — 답변 텍스트에 routed_agent/tools_used를 얹어 각주를
     # 만든다) 역치환을 통과하는 순간 그 메타데이터가 조용히 사라진다.
     #
-    # #263의 NatAnswer.with_text()는 같은 불변식(타입·속성 보존)을 지키는 전용 API로
-    # 이미 존재하며, 해당 메서드 docstring이 #230을 지목하고 있다. 머지 순서에 따라
-    # 아래 중 하나를 택한다:
-    # - 이 PR(#230)이 먼저 머지되면: #263 리뷰 시점에 NatAnswer.with_text()를 제거하고
-    #   여기서 구현한 제네릭 복원이 유일한 장치가 된다.
-    # - #263이 먼저 머지되면: 이 브랜치 리베이스 시점에 `raw.with_text(unmask_pii(...))`
-    #   패턴과 여기서 구현한 제네릭 복원 중 하나를 택한다(중복 보존은 불필요).
+    # #263이 먼저 머지됐다. services.NatAnswer.with_text()는 유지된다 —
+    # llm_chat의 `return unmask_pii(raw, mapping)` 경로에서 이 제네릭 복원이
+    # routed_agent/tools_used를 보존한다. with_text()의 제거 여부는 이 PR(#230)이
+    # 결정하지 않으며 #263 후속에서 다룬다.
     #
-    # 마스킹 대상이 없어 조기 반환하는 경로(위의 `not mapping`)에서는 원본이 그대로
-    # 유지되므로, 이 보존이 없으면 "PII가 있는 질의에서만 메타데이터가 사라지는"
-    # 재현하기 어려운 형태가 된다.
+    # mapping이 비어도 이 보존 로직을 거친다 — 위의 `not mapping` 조기 반환을 없앤
+    # 이유다. 조기 반환이 있으면 "PII가 있는 질의에서만 메타데이터가 사라지는"
+    # 재현하기 어려운 형태가 되고, 이전 턴 자리표시자를 중립 문구로 치환하는
+    # fail-open 경로도 발동하지 않는다.
     #
     # 재생성에 `type(text)(restored)`가 아니라 `str.__new__` + `__dict__` 복사를 쓴다.
     # 서브클래스 생성자를 다시 부르면 **타입만 살고 속성은 기본값으로 리셋**되기

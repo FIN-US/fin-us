@@ -498,6 +498,24 @@ class TestUnmaskFailOpen:
     def test_empty_mapping_returns_text_unchanged(self):
         assert unmask_pii("자리표시자가 없는 응답", {}) == "자리표시자가 없는 응답"
 
+    def test_empty_mapping_with_placeholder_returns_neutral_phrase_with_warning(self, caplog):
+        """mapping이 비어도 이전 턴 자리표시자가 중립 문구로 치환되고 경고가 남아야 한다.
+
+        후속 질의("그럼 팔까?", "왜?")는 PII가 없어 mapping = {}가 된다. NAT 대화
+        히스토리에서 이전 턴의 자리표시자가 응답에 인용되면, 조기 반환하지 않고
+        _PLACEHOLDER_RE.sub를 통과시켜 중립 문구로 치환해야 한다. 조기 반환하면
+        내부 토큰이 경고 없이 사용자 화면에 노출된다.
+
+        이 테스트가 잡는 mutation: unmask_pii의 조기 반환에 `not mapping`을 다시 추가.
+        """
+        with caplog.at_level("WARNING", logger="backend.pii_mask"):
+            result = unmask_pii("앞서 말씀하신 <AMOUNT_deadbe_1> 기준으로는", {})
+        assert "이전에 언급된 금액" in result, "중립 문구로 치환되지 않았다"
+        assert "<AMOUNT_deadbe_1>" not in result, "내부 토큰이 사용자 화면에 노출됐다"
+        assert "<AMOUNT_deadbe_1>" in caplog.text, (
+            "매핑에 없는 자리표시자를 만났는데 경고 로그가 남지 않았다"
+        )
+
     def test_empty_text_returns_as_is(self):
         assert unmask_pii("", {"<AMOUNT_deadbe_1>": "1원"}) == ""
         assert unmask_pii(None, {"<AMOUNT_deadbe_1>": "1원"}) is None
