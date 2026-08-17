@@ -36,8 +36,13 @@ functions:
         function_name: diary_branch_agent
         description: "당일 거래 조회, 매매일지 초안, 거래 회고와 기록 정리."
 
+  transcript_router_agent:
+    _type: finus_sqlite_transcript_agent
+    inner_agent_name: router_supervisor_agent
+    db_path: ${FINUS_TRANSCRIPT_DB_PATH:-.state/conversations.sqlite3}
+    max_history_messages: 30
+
+# 추론 각주(#260)의 부착 지점 — router.yml과 같은 최상위 자리입니다(#273).
 workflow:
-  _type: finus_sqlite_transcript_agent
-  inner_agent_name: router_supervisor_agent
-  db_path: ${FINUS_TRANSCRIPT_DB_PATH:-.state/conversations.sqlite3}
-  max_history_messages: 30
+  _type: finus_reasoning_trace_agent
+  inner_agent_name: transcript_router_agent

@@ -1,7 +1,10 @@
 services:
-  # Unity WebGL 빌드(frontend/Build)를 정적 서빙한다. file://로는 로더가 동작하지 않아
-  # HTTP 서빙이 필수다(frontend/README.md 참고). 정적 파일만 내보내므로 backend에
-  # 의존하지 않는다 — 브라우저가 8000번의 backend를 따로 직접 호출한다.
+  # Unity WebGL 빌드(frontend/Build)를 정적 서빙하고, /api·/health는 같은 네트워크의
+  # backend:8000으로 프록시한다(#245). file://로는 로더가 동작하지 않아 HTTP 서빙이
+  # 필수다(frontend/README.md 참고).
+  # depends_on은 일부러 두지 않는다 — nginx.conf가 proxy_pass에 변수를 써서 backend
+  # 이름을 요청 시점에 해석하므로, backend가 아직 없어도 nginx는 뜨고 정적 화면이 먼저
+  # 보인다. backend를 기다리게 만들면 그 이점이 사라진다.
   frontend:
     image: nginx:alpine
     ports:

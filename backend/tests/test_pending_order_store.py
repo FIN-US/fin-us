@@ -651,6 +651,7 @@ async def test_memory_store_set_if_absent_returns_false_and_preserves_original()
     assert result is False
     # 원래 주문(A)이 B로 덮어쓰이지 않아야 한다
     stored = await store.get("123")
+    assert stored is not None
     assert stored is _ORDER_A
     assert stored.callback_token == "tok-a"
 

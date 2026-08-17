@@ -116,14 +116,17 @@ Fin-Us는 단일 모델이 모든 일을 처리하지 않고, 역할이 분리�
 
 에이전트의 페르소나, 도구 구성, 라우팅 지침은 NAT 레이어에서 정의합니다. `finus_nat/configs/agents/` 폴더 내의 YAML 파일을 수정하여 각 에이전트의 성격과 작업 지침을 관리할 수 있습니다.
 
+에이전트별 역할·지침은 각 YAML의 `additional_instructions`에 둡니다. 반면 모든 에이전트가 공유하는 ReAct 출력 골격(`Thought:` / `Action:` / `Action Input:` 형식 규칙)은 `finus_nat/configs/prompts/*.md` 5개로 분리되어 있고, YAML의 `system_prompt`가 `file://../prompts/<파일>.md`로 이를 참조합니다. `react_kis_full.md`는 trading·monitoring 두 에이전트가 공유하므로 고치면 양쪽에 함께 반영됩니다.
+
 ```yaml
 # 예시: finus_nat/configs/agents/news_agent.yml
 functions:
   news_agent:
     _type: react_agent
+    system_prompt: file://../prompts/react_news.md
     tool_names:
-      - finus_market_news
-      - finus_investor_trading
+      - mcp-news-get-market-news
+      - mcp-dart-get-disclosure-signal
     additional_instructions: |
       역할: 시장 심리 분석가
       뉴스와 외국인/기관 매매 동향을 종합 분석합니다.
@@ -194,11 +197,13 @@ bash scripts/run_stack.sh
 
 | 서비스 | 포트 | 역할 |
 | :--- | :--- | :--- |
-| `frontend` | 8080 | Unity WebGL 대시보드 (nginx 정적 서빙) |
+| `frontend` | 8080 | Unity WebGL 대시보드 (nginx 정적 서빙 + `/api` 프록시) |
 | `backend` | 8000 | API·스케줄러·텔레그램 봇 |
 | `finus-nat` | 8001 | 멀티 에이전트 엔진 |
 | `redis` | 6379 | 신호 중복 방지 캐시 |
 
+- `frontend`(nginx)는 `/api/`와 `/health`를 `backend:8000`으로 프록시합니다. 이 경로로 부르면 대시보드와 API가 브라우저에서 같은 오리진(8080)이 됩니다. **다만 현재 Unity 번들은 아직 `http://localhost:8000`을 하드코딩해 8000번을 직접 호출하므로, 실제로 same-origin이 되는 것은 번들이 상대 경로를 쓰게 되는 #246 이후입니다.** 그전까지는 `ALLOW_ORIGINS`가 계속 필요합니다. 8000 포트는 API 직접 호출과 `/docs`용으로도 열려 있습니다. 자세한 내용은 [`frontend/README.md`](frontend/README.md)를 참고하세요.
+- `ALLOW_ORIGINS`는 CORS뿐 아니라 WebSocket(`/api/v1/ws`) 핸드셰이크의 Origin 검사에도 쓰입니다(#256). `CORSMiddleware`는 WebSocket 핸드셰이크에 적용되지 않아, 이 검사가 없으면 임의 사이트가 브로드캐스트를 수신할 수 있습니다(Cross-Site WebSocket Hijacking). 따라서 #246 이후 HTTP가 same-origin이 되어도 **대시보드를 여는 오리진은 계속 `ALLOW_ORIGINS`에 등록해야 합니다.** 등록하지 않으면 화면은 뜨지만 실시간 알림 연결만 403으로 끊깁니다. Origin 헤더를 보내지 않는 비브라우저 클라이언트(`curl`, `wscat` 등)는 검사 대상이 아닙니다.
 - `backend`는 `finus-nat`과 `redis`가 정상(healthy)이 된 뒤에 뜹니다. `finus-nat`은 준비되는 대로 healthy가 되며, 처음 90초 동안은 헬스체크가 실패해도 재시도로 세지 않습니다(`docker-compose.yml`의 `start_period`). 90초가 지난 뒤에도 응답이 없으면 15초 간격으로 10번 더 확인한 뒤 unhealthy로 판정하므로, 최악의 경우 약 4분 뒤에 `backend` 기동이 중단됩니다.
 - 로컬에서 `uvicorn --reload`만 쓰고 싶다면 볼륨 마운트된 소스로 호스트에서 실행하면 됩니다.
 

@@ -92,12 +92,46 @@ docker compose up frontend
 | 문서 루트 | `./frontend/Build` → `/usr/share/nginx/html` (읽기 전용 `:ro`) |
 | nginx 설정 | `./frontend/nginx.conf` → `/etc/nginx/conf.d/default.conf` (읽기 전용) |
 | `.wasm` MIME | `application/wasm` (`nginx.conf`에서 명시) |
-| backend 의존 | 없음 — 정적 파일만 내보내고, 브라우저가 8000번 backend를 직접 호출합니다 |
+| API 프록시 | `/api/`·`/health` → `http://backend:8000` (이슈 #245) |
+| backend 의존 | `depends_on` 없음 — backend가 아직 없어도 nginx는 뜨고 정적 화면이 먼저 보입니다 |
 
-브라우저가 8080에서 8000번 backend를 호출하므로 backend의 CORS 허용 오리진에
-`http://localhost:8080`이 포함돼야 합니다 (`backend/config.py`의 `ALLOW_ORIGINS` 기본값,
-`.env.example` 참고). 다른 호스트(예: Tailscale 주소)로 시연할 때는 해당 오리진을
-`ALLOW_ORIGINS`에 추가하세요.
+### `/api` 리버스 프록시 (#245)
+
+`nginx.conf`가 `/api/`와 `/health`를 같은 compose 네트워크의 `backend:8000`으로
+프록시합니다. 브라우저 입장에서는 대시보드와 API가 **같은 오리진(8080)**이므로 CORS가
+개입하지 않고, 어떤 주소로 열든(로컬·Tailscale·리버스 프록시 뒤) 그대로 동작합니다.
+
+`proxy_pass`에는 상수 대신 변수(`set $backend_upstream backend:8000;`)를 씁니다. 상수
+호스트명이면 nginx가 **기동 시점에** 이름을 해석하고 실패 시 아예 뜨지 않아 `depends_on`이
+필요해지는데, 변수를 쓰면 Docker 내장 DNS(`resolver 127.0.0.11`)로 **요청 시점에** 해석하므로
+backend를 기다리지 않아도 됩니다. backend가 없는 동안에는 `/api/` 호출만 502(이름 해석 실패·
+연결 거부) 또는 504(`proxy_connect_timeout 5s` 만료, 재시작 중 stale IP로 향한 경우)가 납니다.
+슬래시 없는 `/api`는 `location /api/` 프리픽스에 걸리지 않아 정적 라우트의 404입니다.
+
+`frontend` 서비스에 healthcheck를 추가할 일이 생기면 `/health`가 아니라 **`/nginx-health`**를
+쓰세요. `/health`는 backend로 프록시되므로, backend가 죽으면 frontend까지 unhealthy가 되어
+`depends_on`을 뺀 위 설계가 그대로 무효가 됩니다.
+
+`/api/v1/ws`(WebSocket)는 `map $http_upgrade $connection_upgrade`로 업그레이드 헤더를
+조건부 중계합니다. **nginx 중계가 정상이어도 backend가 403을 줄 수 있습니다** — backend는
+핸드셰이크의 `Origin`을 `ALLOW_ORIGINS`와 대조하고 불일치 시 연결을 거부합니다(#256, 아래
+참고). nginx는 `Origin`을 그대로 넘기므로 브라우저가 보낸 페이지 오리진이 그대로 검사
+대상이 됩니다. `/api/v1/analyze`는 LLM 호출로 오래 걸려 `proxy_read_timeout`을 300s로
+올려 뒀습니다.
+
+> **`ALLOW_ORIGINS`는 #246 이후에도 계속 필요합니다.** 현재 Unity 번들은
+> `http://localhost:8000`을 하드코딩해 여전히 8000번을 직접 호출합니다. 번들이 상대 경로를
+> 쓰도록 바뀌는 시점(이슈 #246, WebGL 재빌드 필요)부터 프록시 경로만 타게 되어 **HTTP 쪽**
+> CORS 부담은 사라집니다. 하지만 `ALLOW_ORIGINS`는 지우면 안 됩니다 — WebSocket
+> (`/api/v1/ws`) 핸드셰이크의 Origin 허용목록을 겸하기 때문입니다(#256).
+> `CORSMiddleware`는 WebSocket 핸드셰이크에 적용되지 않아, 이 검사가 없으면 임의 사이트가
+> 브로드캐스트를 수신할 수 있습니다(Cross-Site WebSocket Hijacking).
+>
+> 따라서 `http://localhost:8080`은 계속 포함돼야 하고(`backend/config.py`의
+> `ALLOW_ORIGINS` 기본값, `.env.example` 참고), 다른 호스트(예: Tailscale 주소)로 시연할
+> 때는 해당 오리진을 `ALLOW_ORIGINS`에 추가해야 합니다. **#246 작업 시 이 변수를 정리
+> 대상으로 삼지 마세요** — 지우면 화면은 정상적으로 뜨는데 실시간 알림 연결만 403으로
+> 죽어서 원인을 찾기 어렵습니다.
 
 현재 번들은 비압축입니다(`Build/`에 `.br`·`.gz` 산출물 없음).
 

@@ -2,11 +2,11 @@ import os
 import logging
 from contextlib import asynccontextmanager
 from datetime import date
-from fastapi import FastAPI, Query, Depends, WebSocket, WebSocketDisconnect, Body
+from fastapi import FastAPI, HTTPException, Query, Depends, Request, WebSocket, WebSocketDisconnect, Body
 from fastapi.middleware.cors import CORSMiddleware
 from sqlmodel import Session, select
 
-from .config import NAT_BASE_URL, NEWS_MCP_PARAMS, TRADING_MCP_PARAMS, DART_MCP_PARAMS, ALLOW_ORIGINS
+from .config import NEWS_MCP_PARAMS, TRADING_MCP_PARAMS, DART_MCP_PARAMS, ALLOW_ORIGINS
 from .ws_manager import manager
 from .scheduler import start_scheduler, stop_scheduler
 from .telegram_commands import start_telegram_commands, stop_telegram_commands
@@ -225,25 +225,96 @@ async def get_db_diary(session: Session = Depends(get_session)):
     return {"status": "success", "data": diaries}
 
 
-@app.get("/api/v1/db/catalysts", response_model=CommonResponse, tags=["Database"])
+@app.get(
+    "/api/v1/db/catalysts",
+    response_model=CommonResponse,
+    tags=["Database"],
+    responses={422: {"description": "to_date < from_date 이거나 쿼리 파라미터 검증 실패"}},
+)
 async def get_db_catalysts(
+    # Request는 쿼리 파라미터가 아니라 타입으로 판별돼 주입된다. 기본값이 없는 인자라
+    # 기본값 있는 인자들보다 앞에 와야 한다(파이썬 문법). from_date가 기본값으로
+    # 채워졌는지 판별하는 데만 쓴다 — 아래 422 분기 참고.
+    request: Request,
     stock_name: str | None = Query(None, min_length=1, description="종목명 정확 일치 필터. 생략 시 전체 종목 조회."),
     # default_factory에 today_kst를 직접 넘기면 라우트 등록 시점의 함수 객체가
     # 고정돼 테스트에서 backend.main.today_kst를 monkeypatch해도 반영되지 않는다.
     # 람다로 감싸 요청마다 모듈 전역의 today_kst를 다시 조회하도록 한다.
-    from_date: date = Query(default_factory=lambda: today_kst(), description="이 날짜 이후(포함) 이벤트만 조회. 생략 시 KST 기준 오늘."),
+    from_date: date = Query(default_factory=lambda: today_kst(), description="이 날짜부터(당일 포함) 이벤트만 조회. 생략 시 KST 기준 오늘."),
     # 이슈 #228: 프론트 시간 링(캘린더 시각화)이 한 번에 그릴 이벤트 수를 과도하게
     # 받아 렌더링이 느려지는 것을 막기 위한 상한(500). 1건도 없이 호출되는 것을
     # 막기 위한 하한(1). 기본값 100은 기존 catalyst_repo.list_upcoming의 기본값(20)보다
     # 넉넉하게 잡아 여러 종목을 한 번에 다루는 전체 조회 용도에 맞춘다.
     limit: int = Query(100, ge=1, le=500, description="결과 상한 (1~500, 기본 100)."),
+    # 이슈 #238: 프론트 시간 링은 "이번 달", "앞으로 3개월" 같은 구간 조회다. to_date가
+    # 없으면 from_date 이후 전부를 요청한 뒤 limit에 걸려 뒷부분이 잘리는데, 잘린 뒷부분을
+    # 다시 가져올 방법이 없었다. 기본 상한(예: from_date+90일)은 두지 않는다 — "전체 조회"
+    # 용도를 막고 기존 호출자의 동작을 조용히 바꾸기 때문이다. 생략 시 상한 없음이 유지된다.
+    #
+    # 남은 간극: to_date는 절단 문제를 완화할 뿐 없애지 못한다. 구간을 하루까지 좁혀도
+    # (from_date == to_date) 그 하루에 limit을 넘는 이벤트가 몰리면 message == "truncated"인
+    # 채로 더 좁힐 수 없어 뒷부분을 회수할 방법이 없다. 실적 시즌처럼 특정일에 공시가
+    # 집중되는 도메인이라 가정적 시나리오가 아니다. 이 잔여 간극은 offset/cursor
+    # 페이지네이션으로만 닫히며, 별도 이슈로 다룬다.
+    to_date: date | None = Query(
+        None,
+        description=(
+            "이 날짜까지(당일 포함) 이벤트만 조회. 생략 시 상한 없음. "
+            "과거 구간을 조회하려면 from_date도 함께 보내야 한다 "
+            "(생략 시 KST 기준 오늘이 적용되어 to_date < from_date로 422가 난다)."
+        ),
+    ),
     session: Session = Depends(get_session),
 ):
     """저장된 촉매 이벤트(실적/배당/공시/주총 등)를 조회합니다."""
+    # to_date < from_date는 빈 결과로 조용히 응답하지 않고 422로 거부한다. 빈 결과로
+    # 두면 "이 구간에 이벤트가 없다"와 "파라미터를 잘못 보냈다"를 클라이언트가 구분할
+    # 수 없다. 이 엔드포인트가 이미 빈 stock_name을 min_length=1로 422 거부하는 선례가
+    # 있어 일관된다. 두 파라미터 간 관계는 FastAPI Query만으로 검증할 수 없어 핸들러
+    # 본문에서 직접 확인한다.
+    #
+    # detail은 FastAPI 자체 검증(min_length=1, ge/le 등)과 동일한 list[{loc,msg,type}]
+    # 형태로 낸다. 같은 엔드포인트가 같은 422를 dict와 list 두 형태로 내면
+    # `for err in resp.json()["detail"]: err["loc"]` 같은 표준 파싱이 dict를 순회해
+    # 키 문자열에서 TypeError로 죽는다. 상태 코드만 선례를 따르고 body 계약은 따르지
+    # 않은 셈이었다.
+    #
+    # 교차 필드 의미 오류를 400으로 분리하는 안도 검토했다("422 = 스키마 검증" 불변식이
+    # 유지된다). 채택하지 않은 이유: 이미 422로 문서화·테스트된 계약을 바꾸는 것이라
+    # 팀 합의가 필요한데, 소비자가 붙기 전인 지금은 형태 통일만으로 문제가 해소되므로
+    # 계약 변경 비용을 지불할 이유가 없다.
+    #
+    # from_date는 생략 시 서버가 오늘(KST)로 채운다. 클라이언트가 과거 구간을 의도해
+    # to_date만 보내면 보낸 적 없는 from_date와 비교돼 422가 나므로, 기본값이 적용됐다는
+    # 사실을 detail에 실어 원인을 바로 알 수 있게 한다.
+    from_date_defaulted = "from_date" not in request.query_params
+    if to_date is not None and to_date < from_date:
+        raise HTTPException(
+            status_code=422,
+            detail=[
+                {
+                    "loc": ["query", "to_date"],
+                    "msg": (
+                        "to_date must not be earlier than from_date "
+                        "(from_date was not sent and defaulted to today in KST)"
+                        if from_date_defaulted
+                        else "to_date must not be earlier than from_date"
+                    ),
+                    "type": "value_error.date_range",
+                    "ctx": {
+                        "from_date": from_date.isoformat(),
+                        "to_date": to_date.isoformat(),
+                        "from_date_defaulted": from_date_defaulted,
+                    },
+                }
+            ],
+        )
     # catalyst_repo.SqliteCatalystEventRepo.list_upcoming은 stock_name이 필수 인자라
     # 전체 종목 조회에 쓸 수 없다. 기존 /api/v1/db/* 4종과 동일하게 이 라우트에서
     # session.exec(select(...))를 직접 실행한다(catalyst_repo.py는 수정하지 않는다).
     query = select(CatalystEvent).where(CatalystEvent.event_date >= from_date)
+    if to_date is not None:
+        query = query.where(CatalystEvent.event_date <= to_date)
     if stock_name is not None:
         query = query.where(CatalystEvent.stock_name == stock_name)
     # event_date만으로는 동일 날짜 이벤트 간 순서가 SQL상 보장되지 않아 limit 절단이
@@ -278,7 +349,33 @@ async def create_db_diary(
 
 @app.get("/health", tags=["System"])
 async def health_check():
-    return {"status": "alive", "nat_base_url": NAT_BASE_URL}
+    # nat_base_url(내부 서비스 주소)은 싣지 않는다. #245로 nginx가 /health를 8080으로도
+    # 중계하면서 내부 토폴로지가 외부에 노출되는 경로가 생겼다. compose 헬스체크는
+    # 상태코드만 보고, 이 필드를 읽는 코드도 없다(PR #252 리뷰).
+    return {"status": "alive"}
+
+
+def is_allowed_ws_origin(origin: str | None) -> bool:
+    """WebSocket 핸드셰이크의 Origin이 허용 대상인지 판정합니다 (#256).
+
+    CORSMiddleware는 WebSocket 핸드셰이크에 적용되지 않는다. ALLOW_ORIGINS로 HTTP를
+    조여도 WS는 그대로 열려 있어, 임의 사이트에 심어 둔 new WebSocket(...)이 붙어
+    브로드캐스트를 수신할 수 있다(Cross-Site WebSocket Hijacking). 같은 목록을 WS
+    핸드셰이크에서도 직접 대조해 이 비대칭을 없앤다.
+
+    Origin 헤더가 없으면 허용한다. Origin은 브라우저가 붙이는 헤더이고 CSWSH는 브라우저
+    공격이다. curl·wscat·헬스체크 같은 비브라우저 클라이언트는 헤더를 보내지 않으므로,
+    없음을 거부로 취급하면 막으려는 위협은 그대로 둔 채 운영 도구만 끊긴다. 그 결과 남는
+    잔여 위험(Origin을 보내지 않는 클라이언트는 여전히 붙는다)은 #266이 추적한다 — API
+    전역에 인증이 없어 이 엔드포인트에만 토큰을 도입하면 일관성이 깨지므로 유보 중이다.
+    """
+    if origin is None:
+        return True
+    # CORSMiddleware가 "*"를 전체 허용으로 해석하므로 같은 목록을 읽는 여기서도 맞춘다.
+    # 두 곳의 해석이 갈리면 HTTP는 열려 있는데 WS만 막히는(또는 반대) 상태가 된다.
+    if "*" in ALLOW_ORIGINS:
+        return True
+    return origin in ALLOW_ORIGINS
 
 
 @app.websocket("/api/v1/ws")
@@ -286,6 +383,13 @@ async def websocket_endpoint(websocket: WebSocket):
     """
     실시간 알림을 위한 WebSocket 엔드포인트입니다.
     """
+    origin = websocket.headers.get("origin")
+    if not is_allowed_ws_origin(origin):
+        # accept() 전에 close()하면 핸드셰이크가 완성되지 않고 HTTP 403으로 끝난다.
+        # accept() 후에 끊으면 그사이 브로드캐스트 1건이 나갈 수 있으므로 순서가 중요하다.
+        logger.warning("WebSocket 연결 거부 — 허용되지 않은 Origin: %s", origin)
+        await websocket.close(code=1008)
+        return
     await manager.connect(websocket)
     try:
         while True:
