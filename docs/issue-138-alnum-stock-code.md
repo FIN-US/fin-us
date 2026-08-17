@@ -62,16 +62,16 @@
 
 ### 2.2 차단 대상의 실제 성격 — 이슈 서술의 정정 (확인된 사실)
 
-이슈와 `backend/telegram_commands.py:790`의 사용자 메시지("ETN·펀드 등 영숫자 종목코드")는 차단 대상을 특수 상품으로 서술한다. **전수 분류 결과 이는 절반만 맞다.**
+이슈와 `backend/telegram_commands.py:790-791`의 사용자 메시지("ETN·펀드 등 영숫자 종목코드")는 차단 대상을 특수 상품으로 서술한다. **전수 분류 결과 이는 절반만 맞다.**
 
 **영숫자 6자 (312건)** — 문자 위치로 두 계열이 갈린다.
 
 | 계열 | 건수 | 형태 | 예시 | 성격 |
 |---|---:|---|---|---|
-| 5번째 자리 영문 | 289 | `숫자4+영문1+숫자1` | `0001A0` 덕양에너젠, `0000D0` TIGER 엔비디아미국채커버드콜밸런스(합성) | 신규 발행 단축코드 |
+| 5번째 자리 영문 | 289 | `숫자4+영문1+숫자1` | `0001A0` 덕양에너젠, `0000D0` TIGER 엔비디아미국채커버드콜밸런스(합성 | 신규 발행 단축코드 |
 | 6번째 자리 영문 | 23 | `숫자5+영문1` | `00088K` 한화3우B, `03473K` SK우, `33626L` 두산퓨얼셀2우B | **신형우선주** |
 
-- 289건의 이름 기반 추정 분류: ETF 계열 약 237, 스팩 27, **일반 보통주 23**(`덕양에너젠`, `엔비알모션`, `아크릴`, `인벤테라`, `에스엔시스`, `에임드바이오`, `보원케미칼`, `제이피아이헬스케어`, `액스비스`, `채비` 등), 리츠 2. *(이름 패턴 기반 추정이므로 정확한 상품 구분은 4.1의 증권그룹구분코드로 확정해야 한다.)*
+- 289건의 이름 기반 추정 분류: ETF 계열 약 237, 스팩 27, **일반 보통주 23**(`덕양에너젠`, `엔비알모션`, `아크릴`, `인벤테라`, `에스엔시스`, `에임드바이오`, `보원케미칼`, `제이피아이헬스케어`, `액스비스`, `채비` 등), 리츠 2. *(이름 패턴 기반 추정이므로 정확한 상품 구분은 4.1의 증권그룹구분코드 + 기업인수목적회사여부(`etpr_undt_objt_co_yn`)로 확정해야 한다. 스팩은 `scrt_grp_cls_code=ST`라 두 필드 없이는 보통주와 갈리지 않는다.)*
 - 23건의 6번째 자리 영문 코드는 **23건 전부 이름에 "우"가 들어가는 우선주**다(`해성산업1우`, `롯데지주우`, `삼성물산우B`, `DL이앤씨2우(전환)`, `한화갤러리아우` …). 신형우선주 단축코드는 `숫자5+K/L` 형태이며, 이들은 KOSPI·KOSDAQ에 정규 상장된 **평범한 지분증권**이다.
 
 **7자 (389건)** — 전부 `Q` 시작, 이름에 `ETN`을 포함하는 것이 387/389. ETN(상장지수증권)이다.
@@ -110,7 +110,7 @@
 |---|---|---|---|---|
 | G1 | `mcp-trading/order.js:77` | `/^[0-9A-Z]{6,7}$/i.test(code) && !/^\d{6,7}$/.test(code)` | 영숫자 6~7자 **701건** | `이 종목은 현재 주문을 지원하지 않습니다.` (전용 메시지) |
 | G2 | `mcp-trading/order.js:84` | `!/^\d{6,7}$/.test(code)` | 9자 **75건** (G1에 매치조차 안 됨) | `stock_code는 6자리 또는 7자리 종목코드여야 합니다.` |
-| G3 | `backend/stock_code.py:59` | `_ORDERABLE_STOCK_CODE_RE = re.compile(r"\A[0-9]{6,7}\Z")` | **776건 전부** | `backend/telegram_commands.py:785`에서 판정 → `:790` 거절 메시지 |
+| G3 | `backend/stock_code.py:59` | `_ORDERABLE_STOCK_CODE_RE = re.compile(r"\A[0-9]{6,7}\Z")` | **776건 전부** | `backend/telegram_commands.py:785`에서 판정 → `:790-791` 거절 메시지 |
 
 **G3가 가장 앞선 차단선이다.** Telegram 주문 경로에서는 `resolve_stock_code` 직후, 시세·잔고 조회(`telegram_commands.py:794-801`)와 60초 pending 슬롯을 쓰기 전에 끊는다. 따라서 **G1·G2만 열면 Telegram 경로는 아무것도 달라지지 않는다.** `backend/stock_code.py:50-55`의 주석이 이 결합을 이미 명시하고 있다.
 
@@ -124,7 +124,7 @@ G1과 G2의 관계: `order.js:73-76` 주석대로 둘이 합쳐 "숫자 6~7자�
 |---|---|---|
 | `mcp-trading/stock-master.js:50` `resolveStock` Step 1 | 코드 완전일치, **길이 무관**(`#174`에서 도입) | 전부 통과 (2.3 실측) |
 | `mcp-trading/stock-master.js:32` `CODE_SHAPE_PATTERN` | `/^[A-Z0-9]{6,7}$/i` | 차단용이 아님. Step 2의 대소문자 무시 이름매칭 스위치 + Step 3 에코 판정에만 쓰인다. 9자는 이 패턴에 안 걸리지만 Step 1에서 이미 해결되므로 무해 |
-| `mcp-trading/index.js:218,240` `getStockQuote`/`getInvestorTrading` | `FID_INPUT_ISCD: stock.code`, 길이 검증 없음 | 그대로 KIS에 전달 |
+| `mcp-trading/index.js:218,240` `getStockQuote`/`getInvestorTrading` | `resolveStock() → FID_INPUT_ISCD(224,246)`, 길이 검증 없음 | 그대로 KIS에 전달 |
 | `mcp-trading/index.js:557` `resolve_stock_code` 툴 | `resolveStock` 결과를 `"이름 (코드, 시장)"`으로 포맷 | 전부 통과 |
 | `mcp-trading/index.js:542` `placeOrderSchema` | `stock_code: z.string()` — 형태 제약 없음 | 통과 (실제 차단은 G1/G2) |
 | `mcp-trading/order-dedup.js:72` | `String(stockCode ?? "").trim()` | 검증 없음 |
@@ -162,6 +162,33 @@ code = header[:9].strip()
 
 또한 `parse_master_rows`(`:51-67`)는 `tail_width`(KOSPI 228 / KOSDAQ 222)만큼의 꼬리를 **잘라 버린다**. 이 꼬리에 무엇이 들어 있는지는 4.2에서 확인했다.
 
+> **⚠️ 주의 — 꼬리 슬라이스가 공식 파서와 1글자 어긋난다** (확인된 사실)
+>
+> `tail_width` 228/222는 **개행(`\n`)을 포함한 폭**이다. 공식 `kis_kospi_code_mst.py`는 `row`에 개행이 남아 있는 상태에서 `row[0:len(row)-228]`로 자르기 때문에 실제 데이터 폭은 227자(KOSPI)/221자(KOSDAQ)다. 반면 우리 코드(`:55`)는 먼저 `row.rstrip("\n")`으로 개행을 제거한 뒤 228을 빼기 때문에 헤더 끝에서 1글자를 더 잘라 낸다.
+>
+> ```python
+> # 공식 kis_kospi_code_mst.py — row에 '\n'이 남은 상태로 자른다
+> rf1 = row[0:len(row) - 228]   # 실제 데이터 227자 + 개행 1자
+> rf2 = row[-228:]
+>
+> # 우리 update_stock_master.py:55 — 개행을 먼저 제거하고 228을 뺀다
+> header = row[: len(row.rstrip("\n")) - tail_width]  # 데이터 228자를 버림 → 1자 초과
+> ```
+>
+> 수정 시 `data_width = tail_width - 1`로 두어야 한다.
+>
+> ```python
+> body = row.rstrip("\n")
+> header = body[: len(body) - data_width]   # data_width = tail_width - 1 (227/221)
+> tail   = body[-data_width:]               # §6.1 안 A가 파싱할 구간
+> ```
+>
+> **증상**: `stocks.json`에 이름이 필드를 꽉 채우는 종목 **9건**에서 닫는 괄호 `)`가 누락된다 (실측 확인): `0000D0`, `0015E0`, `0015F0`, `276970`, `423920`, `480020`, `Q610036`, `Q610085`, `Q610086`. `.strip()`으로 우측 패딩이 제거되기 때문에 이름이 여유 있는 종목에서는 드러나지 않는다.
+>
+> **§6.1 안 A에 미치는 영향**: 안 A가 꼬리에서 필드를 뽑을 때 이 오프셋 규약이 그대로라면 추출 필드 전체가 1글자씩 밀린다. 1글자 필드가 대부분이라 조용히 **옆 필드 값을 읽는** 결과가 된다. 안 A 구현 전에 반드시 수정해야 할 선행 사항이다.
+>
+> *(참고: 이름 절단 자체는 이 PR이 도입한 문제가 아니라 기존 버그이며, 별도 이슈로 분리하는 것이 맞다.)*
+
 ### 4.2 KIS 공식 저장소에서 확인한 것 (문서 근거)
 
 KIS 공식 저장소 `koreainvestment/open-trading-api`의 원문을 확인했다. **이는 문서 근거이지 실호출 확인이 아니다** — 아래 내용은 4.3의 미확인 항목을 대체하지 않는다.
@@ -192,10 +219,11 @@ pdno (str): [필수] 상품번호 (종목코드(6자리) , ETN의 경우 7자리
 | `scrt_grp_cls_code` (증권그룹구분코드) | `ST` 주권, `MF` 증권투자회사, `RT` 부동산투자회사, `DR` 주식예탁증서, `EW` ELW, `EF` ETF, `SW` 신주인수권증권, `SR` 신주인수권증서, `BC` 수익증권, `FE` 해외ETF, `FS` 외국주권 … |
 | `prst_cls_code` (우선주구분코드) | `0` 보통주, `1` 구형우선주, **`2` 신형우선주** |
 | `etp_prod_cls_code` | `3` ETN, `4` 손실제한ETN |
+| `etpr_undt_objt_co_yn` (기업인수목적회사여부) | `Y` 스팩(SPAC). `scrt_grp_cls_code=ST` 안에서 스팩을 보통주와 분리하는 유일한 필드 |
 
 `order_cash.py`의 docstring이 종목코드 마스터로 이 `stocks_info` 폴더를 지목한다. **즉 `update_stock_master.py`가 지금 버리는 꼬리 안에 상품 종류와 우선주 구분이 정확한 코드값으로 들어 있다.** 2.2에서 종목명 휴리스틱에 의존해야 했던 분류를 이 필드로 정확히 대체할 수 있다. 6.1 안 A의 실현 가능성이 문서로 뒷받침된다.
 
-*(단, 이 필드들의 정확한 바이트 오프셋은 `.h` 파일을 실제로 대조해 확정해야 한다. 본 조사는 필드의 존재와 값 목록만 확인했다.)*
+*(오프셋 확정에 대해서는 아래 (라) 항목을 참조.)*
 
 **(다) 펀드 전용 주문 API는 공식 저장소에 없다.**
 
@@ -203,10 +231,25 @@ pdno (str): [필수] 상품번호 (종목코드(6자리) , ETN의 경우 7자리
 
 이는 부재 증거이므로 "펀드 주문 TR이 절대 없다"는 증명은 아니다(포털 전체 카탈로그는 접근 차단으로 훑지 못했다). 그러나 **`F…` 69건을 이 이슈에서 분리해야 한다는 판단을 강화한다.**
 
-**(라) 참고한 1차 자료**
+**(라) 마스터 꼬리의 오프셋은 공식 파서로 확정된다** (문서 근거)
+
+같은 저장소의 `stocks_info/kis_kospi_code_mst.py`·`kis_kosdaq_code_mst.py`가 꼬리 전체의 폭 배열과 컬럼명을 제공하므로, `.h` 파일을 손으로 대조할 필요가 없다. **4.1에서 서술한 off-by-one 수정 후(`data_width = tail_width - 1` 규약, 즉 227자/221자 기준)** 의 오프셋은 다음과 같다(리뷰어 계산, 공식 파서 원문 미직접대조 — 문서에서 제시된 값임).
+
+| 필드 | 공식 컬럼명 | 꼬리 슬라이스 |
+|---|---|---|
+| `scrt_grp_cls_code` | `그룹코드` | `tail[0:2]` |
+| `etp_prod_cls_code` | `ETP` | `tail[22:23]` |
+| `etpr_undt_objt_co_yn` | `SPAC` | `tail[29:30]` |
+| `prst_cls_code` | `우선주` | `tail[158:159]` |
+
+우리 `SOURCES`의 `tail_width` 228/222가 공식 파서의 `row[0:len(row)-228]`·`-222`와 동일한 출처임도 여기서 확인된다. 안 A 구현 시 이 파일들을 정답지로 삼을 수 있으며, `.h` 대조·실호출 없이 오프셋을 확정할 수 있다.
+
+**(마) 참고한 1차 자료**
 
 - `https://github.com/koreainvestment/open-trading-api/blob/main/examples_llm/domestic_stock/order_cash/order_cash.py`
 - `https://github.com/koreainvestment/open-trading-api/blob/main/stocks_info/종목마스터정보(코스피).h`
+- `https://github.com/koreainvestment/open-trading-api/blob/main/stocks_info/kis_kospi_code_mst.py` ← 꼬리 폭 배열·컬럼명 (오프셋 확정의 근거, 상기 (라))
+- `https://github.com/koreainvestment/open-trading-api/blob/main/stocks_info/kis_kosdaq_code_mst.py` ← KOSDAQ 버전
 - `https://github.com/koreainvestment/open-trading-api/blob/main/examples_llm/domestic_stock/mktfunds/mktfunds.py`
 
 `apiportal.koreainvestment.com`의 필드 스펙 표와 오류코드 FAQ는 봇 차단으로 접근하지 못했다. 로그인한 브라우저로 직접 열어야 한다.
@@ -254,13 +297,19 @@ pdno (str): [필수] 상품번호 (종목코드(6자리) , ETN의 경우 7자리
 
 **안 A (권장) — 종목마스터에 상품 구분을 실어 데이터로 판정**
 
-`update_stock_master.py`가 지금 버리는 꼬리에서 `scrt_grp_cls_code`(증권그룹구분코드)와 `prst_cls_code`(우선주구분코드)를 뽑아 `stocks.json`에 `type` 필드로 넣는다(4.2 나). 그러면 주문 가능 여부를 **코드 문자열 모양이 아니라 상품 종류로** 판정할 수 있다.
+`update_stock_master.py`가 지금 버리는 꼬리에서 아래 3개 필드를 뽑아 `stocks.json`에 `type` 필드로 넣는다(4.2 나·라). 그러면 주문 가능 여부를 **코드 문자열 모양이 아니라 상품 종류로** 판정할 수 있다.
 
-- 장점: `0001A0`이 보통주인지 ETF인지 스팩인지 코드 모양으로는 절대 알 수 없다(2.2에서 이름 휴리스틱에 의존해야 했던 이유). `scrt_grp_cls_code`가 `ST`/`EF`/`RT`를 정확히 갈라 준다.
+```
+scrt_grp_cls_code     → ST/EF/RT/SR/SW/BC … 상품 대분류   (tail[0:2], 오프셋은 4.2 라)
+prst_cls_code         → 0 보통주 / 1 구형우선주 / 2 신형우선주  (tail[158:159])
+etpr_undt_objt_co_yn  → Y 스팩 (scrt_grp_cls_code=ST 안에서 스팩을 분리하는 유일한 필드)  (tail[29:30])
+```
+
+- 장점: `0001A0`이 보통주인지 ETF인지 스팩인지 코드 모양으로는 절대 알 수 없다(2.2에서 이름 휴리스틱에 의존해야 했던 이유). `scrt_grp_cls_code`가 `ST`/`EF`/`RT`를 정확히 갈라 주고, `etpr_undt_objt_co_yn`이 `ST` 안에서 스팩을 분리한다.
 - 장점: 신규 상장으로 코드 형식이 또 바뀌어도 정규식을 다시 손댈 필요가 없다. 2023년 KRX 개편으로 코드 체계가 이미 한 번 바뀌었고(`0001A0` 계열의 등장), 또 바뀌지 않는다는 보장이 없다.
 - 장점: #73이 언급한 "마스터 생성 시 주문 불가 종목 표시" 방안과 같은 방향이다.
 - 비용: `stocks.json` 스키마 변경 → `stock-master.js`, `backend/stock_code.py`의 `_load_master_codes`, 관련 테스트 영향. 마스터 재생성 필요.
-- 남은 리스크: 필드의 **존재와 값 목록은 확인됐지만 바이트 오프셋은 미확정**이다(4.2 나). 실제 `.mst`와 `.h`를 대조해 오프셋을 확정하는 것이 선행 작업이다.
+- **선행 작업**: `update_stock_master.py:55`의 꼬리 슬라이스 off-by-one을 먼저 수정해야 한다(4.1 주의사항). 수정 전에 구현하면 추출 필드 전체가 1글자씩 밀려 조용히 옆 필드 값을 읽는다. 오프셋은 공식 파서(`kis_kospi_code_mst.py`)로 확정 가능하므로 실호출 없이 착수할 수 있다(4.2 라).
 
 **안 B — 판정 지점은 그대로 두고 정규식만 단계적으로 넓힘**
 
@@ -337,7 +386,7 @@ TR은 `order.js:33-40`의 `selectCashOrderTrId`가 `demo`/`real` × `BUY`/`SELL`
 
 7장 검증에서 KIS가 영숫자 `PDNO`를 **거부**하면, 이슈의 서술대로 현 상태(정확한 거절)가 최선이다. 다만 그 경우에도 다음은 개선 여지가 있다.
 
-- `backend/telegram_commands.py:790`의 문구 "ETN·펀드 등 영숫자 종목코드는 아직 주문 대상이 아닙니다"는 **두 번 부정확하다**. 첫째, 차단 대상의 상당수가 ETN·펀드가 아니라 보통주·우선주다(2.2). 둘째, **ETN은 KIS 공식 스펙이 `order-cash` 대상으로 명시한 상품**이므로(4.2 가) 하필 대표 예시로 든 것이 가장 근거가 약한 선택이다. 상품군을 단정하지 않는 문구로 바꾸는 것이 맞다.
+- `backend/telegram_commands.py:790-791`의 문구 "ETN·펀드 등 영숫자 종목코드는 아직 주문 대상이 아닙니다"는 **두 번 부정확하다**. 첫째, 차단 대상의 상당수가 ETN·펀드가 아니라 보통주·우선주다(2.2). 둘째, **ETN은 KIS 공식 스펙이 `order-cash` 대상으로 명시한 상품**이므로(4.2 가) 하필 대표 예시로 든 것이 가장 근거가 약한 선택이다. 상품군을 단정하지 않는 문구로 바꾸는 것이 맞다.
 - #73이 제안한 대로 `update_stock_master.py`가 주문 불가 종목을 마스터에 표시하면, 조회 단계에서 미리 알릴 수 있다(안 A와 같은 작업).
 
 ---
@@ -349,7 +398,7 @@ TR은 `order.js:33-40`의 `selectCashOrderTrId`가 `demo`/`real` × `BUY`/`SELL`
 ### 7.1 사전 준비
 
 1. 모의투자 계좌와 모의투자 앱키를 준비한다(`openapivts.koreainvestment.com`).
-2. `mcp-trading`의 환경 변수를 모의투자로 맞춘다. `order.js:43-53`의 `validateOrderEnvMatchesUrl`이 `order_env=demo`일 때 `KIS_URL`에 `openapivts`가 포함될 것을 요구한다.
+2. `mcp-trading`의 환경 변수를 모의투자로 맞춘다. `order.js:43-54`의 `validateOrderEnvMatchesUrl`이 `order_env=demo`일 때 `KIS_URL`에 `openapivts`가 포함될 것을 요구한다.
    - `KIS_URL=https://openapivts.koreainvestment.com:29443`
    - `KIS_APP_KEY`, `KIS_APP_SECRET` = 모의투자용
    - `KIS_ACCOUNT_NO` = 모의계좌 8자리 + 상품코드 2자리
@@ -368,15 +417,25 @@ cd mcp-trading
 
 - **성공 판정**: 응답의 `output.stck_prpr`(현재가)가 0이 아닌 값으로 온다.
 - **의미**: 성공하면 그 코드가 KIS 시스템에서 유효한 식별자임이 확인된다. 실패하면 주문은 볼 것도 없다.
+- **주의**: `getStockQuote`는 `FID_COND_MRKT_DIV_CODE: "J"`(코스피/코스닥)를 고정한다(`index.js:223`). 9자 펀드(`F…`)나 신주인수권(`J…`)이 이 시장구분에서 조회되지 않을 수 있다 — 조회 실패가 시장구분 때문일 수 있으므로 그것만으로 주문 검증을 생략하지 말 것.
 - **주의**: 조회 성공은 **주문 가능의 증거가 아니다.** 이 단계는 후보를 걸러내는 용도다.
 
 ### 7.3 2단계 — 모의투자 주문 실호출 (핵심 확인)
+
+**준비물 (주문 전에 확보할 것)**
+
+- 취소 수단: `mcp-trading`에는 주문 취소(`order-rvsecncl`) 경로가 없다. 둘 중 하나를 미리 준비한다.
+  - **(a) HTS/MTS에서 수동 취소** — 실계좌(7.5)에서는 이쪽을 권장한다.
+  - **(b) `order-rvsecncl` 호출 일회성 스크립트** — `ODNO`(주문번호)와 `KRX_FWDG_ORD_ORGNO`가 필요하므로 주문 응답 JSON을 반드시 저장해 둘 것. *(취소 TR ID는 공식 저장소에서 직접 확인할 것 — 이 문서에서는 확정하지 않는다.)*
+- 미체결 조회: `get_today_daily_orders` (`index.js:441`)
+
+---
 
 가드를 코드에서 풀지 말고, **가드를 우회하는 일회성 스크립트**로 확인한다. `order.js`의 `buildCashOrderBody`를 쓰지 않고 바디를 직접 만들어 `kis-client.js`로 POST한다. 이렇게 하면 저장소의 정책 코드를 건드리지 않고 답을 얻는다.
 
 - 엔드포인트: `POST /uapi/domestic-stock/v1/trading/order-cash`
 - TR: `VTTC0012U` (모의 매수)
-- 바디: `order.js:88-98`과 동일한 형태에서 `PDNO`만 대상 코드로 교체
+- 바디: `order.js:88-98`과 동일한 형태에서 `PDNO`와 `EXCG_ID_DVSN_CD`를 바꿔가며 반복
 
 ```
 CANO             = 계좌 앞 8자리
@@ -385,7 +444,8 @@ PDNO             = 00088K   ← 형식별로 바꿔가며 반복
 ORD_DVSN         = "00"     (지정가)
 ORD_QTY          = "1"
 ORD_UNPR         = 현재가보다 충분히 낮은 값   ← 체결되지 않게
-EXCG_ID_DVSN_CD  = "SOR"
+EXCG_ID_DVSN_CD  = "SOR"   ← 우리 order.js:95의 현행 값. SOR 실패 시 "KRX"로 재시도
+                               (KIS 공식 order_cash.py 예시는 "KRX". 미확인 변수이므로 둘 다 시험)
 SLL_TYPE         = ""
 CNDT_PRIC        = ""
 ```
@@ -403,10 +463,11 @@ CNDT_PRIC        = ""
 | `rt_cd == "0"` + `output.ODNO`(주문번호)가 채워짐 | **수용.** 그 형식은 `order-cash`로 주문된다 | 6.5의 해당 단계 진행 |
 | `rt_cd != "0"` + `msg1`이 **종목코드/상품 자체를 문제 삼음** (예: 종목코드 오류, 취급 불가 상품) | **거부.** 그 형식은 열면 안 된다 | 6.6으로 |
 | `rt_cd != "0"` + `msg1`이 **주문 조건을 문제 삼음** (예: 증거금 부족, 호가단위 오류, 장 미개장, 모의투자 미지원 종목) | **판정 불가.** 코드 형식 문제가 아니다 | 조건을 고쳐 재시도. 특히 "모의투자 미지원"이면 7.5로 |
+| `EXCG_ID_DVSN_CD="SOR"` 실패 + `"KRX"`로 재시도 시 성공 | 종목코드는 수용. **`SOR`이 이 상품군에 무효** | `order.js:95`를 상품별 분기로 바꿔야 한다(6.3 참조) |
 
 - **반드시 각 형식을 개별로 판정한다.** 5개 대표 코드가 서로 다른 답을 낼 수 있다. 하나 성공했다고 나머지를 유추하지 말 것.
 - **반드시 대조군을 같이 돌린다.** 같은 스크립트로 `005930`(삼성전자)을 먼저 주문해 `rt_cd == "0"`이 나오는지 확인한다. 대조군이 실패하면 계좌·환경 설정 문제이지 종목코드 문제가 아니다.
-- 접수된 주문은 확인 후 취소한다. 미체결 주문은 `get_today_daily_orders`(`index.js:441`)로 조회할 수 있다.
+- 접수된 주문은 확인 후 즉시 취소한다. 취소 수단은 7.3의 **준비물** 항목을 참조(HTS/MTS 수동 취소 또는 일회성 스크립트). 미체결 조회는 `get_today_daily_orders`(`index.js:441`).
 
 ### 7.5 모의투자에서 판정이 안 나올 경우
 
@@ -441,6 +502,7 @@ CNDT_PRIC        = ""
 - 9자 75건은 전부 펀드가 아니다 — `F` 69건(펀드)과 `J` 6건(신주인수권증서)이 섞여 있다.
 - 영숫자 6자 312건 중 23건은 신형우선주(`00088K` 한화3우B 등)로, 이름에 "우"가 들어가는 것이 23/23이다.
 - 종목마스터의 `code`는 KIS가 배포하는 `.mst` 마스터의 9자 단축코드 필드를 그대로 옮긴 값이다(`update_stock_master.py:56`).
+- `update_stock_master.py:55`의 꼬리 슬라이스가 공식 파서와 1글자 어긋난다 — `rstrip("\n")` 후 `tail_width`를 빼기 때문에 헤더 끝 1글자를 더 잘라 낸다. 증상: 이름이 필드를 꽉 채운 종목 **9건**에서 닫는 괄호 `)`가 누락된다 (실측 확인: `0000D0`, `0015E0`, `0015F0`, `276970`, `423920`, `480020`, `Q610036`, `Q610085`, `Q610086`). 안 A 구현 전에 `data_width = tail_width - 1` 규약으로 수정해야 한다(4.1).
 - 이슈가 지목한 파일:줄 3곳이 모두 낡았다(5장).
 - `mcp-trading` 테스트 베이스라인: **138 pass / 0 fail**.
 
@@ -449,15 +511,15 @@ CNDT_PRIC        = ""
 - `order-cash`의 `PDNO` 스펙은 "종목코드(6자리), **ETN의 경우 7자리 입력**"이다. **ETN 389건이 `order-cash` 대상이라는 직접 근거다.**
 - 스펙 문구에 문자 구성 제약이 없다("숫자 6자리"가 아니라 "6자리").
 - `PDNO` 스펙에 **9자에 대한 언급이 없다.**
-- KIS 마스터 정의(`종목마스터정보(코스피).h`)에 `scrt_grp_cls_code`(`ST`/`EF`/`SR`/`BC` …), `prst_cls_code`(`2`=신형우선주), `etp_prod_cls_code`(`3`=ETN) 필드가 실재한다 — `update_stock_master.py`가 버리는 꼬리 안에 있다.
+- KIS 마스터 정의(`종목마스터정보(코스피).h`)에 `scrt_grp_cls_code`(`ST`/`EF`/`SR`/`BC` …), `prst_cls_code`(`2`=신형우선주), `etp_prod_cls_code`(`3`=ETN), `etpr_undt_objt_co_yn`(`Y`=스팩) 필드가 실재한다 — `update_stock_master.py`가 버리는 꼬리 안에 있다.
+- `kis_kospi_code_mst.py`·`kis_kosdaq_code_mst.py`(공식 파서)가 꼬리 폭 배열을 제공하므로, off-by-one 수정 후(`data_width = tail_width - 1`) 오프셋이 확정된다 — `scrt_grp_cls_code` `tail[0:2]`, `etp_prod_cls_code` `tail[22:23]`, `etpr_undt_objt_co_yn` `tail[29:30]`, `prst_cls_code` `tail[158:159]`. (리뷰에서 제시된 값, 공식 파서 원문 미직접대조)
 - KIS 공식 저장소에 집합투자증권(펀드) 전용 주문 API가 없다(부재 증거).
 - `order.js`가 쓰는 TR ID(`TTTC0012U` 등)는 현행 값이 맞다. 검색에 흔한 `TTTC0802U` 계열은 구버전이다.
 - `0001A0`(덕양에너젠)은 2026-01-30 코스닥 상장 종목으로 실재한다(복수 독립 소스).
 
 **추정 (근거 있으나 미확정)**:
 
-- 영숫자 6자 289건의 상품 분류(ETF 약 237, 스팩 27, 보통주 23, 리츠 2)는 **종목명 패턴 기반 추정**이다. 정확한 분류는 `scrt_grp_cls_code`로만 확정된다.
-- 위 마스터 필드들의 **바이트 오프셋**은 미확정이다. 필드의 존재와 값 목록만 확인했다.
+- 영숫자 6자 289건의 상품 분류(ETF 약 237, 스팩 27, 보통주 23, 리츠 2)는 **종목명 패턴 기반 추정**이다. 정확한 분류는 `scrt_grp_cls_code` + `etpr_undt_objt_co_yn`로 확정된다(스팩은 `scrt_grp_cls_code=ST`여서 두 필드 없이는 보통주와 갈리지 않는다).
 - 신형우선주·신규 6자 코드가 일반 주식 주문 채널로 거래된다는 것은 **정황 근거**다(주권 범주, 전용 TR 부재, 스펙 문구와 부합). 명시적 확인 문구는 찾지 못했다.
 
 **미확인 (실호출 없이는 확인 불가)**:
@@ -476,5 +538,6 @@ CNDT_PRIC        = ""
 2. 검증 결과를 이 문서의 4.2·8장에 반영한다.
 3. 7.6의 분기에 따라 6.5의 롤아웃을 시작하되, **6.2(두 계층 결합 테스트)를 단계 1보다 먼저** 넣는다.
 4. 검증 결과와 무관하게 착수 가능한 것:
-   - `backend/telegram_commands.py:790`의 부정확한 문구 수정(6.6)
+   - `backend/telegram_commands.py:790-791`의 부정확한 문구 수정(6.6)
    - 이슈 #138 본문의 낡은 파일:줄 참조 갱신(5장)
+   - **안 A의 마스터 필드 추출 착수 — 실호출 불필요**: `update_stock_master.py:55` off-by-one 수정 → `kis_kospi_code_mst.py`·`kis_kosdaq_code_mst.py`로 오프셋 확정(4.2 라) → `stocks.json` 스키마 설계(`scrt_grp_cls_code` / `prst_cls_code` / `etpr_undt_objt_co_yn` 3개 필드 추가) 순으로 7장 검증 결과와 무관하게 진행할 수 있다.
