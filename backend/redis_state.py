@@ -117,6 +117,14 @@ class RedisKeys:
     def telegram_poller_state(self) -> str:
         return f"{self.prefix}:telegram:poller_state"
 
+    def order_proposal_cooldown(self, stock: str, rule_id: str | None) -> str:
+        """주문 보조(#299)의 재제안 냉각 키 — 종목+룰 단위.
+
+        룰이 없는 수동 요청(``/advise``)은 ``manual``로 묶는다. 룰 기반 자동 제안이
+        추가돼도(후속 이슈) 서로의 냉각을 잡아먹지 않는다.
+        """
+        return f"{self.prefix}:order_assist:cooldown:{stock}:{rule_id or 'manual'}"
+
 
 class RedisSchedulerState:
     def __init__(

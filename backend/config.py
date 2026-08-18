@@ -101,6 +101,73 @@ def _is_truthy_flag(value: str) -> bool:
 KIS_REAL_ORDER_ENABLED = _is_truthy_flag(os.environ.get("KIS_REAL_ORDER_ENABLED", ""))
 
 
+# ──────────────────────────────────────────────────────────────────────────
+# 주문 보조(#299) 하드 한도 — 코드가 판정하는 값들
+# ──────────────────────────────────────────────────────────────────────────
+# 이 상수들은 LLM이 볼 수는 있어도 바꿀 수는 없다. 검증 에이전트에는 참고용으로
+# 함께 전달되지만, 위반 여부를 판정하는 것은 backend/order_assist.py의 순수 함수다.
+# 전부 env로 덮어쓸 수 있게 두되 기본값은 보수적으로 잡는다 — 미설정 환경에서
+# 한도가 사라지는 것이 아니라 좁은 한도가 걸리는 쪽이 안전하다.
+
+
+def _int_env(name: str, default: int) -> int:
+    """정수 env를 읽되, 값이 비었거나 정수가 아니면 기본값으로 되돌린다.
+
+    오타 하나로 한도가 0이 되거나(모든 주문 거부) 예외로 앱이 죽는 대신,
+    경고 없이 조용히 넓어지지도 않게 '기본값 복귀'로 고정한다.
+    """
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def _float_env(name: str, default: float) -> float:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+# 1회 주문 금액 상한(원).
+ORDER_MAX_ORDER_AMOUNT = _int_env("ORDER_MAX_ORDER_AMOUNT", 1_000_000)
+# 한 종목이 총 평가금액에서 차지할 수 있는 비중 상한(0~1).
+ORDER_MAX_POSITION_RATIO = _float_env("ORDER_MAX_POSITION_RATIO", 0.20)
+# 하루 주문 횟수 상한(TradeHistory 집계).
+ORDER_MAX_DAILY_COUNT = _int_env("ORDER_MAX_DAILY_COUNT", 10)
+# 하루 거래대금 상한(원, TradeHistory 집계).
+ORDER_MAX_DAILY_AMOUNT = _int_env("ORDER_MAX_DAILY_AMOUNT", 3_000_000)
+# 주문 후 남아야 하는 현금 비중 하한(총 평가금액 대비, 0~1).
+ORDER_MIN_CASH_RATIO = _float_env("ORDER_MIN_CASH_RATIO", 0.10)
+# 지정가가 현재가에서 벗어날 수 있는 최대 비율(0~1).
+ORDER_MAX_PRICE_GAP_RATIO = _float_env("ORDER_MAX_PRICE_GAP_RATIO", 0.03)
+# 제안 확신도 하한. soft — 위반해도 코드가 거부하지 않고 검증자 참고용으로만 전달한다.
+ORDER_MIN_CONFIDENCE = _float_env("ORDER_MIN_CONFIDENCE", 0.6)
+# 같은 종목+룰 조합의 재제안 냉각 시간(분). hard — redis TTL로 강제한다.
+ORDER_REPROPOSAL_COOLDOWN_MINUTES = _int_env("ORDER_REPROPOSAL_COOLDOWN_MINUTES", 60)
+
+# 주문 금지 종목코드 목록(쉼표 구분). 기본은 빈 목록이다.
+# 판정은 order_assist가 _ORDERABLE_STOCK_CODE_RE 검사 바로 옆에서 수행한다 —
+# 둘 다 "이 코드로 주문을 낼 수 있는가"라는 같은 질문의 두 갈래라 떨어뜨려 두면
+# 한쪽만 통과하는 경로가 생긴다.
+ORDER_BLACKLIST = frozenset(
+    code.strip().upper()
+    for code in os.environ.get("ORDER_BLACKLIST", "").split(",")
+    if code.strip()
+)
+
+# NAT 주문 보조 엔드포인트 호출 상한(초). 제안은 ReAct 루프라 길고, 검증은 단발 호출이라 짧다.
+# 검증 타임아웃은 fail-closed로 이어진다 — 초과 시 REJECT다.
+ORDER_PROPOSE_TIMEOUT_SECONDS = _float_env("ORDER_PROPOSE_TIMEOUT_SECONDS", 120.0)
+ORDER_VERIFY_TIMEOUT_SECONDS = _float_env("ORDER_VERIFY_TIMEOUT_SECONDS", 40.0)
+
+
 def is_placeholder_secret(value: str | None) -> bool:
     if not value:
         return True

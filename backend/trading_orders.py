@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 from typing import Any, Awaitable, Callable, Literal
 
 from fastapi import HTTPException
@@ -11,6 +11,12 @@ from .timeutil import KST
 
 OrderSide = Literal["BUY", "SELL"]
 OrderType = Literal["LIMIT", "MARKET"]
+
+# 대기 주문의 앱 레벨 만료 창. PendingOrder의 성질이므로 여기 둔다 (#299).
+# telegram_commands가 같은 이름으로 재수출하며(기존 import 경로 유지), order_assist도
+# 여기서 직접 읽는다 — telegram_commands에 두면 order_assist와 순환 import가 된다.
+# redis 쪽 PENDING_ORDER_TTL_SEC(10분)은 이 값의 10배 여유로 잡힌 별개 장치다.
+ORDER_EXPIRES_AFTER = timedelta(seconds=60)
 
 
 @dataclass(frozen=True)

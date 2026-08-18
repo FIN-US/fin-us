@@ -45,6 +45,7 @@ from .telegram_notifier import (
 )
 from .timeutil import KST
 from .trading_orders import (
+    ORDER_EXPIRES_AFTER,
     McpTradingOrderGateway,
     OrderType,
     PendingOrder,
@@ -72,7 +73,6 @@ UNRESOLVED_STOCK_WARNING = (
     "⚠️ 종목명을 확인하지 못했습니다. 입력한 코드가 맞는지 다시 확인하세요."
 )
 # _STOCK_CODE_EXTRACT_RE, _ORDERABLE_STOCK_CODE_RE → backend/stock_code.py (#140)
-ORDER_EXPIRES_AFTER = timedelta(seconds=60)
 ORDER_CONFIRM_CALLBACK = "order:confirm"
 ORDER_CANCEL_CALLBACK = "order:cancel"
 ORDER_STALE_CALLBACK_TEXT = "이전 주문 버튼입니다. 최신 주문 메시지에서 다시 선택하세요."
