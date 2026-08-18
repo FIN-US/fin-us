@@ -307,7 +307,11 @@ TERMS_PATH = Path(__file__).with_name("terms.json")
 # 한 메시지에 붙는 용어 각주 개수 상한. 셋을 넘어가면 각주가 본문만큼 길어지고, 그 시점부터
 # 사용자는 각주를 읽지 않는다 — 설명이 없는 것과 같아진다.
 TERM_FOOTNOTE_MAX_ENTRIES = 2
-TERM_FOOTNOTE_PREFIX = "ℹ️ 용어:"
+# 각주 한 줄의 모양: "ℹ️ 예수금: 설명".
+# "용어:"라는 말을 붙이지 않는다 — 이모지가 이미 "이건 설명이다"를 뜻하고, 두 개가 연속으로
+# 붙으면 같은 말이 두 줄 반복된다. 표제어와 설명 사이도 줄표(—)가 아니라 콜론이다.
+# 줄표는 한국어 문장에서 자연스럽지 않고, 사전에서 "말: 뜻" 관계를 나타내는 것은 콜론이다.
+TERM_FOOTNOTE_MARK = "ℹ️"
 
 
 @dataclass(frozen=True)
@@ -446,7 +450,7 @@ def term_footnote(
         return ""
     entries = find_terms(text, exclude=_terms_in(question))
     return "\n".join(
-        f"{TERM_FOOTNOTE_PREFIX} {entry.term} — {entry.description}" for entry in entries
+        f"{TERM_FOOTNOTE_MARK} {entry.term}: {entry.description}" for entry in entries
     )
 
 

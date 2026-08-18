@@ -11,7 +11,7 @@ from backend.presentation import (
     LEVEL_BEGINNER,
     LEVEL_INTERMEDIATE,
     REASONING_FOOTNOTE_SEPARATOR,
-    TERM_FOOTNOTE_PREFIX,
+    TERM_FOOTNOTE_MARK,
 )
 from backend.telegram_commands import (
     LEVEL_COMMAND_HELP,
@@ -217,8 +217,8 @@ async def test_beginner_answer_carries_both_footnotes():
     await _send(handler, "잔고 알려줘")
 
     message = notifier.messages[-1]
-    assert f"{TERM_FOOTNOTE_PREFIX} 예수금" in message
-    assert message.index(TERM_FOOTNOTE_PREFIX) < message.index(REASONING_FOOTNOTE_SEPARATOR)
+    assert f"{TERM_FOOTNOTE_MARK} 예수금" in message
+    assert message.index(TERM_FOOTNOTE_MARK) < message.index(REASONING_FOOTNOTE_SEPARATOR)
     assert message.endswith("📚 확인한 자료: KIS 시세·계좌 조회")
 
 
@@ -240,7 +240,7 @@ async def test_intermediate_answer_drops_only_the_term_footnote():
     await _send(handler, "잔고 알려줘")
 
     message = notifier.messages[-1]
-    assert TERM_FOOTNOTE_PREFIX not in message
+    assert TERM_FOOTNOTE_MARK not in message
     assert REASONING_FOOTNOTE_SEPARATOR in message
 
 
@@ -287,7 +287,7 @@ async def test_level_lookup_failure_falls_back_to_beginner_without_failing_the_m
 
     await _send(handler, "잔고 알려줘")
 
-    assert f"{TERM_FOOTNOTE_PREFIX} 예수금" in notifier.messages[-1]
+    assert f"{TERM_FOOTNOTE_MARK} 예수금" in notifier.messages[-1]
 
 
 @pytest.mark.asyncio

@@ -23,7 +23,7 @@ from backend.presentation import (
     LEVEL_INTERMEDIATE,
     REASONING_FOOTNOTE_SEPARATOR,
     TELEGRAM_MESSAGE_LIMIT,
-    TERM_FOOTNOTE_PREFIX,
+    TERM_FOOTNOTE_MARK,
     URGENT_ALERT_URGENCIES,
     TermEntry,
     alert_kind,
@@ -135,7 +135,7 @@ def test_aliases_match_but_the_footnote_names_the_canonical_term(fake_terms):
 
     footnote = term_footnote("주문가능금액이 부족합니다. 확인이 필요합니다.", level=LEVEL_BEGINNER)
 
-    assert footnote == f"{TERM_FOOTNOTE_PREFIX} 예수금 — 아직 쓰지 않은 현금"
+    assert footnote == f"{TERM_FOOTNOTE_MARK} 예수금: 아직 쓰지 않은 현금"
 
 
 def test_longer_surface_wins_at_the_same_position(fake_terms):
@@ -163,7 +163,7 @@ def test_a_short_body_still_gets_its_footnote(fake_terms):
     fake_terms([FLOW])
 
     assert term_footnote("수급 응답", level=LEVEL_BEGINNER) == (
-        f"{TERM_FOOTNOTE_PREFIX} 수급 — 누가 사고 누가 팔았는지"
+        f"{TERM_FOOTNOTE_MARK} 수급: 누가 사고 누가 팔았는지"
     )
 
 
@@ -177,7 +177,7 @@ def test_terms_the_user_typed_are_not_explained(fake_terms):
         question="예수금 얼마야?",
     )
 
-    assert footnote == f"{TERM_FOOTNOTE_PREFIX} 체결 — 주문이 거래로 이뤄진 것"
+    assert footnote == f"{TERM_FOOTNOTE_MARK} 체결: 주문이 거래로 이뤄진 것"
 
 
 def test_a_known_term_does_not_waste_a_footnote_slot(fake_terms):
@@ -400,7 +400,7 @@ def test_term_and_reasoning_footnotes_coexist_in_order(fake_terms):
 
     body, term_block, reasoning_block = message.split("\n\n")
     assert body.startswith("예수금은 120만원")
-    assert term_block == f"{TERM_FOOTNOTE_PREFIX} 예수금 — 아직 쓰지 않은 현금"
+    assert term_block == f"{TERM_FOOTNOTE_MARK} 예수금: 아직 쓰지 않은 현금"
     assert reasoning_block == reasoning
 
 
@@ -416,7 +416,7 @@ def test_intermediate_level_keeps_the_reasoning_footnote(fake_terms):
         reasoning=reasoning,
     )
 
-    assert TERM_FOOTNOTE_PREFIX not in message
+    assert TERM_FOOTNOTE_MARK not in message
     assert message.endswith(reasoning)
 
 
@@ -433,7 +433,7 @@ def test_long_body_is_truncated_but_both_footnotes_survive(fake_terms):
 
     assert len(message) <= TELEGRAM_MESSAGE_LIMIT
     assert message.endswith(reasoning)
-    assert TERM_FOOTNOTE_PREFIX in message
+    assert TERM_FOOTNOTE_MARK in message
 
 
 def test_markdown_is_cleaned_before_terms_are_matched(fake_terms):
@@ -447,4 +447,4 @@ def test_markdown_is_cleaned_before_terms_are_matched(fake_terms):
     )
 
     assert message.startswith("예수금은 충분합니다")
-    assert TERM_FOOTNOTE_PREFIX in message
+    assert TERM_FOOTNOTE_MARK in message
