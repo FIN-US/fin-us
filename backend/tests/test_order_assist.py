@@ -9,7 +9,7 @@
 - 승인 시 기존 PendingOrder 경로 합류(확정 버튼 포함)
 """
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
@@ -84,6 +84,12 @@ QUOTE_TEXT = """[삼성전자] 현재가 시세
 - 종목코드: 005930
 - 현재가: 74,500원
 - 전일 대비: +1,000 (1.36%)
+"""
+
+# mcp-trading/balance.js formatTruncationNote()가 잘림 시 덧붙이는 안내다. 사유 부분만
+# 바뀌고 "조회가 중단되어"는 고정이라, scheduler.is_balance_truncated가 그 리터럴을 본다.
+TRUNCATION_NOTE = """
+[안내] 페이지 상한(20회)에 도달하여 조회가 중단되어 일부 보유 종목이 위 목록에서 누락되었을 수 있습니다. 실제 잔고는 별도로 확인하세요.
 """
 
 PROPOSAL_JSON = (
@@ -227,14 +233,6 @@ def test_sell_within_holdings_passes():
     assert result.passed is True
 
 
-def test_cooldown_flag_becomes_a_violation():
-    result = evaluate_hard_limits(
-        _proposal(), _snapshot(), OrderLimits(), DailyUsage(), cooldown_active=True
-    )
-
-    assert "cooldown" in [v.code for v in result.violations]
-
-
 def test_low_confidence_is_soft_and_does_not_reject():
     """확신도는 soft 한도다 — 코드가 거부하지 않고 검증자 참고 신호로만 넘어간다."""
     result = evaluate_hard_limits(
@@ -350,6 +348,34 @@ def test_parse_snapshot_reads_all_four_values():
     assert snapshot == AccountSnapshot(
         current_price=74_500, cash=5_000_000, total_value=20_000_000, holding_qty=3
     )
+
+
+def test_parse_snapshot_rejects_a_truncated_balance():
+    """잘린 잔고는 마커도 있고 파싱도 되지만, 못 본 보유분을 0주로 읽게 만든다.
+
+    그대로 통과시키면 BUY 비중 한도와 SELL 보유량 판정이 동시에 헐거워진다 —
+    "빠진 값을 0으로 채우면 한도가 조용히 무력해진다"는 이 모듈의 원칙이 정확히
+    이 지점에서 깨진다. 잘림 문구는 mcp-trading/balance.js formatTruncationNote()의
+    사유 무관 고정 부분이며 scheduler.is_balance_truncated가 같은 리터럴을 본다.
+    """
+    truncated = BALANCE_TEXT + TRUNCATION_NOTE
+
+    snapshot, error = parse_snapshot(QUOTE_TEXT, truncated, "005930")
+
+    assert snapshot is None
+    assert "끊겨" in error
+
+
+@pytest.mark.asyncio
+async def test_truncated_balance_stops_the_flow_before_the_verifier():
+    """잘린 잔고는 한도 판정 이전 단계라 검증자까지 가지 않는다."""
+    truncated = BALANCE_TEXT + TRUNCATION_NOTE
+
+    result, verify_calls = await _run(mcp=_mcp_runner(balance=truncated))
+
+    assert result.status == "rejected"
+    assert [v.code for v in result.violations] == ["snapshot_parse"]
+    assert verify_calls == []
 
 
 def test_parse_snapshot_reports_zero_holdings_for_an_unheld_stock():
@@ -674,6 +700,64 @@ async def test_conflict_when_a_pending_order_already_exists():
     # 충돌이면 제안도 검증도 하지 않는다 — 슬롯이 없는데 왕복만 버릴 이유가 없다.
     assert mcp.calls == []
     assert verify_calls == []
+
+
+@pytest.mark.asyncio
+async def test_expired_pending_order_does_not_block_a_new_proposal():
+    """만료된 대기 주문은 충돌이 아니다 — 안내대로 /confirm해도 되지 않는 막다른 길이 된다.
+
+    앱 만료(60초)와 redis TTL(600초)이 10배 차이라, 확정·취소하지 않은 주문의 키는
+    약 9분간 남는다. /buy는 같은 자리에서 만료분을 치우므로 통과하는데 /advise만
+    막히던 자리를 고정한다.
+    """
+    from backend.trading_orders import PendingOrder
+
+    store = InMemoryPendingOrderStore()
+    await store.set_if_absent(
+        "123",
+        PendingOrder(
+            chat_id="123",
+            stock_name="NAVER",
+            stock_code="035420",
+            side="BUY",
+            quantity=1,
+            price=200_000,
+            # 61초 전 생성 — ORDER_EXPIRES_AFTER(60초)를 막 넘겼다.
+            created_at=MARKET_OPEN_NOW - ORDER_EXPIRES_AFTER - timedelta(seconds=1),
+        ),
+    )
+
+    result, verify_calls = await _run(store=store)
+
+    assert result.status == "approved"
+    assert len(verify_calls) == 1
+    # 만료분이 치워지고 새 제안이 그 자리를 차지한다.
+    stored = await store.get("123")
+    assert stored is not None and stored.stock_code == "005930"
+
+
+@pytest.mark.asyncio
+async def test_unexpired_pending_order_still_conflicts():
+    """만료 정리가 '충돌 검사를 없앤 것'이 되면 안 된다 — 살아 있는 주문은 그대로 막는다."""
+    from backend.trading_orders import PendingOrder
+
+    store = InMemoryPendingOrderStore()
+    await store.set_if_absent(
+        "123",
+        PendingOrder(
+            chat_id="123",
+            stock_name="NAVER",
+            stock_code="035420",
+            side="BUY",
+            quantity=1,
+            price=200_000,
+            created_at=MARKET_OPEN_NOW - timedelta(seconds=30),
+        ),
+    )
+
+    result, _ = await _run(store=store)
+
+    assert result.status == "conflict"
 
 
 @pytest.mark.asyncio

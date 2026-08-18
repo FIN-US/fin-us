@@ -56,6 +56,10 @@ from .config import (
     ORDER_VERIFY_TIMEOUT_SECONDS,
     TRADING_MCP_PARAMS,
 )
+# services는 order_assist를 import하지 않으므로 순환하지 않는다. run_mcp_tool은
+# 호출 시점에 늦게 가져오지만(테스트가 주입하는 것이 기본 경로다) short_error는
+# 순수 포매터라 여기서 바로 묶는다.
+from .services import short_error
 from .stock_code import _ORDERABLE_STOCK_CODE_RE, _is_unresolved_echo, _STOCK_CODE_EXTRACT_RE
 from .timeutil import KST
 from .trading_orders import ORDER_EXPIRES_AFTER, OrderSide, OrderType, PendingOrder, is_korean_market_open
@@ -378,7 +382,7 @@ def parse_snapshot(
     보유량만 예외다. 잔고 섹션 마커가 있는데 해당 종목 줄이 없으면 그것은 관측된
     0주다. 마커 자체가 없으면 응답을 읽지 못한 것이므로 실패로 본다.
     """
-    from .scheduler import _BALANCE_HOLDINGS_MARKER, _parse_balance_holdings
+    from .scheduler import _BALANCE_HOLDINGS_MARKER, _parse_balance_holdings, is_balance_truncated
 
     current_price = _first_amount(_CURRENT_PRICE_RE, quote_text)
     if current_price is None or current_price <= 0:
@@ -386,6 +390,17 @@ def parse_snapshot(
 
     if _BALANCE_HOLDINGS_MARKER not in (balance_text or ""):
         return None, "계좌 잔고를 확인하지 못해 진행하지 않았습니다."
+
+    # 잘린 잔고는 "마커도 있고 파싱도 되는" 응답이라 위 검사를 그대로 통과한다. 그런데
+    # 대상 종목 줄이 잘려 나갔으면 holding_qty가 관측된 0주가 아니라 **못 본 0주**가 되고,
+    # 그 순간 두 한도가 조용히 넓어진다:
+    #   - BUY 비중: 기존 보유분을 빼먹고 계산해 한도를 넘는 주문이 통과한다.
+    #   - SELL 보유량: 실제로는 있는 보유량을 0으로 보므로 oversell 판정이 뒤집힌다.
+    # 총 평가금액도 부분 집계일 수 있어 min_cash_ratio의 분모까지 흔들린다.
+    # _parse_balance_holdings는 이 가드를 호출처의 몫으로 명시하고 있고, 기존 호출처
+    # (scheduler의 포트폴리오 동기화 두 곳)는 모두 같은 가드를 건다.
+    if is_balance_truncated(balance_text or ""):
+        return None, "계좌 잔고 조회가 중간에 끊겨(일부 종목 누락) 진행하지 않았습니다."
 
     cash = _first_amount(_CASH_RE, balance_text)
     if cash is None:
@@ -444,8 +459,6 @@ def evaluate_hard_limits(
     snapshot: AccountSnapshot,
     limits: OrderLimits,
     usage: DailyUsage,
-    *,
-    cooldown_active: bool = False,
 ) -> HardCheckResult:
     """하드 한도를 전부 평가해 위반 목록을 돌려준다.
 
@@ -454,16 +467,13 @@ def evaluate_hard_limits(
 
     확신도(:attr:`OrderLimits.min_confidence`)는 여기서 판정하지 않는다 — soft 한도라
     검증자 참고 신호로만 넘어간다. 코드가 거부하는 것은 hard 한도뿐이다.
+
+    재제안 냉각도 여기 없다. 냉각은 제안을 요청하기 **전에** redis로 판정해야 의미가
+    있어서(냉각 중이면 LLM 왕복 자체를 아끼는 것이 목적) run_order_assist 앞단에 있다.
+    여기에 같은 규칙을 한 번 더 두면 프로덕션에서는 한 번도 참이 되지 않는 분기가 생기고,
+    테스트만 그 죽은 분기를 타게 된다.
     """
     violations: list[LimitViolation] = []
-
-    if cooldown_active:
-        violations.append(
-            LimitViolation(
-                "cooldown",
-                f"같은 종목의 재제안 냉각 시간({limits.cooldown_minutes}분)이 아직 남았습니다.",
-            )
-        )
 
     unit_price = estimated_unit_price(proposal, snapshot)
     amount = unit_price * proposal.quantity
@@ -846,6 +856,22 @@ def format_rejection_message(
 # ---------------------------------------------------------------------------
 
 
+async def _drop_expired_pending_order(pending_orders: Any, chat_id: str, now: datetime) -> None:
+    """앱 레벨 만료(``ORDER_EXPIRES_AFTER``)가 지난 대기 주문을 지운다.
+
+    telegram_commands의 동명 메서드와 같은 판정이다. 두 곳이 같은 규칙을 쓰는 것이
+    핵심이라 만료 창(ORDER_EXPIRES_AFTER)을 공유하는 상수 하나에서 읽는다.
+    """
+    order = await pending_orders.get(chat_id)
+    if order is None:
+        return
+    created_at = order.created_at
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=KST)
+    if now.astimezone(KST) - created_at.astimezone(KST) > ORDER_EXPIRES_AFTER:
+        await pending_orders.delete(chat_id)
+
+
 def _new_proposal_id(now: datetime) -> str:
     return f"adv-{now.astimezone(KST):%Y%m%d%H%M%S}-{secrets.token_hex(3)}"
 
@@ -918,11 +944,19 @@ async def run_order_assist(
 
     # ① 충돌 — 대기 주문이 이미 있으면 제안 자체를 만들지 않는다. 슬롯이 하나뿐이라
     #    지금 만들어 봐야 저장하지 못하고, LLM 왕복만 버린다.
+    #
+    #    검사 전에 만료분을 먼저 치운다(/buy가 같은 자리에서 하는 것과 동일하다).
+    #    앱 만료(ORDER_EXPIRES_AFTER 60초)와 redis TTL(PENDING_ORDER_TTL_SEC 600초)이
+    #    10배 차이라, 확정도 취소도 하지 않은 주문의 키는 약 9분간 남는다. 그 구간에서
+    #    이 정리를 건너뛰면 /advise만 충돌로 막히면서 "/confirm 또는 /cancel로 먼저
+    #    처리하세요"라고 안내하는데, 정작 그 주문은 이미 만료라 /confirm이 되지 않는
+    #    막다른 길이 된다. InMemoryPendingOrderStore는 TTL 자체가 없어 더 오래 간다.
     try:
+        await _drop_expired_pending_order(pending_orders, trigger.chat_id, now)
         has_pending = await pending_orders.has(trigger.chat_id)
     except Exception as exc:  # noqa: BLE001
         logger.error("대기 주문 조회 실패 — 진행을 막는다: %s", exc)
-        return _rejected(stock, (LimitViolation("store_error", f"주문 저장소 오류: {exc}"),))
+        return _rejected(stock, (LimitViolation("store_error", f"주문 저장소 오류: {short_error(exc)}"),))
     if has_pending:
         return OrderAssistResult(status="conflict", message=CONFLICT_MESSAGE)
 
@@ -941,7 +975,7 @@ async def run_order_assist(
         raw = await propose(build_proposal_prompt(trigger))
     except Exception as exc:  # noqa: BLE001
         logger.error("제안 요청 실패: %s", exc)
-        return _rejected(stock, (LimitViolation("propose_failed", f"제안을 받지 못했습니다: {exc}"),))
+        return _rejected(stock, (LimitViolation("propose_failed", f"제안을 받지 못했습니다: {short_error(exc)}"),))
 
     proposal, parse_error = parse_proposal(raw)
     if proposal is None:
@@ -955,7 +989,7 @@ async def run_order_assist(
         resolved = str(await mcp_runner(TRADING_MCP_PARAMS, "resolve_stock_code", {"stock_name": stock}))
     except Exception as exc:  # noqa: BLE001
         await cooldown.mark(stock, trigger.rule_id)
-        return _rejected(stock, (LimitViolation("resolve_failed", f"종목코드를 확인하지 못했습니다: {exc}"),))
+        return _rejected(stock, (LimitViolation("resolve_failed", f"종목코드를 확인하지 못했습니다: {short_error(exc)}"),))
 
     code_match = _STOCK_CODE_EXTRACT_RE.search(resolved)
     if code_match is None or _is_unresolved_echo(resolved):
@@ -996,7 +1030,7 @@ async def run_order_assist(
         await cooldown.mark(stock, trigger.rule_id)
         return _rejected(
             stock,
-            (LimitViolation("snapshot_failed", f"계좌·시세를 조회하지 못했습니다: {exc}"),),
+            (LimitViolation("snapshot_failed", f"계좌·시세를 조회하지 못했습니다: {short_error(exc)}"),),
             proposal=proposal,
         )
 
@@ -1012,7 +1046,7 @@ async def run_order_assist(
         await cooldown.mark(stock, trigger.rule_id)
         return _rejected(
             stock,
-            (LimitViolation("usage_failed", f"오늘 주문 사용량을 확인하지 못했습니다: {exc}"),),
+            (LimitViolation("usage_failed", f"오늘 주문 사용량을 확인하지 못했습니다: {short_error(exc)}"),),
             proposal=proposal,
             snapshot=snapshot,
         )
@@ -1107,7 +1141,7 @@ async def run_order_assist(
         logger.error("대기 주문 저장 실패: %s", exc)
         return _rejected(
             stock,
-            (LimitViolation("store_error", f"주문 저장소 오류: {exc}"),),
+            (LimitViolation("store_error", f"주문 저장소 오류: {short_error(exc)}"),),
             verifier_called=True,
             proposal=proposal,
             snapshot=snapshot,

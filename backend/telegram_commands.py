@@ -6,7 +6,7 @@ import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from enum import Enum
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any, Callable
 from urllib.parse import quote as _url_quote
 
@@ -34,7 +34,7 @@ from .redis_state import (
     create_redis_client,
     redis_state,
 )
-from .services import llm_chat, run_mcp_tool
+from .services import llm_chat, run_mcp_tool, short_error as _short_error
 from .watchlist_repo import SqliteWatchlistRepo
 from .telegram_notifier import (
     TELEGRAM_ALERT_MODES,
@@ -367,14 +367,6 @@ def _nat_answer_message(result: Any) -> str:
         getattr(result, "tools_used", ()),
     )
     return _answer_with_footnote(str(result), footnote)
-
-
-def _short_error(exc: Exception) -> str:
-    raw = getattr(exc, "detail", str(exc))
-    text = str(raw or "").strip()
-    if not text:
-        text = exc.__class__.__name__
-    return text[:300]
 
 
 def _telegram_command_parts(text: str) -> tuple[str, str, str]:
