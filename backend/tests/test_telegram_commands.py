@@ -450,7 +450,8 @@ def test_bot_command_menu_includes_all_user_commands():
 
     assert commands == [
         "help", "balance", "watch", "catalysts", "quote", "trend", "earnings",
-        "alerts", "visualize", "trade", "lookup", "buy", "sell", "confirm", "cancel",
+        "alerts", "level", "start", "visualize", "trade", "lookup", "buy", "sell",
+        "confirm", "cancel",
     ]
 
 

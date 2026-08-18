@@ -6,7 +6,12 @@ from typing import Any
 import httpx
 
 from .config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, is_placeholder_secret
-from .presentation import KIND_ALERT, TELEGRAM_MESSAGE_LIMIT, render
+from .presentation import (
+    DEFAULT_TELEGRAM_USER_LEVEL,
+    KIND_ALERT,
+    TELEGRAM_MESSAGE_LIMIT,
+    render,
+)
 
 logger = logging.getLogger(__name__)
 _TELEGRAM_BOT_URL_RE = re.compile(r"(https://api\.telegram\.org/bot)[^/\s\"]+")
@@ -345,6 +350,7 @@ class TelegramNotifier:
         analysis_data: dict[str, Any],
         *,
         alert_mode: str = "urgent",
+        level: str = DEFAULT_TELEGRAM_USER_LEVEL,
     ) -> bool:
         """분석 알림을 보낸다. 문장 조립은 format_analysis_alert, 마무리는 presentation.render.
 
@@ -352,6 +358,10 @@ class TelegramNotifier:
         함수라 테스트가 그 매핑만 검사할 수 있고, 틀·용어 각주·마크다운 정리는 나가는 모든
         메시지에 공통이라 한 지점(render)에 있어야 한다. 여기서 합치면 알림만 규칙이
         갈라진다 (#297).
+
+        ``level``은 호출부(scheduler)가 redis에서 읽어 넘긴다. notifier가 직접 읽지 않는
+        이유는 이 클래스가 저장소를 모르는 채로 남아야 테스트에서 redis 없이 세워지기
+        때문이다 — ``alert_mode``와 같은 방식이다.
         """
         if not self.enabled:
             return False
@@ -367,6 +377,7 @@ class TelegramNotifier:
                         analysis_data=analysis_data,
                     ),
                     KIND_ALERT,
+                    level,
                 )
             )
             return True

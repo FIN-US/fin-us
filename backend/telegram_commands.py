@@ -36,8 +36,11 @@ from .redis_state import (
 )
 from .presentation import (
     AGENT_LABELS,
+    DEFAULT_TELEGRAM_USER_LEVEL,
     KIND_ANALYSIS,
     KIND_QUOTE,
+    LEVEL_BEGINNER,
+    LEVEL_INTERMEDIATE,
     REASONING_FOOTNOTE_MAX_CHARS,
     REASONING_FOOTNOTE_SEPARATOR,
     TELEGRAM_TRUNCATION_SUFFIX,
@@ -45,6 +48,8 @@ from .presentation import (
     clamp as _clamp,
     reasoning_footnote,
     kind_for_agent,
+    level_label,
+    normalize_level,
     render,
 )
 from .services import llm_chat, run_mcp_tool
@@ -73,6 +78,18 @@ from .stock_code import (
 logger = logging.getLogger(__name__)
 
 ALERT_COMMAND_HELP = "사용법: /alerts urgent | all | off | status"
+LEVEL_COMMAND_HELP = "사용법: /level 초보 | 중급"
+LEVEL_ONBOARDING_QUESTION = "주식 투자 얼마나 익숙하세요?"
+# 온보딩은 이 한 문항이 전부다. 지식 퀴즈로 수준을 판정하지 않는다 — 봇이 사용자를 시험하는
+# 관계가 되는 순간 설명을 켜 두는 것이 창피한 일이 되고, 그러면 초보 모드가 쓰이지 않는다.
+START_MESSAGE = "\n".join(
+    [
+        "안녕하세요. 이 봇은 시세·공시·매매를 텔레그램에서 다룹니다.",
+        "",
+        LEVEL_ONBOARDING_QUESTION,
+        "초보를 고르면 낯선 용어에 한 줄 설명이 붙습니다. 나중에 /level 로 바꿀 수 있어요.",
+    ]
+)
 BUY_COMMAND_HELP = "사용법: /buy <종목명> <수량> [지정가]"
 SELL_COMMAND_HELP = "사용법: /sell <종목명> <수량> [지정가]"
 WATCH_COMMAND_HELP = "사용법: /watch add <종목명> | remove <종목명> | list"
@@ -90,6 +107,7 @@ ORDER_CONFIRM_CALLBACK = "order:confirm"
 ORDER_CANCEL_CALLBACK = "order:cancel"
 ORDER_STALE_CALLBACK_TEXT = "이전 주문 버튼입니다. 최신 주문 메시지에서 다시 선택하세요."
 ALERT_CALLBACK_PREFIX = "alerts:"
+LEVEL_CALLBACK_PREFIX = "level:"
 BALANCE_REFRESH_CALLBACK = "balance:refresh"
 TRADE_CALLBACK_PREFIX = "trade:"
 LOOKUP_CALLBACK_PREFIX = "lookup:"
@@ -203,6 +221,7 @@ TELEGRAM_INTERACTIVE_HELP = "\n".join(
     [
         "사용 가능한 명령:",
         "/alerts urgent|all|off|status - Telegram 알림 모드 변경",
+        "/level 초보|중급 - 용어 설명 표시 수준 변경",
         "/balance - 예수금·총자산·보유 종목 조회",
         "/watch add <종목명>|remove <종목명>|list - 관심 종목 관리",
         "/catalysts <종목명> - 예정 촉매 이벤트 조회",
@@ -228,6 +247,8 @@ TELEGRAM_BOT_COMMANDS = [
     {"command": "trend", "description": "종목 외국인·기관·개인 수급 조회"},
     {"command": "earnings", "description": "DART 실적·뉴스 분석"},
     {"command": "alerts", "description": "Telegram 알림 모드 변경"},
+    {"command": "level", "description": "용어 설명 표시 수준 변경 (초보/중급)"},
+    {"command": "start", "description": "봇 소개와 수준 설정"},
     {"command": "visualize", "description": "Unity 포트폴리오 시각화 링크"},
     {"command": "trade", "description": "매수·매도 주문 입력 안내"},
     {"command": "lookup", "description": "현재가·수급 조회 입력 안내"},
@@ -267,6 +288,32 @@ PROGRESS_DONE_MESSAGE = "✅ 분석 완료"
 
 _telegram_command_task: asyncio.Task | None = None
 
+# 설명 수준 캐시 (#297). 값 자체는 거의 바뀌지 않으므로 짧게 들고 있어도 사용자가 체감할
+# 지연은 없고, /level로 바꾸면 _apply_level이 그 자리에서 캐시를 갱신하므로 즉시 반영된다.
+LEVEL_CACHE_TTL_SECONDS = 60.0
+# 읽기에 실패했을 때는 더 길게 기다린다. 실패의 지배적 원인은 redis 부재이고 그건 다음
+# 1초 안에 낫지 않는다 — 짧게 잡으면 장애 내내 메시지마다 소켓 타임아웃을 다시 문다.
+LEVEL_LOOKUP_FAILURE_COOLDOWN_SECONDS = 300.0
+_level_cache: tuple[str, float] | None = None
+
+
+def _level_cache_get(now: float) -> str | None:
+    if _level_cache is None or now >= _level_cache[1]:
+        return None
+    return _level_cache[0]
+
+
+def _level_cache_put(level: str, expires_at: float) -> None:
+    global _level_cache
+    _level_cache = (level, expires_at)
+
+
+def reset_level_cache() -> None:
+    """캐시를 비운다. 테스트가 수준 저장소를 갈아끼울 때 쓴다."""
+    global _level_cache
+    _level_cache = None
+
+
 def _telegram_text(text: str, limit: int = TELEGRAM_MESSAGE_LIMIT) -> str:
     return _clamp(text, limit)
 
@@ -274,21 +321,22 @@ def _telegram_text(text: str, limit: int = TELEGRAM_MESSAGE_LIMIT) -> str:
 _reasoning_footnote = reasoning_footnote
 
 
-def _nat_answer_message(result: Any) -> str:
+def _nat_answer_message(result: Any, level: str = DEFAULT_TELEGRAM_USER_LEVEL) -> str:
     """NAT 응답을 텔레그램 메시지로 만든다 (#260, #297).
 
     ``routed_agent``/``tools_used``는 ``services.NatAnswer``가 실어 오는 속성이다.
     속성이 없는 값(구버전 경로, 문자열만 주는 대역)이면 각주 없이 본문만 보낸다.
 
-    #297에서 조립을 presentation.render에 위임했다. 마크다운 정리가 함께 붙지만 각주의
-    모양과 길이 예산 규칙은 그대로다 — 각주 자리를 먼저 확보한 뒤 본문을 나머지에 맞춘다.
-    틀은 라우팅된 에이전트로 정한다(매매일지 답변은 일지 틀). 본문을 파싱해 추측하지 않는
-    것이 #260 각주와 같은 원칙이다.
+    #297에서 조립을 presentation.render에 위임했다. 마크다운 정리와 용어 각주가 함께
+    붙지만 추론 각주의 모양과 길이 예산 규칙은 그대로다 — 각주 자리를 먼저 확보한 뒤 본문을
+    나머지에 맞춘다. 틀은 라우팅된 에이전트로 정한다(매매일지 답변은 일지 틀). 본문을 파싱해
+    추측하지 않는 것이 #260 각주와 같은 원칙이다.
     """
     routed_agent = getattr(result, "routed_agent", None)
     return render(
         result,
         kind_for_agent(routed_agent),
+        level,
         reasoning=reasoning_footnote(routed_agent, getattr(result, "tools_used", ())),
     )
 
@@ -406,6 +454,12 @@ class TelegramCommandHandler:
         command, bot_username, argument = _telegram_command_parts(text)
         if self._matches_command(command, bot_username, "/alerts"):
             await self._handle_alerts(argument)
+            return
+        if self._matches_command(command, bot_username, "/level"):
+            await self._handle_level(argument)
+            return
+        if self._matches_command(command, bot_username, "/start"):
+            await self._handle_start()
             return
         if self._matches_command(command, bot_username, "/help"):
             await self._send_text_or_raise(
@@ -615,6 +669,9 @@ class TelegramCommandHandler:
             )
             return
 
+        if data.startswith(LEVEL_CALLBACK_PREFIX):
+            await self._handle_level_callback(callback_query_id, data)
+            return
         if data.startswith(ALERT_CALLBACK_PREFIX):
             await self._handle_alerts_callback(callback_query_id, data)
             return
@@ -823,6 +880,100 @@ class TelegramCommandHandler:
                 reply_markup=self._alerts_reply_markup(),
             )
 
+    async def _handle_start(self) -> None:
+        """봇 소개 + 수준 1문항. /start는 텔레그램이 첫 대화에서 자동으로 보내는 명령이다 (#297).
+
+        여기서 수준을 저장하지 않는다 — 버튼을 누르지 않고 넘어간 사용자도 기본값(초보)으로
+        동작해야 한다. 저장은 버튼 콜백이나 /level에서만 일어난다.
+        """
+        await self._send_text_or_raise(
+            START_MESSAGE,
+            reply_markup=self._level_reply_markup(),
+        )
+
+    async def _handle_level(self, argument: str) -> None:
+        """/level 초보|중급. 인자가 없으면 현재 설정을 버튼과 함께 보여준다 (#297).
+
+        /alerts와 같은 모양을 일부러 지켰다 — 두 명령 다 "이 채팅의 표시 설정"이고,
+        인자 없이 치면 현재 상태가 나오는 규칙이 명령마다 다르면 사용자가 외울 것이 늘어난다.
+        """
+        parts = argument.split()
+        if not parts:
+            level = await self._current_level()
+            await self._send_text_or_raise(
+                f"현재 설명 수준: {level_label(level)}\n{LEVEL_COMMAND_HELP}",
+                reply_markup=self._level_reply_markup(),
+            )
+            return
+
+        requested = normalize_level(parts[0])
+        if requested is None:
+            await self._send_text_or_raise(
+                LEVEL_COMMAND_HELP,
+                reply_markup=self._level_reply_markup(),
+            )
+            return
+
+        await self._apply_level(requested)
+
+    async def _apply_level(self, level: str) -> None:
+        async with self._state() as state:
+            await state.set_telegram_user_level(level)
+        # 저장이 성공한 뒤에만 캐시를 갱신한다. 먼저 갱신하면 저장에 실패한 값이 이 프로세스
+        # 안에서만 적용된 것처럼 보이고, 재시작 후 조용히 되돌아간다.
+        _level_cache_put(level, time.monotonic() + LEVEL_CACHE_TTL_SECONDS)
+        await self._send_text_or_raise(
+            self._level_changed_message(level),
+            reply_markup=self._level_reply_markup(),
+        )
+
+    def _level_changed_message(self, level: str) -> str:
+        if level == LEVEL_BEGINNER:
+            detail = "낯선 용어가 나오면 한 줄 설명을 붙여 드립니다."
+        else:
+            detail = "용어 설명 없이 내용만 보냅니다."
+        return f"설명 수준을 {level_label(level)}(으)로 바꿨습니다. {detail}"
+
+    async def _handle_level_callback(self, callback_query_id: str, data: str) -> None:
+        requested = normalize_level(data.removeprefix(LEVEL_CALLBACK_PREFIX).strip())
+        if requested is None:
+            await self._answer_callback_query(callback_query_id, text="지원하지 않는 버튼입니다.")
+            return
+        await self._answer_callback_query(callback_query_id)
+        await self._apply_level(requested)
+
+    async def _current_level(self) -> str:
+        """저장된 설명 수준. 읽지 못하면 기본값(초보) (#297).
+
+        redis를 만지는 다른 명령(/alerts·/buy)과 달리 여기서 예외를 삼킨다. 그 명령들은
+        redis 장애가 곧 명령의 실패지만, 수준은 **다른 메시지의 곁다리 정보**다 —
+        수준을 못 읽었다고 시세나 알림 자체를 실패시키면, 부가 기능이 본 기능의 가용성을
+        떨어뜨리는 꼴이 된다. 못 읽으면 설명을 붙이는 쪽(초보)으로 떨어진다: 아는 사람에게
+        설명이 한 줄 붙는 쪽이, 모르는 사람이 설명을 못 받는 쪽보다 덜 나쁘다.
+
+        캐시는 성능이 아니라 그 fail-open을 싸게 만들기 위한 것이다. 캐시가 없으면 redis가
+        죽어 있는 동안 나가는 **모든** 메시지가 소켓 타임아웃(3초, #268)을 한 번씩 문다 —
+        조회도 답변도 3초씩 늦어지는데 그 대가로 얻는 것은 어차피 기본값이다. 그래서 실패는
+        더 길게 기억한다.
+
+        캐시가 인스턴스가 아니라 모듈 수준인 이유: 이 설정은 채팅 하나에 하나뿐이고
+        (알림 모드와 같은 단일 키), 폴러가 핸들러를 다시 세워도 같은 값이어야 한다.
+        """
+        now = time.monotonic()
+        cached = _level_cache_get(now)
+        if cached is not None:
+            return cached
+        try:
+            async with self._state() as state:
+                level = await state.get_telegram_user_level()
+            ttl = LEVEL_CACHE_TTL_SECONDS
+        except Exception as exc:
+            logger.warning("설명 수준을 읽지 못해 기본값을 씁니다: %s", exc)
+            level = DEFAULT_TELEGRAM_USER_LEVEL
+            ttl = LEVEL_LOOKUP_FAILURE_COOLDOWN_SECONDS
+        _level_cache_put(level, now + ttl)
+        return level
+
     async def _handle_watch(self, argument: str) -> None:
         parts = argument.split(None, 1)
         subcommand = parts[0].lower() if parts else "list"
@@ -942,7 +1093,7 @@ class TelegramCommandHandler:
             await self._send_text_or_raise(f"조회 실패: {_short_error(exc)}")
             return
         await self._send_text_or_raise(
-            render(result, KIND_QUOTE),
+            render(result, KIND_QUOTE, await self._current_level()),
             reply_markup=self._market_reply_markup("trend", chat_id, stock),
         )
 
@@ -1293,6 +1444,22 @@ class TelegramCommandHandler:
             ]
         }
 
+    def _level_reply_markup(self) -> dict[str, Any]:
+        return {
+            "inline_keyboard": [
+                [
+                    {
+                        "text": "🌱 처음이에요",
+                        "callback_data": f"{LEVEL_CALLBACK_PREFIX}{LEVEL_BEGINNER}",
+                    },
+                    {
+                        "text": "📈 좀 해봤어요",
+                        "callback_data": f"{LEVEL_CALLBACK_PREFIX}{LEVEL_INTERMEDIATE}",
+                    },
+                ]
+            ]
+        }
+
     def _alerts_reply_markup(self) -> dict[str, Any]:
         return {
             "inline_keyboard": [
@@ -1508,7 +1675,7 @@ class TelegramCommandHandler:
             await self._send_text_or_raise(f"조회 실패: {_short_error(exc)}")
             return
         await self._send_text_or_raise(
-            render(result, KIND_QUOTE),
+            render(result, KIND_QUOTE, await self._current_level()),
             reply_markup=self._market_reply_markup("quote", chat_id, stock),
         )
 
@@ -1677,6 +1844,9 @@ class TelegramCommandHandler:
         # 접수 즉시 진행 메시지를 남기고, 응답이 오면 그 메시지를 치운 뒤 답변을
         # 새 메시지로 보낸다(편집은 푸시 알림을 발생시키지 않는다).
         progress_message_id = await self._send_progress_message(NAT_PROGRESS_MESSAGE)
+        # NAT 호출 전에 읽는다. 호출 뒤로 미루면 수십 초짜리 LLM 왕복이 끝난 다음에 redis
+        # 왕복이 한 번 더 붙어 진행 메시지가 그만큼 더 오래 남는다.
+        level = await self._current_level()
         try:
             result = await self.llm_runner(
                 "nat",
@@ -1694,7 +1864,7 @@ class TelegramCommandHandler:
         await self._clear_progress_message(progress_message_id)
         # _nat_answer_message(→ presentation.render)가 각주 자리를 확보한 뒤 본문을 길이
         # 한도에 맞춘다 (#260, #297).
-        await self._send_text_settled(_nat_answer_message(result))
+        await self._send_text_settled(_nat_answer_message(result, level))
 
     @asynccontextmanager
     async def _state(self):

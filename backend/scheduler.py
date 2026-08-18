@@ -20,7 +20,12 @@ from .services import (
 from .models import Portfolio
 from .timeutil import KST
 from .watchlist_repo import SqliteWatchlistRepo
-from .presentation import KIND_ALERT, KIND_BRIEFING, render
+from .presentation import (
+    DEFAULT_TELEGRAM_USER_LEVEL,
+    KIND_ALERT,
+    KIND_BRIEFING,
+    render,
+)
 from .telegram_notifier import telegram_notifier
 from .telegram_notifier import should_send_telegram_alert
 
@@ -452,6 +457,7 @@ async def _send_due_catalyst_alerts(
     *,
     notifier: Any,
     today: date,
+    level: str = DEFAULT_TELEGRAM_USER_LEVEL,
 ) -> None:
     try:
         due_events = await catalyst_repo.list_due_for_notification(watchlist, today=today)
@@ -462,7 +468,7 @@ async def _send_due_catalyst_alerts(
     for event in due_events:
         try:
             sent = await notifier.send_text(
-                render(_format_catalyst_alert(event), KIND_ALERT)
+                render(_format_catalyst_alert(event), KIND_ALERT, level)
             )
             if sent is True:
                 await catalyst_repo.mark_notification_sent(
@@ -714,11 +720,19 @@ async def _send_telegram_alert_if_needed(
         alert_mode = await state.get_telegram_alert_mode() if state is not None else "urgent"
         if not should_send_telegram_alert(analysis_data, alert_mode=alert_mode):
             return
+        # 알림 모드와 같은 저장소에서 같은 타이밍에 읽는다 (#297). state가 없으면(=redis
+        # 없이 도는 경로) 기본값으로 떨어져 설명이 붙는 쪽을 택한다.
+        level = (
+            await state.get_telegram_user_level()
+            if state is not None
+            else DEFAULT_TELEGRAM_USER_LEVEL
+        )
         await telegram_notifier.send_analysis_alert(
             stock,
             source,
             analysis_data,
             alert_mode=alert_mode,
+            level=level,
         )
     except Exception as e:
         logger.error("[%s:%s] Telegram 알림 처리 중 오류: %s", source, stock, e)
@@ -848,7 +862,11 @@ async def ping_task():
     })
 
 
-async def morning_briefing_task(watchlist_repo: SqliteWatchlistRepo | None = None):
+async def morning_briefing_task(
+    watchlist_repo: SqliteWatchlistRepo | None = None,
+    *,
+    level: str = DEFAULT_TELEGRAM_USER_LEVEL,
+):
     try:
         if watchlist_repo is None:
             watchlist_repo = SqliteWatchlistRepo(lambda: Session(engine))
@@ -860,7 +878,7 @@ async def morning_briefing_task(watchlist_repo: SqliteWatchlistRepo | None = Non
 
         briefing = await generate_morning_briefing(watchlist)
         message = telegram_notifier.format_morning_briefing(briefing)
-        await telegram_notifier.send_text(render(message, KIND_BRIEFING))
+        await telegram_notifier.send_text(render(message, KIND_BRIEFING, level))
     except Exception as e:
         logger.error("모닝 브리핑 작업 중 오류: %s", e)
 
