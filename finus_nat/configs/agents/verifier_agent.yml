@@ -1,0 +1,57 @@
+base: diary_agent.yml
+# base: 체인의 성격과 공유 도구 정의 위치는 configs/common.yml 상단 주석을 참조한다 (#284).
+#
+# 이 파일은 주문 보조(#299)의 NAT 쪽 절반이다. 두 가지를 얹는다:
+#   1) backend 전용 HTTP 엔드포인트 2개 (general.front_end.endpoints)
+#   2) 그중 하나가 노출하는 order_verifier 함수
+#
+# 사슬 위치: diary_agent.yml과 router*.yml 사이다. 라우터가 base로 이 파일을 가리키므로
+# 여섯 에이전트 정의는 그대로 상속되고, 라우터가 실제로 로드하는 설정에 아래 엔드포인트가
+# 함께 들어온다. supervisor의 브랜치 6개는 건드리지 않는다 — 검증자는 브랜치가 아니다.
+
+general:
+  front_end:
+    _type: fastapi
+    # NAT은 endpoints의 각 항목마다 function_name이 가리키는 함수의 시그니처에서
+    # 요청/응답 스키마를 파생한다 (nat/builder/function_info.py FunctionDescriptor):
+    #   - 단일 BaseModel 인자  -> 그 모델의 JSON이 곧 요청 본문 (래핑 없음)
+    #   - 그 외 인자          -> {"<인자이름>": 값} 형태의 InputArgsSchema
+    #   - BaseModel 반환      -> 그 모델의 JSON이 곧 응답 본문
+    #   - str 반환            -> {"value": "<문자열>"} (OutputArgsSchema)
+    # 즉 아래 두 엔드포인트의 직렬화 형식이 서로 다르다. backend/order_assist.py의
+    # _post_propose_order / _post_verify_order 주석이 같은 계약을 반대편에서 고정한다.
+    endpoints:
+      # 제안 생성. strategy_agent가 아니라 strategy_branch_agent(fe_branch)를 노출한다 —
+      # fe_branch가 _run_with_gate(도구 강제 환각 게이트)를 감싸고 있으므로, 이 엔드포인트로
+      # 들어온 요청도 채팅 경로와 똑같이 게이트를 통과한다. 안쪽 react_agent를 직접 노출하면
+      # 주문 제안이라는 가장 위험한 경로만 게이트 밖으로 빠져나간다.
+      # fe_branch는 ChatRequestOrMessage를 받고 str을 반환하므로
+      # 요청 {"input_message": "..."} / 응답 {"value": "..."}이다.
+      - path: /v1/propose-order
+        method: POST
+        description: "Order proposal: strategy branch agent behind the tool-enforcement gate (#299)."
+        function_name: strategy_branch_agent
+
+      # 검증. order_verifier는 VerifyOrderRequest를 받고 OrderVerdict를 반환하므로
+      # 요청·응답 모두 그 모델의 JSON 그대로다.
+      - path: /v1/verify-order
+        method: POST
+        description: "Order verifier: single-shot APPROVE/REJECT on a pre-checked proposal (#299)."
+        function_name: order_verifier
+
+llms:
+  # 기존 에이전트별 LLM 설정 관례를 그대로 따른다 — 전용 env로 모델만 갈아끼울 수 있게.
+  verifier_openai_llm:
+    _type: openai
+    api_key: ${OPENAI_API_KEY}
+    base_url: ${OPENAI_API_BASE_URL:-${OPENAI_BASE_URL:-https://api.openai.com/v1}}
+    model_name: ${VERIFIER_OPENAI_CHAT_MODEL:-gpt-5.4-mini}
+
+functions:
+  # react_agent가 아니라 단발 LLM 호출 + pydantic 파싱 커스텀 함수다. 도구는 없다.
+  # 환각 게이트 밖인 이유와 fail-closed 규칙은 src/nat_finus_nat/verifier.py 모듈
+  # docstring에 있다.
+  order_verifier:
+    _type: finus_order_verifier
+    llm_name: verifier_openai_llm
+    timeout_sec: ${FINUS_ORDER_VERIFIER_TIMEOUT_SEC:-30}
