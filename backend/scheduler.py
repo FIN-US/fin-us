@@ -16,6 +16,7 @@ from .services import (
     run_mcp_tool,
     check_signal_significance,
     generate_morning_briefing,
+    take_last_signal_score,
 )
 from .models import Portfolio
 from .timeutil import KST
@@ -761,6 +762,9 @@ async def _monitor_signal(
             last_signal = await state.get_last_signal_text(source.name, stock)
 
         # 2. 유의미성 판단 (Local Model or Mini LLM API)
+        #    #298: 판정은 |score| >= 임계값이다. bool 뒤에 딸린 점수·근거·불확실성은
+        #    take_last_signal_score()로 꺼내 분석 리포트와 알림까지 실어 나른다.
+        #    채점을 하지 못했으면(fail-open) None이며, 그대로 null로 남는다.
         is_significant = await check_signal_significance(
             stock,
             current_signal,
@@ -768,6 +772,7 @@ async def _monitor_signal(
             source=source.name,
             provider=FILTER_PROVIDER,
         )
+        signal_score = take_last_signal_score()
 
         if not is_significant:
             await _set_last_signal_state(state, source.name, stock, current_signal, current_digest)
@@ -782,6 +787,7 @@ async def _monitor_signal(
             session,
             trigger_source=source.name,
             trigger_signal=current_signal,
+            signal_score=signal_score,
         )
         await _set_last_signal_state(state, source.name, stock, current_signal, current_digest)
 

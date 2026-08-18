@@ -2160,3 +2160,115 @@ def test_portfolio_endpoint_includes_price_known_flag(client):
             for row in session.exec(select(Portfolio)).all():
                 session.delete(row)
             session.commit()
+
+# --- #298: 신호 점수가 분석까지 흘러가는지 ---------------------------------
+
+
+@pytest.mark.asyncio
+async def test_monitor_signal_passes_signal_score_to_analysis(monkeypatch):
+    """2차 필터가 매긴 점수가 perform_stock_analysis까지 도달해야 한다.
+
+    check_signal_significance는 bool만 돌려주고 점수는 사이드 채널
+    (services.take_last_signal_score)로 온다. 스케줄러가 그걸 꺼내 넘기지 않으면
+    점수는 로그에만 남고 DB·알림에서 사라진다 — 그래서 여기서는 필터를
+    monkeypatch하지 않고 llm_chat만 갈아끼워 실제 채점 경로를 태운다.
+    """
+    from backend import services
+    from ..scheduler import SignalSource, monitor_market_task
+
+    state = RedisSchedulerState(FakeRedis())
+
+    @asynccontextmanager
+    async def fake_redis_state():
+        yield state
+
+    async def mock_run_mcp_tool(params, name, args):
+        if name == "get_balance":
+            return "[보유 종목 리스트]\n- 삼성전자 (005930): 10주"
+        return "삼성전자, 대형 수주 공시\n증권가 목표주가 상향"
+
+    async def fake_llm_chat(provider, prompt, *, conversation_id=None):
+        return '{"score": 3, "reason": "대형 수주 공시", "headline_scores": [3, 2]}'
+
+    monkeypatch.setattr(services, "llm_chat", fake_llm_chat)
+
+    mock_perform_analysis = MagicMock(return_value=asyncio.Future())
+    mock_perform_analysis.return_value.set_result({"summary": "Mocked"})
+    mock_broadcast = MagicMock(return_value=asyncio.Future())
+    mock_broadcast.return_value.set_result(None)
+
+    monkeypatch.setattr("backend.scheduler.redis_state", fake_redis_state)
+    monkeypatch.setattr(
+        "backend.scheduler.SIGNAL_SOURCES",
+        [SignalSource(name="news", mcp_params=object(), tool_name="get_market_news")],
+    )
+    monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
+    monkeypatch.setattr("backend.scheduler.perform_stock_analysis", mock_perform_analysis)
+    monkeypatch.setattr("backend.scheduler.manager.broadcast", mock_broadcast)
+    monkeypatch.setattr(
+        "backend.scheduler._sync_portfolio_from_balance",
+        lambda balance_text, session, **kwargs: None,
+    )
+
+    await monitor_market_task(watchlist_repo=FakeWatchlistRepo())
+
+    assert mock_perform_analysis.call_count == 1
+    passed = mock_perform_analysis.call_args.kwargs["signal_score"]
+    assert passed is not None
+    assert passed.score == 3
+    assert passed.reason == "대형 수주 공시"
+    assert passed.headline_scores == (3, 2)
+    assert passed.uncertainty == 0.5
+
+
+@pytest.mark.asyncio
+async def test_monitor_signal_passes_none_when_scoring_fails_open(monkeypatch):
+    """채점에 실패하면 분석은 계속하되(fail-open) 점수는 null로 넘어가야 한다.
+
+    실패를 0점으로 넘기면 "모델이 중립이라고 판단함"이라는 없던 사실이 DB에 남는다.
+    """
+    from backend import services
+    from ..scheduler import SignalSource, monitor_market_task
+
+    state = RedisSchedulerState(FakeRedis())
+
+    @asynccontextmanager
+    async def fake_redis_state():
+        yield state
+
+    async def mock_run_mcp_tool(params, name, args):
+        if name == "get_balance":
+            return "[보유 종목 리스트]\n- 삼성전자 (005930): 10주"
+        return "삼성전자 관련 뉴스"
+
+    async def exploding_llm_chat(provider, prompt, *, conversation_id=None):
+        raise RuntimeError("ollama 연결 실패")
+
+    monkeypatch.setattr(services, "llm_chat", exploding_llm_chat)
+
+    mock_perform_analysis = MagicMock(return_value=asyncio.Future())
+    mock_perform_analysis.return_value.set_result({"summary": "Mocked"})
+    mock_broadcast = MagicMock(return_value=asyncio.Future())
+    mock_broadcast.return_value.set_result(None)
+
+    monkeypatch.setattr("backend.scheduler.redis_state", fake_redis_state)
+    monkeypatch.setattr(
+        "backend.scheduler.SIGNAL_SOURCES",
+        [SignalSource(name="news", mcp_params=object(), tool_name="get_market_news")],
+    )
+    monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
+    monkeypatch.setattr("backend.scheduler.perform_stock_analysis", mock_perform_analysis)
+    monkeypatch.setattr("backend.scheduler.manager.broadcast", mock_broadcast)
+    monkeypatch.setattr(
+        "backend.scheduler._sync_portfolio_from_balance",
+        lambda balance_text, session, **kwargs: None,
+    )
+
+    await monitor_market_task(watchlist_repo=FakeWatchlistRepo())
+
+    # fail-open: 분석은 수행된다
+    assert mock_perform_analysis.call_count == 1
+    passed = mock_perform_analysis.call_args.kwargs["signal_score"]
+    assert passed is not None
+    assert passed.is_significant is True
+    assert passed.score is None

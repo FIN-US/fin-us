@@ -1717,3 +1717,319 @@ def test_morning_briefing_from_text_skips_non_briefing_candidates():
         "브리핑 키 없는 후보가 reversed 선두에 와도 건너뛰고 올바른 후보를 써야 한다"
     )
     assert result["watchlist"] == ["삼성전자"]
+
+
+# --- #298: 신호 유의성 점수화 -----------------------------------------------
+
+
+def test_parse_signal_score_reads_score_reason_and_headline_scores():
+    parsed = services.parse_signal_score(
+        '{"score": -2, "reason": "주요 고객 이탈 보도", "headline_scores": [-3, -2, -1]}'
+    )
+
+    assert parsed is not None
+    assert parsed.score == -2
+    assert parsed.reason == "주요 고객 이탈 보도"
+    assert parsed.headline_scores == (-3, -2, -1)
+    assert parsed.is_significant is True
+
+
+def test_parse_signal_score_ignores_prose_around_the_json():
+    """경량 모델은 JSON만 달라고 해도 설명을 앞뒤로 붙인다. 그걸로 실패하면 안 된다."""
+    parsed = services.parse_signal_score(
+        '분석 결과입니다.\n{"score": 3, "reason": "대형 수주 공시", "headline_scores": [3]}\n감사합니다.'
+    )
+
+    assert parsed is not None
+    assert parsed.score == 3
+
+
+def test_parse_signal_score_clamps_out_of_range_and_rounds_floats():
+    """레인지를 벗어난 값은 버리지 않고 자른다 — 방향 정보는 살아 있다.
+
+    이 경계 처리를 파싱 실패로 바꾸면 하필 대형 신호(모델이 7점을 주는 경우)에서만
+    fail-open이 잦아진다.
+    """
+    assert services.parse_signal_score('{"score": 9}').score == 3
+    assert services.parse_signal_score('{"score": -9}').score == -3
+    assert services.parse_signal_score('{"score": 2.4}').score == 2
+    assert services.parse_signal_score('{"score": "2"}').score == 2
+    assert (
+        services.parse_signal_score('{"score": 1, "headline_scores": [8, -8]}').headline_scores
+        == (3, -3)
+    )
+
+
+def test_parse_signal_score_rejects_non_numeric_score():
+    """숫자로 볼 수 없으면 실패(None)로 떨어뜨린다 — 점수를 지어내지 않는다.
+
+    bool은 int의 하위형이라 별도로 막지 않으면 True가 1점으로 샌다.
+    """
+    assert services.parse_signal_score('{"score": "매우 긍정적"}') is None
+    assert services.parse_signal_score('{"score": null}') is None
+    assert services.parse_signal_score('{"score": true}') is None
+    assert services.parse_signal_score('{"reason": "점수 없음"}') is None
+
+
+def test_parse_signal_score_returns_none_for_broken_json():
+    assert services.parse_signal_score('{"score": -2, "reason": ') is None
+    assert services.parse_signal_score("YES") is None
+    assert services.parse_signal_score("") is None
+
+
+def test_parse_signal_score_drops_unusable_headline_entries():
+    parsed = services.parse_signal_score(
+        '{"score": 1, "headline_scores": [2, "몰라", null, -1]}'
+    )
+
+    assert parsed is not None
+    assert parsed.headline_scores == (2, -1)
+
+
+def test_parse_signal_score_collapses_multiline_reason():
+    """reason은 알림 한 줄에 들어간다. 줄바꿈이 그대로 들어가면 메시지 형식이 깨진다."""
+    parsed = services.parse_signal_score('{"score": 2, "reason": "수주\\n공시\\n확인"}')
+
+    assert parsed is not None
+    assert parsed.reason == "수주 공시 확인"
+
+
+def test_parse_signal_score_truncates_overlong_reason():
+    parsed = services.parse_signal_score(
+        '{"score": 2, "reason": "%s"}' % ("가" * 500)
+    )
+
+    assert parsed is not None
+    assert len(parsed.reason) == services._SIGNAL_REASON_MAX_CHARS
+
+
+def test_signal_score_uncertainty_is_none_below_two_headlines():
+    """1건이면 0.0이 아니라 None이다. 0.0은 '기사들이 완전히 일치했다'는 뜻이다."""
+    assert services.signal_score_uncertainty([]) is None
+    assert services.signal_score_uncertainty([2]) is None
+
+
+def test_signal_score_uncertainty_is_population_stdev():
+    assert services.signal_score_uncertainty([2, 2, 2]) == 0.0
+    assert services.signal_score_uncertainty([-3, 3]) == 3.0
+    assert services.signal_score_uncertainty([1, 2]) == 0.5
+
+
+def test_parse_signal_score_computes_uncertainty_from_headline_scores():
+    """불확실성은 LLM이 신고한 값이 아니라 기사별 점수에서 코드로 계산해야 한다."""
+    parsed = services.parse_signal_score(
+        '{"score": 0, "headline_scores": [3, -3], "uncertainty": 0.0}'
+    )
+
+    assert parsed is not None
+    assert parsed.uncertainty == 3.0  # LLM이 준 0.0이 아니라 코드 계산값
+
+    single = services.parse_signal_score('{"score": 2, "headline_scores": [2]}')
+    assert single is not None
+    assert single.uncertainty is None
+
+
+@pytest.mark.parametrize(
+    ("score", "threshold", "expected"),
+    [
+        (0, 2, False),
+        (1, 2, False),
+        (-1, 2, False),
+        (2, 2, True),
+        (-2, 2, True),
+        (3, 2, True),
+        (1, 1, True),
+        (2, 3, False),
+        (-3, 3, True),
+    ],
+)
+def test_significance_is_threshold_on_absolute_score(monkeypatch, score, threshold, expected):
+    """유의성은 |score| >= 임계값이다. 부호(호재/악재)는 판정에 영향을 주지 않는다."""
+    monkeypatch.setattr(services, "SIGNAL_SCORE_THRESHOLD", threshold)
+
+    parsed = services.parse_signal_score('{"score": %d}' % score)
+
+    assert parsed is not None
+    assert parsed.is_significant is expected
+
+
+@pytest.mark.asyncio
+async def test_score_signal_fails_open_when_llm_call_raises(monkeypatch):
+    """REQ-04: LLM 호출이 실패해도 유의미로 통과시킨다. 단 점수는 null로 남긴다.
+
+    이 fail-open이 없으면 ollama가 죽어 있는 동안 대형 악재가 통째로 묻힌다.
+    """
+    async def exploding_llm_chat(provider, prompt, *, conversation_id=None):
+        raise RuntimeError("ollama 연결 실패")
+
+    monkeypatch.setattr(services, "llm_chat", exploding_llm_chat)
+
+    scored = await services.score_signal("삼성전자", "긴급 공시", source="news")
+
+    assert scored.is_significant is True
+    assert scored.score is None
+    assert scored.reason is None
+    assert scored.uncertainty is None
+
+
+@pytest.mark.asyncio
+async def test_score_signal_fails_open_when_response_is_unparseable(monkeypatch):
+    async def fake_llm_chat(provider, prompt, *, conversation_id=None):
+        return "죄송합니다. 점수를 매길 수 없습니다."
+
+    monkeypatch.setattr(services, "llm_chat", fake_llm_chat)
+
+    scored = await services.score_signal("삼성전자", "긴급 공시", source="news")
+
+    assert scored.is_significant is True
+    assert scored.score is None
+
+
+@pytest.mark.asyncio
+async def test_score_signal_skips_empty_and_unchanged_content(monkeypatch):
+    """채점 이전에 걸러지는 경로는 LLM을 부르지 않고, 점수도 남기지 않는다."""
+    calls = []
+
+    async def fake_llm_chat(provider, prompt, *, conversation_id=None):
+        calls.append(prompt)
+        return '{"score": 3}'
+
+    monkeypatch.setattr(services, "llm_chat", fake_llm_chat)
+
+    empty = await services.score_signal("삼성전자", "", source="news")
+    unchanged = await services.score_signal("삼성전자", "같은 뉴스", "같은 뉴스", source="news")
+
+    assert empty.is_significant is False and empty.score is None
+    assert unchanged.is_significant is False and unchanged.score is None
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_score_signal_prompt_states_the_scale_and_headline_count(monkeypatch):
+    prompts = []
+
+    async def fake_llm_chat(provider, prompt, *, conversation_id=None):
+        prompts.append(prompt)
+        return '{"score": 2, "reason": "수주", "headline_scores": [2, 2, 2]}'
+
+    monkeypatch.setattr(services, "llm_chat", fake_llm_chat)
+
+    await services.score_signal(
+        "삼성전자",
+        "기사1 - 내용\n기사2 - 내용\n기사3 - 내용",
+        source="news",
+        provider="ollama",
+    )
+
+    prompt = prompts[0]
+    # 단계별 기준이 프롬프트에 명시돼야 한다 — 축을 모델 상상에 맡기면 재현성이 없다.
+    assert "+3:" in prompt and "-3:" in prompt and " 0:" in prompt
+    assert "기사 3건" in prompt
+    assert "headline_scores" in prompt
+
+
+@pytest.mark.asyncio
+async def test_check_signal_significance_still_returns_plain_bool(monkeypatch):
+    """공개 계약 유지: 반환값은 bool이다. 점수는 사이드 채널로만 노출한다."""
+    async def fake_llm_chat(provider, prompt, *, conversation_id=None):
+        return '{"score": -3, "reason": "회계 이슈", "headline_scores": [-3, -2]}'
+
+    monkeypatch.setattr(services, "llm_chat", fake_llm_chat)
+
+    result = await services.check_signal_significance("삼성전자", "감리 착수", source="news")
+
+    assert result is True
+
+    scored = services.take_last_signal_score()
+    assert scored is not None
+    assert scored.score == -3
+    assert scored.reason == "회계 이슈"
+    assert scored.uncertainty == 0.5
+
+
+@pytest.mark.asyncio
+async def test_take_last_signal_score_is_consumed_once(monkeypatch):
+    """두 번째 호출은 None이어야 한다 — 남겨 두면 다음 종목이 앞 종목의 점수를 물려받는다."""
+    async def fake_llm_chat(provider, prompt, *, conversation_id=None):
+        return '{"score": 2}'
+
+    monkeypatch.setattr(services, "llm_chat", fake_llm_chat)
+
+    await services.check_signal_significance("삼성전자", "수주 공시", source="news")
+
+    assert services.take_last_signal_score() is not None
+    assert services.take_last_signal_score() is None
+
+
+@pytest.mark.asyncio
+async def test_check_news_significance_keeps_delegating(monkeypatch):
+    async def fake_llm_chat(provider, prompt, *, conversation_id=None):
+        return '{"score": 0, "reason": "홍보성 기사"}'
+
+    monkeypatch.setattr(services, "llm_chat", fake_llm_chat)
+
+    result = await services.check_news_significance("삼성전자", "신제품 홍보")
+
+    assert result is False
+    assert services.take_last_signal_score().score == 0
+
+
+@pytest.mark.asyncio
+async def test_perform_stock_analysis_persists_signal_score(monkeypatch):
+    """2차 필터의 채점 결과가 AgentReport와 API 응답 양쪽에 실려야 한다.
+
+    perform_stock_analysis가 signal_score를 무시하면 점수가 DB에도 알림에도 남지
+    않고, 나중에 평가셋으로 모델을 검증할 방법이 사라진다.
+    """
+    async def fake_llm_chat(provider, prompt, *, conversation_id=None):
+        return "plain analysis"
+
+    async def fake_run_mcp_tool(params, tool_name, arguments):
+        return "삼성전자 (005930, KOSPI)"
+
+    monkeypatch.setattr(services, "llm_chat", fake_llm_chat)
+    monkeypatch.setattr(services, "run_mcp_tool", fake_run_mcp_tool)
+
+    scored = services.SignalScore(
+        score=-2,
+        reason="주요 고객 이탈 보도",
+        uncertainty=1.5,
+        headline_scores=(-3, 0),
+        is_significant=True,
+    )
+
+    session = FakeSession()
+    result = await services.perform_stock_analysis(
+        "삼성전자", "openai", session, signal_score=scored
+    )
+
+    assert session.report.signal_score == -2
+    assert session.report.signal_reason == "주요 고객 이탈 보도"
+    assert session.report.signal_uncertainty == 1.5
+    assert result["signal_score"] == -2
+    assert result["signal_reason"] == "주요 고객 이탈 보도"
+    assert result["signal_uncertainty"] == 1.5
+
+
+@pytest.mark.asyncio
+async def test_perform_stock_analysis_leaves_signal_score_null_without_filter(monkeypatch):
+    """필터를 거치지 않은 경로(수동 분석·API 직접 호출)는 세 값 모두 null이어야 한다.
+
+    0으로 채우면 "모델이 중립으로 채점했다"는 없던 사실이 생긴다 (#122·#162).
+    """
+    async def fake_llm_chat(provider, prompt, *, conversation_id=None):
+        return "plain analysis"
+
+    async def fake_run_mcp_tool(params, tool_name, arguments):
+        return "삼성전자 (005930, KOSPI)"
+
+    monkeypatch.setattr(services, "llm_chat", fake_llm_chat)
+    monkeypatch.setattr(services, "run_mcp_tool", fake_run_mcp_tool)
+
+    session = FakeSession()
+    result = await services.perform_stock_analysis("삼성전자", "openai", session)
+
+    assert session.report.signal_score is None
+    assert session.report.signal_reason is None
+    assert session.report.signal_uncertainty is None
+    assert result["signal_score"] is None

@@ -166,3 +166,65 @@ def test_visualization_url_is_trimmed_and_trailing_slash_preserved(monkeypatch):
     reloaded = importlib.reload(config)
 
     assert reloaded.VISUALIZATION_URL == "https://finus-visual.example/portfolio/"
+
+
+# --- #298: 신호 점수 임계값 -------------------------------------------------
+
+
+@pytest.fixture
+def restore_config():
+    """env를 바꿔 config를 reload한 테스트가 끝나면 원래 env로 되돌린다.
+
+    importlib.reload는 모듈 객체를 제자리에서 바꾸므로, 되돌리지 않으면 뒤따르는
+    테스트가 이 테스트의 env로 계산된 상수를 보게 된다.
+    """
+    yield
+    importlib.reload(config)
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("1", 1),
+        ("3", 3),
+        (" 2 ", 2),
+    ],
+)
+def test_signal_score_threshold_reads_valid_env(monkeypatch, restore_config, raw, expected):
+    monkeypatch.setenv("SIGNAL_SCORE_THRESHOLD", raw)
+
+    assert importlib.reload(config).SIGNAL_SCORE_THRESHOLD == expected
+
+
+@pytest.mark.parametrize("raw", ["0", "4", "-2", "높음", "1.5", ""])
+def test_signal_score_threshold_falls_back_to_default_on_bad_env(
+    monkeypatch, restore_config, raw
+):
+    """범위를 벗어난 임계값은 조용히 파이프라인을 망가뜨린다.
+
+    0이면 모든 signal이 유의미해져 2차 필터가 사라지고(비용 폭증), 4 이상이면 어떤
+    점수도 통과하지 못해 감시가 영구히 침묵한다(놓침). 둘 다 사고이므로 기본값 2로
+    되돌린다.
+    """
+    monkeypatch.setenv("SIGNAL_SCORE_THRESHOLD", raw)
+
+    assert importlib.reload(config).SIGNAL_SCORE_THRESHOLD == 2
+
+
+def test_signal_score_threshold_defaults_to_two_when_unset(monkeypatch, restore_config):
+    monkeypatch.delenv("SIGNAL_SCORE_THRESHOLD", raising=False)
+
+    assert importlib.reload(config).SIGNAL_SCORE_THRESHOLD == 2
+
+
+def test_signal_uncertainty_alert_threshold_rejects_negative_and_garbage(
+    monkeypatch, restore_config
+):
+    monkeypatch.setenv("SIGNAL_UNCERTAINTY_ALERT_THRESHOLD", "-1")
+    assert importlib.reload(config).SIGNAL_UNCERTAINTY_ALERT_THRESHOLD == 1.0
+
+    monkeypatch.setenv("SIGNAL_UNCERTAINTY_ALERT_THRESHOLD", "높음")
+    assert importlib.reload(config).SIGNAL_UNCERTAINTY_ALERT_THRESHOLD == 1.0
+
+    monkeypatch.setenv("SIGNAL_UNCERTAINTY_ALERT_THRESHOLD", "0.75")
+    assert importlib.reload(config).SIGNAL_UNCERTAINTY_ALERT_THRESHOLD == 0.75

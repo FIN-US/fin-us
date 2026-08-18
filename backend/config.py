@@ -78,6 +78,53 @@ _MCP_ENV_ALLOWED_PREFIXES = ("FIN_US_", "FINUS_KIS_", "KIS_")
 DATABASE_URL = os.environ.get("DATABASE_URL") or f"sqlite:///{_FIN_US_ROOT}/backend/finus.db"
 DB_ECHO = os.getenv("DB_ECHO", "false").lower() == "true"
 
+# 신호 유의성 점수화 (#298).
+# 2차 필터(services.check_signal_significance)가 YES/NO 대신 -3~+3 정수를 받는다.
+# 레인지를 좁게 잡은 것은 의도다 — 경량 모델은 0~100 같은 넓은 축에서 재현성이 없다.
+SIGNAL_SCORE_MIN = -3
+SIGNAL_SCORE_MAX = 3
+
+
+def _int_env_in_range(name: str, default: int, low: int, high: int) -> int:
+    """정수 env를 [low, high]로 강제한다. 값이 없거나 이상하면 default로 되돌린다.
+
+    범위를 벗어난 임계값은 조용히 파이프라인을 망가뜨린다 — 0이면 모든 signal이
+    유의미해져 필터가 사라지고, 4 이상이면 어떤 점수도 통과하지 못해 감시가
+    영구히 침묵한다. 둘 다 "놓침 방지"(REQ-04) 관점에서 사고이므로 받아들이지 않는다.
+    """
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    if not low <= value <= high:
+        return default
+    return value
+
+
+# |score| >= 이 값이면 유의미로 판정한다. 1이면 약한 호재/악재까지 상세 분석을 태우고,
+# 3이면 대형 이벤트만 통과한다. 기본 2 = "방향이 분명한" 신호부터.
+SIGNAL_SCORE_THRESHOLD = _int_env_in_range("SIGNAL_SCORE_THRESHOLD", 2, 1, SIGNAL_SCORE_MAX)
+
+
+def _float_env(name: str, default: float) -> float:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        return default
+    return value if value >= 0 else default
+
+
+# 기사별 점수의 표준편차가 이 값 이상이면 "기사 간 평가 엇갈림"을 알림에 표시한다.
+# 기본 1.0 = 7단계 축에서 기사들이 한 칸 넘게 흩어졌다는 뜻.
+SIGNAL_UNCERTAINTY_ALERT_THRESHOLD = _float_env("SIGNAL_UNCERTAINTY_ALERT_THRESHOLD", 1.0)
+
+
 # Redis cache/lock settings for scheduler state.
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 

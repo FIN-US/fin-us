@@ -2,8 +2,10 @@ import json
 import httpx
 import logging
 import re
+from contextvars import ContextVar
 from datetime import date
-from typing import Any, Literal, NamedTuple, Optional, get_args, overload
+from statistics import pstdev
+from typing import Any, Literal, NamedTuple, Optional, Sequence, get_args, overload
 from urllib.parse import quote as _url_quote
 from fastapi import HTTPException
 from anthropic import AsyncAnthropic
@@ -19,6 +21,7 @@ from .config import (
     OLLAMA_API_KEY, OLLAMA_MODEL, OLLAMA_BASE_URL,
     NAT_BASE_URL, NAT_CHAT_MODEL, NAT_CONVERSATION_ID,
     NEWS_MCP_PARAMS, TRADING_MCP_PARAMS,
+    SIGNAL_SCORE_MIN, SIGNAL_SCORE_MAX, SIGNAL_SCORE_THRESHOLD,
 )
 from .schemas import TradingSignal, AnalysisReport
 from .models import AgentReport
@@ -320,6 +323,7 @@ async def perform_stock_analysis(
     *,
     trigger_source: str | None = None,
     trigger_signal: str | None = None,
+    signal_score: "SignalScore | None" = None,
     conversation_id: str | None = None,
 ) -> dict[str, Any]:
     """
@@ -331,6 +335,10 @@ async def perform_stock_analysis(
 
     provider=openai/anthropic/ollama: 도구 없이 일반 배경 설명만 생성한다.
     decision·confidence_score는 저장하지 않는다 (DB와 API 응답 모두 null).
+
+    signal_score: 감시 파이프라인의 2차 필터가 매긴 채점 결과 (#298). 필터를 거치지
+    않은 경로(수동 분석, API 직접 호출)는 None이며, 이때 신호 점수 세 필드는 모두
+    null로 남는다 — 0으로 채우지 않는다.
     """
     key = normalize_llm_provider(provider)
     supports_tools = provider_supports_tools(key)
@@ -366,6 +374,15 @@ async def perform_stock_analysis(
     data["provider"] = key
     data["provider_supports_tools"] = supports_tools
 
+    # #298: 2차 필터의 채점 결과도 같은 자리에서 응답·DB 양쪽에 붙인다. 알림
+    # 포매터(telegram_notifier.format_analysis_alert)는 이 세 키만 보고 영향도 줄을
+    # 만들므로, 여기서 빠지면 알림에서 조용히 사라진다.
+    data["signal_score"] = signal_score.score if signal_score is not None else None
+    data["signal_reason"] = signal_score.reason if signal_score is not None else None
+    data["signal_uncertainty"] = (
+        signal_score.uncertainty if signal_score is not None else None
+    )
+
     # 분석 리포트를 데이터베이스에 자동으로 저장
     try:
         stock_code = await _resolve_stock_code(stock)
@@ -378,6 +395,9 @@ async def perform_stock_analysis(
             confidence_score=confidence_score,
             reason=reason,
             provider_supports_tools=supports_tools,
+            signal_score=data["signal_score"],
+            signal_reason=data["signal_reason"],
+            signal_uncertainty=data["signal_uncertainty"],
         )
         session.add(report)
         session.commit()
@@ -473,6 +493,229 @@ def _string_list(value: Any) -> list[str]:
     return []
 
 
+class SignalScore(NamedTuple):
+    """2차 필터가 signal 하나에 대해 내린 채점 결과 (#298).
+
+    ``score``/``reason``/``uncertainty``가 None인 것과 0/""인 것은 다른 상태다.
+    None은 "채점하지 못했다", 0은 "무관/중립이라고 채점했다"이다 (#122·#162).
+    """
+
+    score: Optional[int]
+    reason: Optional[str]
+    uncertainty: Optional[float]
+    headline_scores: tuple[int, ...]
+    is_significant: bool
+
+
+# 채점에 실패했을 때의 결과. is_significant=True가 핵심이다 (REQ-04 fail-open):
+# 경량 LLM이 죽었다고 상세 분석까지 건너뛰면 진짜 대형 악재를 통째로 놓친다.
+# 점수는 null로 남겨 "통과시켰지만 몇 점인지는 모른다"를 사후에 구분할 수 있게 한다.
+_FAIL_OPEN_SIGNAL_SCORE = SignalScore(None, None, None, (), True)
+# 채점 이전에 걸러진 signal(빈 내용, 직전과 동일 내용). LLM을 부르지도 않았으므로 점수가 없다.
+_SKIPPED_SIGNAL_SCORE = SignalScore(None, None, None, (), False)
+
+# reason은 알림 한 줄에 들어간다. 모델이 장문을 뱉으면 잘라 쓴다.
+_SIGNAL_REASON_MAX_CHARS = 120
+# 채점 프롬프트에 넣는 signal 본문 상한 (기존 YES/NO 필터와 동일하게 유지).
+_SIGNAL_SNIPPET_CHARS = 1000
+
+# 직전 check_signal_significance 호출의 채점 결과를 담는 사이드 채널.
+#
+# check_signal_significance의 반환형은 bool로 유지한다 — "유의미한가"는 이 함수의
+# 공개 계약이고, 호출부(scheduler, check_news_significance)와 테스트가 그 계약에
+# 의존한다. 점수·근거·불확실성은 그 판정에 딸린 진단 정보이므로, 반환형을 바꿔
+# 모든 호출부를 흔드는 대신 컨텍스트 지역 변수로 흘린다.
+#
+# ContextVar를 쓰는 이유: 감시 루프는 종목·소스마다 별개의 asyncio 태스크로 갈릴 수
+# 있고, 모듈 전역 변수는 그때 서로의 점수를 덮어쓴다. ContextVar는 태스크별로
+# 격리되면서, await로 이어진 같은 태스크 안에서는 호출부에 그대로 보인다.
+_last_signal_score: ContextVar[Optional[SignalScore]] = ContextVar(
+    "fin_us_last_signal_score", default=None
+)
+
+
+def take_last_signal_score() -> Optional[SignalScore]:
+    """직전 채점 결과를 꺼내고 비운다. 채점이 없었으면 None.
+
+    꺼내면서 비우는 것이 중요하다. 남겨 두면 다음 종목이 채점 경로를 타지 않고
+    지나갈 때(테스트에서 함수가 monkeypatch된 경우 등) 앞 종목의 점수를 자기
+    것으로 착각한다.
+    """
+    value = _last_signal_score.get()
+    _last_signal_score.set(None)
+    return value
+
+
+def _coerce_signal_score(value: Any) -> Optional[int]:
+    """임의의 JSON 값을 -3~+3 정수로 좁힌다. 숫자로 볼 수 없으면 None.
+
+    소수(2.5)는 반올림한다 — 프롬프트는 정수를 요구하지만 경량 모델은 자주 어긴다.
+    레인지를 벗어난 값(7, -9)은 버리지 않고 끝값으로 자른다: "아주 큰 호재"라는
+    방향 정보 자체는 유효하고, 이걸 파싱 실패로 처리하면 하필 대형 신호에서만
+    fail-open이 잦아진다. bool은 int의 하위형이라 True가 1점으로 새는 것을 막는다.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, str):
+        try:
+            value = float(value.strip())
+        except ValueError:
+            return None
+    if not isinstance(value, (int, float)):
+        return None
+    if value != value or value in (float("inf"), float("-inf")):  # NaN/±inf
+        return None
+    return max(SIGNAL_SCORE_MIN, min(SIGNAL_SCORE_MAX, int(round(value))))
+
+
+def signal_score_uncertainty(headline_scores: Sequence[int]) -> Optional[float]:
+    """기사별 점수의 표준편차. 기사가 2건 미만이면 None.
+
+    LLM에게 확신도를 묻지 않고 코드로 계산한다 — 모델이 스스로 신고하는 확신도는
+    보정되지 않은 값이지만, "여러 기사가 서로 다른 방향을 가리킨다"는 관측된 사실이다.
+
+    모집단 표준편차(pstdev)를 쓴다: 이 기사 묶음은 더 큰 모집단에서 뽑은 표본이
+    아니라 판단에 실제로 쓴 전부다. 1건이면 0.0이 아니라 None이다 — 0.0은
+    "기사들이 완전히 일치했다"는 뜻이고, 1건은 흩어짐을 정의할 수 없는 상태다.
+    """
+    if len(headline_scores) < 2:
+        return None
+    return pstdev(headline_scores)
+
+
+def parse_signal_score(raw: str) -> Optional[SignalScore]:
+    """채점 응답 텍스트에서 SignalScore를 뽑는다. 실패하면 None.
+
+    None은 호출부에서 fail-open(유의미 취급)으로 이어진다. 그래서 "적당히 넘겨
+    짚기"보다 명확히 실패로 떨어뜨리는 편이 안전하다 — 점수를 지어내면 그 값이
+    DB와 평가셋에 그대로 남지만, 실패는 null로 남아 구분된다.
+    """
+    for data in _json_objects_from_text(raw or ""):
+        score = _coerce_signal_score(data.get("score"))
+        if score is None:
+            continue
+
+        raw_reason = data.get("reason")
+        reason: Optional[str] = None
+        if isinstance(raw_reason, str):
+            # 알림 한 줄에 들어가므로 줄바꿈을 접는다.
+            collapsed = " ".join(raw_reason.split())
+            reason = collapsed[:_SIGNAL_REASON_MAX_CHARS] or None
+
+        raw_headlines = data.get("headline_scores")
+        headline_scores: tuple[int, ...] = ()
+        if isinstance(raw_headlines, list):
+            # 숫자로 볼 수 없는 원소는 버린다. 개수가 기사 수와 어긋날 수 있지만,
+            # 표준편차는 "실제로 채점된 기사들"의 흩어짐이면 충분하다.
+            headline_scores = tuple(
+                coerced
+                for coerced in (_coerce_signal_score(item) for item in raw_headlines)
+                if coerced is not None
+            )
+
+        return SignalScore(
+            score=score,
+            reason=reason,
+            uncertainty=signal_score_uncertainty(headline_scores),
+            headline_scores=headline_scores,
+            is_significant=abs(score) >= SIGNAL_SCORE_THRESHOLD,
+        )
+    return None
+
+
+def _build_signal_score_prompt(stock: str, source: str, snippet: str) -> str:
+    """채점 프롬프트. 단계별 기준을 모두 적어 모델이 축을 스스로 상상하지 않게 한다.
+
+    레인지를 -3~+3으로 좁게 잡은 것은 의도다. 0~100 같은 넓은 축에서 경량 모델은
+    같은 기사에 매번 다른 점수를 준다 — 좁은 축은 재현성을 사고, 잃는 해상도는
+    이 필터가 애초에 필요로 하지 않는다.
+    """
+    headline_count = len([line for line in snippet.splitlines() if line.strip()])
+    return (
+        f"당신은 전문 주식 분석가입니다. 다음은 '{stock}' 종목에 대한 최신 외부 signal입니다.\n"
+        f"signal 출처: {source}\n\n"
+        f"--- signal 내용 ---\n{snippet}\n"
+        "------------------\n\n"
+        f"이 signal이 '{stock}'의 투자 판단에 미치는 영향을 아래 기준으로 채점하십시오.\n"
+        "+3: 실적 서프라이즈, 대형 수주·계약, M&A 등 명확한 대형 호재\n"
+        "+2: 방향이 분명한 호재 (신규 대형 고객사, 의미 있는 가이던스 상향 등)\n"
+        "+1: 약한 호재 또는 우호적인 분위기\n"
+        " 0: 투자 판단과 무관하거나 중립 (홍보성 기사, 단순 시황 나열, 반복되는 내용)\n"
+        "-1: 약한 악재\n"
+        "-2: 방향이 분명한 악재 (가이던스 하향, 주요 고객 이탈 등)\n"
+        "-3: 실적 쇼크, 대형 소송·제재, 회계 이슈 등 명확한 대형 악재\n\n"
+        f"signal 내용은 기사 {headline_count}건이 줄 단위로 이어져 있습니다. "
+        "headline_scores에는 각 기사를 같은 기준으로 따로 채점한 정수를 원문 순서대로 담으십시오.\n\n"
+        "반드시 아래 JSON 객체 하나만 출력하고 다른 설명은 붙이지 마십시오.\n"
+        '{"score": <-3~3 정수>, "reason": "<점수 근거 한 줄, 40자 이내>", '
+        '"headline_scores": [<-3~3 정수>, ...]}'
+    )
+
+
+async def score_signal(
+    stock: str,
+    signal_content: str,
+    last_signal_content: Optional[str] = None,
+    *,
+    source: str = "signal",
+    provider: str = "ollama",
+) -> SignalScore:
+    """외부 signal을 -3~+3으로 채점한다 (#298).
+
+    로컬 초경량 모델(예: gemma4) 또는 경량 API 모델(예: gpt-5.4-mini)을 1차
+    필터로 사용해 비용과 정확도의 균형을 맞춘다.
+
+    호출·파싱에 실패하면 예외를 올리지 않고 fail-open한다 — 유의미로 통과시키되
+    점수는 null로 남긴다 (REQ-04 놓침 방지).
+    """
+    if not signal_content:
+        return _SKIPPED_SIGNAL_SCORE
+
+    if signal_content == last_signal_content:
+        return _SKIPPED_SIGNAL_SCORE
+
+    prompt = _build_signal_score_prompt(
+        stock, source, signal_content[:_SIGNAL_SNIPPET_CHARS]
+    )
+
+    try:
+        # 설정된 provider(ollama, openai 등)에 따라 경량 모델 호출
+        raw = await llm_chat(provider, prompt)
+    except Exception as e:
+        logger.error(
+            "signal 채점 호출 실패 (%s, %s, %s): %s — 유의미로 통과시킵니다(fail-open)",
+            source,
+            stock,
+            provider,
+            e,
+        )
+        return _FAIL_OPEN_SIGNAL_SCORE
+
+    parsed = parse_signal_score(str(raw))
+    if parsed is None:
+        logger.warning(
+            "signal 채점 응답을 파싱하지 못했습니다 [%s:%s] (Provider: %s) — "
+            "유의미로 통과시킵니다(fail-open)",
+            source,
+            stock,
+            provider,
+        )
+        return _FAIL_OPEN_SIGNAL_SCORE
+
+    logger.info(
+        "signal 채점 [%s:%s] (Provider: %s): score=%s, 유의미=%s, 기사별=%s, 흩어짐=%s, 근거=%s",
+        source,
+        stock,
+        provider,
+        parsed.score,
+        parsed.is_significant,
+        list(parsed.headline_scores),
+        parsed.uncertainty,
+        parsed.reason,
+    )
+    return parsed
+
+
 async def check_signal_significance(
     stock: str,
     signal_content: str,
@@ -481,46 +724,22 @@ async def check_signal_significance(
     source: str = "signal",
     provider: str = "ollama"
 ) -> bool:
-    """
-    외부 signal을 분석하여 투자 관점에서 유의미한 변화가 있는지 판단합니다.
-    로컬 초경량 모델(예: gemma4) 또는 경량 API 모델(예: gpt-5.4-mini)을 
-    1차 필터로 사용하여 비용과 정확도의 균형을 맞출 수 있습니다.
-    """
-    if not signal_content:
-        return False
-    
-    if signal_content == last_signal_content:
-        return False
+    """외부 signal이 투자 관점에서 유의미한 변화인지 판단합니다.
 
-    # signal 텍스트 상단 1000자 사용
-    snip_content = signal_content[:1000]
-
-    prompt = (
-        f"당신은 전문 주식 분석가입니다. 다음은 '{stock}' 종목에 대한 최신 외부 signal입니다.\n"
-        f"signal 출처: {source}\n\n"
-        f"--- signal 내용 ---\n{snip_content}\n"
-        "------------------\n\n"
-        "이 signal이 기존 상황을 바꿀 만큼 유의미한 새로운 투자 정보"
-        "(실적 발표, 계약, M&A, 수급 변화, 평판 리스크, 급격한 여론 변화 등)를 포함하고 있습니까?\n"
-        "중요한 변화가 있다면 'YES', 사소하거나 반복되는 signal이라면 'NO'라고만 답하세요.\n"
-        "답변은 반드시 다른 설명 없이 'YES' 또는 'NO' 중 하나로만 대답하십시오."
+    판정은 :func:`score_signal`의 점수를 ``|score| >= SIGNAL_SCORE_THRESHOLD``로
+    환산한 것이다 (#298 이전에는 경량 LLM에 YES/NO를 직접 물었다). 반환형은 bool
+    그대로 유지하고, 점수·근거·불확실성은 :func:`take_last_signal_score`로 꺼낸다
+    (사이드 채널을 쓰는 이유는 ``_last_signal_score`` 주석 참고).
+    """
+    scored = await score_signal(
+        stock,
+        signal_content,
+        last_signal_content,
+        source=source,
+        provider=provider,
     )
-
-    try:
-        # 설정된 provider(ollama, openai 등)에 따라 경량 모델 호출
-        result = await llm_chat(provider, prompt)
-        is_significant = "YES" in result.upper()
-        logger.info(
-            "signal 유의미성 확인 [%s:%s] (Provider: %s): %s",
-            source,
-            stock,
-            provider,
-            is_significant,
-        )
-        return is_significant
-    except Exception as e:
-        logger.error(f"signal 유의미성 확인 중 오류 발생 ({source}, {stock}, {provider}): {e}")
-        return True
+    _last_signal_score.set(scored)
+    return scored.is_significant
 
 
 async def check_news_significance(
