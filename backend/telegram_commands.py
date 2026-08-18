@@ -254,7 +254,8 @@ REASONING_FOOTNOTE_SEPARATOR = "─────"
 REASONING_FOOTNOTE_MAX_CHARS = 300
 
 # NAT supervisor 브랜치명 → 사용자에게 보여줄 한국어 라벨.
-# 키는 finus_nat/configs/router*.yml의 branches[].name과 같아야 한다.
+# 키는 finus_nat/configs/router*.yml의 branches[].name과 같아야 한다 —
+# 누락은 backend/tests/test_label_drift.py가 CI에서 잡는다 (#282).
 AGENT_LABELS: dict[str, str] = {
     "trading_agent": "트레이딩 에이전트",
     "monitoring_agent": "모니터링 에이전트",
@@ -267,7 +268,9 @@ AGENT_LABELS: dict[str, str] = {
 # 도구 강제 원장(finus_nat/src/nat_finus_nat/finus_api.py의 _record_to_ledger 호출부)에
 # 기록되는 내부 도구명 → 사용자에게 보여줄 한국어 라벨.
 # 매핑에 없는 도구는 내부 이름을 그대로 노출한다 — 조용히 감추면 각주가 "확인한 자료"를
-# 실제보다 적게 보여주게 되어, 근거를 보여준다는 목적 자체가 무너진다.
+# 실제보다 적게 보여주게 되어, 근거를 보여준다는 목적 자체가 무너진다. 그렇게 열화가
+# graceful한 만큼 누락을 아무도 눈치채지 못하므로, 원장 도구명과의 드리프트는
+# backend/tests/test_label_drift.py가 CI에서 잡는다 (#282).
 TOOL_LABELS: dict[str, str] = {
     "finus_account_balance": "KIS 시세·계좌 조회",
     "finus_market_news": "뉴스 검색",
