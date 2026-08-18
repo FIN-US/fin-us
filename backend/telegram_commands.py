@@ -45,6 +45,7 @@ from .presentation import (
     REASONING_FOOTNOTE_SEPARATOR,
     TELEGRAM_TRUNCATION_SUFFIX,
     TOOL_LABELS,
+    as_list_items,
     clamp as _clamp,
     reasoning_footnote,
     kind_for_agent,
@@ -115,6 +116,7 @@ WATCH_LIST_CALLBACK = "watch:list"
 WATCH_LIST_QUOTE_DELAY_SECONDS = 1.1
 MARKET_QUOTE_CALLBACK = "market:quote"
 MARKET_TREND_CALLBACK = "market:trend"
+MARKET_TREND_DETAIL_CALLBACK = "market:trend_detail"
 MARKET_STALE_CALLBACK_TEXT = "이전 조회 버튼입니다. 최신 조회 메시지에서 다시 선택하세요."
 MARKET_CALLBACK_LIMIT = 100
 # 실패한 update는 offset을 유지해 재시도한다(일시 장애 때 명령을 버리지 않기 위함).
@@ -344,6 +346,157 @@ def _nat_answer_message(
         reasoning=reasoning_footnote(routed_agent, getattr(result, "tools_used", ())),
         question=question,
     )
+
+
+# ---- 수급 표 (#297 검수 4차) ----
+
+# 텔레그램에서 표는 유지할 수 없다. 한 행이 폭을 넘으면 뒷조각이 아무 열에나 떨어져
+# 정렬이 통째로 무너지고, 폭은 읽는 쪽 글자 크기 설정에 달려 있어 우리가 보장할 수 없다.
+# 그래서 가로 표를 세로 나열로 바꾼다 — 세로는 접혀도 "- " 표시가 항목 경계를 지킨다.
+#
+# 5일 × 3주체를 세로로 펴면 20줄이라 그것대로 안 읽힌다. 기본 메시지는 방향 한 줄과
+# 최근 1일만 보여주고, 5일치는 버튼을 누른 사람에게만 별도 메시지로 보낸다. 링크로 빼지
+# 않는 이유는 목적지 화면이 없기도 하지만, 이 봇의 값이 "텔레그램 안에서 끝난다"는 데
+# 있기 때문이다.
+#
+# mcp-trading/index.js의 getInvestorTrading이 만드는 행을 읽는다. 다른 서비스의 출력
+# 형식에 기대는 파싱이라 깨질 수 있으므로, 한 행도 못 읽으면 원문을 그대로 내보낸다
+# (_format_investor_flow의 None 반환). 형식이 바뀌면 요약이 사라질 뿐 조회는 계속 된다.
+_INVESTOR_ROW_RE = re.compile(
+    r"^\s*(\d{8})\s*\|\s*개인:\s*(-?[\d,]+)\s*\|\s*"
+    r"외국인:\s*(-?[\d,]+)\s*\|\s*기관:\s*(-?[\d,]+)\s*$",
+    re.M,
+)
+# 요약에 싣는 일수. 상세는 MCP가 준 만큼 전부 싣는다(현재 5일).
+TREND_SUMMARY_DAYS = 1
+TREND_DETAIL_BUTTON_TEXT = "📊 5일 상세 보기"
+
+
+@dataclass(frozen=True)
+class InvestorFlow:
+    """하루치 투자자별 순매수 수량(주). 음수면 순매도."""
+
+    date: str
+    individual: int
+    foreign: int
+    institution: int
+
+
+# (표시 이름, 필드명). 순서가 화면 순서다.
+TREND_ACTORS: tuple[tuple[str, str], ...] = (
+    ("개인", "individual"),
+    ("외국인", "foreign"),
+    ("기관", "institution"),
+)
+
+
+def _parse_investor_flows(raw: str) -> list[InvestorFlow]:
+    """수급 응답에서 날짜별 행을 뽑는다. 못 읽으면 빈 목록.
+
+    값이 없는 칸을 "-"로 채우는 행(formatQuantity의 빈 값 처리)은 정규식에 걸리지 않아
+    조용히 빠진다. 그 하루를 요약에서 빼는 편이, 0으로 채워 "순매수도 순매도도 아님"이라고
+    말하는 것보다 낫다 — 없는 데이터를 지어내지 않는다는 이 레포의 선(#162)과 같다.
+    """
+    flows = [
+        InvestorFlow(
+            date=match.group(1),
+            individual=int(match.group(2).replace(",", "")),
+            foreign=int(match.group(3).replace(",", "")),
+            institution=int(match.group(4).replace(",", "")),
+        )
+        for match in _INVESTOR_ROW_RE.finditer(raw)
+    ]
+    # MCP가 최신순으로 준다고 가정하지 않는다. 정렬이 뒤집히면 "3일 연속"이 거꾸로 세어진다.
+    return sorted(flows, key=lambda flow: flow.date, reverse=True)
+
+
+def _format_flow_date(date: str) -> str:
+    return f"{date[4:6]}/{date[6:8]}" if len(date) == 8 else date
+
+
+def _format_flow_rounded(value: int) -> str:
+    """요약용 표기. 만 주 이상은 만 단위로 접는다.
+
+    요약에서 중요한 것은 방향과 규모지 정확한 주수가 아니다. 정확한 값이 필요한 사람은
+    상세 버튼을 누르고, 거기서는 반올림하지 않는다.
+    """
+    if abs(value) >= 10_000:
+        return f"{value / 10_000:+,.0f}만주"
+    return f"{value:+,}주"
+
+
+def _flow_streak(flows: list[InvestorFlow], field: str) -> int:
+    """최근일부터 같은 방향이 이어진 일수. 0이 끼면 거기서 끊는다."""
+    latest = getattr(flows[0], field)
+    if latest == 0:
+        return 0
+    positive = latest > 0
+    streak = 0
+    for flow in flows:
+        value = getattr(flow, field)
+        if value == 0 or (value > 0) != positive:
+            break
+        streak += 1
+    return streak
+
+
+def _trend_headline(flows: list[InvestorFlow]) -> str:
+    """가장 길게 이어진 방향 한 줄. 계산일 뿐 판단이 아니다.
+
+    "외국인 3일 연속 순매수"는 데이터에서 바로 나오는 사실이다. 여기에 그래서 어떻다는
+    말을 붙이지 않는다 — 그건 이 계층이 할 일이 아니고, 붙이는 순간 투자 권유가 된다.
+    """
+    ranked = sorted(
+        (
+            (_flow_streak(flows, field), abs(getattr(flows[0], field)), label, field)
+            for label, field in TREND_ACTORS
+        ),
+        reverse=True,
+    )
+    streak, _, label, field = ranked[0]
+    if streak == 0:
+        return ""
+    direction = "순매수" if getattr(flows[0], field) > 0 else "순매도"
+    if streak == 1:
+        return f"{label} {direction}"
+    return f"{label} {streak}일 연속 {direction}"
+
+
+def _format_flow_block(flow: InvestorFlow, *, rounded: bool) -> list[str]:
+    formatter = _format_flow_rounded if rounded else (lambda value: f"{value:+,}")
+    return [
+        _format_flow_date(flow.date),
+        *as_list_items(
+            [f"{label} {formatter(getattr(flow, field))}" for label, field in TREND_ACTORS]
+        ),
+    ]
+
+
+def _format_trend_summary(stock: str, raw: str) -> str | None:
+    """방향 한 줄 + 최근 1일 세로. 행을 못 읽으면 None (호출부가 원문을 쓴다)."""
+    flows = _parse_investor_flows(str(raw))
+    if not flows:
+        return None
+
+    lines = [f"[{stock}] 투자자 매매동향"]
+    headline = _trend_headline(flows)
+    if headline:
+        lines.append(headline)
+    for flow in flows[:TREND_SUMMARY_DAYS]:
+        lines += ["", *_format_flow_block(flow, rounded=True)]
+    return "\n".join(lines)
+
+
+def _format_trend_detail(stock: str, raw: str) -> str | None:
+    """전체 일수를 세로로. 반올림하지 않는다."""
+    flows = _parse_investor_flows(str(raw))
+    if not flows:
+        return None
+
+    lines = [f"[{stock}] 투자자 매매동향 {len(flows)}일 상세", "단위: 주, +는 순매수"]
+    for flow in flows:
+        lines += ["", *_format_flow_block(flow, rounded=False)]
+    return "\n".join(lines)
 
 
 def _short_error(exc: Exception) -> str:
@@ -703,6 +856,14 @@ class TelegramCommandHandler:
             await self._handle_market_callback(callback_query_id, chat_id, "quote", data)
             return
 
+        # 접두어가 겹치므로 긴 쪽(market:trend_detail)을 먼저 본다. 순서가 바뀌면 상세
+        # 버튼이 요약 경로로 떨어져 같은 메시지가 두 번 나간다.
+        if data.startswith(f"{MARKET_TREND_DETAIL_CALLBACK}:"):
+            await self._handle_market_callback(
+                callback_query_id, chat_id, "trend_detail", data
+            )
+            return
+
         if data.startswith(f"{MARKET_TREND_CALLBACK}:"):
             await self._handle_market_callback(callback_query_id, chat_id, "trend", data)
             return
@@ -847,7 +1008,7 @@ class TelegramCommandHandler:
         if action == "quote":
             await self._handle_quote(stock, chat_id)
         else:
-            await self._handle_trend(stock, chat_id)
+            await self._handle_trend(stock, chat_id, detail=action == "trend_detail")
         # 전송이 성공한 뒤에만 소비한다. 위에서 TelegramSendError가 나면 여기 도달하지
         # 않으므로 재시도가 같은 토큰으로 같은 조회를 다시 수행한다.
         self.market_callbacks.pop(token, None)
@@ -1548,15 +1709,24 @@ class TelegramCommandHandler:
         if len(self.market_callbacks) >= MARKET_CALLBACK_LIMIT:
             self.market_callbacks.pop(next(iter(self.market_callbacks)), None)
         self.market_callbacks[token] = (chat_id, stock)
+        quote_button = {
+            "text": "💵 현재가 보기",
+            "callback_data": f"{MARKET_QUOTE_CALLBACK}:{token}",
+        }
         if action == "quote":
+            return {"inline_keyboard": [[quote_button]]}
+        if action == "trend_detail":
+            # 수급 요약 아래에는 상세가 먼저다. 방금 받은 메시지에 이어지는 동작이라
+            # 다른 종류의 조회(현재가)보다 앞에 온다 (#297 검수 4차).
             return {
                 "inline_keyboard": [
                     [
                         {
-                            "text": "💵 현재가 보기",
-                            "callback_data": f"{MARKET_QUOTE_CALLBACK}:{token}",
+                            "text": TREND_DETAIL_BUTTON_TEXT,
+                            "callback_data": f"{MARKET_TREND_DETAIL_CALLBACK}:{token}",
                         }
-                    ]
+                    ],
+                    [quote_button],
                 ]
             }
         return {
@@ -1668,7 +1838,14 @@ class TelegramCommandHandler:
             return None
         return price_match.group(1).strip(), rate_match.group(1).strip()
 
-    async def _handle_trend(self, argument: str, chat_id: str) -> None:
+    async def _handle_trend(self, argument: str, chat_id: str, *, detail: bool = False) -> None:
+        """수급 조회. 기본은 요약, ``detail``이면 전체 일수를 세로로 (#297 검수 4차).
+
+        두 경로가 같은 MCP 호출을 각자 한 번씩 한다. 요약할 때 상세까지 만들어 들고 있지
+        않는 이유는, 그러려면 버튼을 누를 때까지 원문을 어딘가 보관해야 하고 그 저장소가
+        market_callbacks처럼 또 하나의 만료·용량 관리 대상이 되기 때문이다. 조회 버튼이
+        이미 재조회로 동작하고 있어(현재가·수급 버튼) 규칙도 그쪽과 같아진다.
+        """
         if not argument:
             await self._send_text_or_raise(TREND_COMMAND_HELP)
             return
@@ -1684,14 +1861,20 @@ class TelegramCommandHandler:
         except Exception as exc:
             await self._send_text_or_raise(f"조회 실패: {_short_error(exc)}")
             return
+
+        format_trend = _format_trend_detail if detail else _format_trend_summary
+        # 형식이 바뀌어 파싱이 깨지면 원문을 그대로 보낸다. 요약이 사라질 뿐 조회는 된다.
+        body = format_trend(stock, str(result)) or str(result)
         await self._send_text_or_raise(
             render(
-                result,
+                body,
                 KIND_QUOTE,
                 await self._current_level(),
                 question=argument,
             ),
-            reply_markup=self._market_reply_markup("quote", chat_id, stock),
+            reply_markup=self._market_reply_markup(
+                "trend_detail" if not detail else "quote", chat_id, stock
+            ),
         )
 
     async def _handle_earnings(self, argument: str, chat_id: str) -> None:

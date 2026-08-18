@@ -670,7 +670,14 @@ async def test_trend_command_calls_mcp_runner_with_stock_name():
     assert notifier.actions == ["typing"]
     assert len(notifier.messages) == 1
     assert notifier.messages[0].startswith("수급 응답\n\nℹ️ 수급: ")
-    assert notifier.reply_markups[-1]["inline_keyboard"][0][0]["text"] == "💵 현재가 보기"
+    # 수급 요약 아래에는 상세가 먼저다 — 방금 받은 메시지에 이어지는 동작이라 다른
+    # 종류의 조회(현재가)보다 앞에 온다 (#297 검수 4차).
+    buttons = [
+        button
+        for row in notifier.reply_markups[-1]["inline_keyboard"]
+        for button in row
+    ]
+    assert [button["text"] for button in buttons] == ["📊 5일 상세 보기", "💵 현재가 보기"]
 
 
 @pytest.mark.asyncio
@@ -689,7 +696,13 @@ async def test_trend_result_quote_button_uses_same_stock_name():
     handler = TelegramCommandHandler(notifier=notifier, mcp_runner=mcp_runner)
 
     await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/trend 삼성전자"}})
-    callback_data = notifier.reply_markups[-1]["inline_keyboard"][0][0]["callback_data"]
+    # 자리가 아니라 콜백 접두어로 고른다. 버튼 순서는 이 테스트가 지킬 계약이 아니다.
+    callback_data = next(
+        button["callback_data"]
+        for row in notifier.reply_markups[-1]["inline_keyboard"]
+        for button in row
+        if button["callback_data"].startswith("market:quote:")
+    )
     await handler.handle_update(
         {
             "callback_query": {
