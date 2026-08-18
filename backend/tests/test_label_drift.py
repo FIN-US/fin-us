@@ -30,9 +30,18 @@ import yaml
 from backend.telegram_commands import AGENT_LABELS, TOOL_LABELS
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_FINUS_API_PATH = _REPO_ROOT / "finus_nat" / "src" / "nat_finus_nat" / "finus_api.py"
-_CONFIGS_ROOT = _REPO_ROOT / "finus_nat" / "configs"
-_ROUTER_CONFIGS = [_CONFIGS_ROOT / "router.yml", _CONFIGS_ROOT / "router_nomemory.yml"]
+_FINUS_NAT_ROOT = _REPO_ROOT / "finus_nat"
+_SRC_ROOT = _FINUS_NAT_ROOT / "src"
+_CONFIGS_ROOT = _FINUS_NAT_ROOT / "configs"
+
+# 스캔 대상은 파일 목록이 아니라 **패턴**이다. 오늘 원장 기록은 finus_api.py 한 곳에만,
+# branches는 router 두 파일에만 있지만, 그걸 상수로 박아 두면 새 모듈·새 라우터 config가
+# 검사 밖에서 조용히 자란다 — 이 검사가 막으려던 것과 정확히 같은 실패 모드를 한 겹
+# 안쪽에 다시 만드는 셈이다(1400줄짜리 finus_api.py가 분할되는 시점이 특히 그렇다).
+# telegram_commands.py의 주석도 특정 파일이 아니라 router*.yml로 계약을 적어 뒀다.
+# 두 목록이 비면 검사가 통째로 공허해지므로 아래 test_scan_inputs_are_discovered가 잡는다.
+_SOURCE_FILES = sorted(_SRC_ROOT.rglob("*.py"))
+_ROUTER_CONFIGS = sorted(_CONFIGS_ROOT.glob("router*.yml"))
 
 # 원장 기록 함수와, 그 함수에 도구명을 흘려 보내는 래퍼의 키워드 인자.
 # finus_api.py의 원격 MCP 호출 래퍼는 도구명을 자기 파라미터로 받아 _record_to_ledger에
@@ -86,24 +95,33 @@ def _ledger_tool_name_exprs(tree: ast.Module) -> list[ast.expr]:
 
 
 def _extract_ledger_tool_names() -> tuple[set[str], list[str]]:
-    """(도구명 집합, 정적으로 해석하지 못한 표현식 목록)."""
-    assert _FINUS_API_PATH.exists(), f"finus_nat 소스가 없습니다: {_FINUS_API_PATH}"
-    tree = ast.parse(_FINUS_API_PATH.read_text(encoding="utf-8"))
-    constants = _module_level_str_constants(tree)
+    """finus_nat/src 전체를 훑어 (도구명 집합, 정적으로 해석하지 못한 표현식 목록)을 낸다.
 
+    상수는 파일별로 계산한다 — 모듈이 갈라져도 각자의 최상위 상수로 해석되고, 다른
+    모듈의 동명 상수가 끼어들지 않는다. 남의 모듈에서 import해 온 이름은 미해석으로
+    잡히는데, 그게 맞다: _record_to_ledger의 docstring이 "리터럴이나 모듈 상수로
+    유지하라"를 계약으로 못박아 뒀고, 어긴 자리는 조용히 넘어가는 대신 빨간불이 된다.
+    """
     names: set[str] = set()
     unresolved: list[str] = []
-    for expr in _ledger_tool_name_exprs(tree):
-        if isinstance(expr, ast.Constant) and isinstance(expr.value, str):
-            names.add(expr.value)
-        elif isinstance(expr, ast.Name) and expr.id in constants:
-            names.add(constants[expr.id])
-        elif isinstance(expr, ast.Name) and expr.id == _LEDGER_KWARG:
-            # 래퍼가 자기 파라미터를 그대로 전달하는 자리. 실제 값은 호출부의
-            # ledger_tool_name= 리터럴에서 이미 수집된다.
+    for path in _SOURCE_FILES:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        exprs = _ledger_tool_name_exprs(tree)
+        if not exprs:  # 원장을 건드리지 않는 모듈이 대부분이다
             continue
-        else:
-            unresolved.append(f"{_FINUS_API_PATH.name}:{expr.lineno}: {ast.unparse(expr)}")
+        constants = _module_level_str_constants(tree)
+        for expr in exprs:
+            if isinstance(expr, ast.Constant) and isinstance(expr.value, str):
+                names.add(expr.value)
+            elif isinstance(expr, ast.Name) and expr.id in constants:
+                names.add(constants[expr.id])
+            elif isinstance(expr, ast.Name) and expr.id == _LEDGER_KWARG:
+                # 래퍼가 자기 파라미터를 그대로 전달하는 자리. 실제 값은 호출부의
+                # ledger_tool_name= 리터럴에서 이미 수집된다.
+                continue
+            else:
+                location = path.relative_to(_REPO_ROOT).as_posix()
+                unresolved.append(f"{location}:{expr.lineno}: {ast.unparse(expr)}")
     return names, unresolved
 
 
@@ -150,16 +168,26 @@ def _extract_branch_names(path: Path) -> set[str]:
     return names
 
 
+def test_scan_inputs_are_discovered():
+    """스캔 입력이 비면 아래 검사들이 통째로 공허해지므로 목록부터 확인한다.
+
+    router config 목록은 특히 조용하다 — 비면 parametrize가 빈 파라미터 집합이 되어
+    커버리지 테스트가 실패가 아니라 skip으로 사라진다.
+    """
+    assert _SOURCE_FILES, f"finus_nat 소스를 하나도 찾지 못했습니다: {_SRC_ROOT}"
+    assert _ROUTER_CONFIGS, f"router*.yml을 하나도 찾지 못했습니다: {_CONFIGS_ROOT}"
+
+
 def test_every_ledger_tool_name_is_statically_resolvable():
     """도구명을 하나라도 정적으로 못 읽으면 아래 커버리지 검사가 공허해지므로 먼저 막는다."""
     names, unresolved = _extract_ledger_tool_names()
     assert unresolved == [], (
-        "finus_api.py의 도구 원장 기록에서 도구명을 정적으로 해석하지 못했습니다. "
+        "finus_nat 소스의 도구 원장 기록에서 도구명을 정적으로 해석하지 못했습니다. "
         "리터럴이나 모듈 상수로 되돌리거나, 이 파일의 추출 규칙을 함께 넓히세요 "
         f"(그대로 두면 #282 드리프트 검사가 조용히 비어 갑니다): {unresolved}"
     )
     assert names, (
-        f"{_FINUS_API_PATH.name}에서 도구명을 하나도 찾지 못했습니다 — "
+        f"{_SRC_ROOT.name} 아래에서 도구명을 하나도 찾지 못했습니다 — "
         f"'{_LEDGER_FUNC}' 호출 규약이 바뀌었다면 추출 규칙을 함께 고쳐야 합니다."
     )
 
