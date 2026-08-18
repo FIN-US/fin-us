@@ -61,11 +61,15 @@ def test_format_analysis_alert_uses_plain_text():
 
     # 필드명도 값도 한국어다 (#297 검수 2). decision/urgency는 AgentReport의 정해진
     # 값이라 출력 계층이 결정론적으로 번역한다 — LLM에게 시키면 매번 다른 말이 나온다.
-    assert message.splitlines()[0] == "삼성전자 / disclosure"
-    assert "판단: 보유 유지 (확신도 0.82)" in message
-    assert "이유: 단기 변동성 확대 가능성" in message
-    assert "긴급도: 매우 높음 - 대량보유 변동 공시" in message
-    assert "요약: 대량보유 변동" in message
+    # 제목은 목록 밖이고 값이 늘어선 줄만 "- " 표시를 받는다. 좁은 말풍선에서 줄이 접혀도
+    # 표시 없는 줄은 앞 줄의 계속이라는 뜻이 되므로 항목 경계가 유지된다 (#297 검수 3차).
+    assert message.splitlines() == [
+        "삼성전자 / disclosure",
+        "- 판단: 보유 유지 (확신도 0.82)",
+        "- 이유: 단기 변동성 확대 가능성",
+        "- 긴급도: 매우 높음, 대량보유 변동 공시",
+        "- 요약: 대량보유 변동",
+    ]
 
 
 def test_format_analysis_alert_marks_only_actual_urgent_alerts():

@@ -11,6 +11,7 @@ from .presentation import (
     TELEGRAM_MESSAGE_LIMIT,
     URGENT_ALERT_URGENCIES,
     alert_kind,
+    as_list_items,
     decision_label,
     render,
     urgency_label,
@@ -320,14 +321,17 @@ class TelegramNotifier:
         # 제목에서 "[긴급]"을 뺐다. 긴급 여부는 이제 render가 붙이는 배너(🚨 긴급 알림)가
         # 알리므로, 두 자리에서 같은 말을 하면 한쪽이 바뀔 때 어긋난다. is_urgent는
         # urgency_reason의 기본 문구를 고르는 데 계속 쓴다.
-        lines = [
-            f"{stock} / {source}",
+        items = [
             f"판단: {decision_label(decision)}{confidence_text}",
             f"이유: {reason}",
-            f"긴급도: {urgency_label(urgency)} - {urgency_reason}",
+            # 구분자를 하이픈에서 쉼표로 바꿨다. 줄 앞에 나열 표시("- ")가 붙는 마당에
+            # 줄 가운데 또 하이픈이 있으면 그게 항목 경계로 읽힌다 (#297 검수 3차).
+            f"긴급도: {urgency_label(urgency)}, {urgency_reason}",
         ]
         if summary:
-            lines.append(f"요약: {summary}")
+            items.append(f"요약: {summary}")
+        # 제목은 목록 밖이다. 값이 늘어선 줄만 표시를 받는다.
+        lines = [f"{stock} / {source}", *as_list_items(items)]
         return "\n".join(lines)[:TELEGRAM_MESSAGE_LIMIT]
 
     def format_morning_briefing(self, briefing: dict[str, Any]) -> str:
@@ -348,11 +352,14 @@ class TelegramNotifier:
 
     @staticmethod
     def _format_bullets(items: Any) -> list[str]:
+        # 표시는 presentation.LIST_MARKER 하나로 모은다. 여기서 하이픈을 직접 적으면
+        # 표시를 바꿀 때 이 함수만 조용히 옛 기호로 남는다 (#297 검수 3차).
         if not items:
-            return ["- 없음"]
+            return as_list_items(["없음"])
         if isinstance(items, str):
-            return [f"- {items}"]
-        return [f"- {item}" for item in items if str(item).strip()] or ["- 없음"]
+            return as_list_items([items])
+        values = [str(item) for item in items if str(item).strip()]
+        return as_list_items(values or ["없음"])
 
     async def send_analysis_alert(
         self,

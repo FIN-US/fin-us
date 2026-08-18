@@ -157,6 +157,30 @@ def template_for(kind: str) -> MessageTemplate:
     return TEMPLATES.get(kind, _FALLBACK_TEMPLATE)
 
 
+# 나열 항목 앞에 붙는 표시. 제목 줄에는 붙이지 않는다.
+#
+# 값이 늘어선 메시지(잔고·시세·알림)에서 한 줄이 말풍선 폭을 넘으면 뒷부분이 다음 줄 왼쪽
+# 끝으로 내려간다. 표시가 없으면 그 조각이 새 항목처럼 보인다 — "상한가: 92,600원 / 하한가:"
+# 다음 줄에 "49,900원"만 남으면 그게 값인지 항목인지 알 수 없다. 모든 항목이 표시로 시작하면
+# 표시 없는 줄은 앞 줄의 계속이라는 뜻이 되므로, 접혀도 경계가 유지된다.
+#
+# 텔레그램은 평문이라 정렬(들여쓰기)로는 이걸 못 한다. 읽는 쪽 글꼴·글자 크기 설정에 따라
+# 공백 폭이 달라져 오히려 어긋나 보인다 (#297 검수 3차).
+LIST_MARKER = "-"
+
+
+def as_list_items(lines: list[str]) -> list[str]:
+    """나열 줄에 LIST_MARKER를 붙인다. 이미 붙어 있으면 그대로 둔다.
+
+    제목 줄은 호출부가 목록에서 빼고 넘긴다 — 어느 줄이 제목인지는 데이터의 모양을 아는
+    쪽만 알 수 있고, 여기서 "첫 줄은 제목"으로 못박으면 제목 없는 목록이 머리를 잃는다.
+    """
+    return [
+        line if line.startswith(f"{LIST_MARKER} ") else f"{LIST_MARKER} {line}"
+        for line in lines
+    ]
+
+
 def alert_kind(urgency: Any) -> str:
     """urgency 값에 맞는 알림 틀. 모르는 값이면 일반 알림 (#297).
 
@@ -235,6 +259,8 @@ _HRULE_RE = re.compile(
     re.M,
 )
 _BLOCKQUOTE_RE = re.compile(r"^[ \t]{0,3}>[ \t]?", re.M)
+# 마크다운 글머리표(-, *, +)를 하나로 맞춘다. 목적지는 LIST_MARKER("-")다 — 이 봇의 나열
+# 표시가 그것이고, 소스마다 다른 기호를 쓰면 한 화면에 세 종류가 섞인다.
 _BULLET_RE = re.compile(r"^([ \t]*)[*+\-][ \t]+", re.M)
 _LINK_RE = re.compile(r"!?\[([^\]\n]*)\]\(\s*<?([^)\s]*)>?[^)]*\)")
 _BOLD_STAR_RE = re.compile(r"\*\*(?!\s)(.+?)(?<!\s)\*\*", re.S)
@@ -294,7 +320,7 @@ def sanitize_markdown(text: str) -> str:
     result = _ITALIC_UNDERSCORE_RE.sub(r"\1", result)
     result = _INLINE_CODE_RE.sub(r"\1", result)
     result = _LEFTOVER_EMPHASIS_RE.sub("", result)
-    result = _BULLET_RE.sub(r"\1• ", result)
+    result = _BULLET_RE.sub(rf"\1{LIST_MARKER} ", result)
     result = _ESCAPE_RESTORE_RE.sub(lambda match: chr(int(match.group(1))), result)
     result = _TRAILING_SPACE_RE.sub("", result)
     result = _EXTRA_BLANKS_RE.sub("\n\n", result)
@@ -312,20 +338,11 @@ TERM_FOOTNOTE_MAX_ENTRIES = 2
 # 붙으면 같은 말이 두 줄 반복된다. 표제어와 설명 사이도 줄표(—)가 아니라 콜론이다.
 # 줄표는 한국어 문장에서 자연스럽지 않고, 사전에서 "말: 뜻" 관계를 나타내는 것은 콜론이다.
 TERM_FOOTNOTE_MARK = "ℹ️"
-# 설명이 두 문장이면 둘째 문장부터 이 표시를 달아 줄을 나눈다.
+# 각주 한 개는 한 줄이다. 말풍선 폭을 넘으면 텔레그램이 알아서 접는다.
 #
-# 텔레그램 말풍선은 폭이 좁아(모바일 기본 글꼴에서 반각 44칸 안팎) 긴 줄이 저절로 접히는데,
-# 접힌 뒷줄은 왼쪽 끝에서 시작하므로 새 각주처럼 보인다. 각주가 둘 붙으면 네 줄이 되고 어느
-# 것이 새 항목인지 구분이 안 된다.
-#
-# 공백으로 들여쓰지 않는 이유: 들여쓰기는 읽는 쪽 글꼴·글자 크기 설정에 따라 정렬이 어긋나
-# 오히려 깨져 보인다. 표시는 설정과 무관하게 "이 줄은 앞 줄에 딸린 설명"이라고 말해 준다.
-#
-# 문장을 나누는 일은 코드가 아니라 사전이 한다 — terms.json에 두 문장으로 적으면 두 줄이
-# 된다. 폭을 재서 자동으로 접지 않는 이유는 읽는 쪽 폭을 알 수 없기 때문이다.
-TERM_FOOTNOTE_CONTINUATION_MARK = "-"
-# 문장 끝 마침표 + 공백. 소수점(5.1%)에는 뒤에 공백이 없어 걸리지 않는다.
-_SENTENCE_SPLIT_RE = re.compile(r"\.\s+")
+# 폭에 맞춰 미리 자르지 않는다. 읽는 쪽 화면 폭도 글자 크기 설정도 알 수 없으므로 우리가
+# 고른 지점이 그 사람에게 맞는 지점일 이유가 없고, 어긋나면 접힌 자리가 두 군데가 된다.
+# 설명은 이어지는 한 문장이라 접혀도 이어 읽힌다 — 나열 항목과 달리 경계를 표시할 것이 없다.
 
 
 @dataclass(frozen=True)
@@ -463,23 +480,9 @@ def term_footnote(
     if level != LEVEL_BEGINNER:
         return ""
     entries = find_terms(text, exclude=_terms_in(question))
-    lines: list[str] = []
-    for entry in entries:
-        head, *rest = _description_sentences(entry.description)
-        lines.append(f"{TERM_FOOTNOTE_MARK} {entry.term}: {head}")
-        lines.extend(f"{TERM_FOOTNOTE_CONTINUATION_MARK} {part}" for part in rest)
-    return "\n".join(lines)
-
-
-def _description_sentences(description: str) -> list[str]:
-    """설명을 문장 단위로 쪼갠다. 끝 마침표는 뗀다.
-
-    각주는 문장이 아니라 항목이라 마침표로 닫지 않는다. terms.json은 자연스러운 산문으로
-    적고(마침표 포함), 화면에 나갈 때 여기서 정리한다 — 사전 쪽에 표기 규칙을 하나 더
-    얹으면 사람이 검수할 때 내용 말고 형식을 신경 쓰게 된다.
-    """
-    parts = [part.strip().rstrip(".") for part in _SENTENCE_SPLIT_RE.split(description)]
-    return [part for part in parts if part] or [description]
+    return "\n".join(
+        f"{TERM_FOOTNOTE_MARK} {entry.term}: {entry.description}" for entry in entries
+    )
 
 
 def _terms_in(question: str) -> frozenset[str]:
