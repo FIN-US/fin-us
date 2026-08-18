@@ -8,6 +8,7 @@
 """
 
 import json
+import unicodedata
 
 import pytest
 
@@ -23,6 +24,7 @@ from backend.presentation import (
     LEVEL_INTERMEDIATE,
     REASONING_FOOTNOTE_SEPARATOR,
     TELEGRAM_MESSAGE_LIMIT,
+    TERM_FOOTNOTE_CONTINUATION_MARK,
     TERM_FOOTNOTE_MARK,
     URGENT_ALERT_URGENCIES,
     TermEntry,
@@ -210,6 +212,62 @@ def test_without_a_question_nothing_is_filtered_out(fake_terms):
     fake_terms([DEPOSIT])
 
     assert term_footnote("예수금이 부족합니다.", level=LEVEL_BEGINNER) != ""
+
+
+def test_a_second_sentence_becomes_its_own_marked_line(fake_terms):
+    """말풍선이 좁아 긴 줄은 저절로 접히는데, 접힌 뒷줄은 새 각주처럼 보인다 (#297 검수 3).
+
+    공백으로 들여쓰지 않는다 — 들여쓰기는 읽는 쪽 글꼴 설정에 따라 어긋난다. 표시는
+    설정과 무관하게 "이 줄은 앞 줄에 딸린 설명"이라고 말해 준다.
+    """
+    fake_terms([
+        TermEntry(term="시가총액", description="주가 × 전체 주식 수예요. 회사를 통째로 사면 얼마인지예요.")
+    ])
+
+    assert term_footnote("시가총액이 늘었습니다.", level=LEVEL_BEGINNER) == (
+        f"{TERM_FOOTNOTE_MARK} 시가총액: 주가 × 전체 주식 수예요\n"
+        f"{TERM_FOOTNOTE_CONTINUATION_MARK} 회사를 통째로 사면 얼마인지예요"
+    )
+
+
+def test_a_single_sentence_stays_on_one_line(fake_terms):
+    fake_terms([TermEntry(term="종가", description="그날 장이 끝날 때 마지막 가격이에요.")])
+
+    assert term_footnote("종가 기준입니다.", level=LEVEL_BEGINNER) == (
+        f"{TERM_FOOTNOTE_MARK} 종가: 그날 장이 끝날 때 마지막 가격이에요"
+    )
+
+
+def test_a_decimal_point_does_not_split_a_sentence(fake_terms):
+    """마침표 뒤 공백만 문장 끝으로 본다. 5.1%가 두 줄로 갈라지면 안 된다."""
+    fake_terms([TermEntry(term="5%룰", description="지분 5.1%처럼 5%를 넘기면 공개해야 해요.")])
+
+    assert term_footnote("5%룰 공시입니다.", level=LEVEL_BEGINNER).count("\n") == 0
+
+
+def test_every_shipped_description_fits_a_telegram_bubble():
+    """실제 사전이 한 줄에 들어가는지 확인한다 (#297 검수 3).
+
+    모바일 기본 글꼴 기준 말풍선 한 줄이 반각 44칸 안팎이라 그 자체를 상한으로 삼으면
+    설명이 전보로 변한다 — 검수 지시는 "짧게가 아니라 이해하기 쉽게"였다. 대신 56칸을
+    넘지 않게 해 최악이라도 한 번만 접히게 한다. 이 테스트가 없으면 사전에 문장을
+    보태다가 조용히 예전 상태(중앙값 79칸, 최대 117칸)로 돌아간다.
+    """
+    def width(text):
+        return sum(
+            2 if unicodedata.east_asian_width(char) in "WF" else 1 for char in text
+        )
+
+    too_wide = []
+    for entry in presentation.load_terms(presentation.TERMS_PATH):
+        head, *rest = presentation._description_sentences(entry.description)
+        lines = [f"{TERM_FOOTNOTE_MARK} {entry.term}: {head}"]
+        lines += [f"{TERM_FOOTNOTE_CONTINUATION_MARK} {part}" for part in rest]
+        # 문장 셋 이상은 각주 하나가 세 줄이 된다 (검수 기준 2).
+        assert len(lines) <= 2, entry.term
+        too_wide += [line for line in lines if width(line) > 56]
+
+    assert too_wide == []
 
 
 def test_unknown_words_get_no_footnote(fake_terms):

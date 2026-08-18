@@ -312,6 +312,20 @@ TERM_FOOTNOTE_MAX_ENTRIES = 2
 # 붙으면 같은 말이 두 줄 반복된다. 표제어와 설명 사이도 줄표(—)가 아니라 콜론이다.
 # 줄표는 한국어 문장에서 자연스럽지 않고, 사전에서 "말: 뜻" 관계를 나타내는 것은 콜론이다.
 TERM_FOOTNOTE_MARK = "ℹ️"
+# 설명이 두 문장이면 둘째 문장부터 이 표시를 달아 줄을 나눈다.
+#
+# 텔레그램 말풍선은 폭이 좁아(모바일 기본 글꼴에서 반각 44칸 안팎) 긴 줄이 저절로 접히는데,
+# 접힌 뒷줄은 왼쪽 끝에서 시작하므로 새 각주처럼 보인다. 각주가 둘 붙으면 네 줄이 되고 어느
+# 것이 새 항목인지 구분이 안 된다.
+#
+# 공백으로 들여쓰지 않는 이유: 들여쓰기는 읽는 쪽 글꼴·글자 크기 설정에 따라 정렬이 어긋나
+# 오히려 깨져 보인다. 표시는 설정과 무관하게 "이 줄은 앞 줄에 딸린 설명"이라고 말해 준다.
+#
+# 문장을 나누는 일은 코드가 아니라 사전이 한다 — terms.json에 두 문장으로 적으면 두 줄이
+# 된다. 폭을 재서 자동으로 접지 않는 이유는 읽는 쪽 폭을 알 수 없기 때문이다.
+TERM_FOOTNOTE_CONTINUATION_MARK = "-"
+# 문장 끝 마침표 + 공백. 소수점(5.1%)에는 뒤에 공백이 없어 걸리지 않는다.
+_SENTENCE_SPLIT_RE = re.compile(r"\.\s+")
 
 
 @dataclass(frozen=True)
@@ -449,9 +463,23 @@ def term_footnote(
     if level != LEVEL_BEGINNER:
         return ""
     entries = find_terms(text, exclude=_terms_in(question))
-    return "\n".join(
-        f"{TERM_FOOTNOTE_MARK} {entry.term}: {entry.description}" for entry in entries
-    )
+    lines: list[str] = []
+    for entry in entries:
+        head, *rest = _description_sentences(entry.description)
+        lines.append(f"{TERM_FOOTNOTE_MARK} {entry.term}: {head}")
+        lines.extend(f"{TERM_FOOTNOTE_CONTINUATION_MARK} {part}" for part in rest)
+    return "\n".join(lines)
+
+
+def _description_sentences(description: str) -> list[str]:
+    """설명을 문장 단위로 쪼갠다. 끝 마침표는 뗀다.
+
+    각주는 문장이 아니라 항목이라 마침표로 닫지 않는다. terms.json은 자연스러운 산문으로
+    적고(마침표 포함), 화면에 나갈 때 여기서 정리한다 — 사전 쪽에 표기 규칙을 하나 더
+    얹으면 사람이 검수할 때 내용 말고 형식을 신경 쓰게 된다.
+    """
+    parts = [part.strip().rstrip(".") for part in _SENTENCE_SPLIT_RE.split(description)]
+    return [part for part in parts if part] or [description]
 
 
 def _terms_in(question: str) -> frozenset[str]:
