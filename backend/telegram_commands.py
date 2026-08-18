@@ -115,11 +115,20 @@ UPDATE_SKIPPED_NOTICE = "요청 처리에 실패했어요. 다시 시도해주�
 # 통지에 붙일 실패 명령 요약의 최대 길이. 명령을 연달아 보낸 사용자가 무엇을 다시
 # 보내야 하는지 알 수 있어야 한다 (PR #242 리뷰).
 UPDATE_LABEL_LIMIT = 40
-# 폴러 상태 저장소 호출의 상한. create_redis_client()는 socket_timeout을 주지 않고
-# redis-py asyncio 기본값은 None(무한 대기)이라, 이게 없으면 fail-open이 fail-hang으로 무너진다:
-# redis 호스트가 RST 없이 패킷을 drop하면 _persist_state의 await가 돌아오지 않고, 그 await는
-# run()의 배치 루프 안이라 폴러 태스크가 통째로 멈춘다. except Exception은 예외가 나야 도는데
-# hang은 예외를 내지 않으므로 "인메모리로 계속" 로그조차 남지 않는다.
+# 폴러 상태 저장소 호출의 상한. 이게 없으면 fail-open이 fail-hang으로 무너진다: 저장소가
+# 예외 대신 hang하면 _persist_state의 await가 돌아오지 않고, 그 await는 run()의 배치 루프
+# 안이라 폴러 태스크가 통째로 멈춘다. except Exception은 예외가 나야 도는데 hang은 예외를
+# 내지 않으므로 "인메모리로 계속" 로그조차 남지 않는다.
+#
+# #268이 create_redis_client()에 socket_timeout을 걸어 redis 클라이언트발 hang은 소켓에서
+# 먼저 잘리지만, 이 wait_for는 그대로 남긴다. 두 상한이 덮는 범위가 다르기 때문이다:
+# state_store는 덕 타이핑된 주입 지점이라 redis가 아닌 구현이 들어올 수 있고(테스트의
+# 인메모리 저장소가 그렇다), 소켓 타임아웃은 명령 하나의 상한이지 호출 하나의 상한이 아니다
+# — load()나 save()가 명령을 여럿 쓰게 되면 상한이 그만큼 곱해진다.
+#
+# 두 값이 같아(둘 다 3.0) redis 저장소에서는 어느 쪽이 먼저 발화할지 정해져 있지 않다.
+# 결과는 같고(삼킨 뒤 인메모리로 계속) 로그 문구만 갈린다 — 소켓 쪽이 이기면 "Timeout
+# reading from host:port"가 붙어 원인이 더 분명해진다.
 #
 # 이 PR이 노출을 넓혔다는 점이 근거다: 이전에는 redis를 만지는 명령(/alerts, /buy, /confirm,
 # /cancel)만 이 위험을 졌고 /help·자연어·/watch는 blackhole 중에도 서비스됐지만, 이제 모든
@@ -1939,7 +1948,11 @@ class TelegramCommandPoller:
                 # 재시도 예산 전체(최대 335초)였고 #251이 그걸 handle_update 한 번으로
                 # 줄인다. 삼중 우연(체결 + 전송 실패 + 그 사이 배포)을 요구하고 금전 자체는
                 # 안전하지만(체결은 정상이고 trade_recorder에도 남는다), 오표시가 수동
-                # 재주문을 유발할 수 있어 별도 이슈로 추적한다 (PR #251 리뷰).
+                # 재주문을 유발할 수 있다 (PR #251 리뷰).
+                #
+                # 이 창은 아직 열려 있다. #269가 그 사실을 회귀 테스트로 고정했고
+                # (test_confirmed_order_is_reexecuted_when_restart_lands_in_the_settled_send),
+                # 닫는 작업은 #293이다.
                 await self._persist_state()
 
             if skipped:
