@@ -3,7 +3,7 @@
 이 레포의 원칙은 일관되게 "형식은 코드로 강제하고 LLM은 내용만 만든다"였다 (#129의
 종목코드 검증, #260의 추론 각주). 이 모듈은 그 원칙을 문장 자체에 적용한다.
 
-책임이 셋이다.
+책임이 넷이다.
 
 1. **마크다운 잔재 정리.** 이 봇은 ``sendMessage``에 ``parse_mode``를 넣지 않는다 —
    레포 전체에서 그 키를 쓰는 곳이 없다. 의도된 정책이다: MarkdownV2를 켜면 ``.``·``-``·
@@ -13,7 +13,11 @@
 
 2. **메시지 종류별 틀.** 틀은 이 모듈의 상수고 LLM 출력은 본문 슬롯에만 들어간다.
 
-3. **길이 예산.** 각주 자리를 먼저 확보하고 본문을 자른다 (#260에서 온 규칙).
+3. **용어 각주.** 사전(``terms.json``)에 있는 말만 설명한다. LLM에게 즉석 설명을 시키지
+   않는다 — 틀린 시세는 다음 조회에서 정정되지만 틀린 정의는 사용자의 머릿속에 남는다.
+   환각을 가장 늦게 발견하게 되는 층위가 교육이다.
+
+4. **길이 예산.** 각주 자리를 먼저 확보하고 본문을 자른다 (#260에서 온 규칙).
 
 임포트 방향: 이 모듈은 backend의 어떤 모듈도 임포트하지 않는다. 반대로 telegram_notifier·
 telegram_commands·redis_state가 이쪽을 임포트한다. 텔레그램 전송 계층이 출력 계층을 쓰는데
@@ -23,9 +27,11 @@ telegram_commands·redis_state가 이쪽을 임포트한다. 텔레그램 전송
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -34,6 +40,49 @@ logger = logging.getLogger(__name__)
 # telegram_notifier가 같은 이름으로 재수출한다 (이 모듈이 임포트 그래프의 잎이다).
 TELEGRAM_MESSAGE_LIMIT = 4000
 TELEGRAM_TRUNCATION_SUFFIX = "...(이하 생략)"
+
+
+# ---- 사용자 수준 ----
+
+LEVEL_BEGINNER = "beginner"
+LEVEL_INTERMEDIATE = "intermediate"
+TELEGRAM_USER_LEVELS = (LEVEL_BEGINNER, LEVEL_INTERMEDIATE)
+# 기본값이 초보인 이유: 모르는 사람에게 설명이 한 줄 더 붙는 비용보다, 아는 사람에게
+# 설명이 없어서 뜻을 잘못 짚는 비용이 크다. 아는 사용자는 /level 중급 한 번으로 끈다.
+DEFAULT_TELEGRAM_USER_LEVEL = LEVEL_BEGINNER
+
+LEVEL_LABELS: dict[str, str] = {
+    LEVEL_BEGINNER: "초보",
+    LEVEL_INTERMEDIATE: "중급",
+}
+# 사용자가 실제로 칠 법한 말 → 정규값. 한국어 명령(/level 초보)과 콜백 데이터(level:beginner)가
+# 같은 정규화를 통과해야 두 경로가 갈라지지 않는다.
+_LEVEL_ALIASES: dict[str, str] = {
+    "beginner": LEVEL_BEGINNER,
+    "basic": LEVEL_BEGINNER,
+    "초보": LEVEL_BEGINNER,
+    "초급": LEVEL_BEGINNER,
+    "입문": LEVEL_BEGINNER,
+    "intermediate": LEVEL_INTERMEDIATE,
+    "중급": LEVEL_INTERMEDIATE,
+    "중수": LEVEL_INTERMEDIATE,
+    "숙련": LEVEL_INTERMEDIATE,
+}
+
+
+def normalize_level(value: Any) -> str | None:
+    """사용자 입력·저장값을 정규 수준값으로. 해석할 수 없으면 ``None``.
+
+    ``None``과 기본값을 구분한다 — 호출부가 "못 알아들었다"(사용법 안내)와 "설정이
+    없다"(기본값 적용)를 다르게 처리해야 하기 때문이다.
+    """
+    if not isinstance(value, str):
+        return None
+    return _LEVEL_ALIASES.get(value.strip().casefold())
+
+
+def level_label(level: str) -> str:
+    return LEVEL_LABELS.get(level, level)
 
 
 # ---- 메시지 종류별 틀 ----
@@ -169,6 +218,146 @@ def sanitize_markdown(text: str) -> str:
     return result.strip()
 
 
+# ---- 용어 사전 ----
+
+TERMS_PATH = Path(__file__).with_name("terms.json")
+# 한 메시지에 붙는 용어 각주 개수 상한. 셋을 넘어가면 각주가 본문만큼 길어지고, 그 시점부터
+# 사용자는 각주를 읽지 않는다 — 설명이 없는 것과 같아진다.
+TERM_FOOTNOTE_MAX_ENTRIES = 2
+TERM_FOOTNOTE_PREFIX = "ℹ️ 용어:"
+# 각주 총량이 본문의 몇 배까지 허용되는가. 2배는 "메시지의 2/3까지는 설명이어도 된다"는 뜻이다.
+# 이 상한이 없으면 "수급 응답" 다섯 글자 아래에 마흔 글자짜리 정의가 붙어, 설명이 설명 대상을
+# 밀어낸다. 반대로 너무 빡빡하게 잡으면 한두 문장짜리 답변에서 설명이 통째로 사라진다.
+TERM_FOOTNOTE_MAX_BODY_RATIO = 2
+
+
+@dataclass(frozen=True)
+class TermEntry:
+    term: str
+    description: str
+    aliases: tuple[str, ...] = ()
+
+
+_terms_cache: tuple[TermEntry, ...] | None = None
+_surface_index_cache: tuple[tuple[str, TermEntry], ...] | None = None
+
+
+def load_terms(path: Path | None = None) -> tuple[TermEntry, ...]:
+    """``terms.json``을 읽어 용어 목록을 돌려준다. 실패하면 빈 목록 (#297).
+
+    파일이 깨졌다고 메시지를 못 보내면 안 된다 — 용어 각주는 부가 정보이고, 그것 때문에
+    체결 통지나 긴급 알림이 막히는 것은 명백히 손해다. 대신 경고를 남겨 조용히 사라지지 않게 한다.
+
+    ``path``를 명시하면 캐시를 쓰지도 채우지도 않는다. 테스트가 임시 사전을 끼워 넣어도
+    프로세스 전역 캐시가 오염되지 않게 하기 위해서다.
+    """
+    global _terms_cache, _surface_index_cache
+    if path is None and _terms_cache is not None:
+        return _terms_cache
+
+    target = path or TERMS_PATH
+    entries: list[TermEntry] = []
+    try:
+        raw = json.loads(target.read_text(encoding="utf-8"))
+        for item in raw.get("terms", []):
+            term = str(item.get("term", "")).strip()
+            description = str(item.get("description", "")).strip()
+            if not term or not description:
+                continue
+            aliases = tuple(
+                alias.strip()
+                for alias in item.get("aliases", [])
+                if isinstance(alias, str) and alias.strip()
+            )
+            entries.append(TermEntry(term=term, description=description, aliases=aliases))
+    except Exception as exc:
+        logger.warning("용어 사전을 읽지 못했습니다 (%s): %s", target, exc)
+        entries = []
+
+    result = tuple(entries)
+    if path is None:
+        _terms_cache = result
+        _surface_index_cache = None
+    return result
+
+
+def _surface_index() -> tuple[tuple[str, TermEntry], ...]:
+    """(찾을 문자열, 용어) 목록. 긴 표기가 먼저 오도록 정렬한다.
+
+    "시가총액"과 "시가"가 둘 다 사전에 있으면 같은 자리에서 긴 쪽이 이겨야 한다. 짧은 쪽이
+    이기면 시가총액을 시가로 설명하게 되는데, 이건 설명이 아니라 오답이다.
+    """
+    global _surface_index_cache
+    if _surface_index_cache is not None:
+        return _surface_index_cache
+
+    pairs: list[tuple[str, TermEntry]] = []
+    for entry in load_terms():
+        for surface in (entry.term, *entry.aliases):
+            pairs.append((surface, entry))
+    pairs.sort(key=lambda pair: -len(pair[0]))
+    _surface_index_cache = tuple(pairs)
+    return _surface_index_cache
+
+
+def find_terms(text: str, *, limit: int = TERM_FOOTNOTE_MAX_ENTRIES) -> list[TermEntry]:
+    """본문에서 설명할 용어를 첫 등장 순서로 최대 ``limit``개 고른다 (#297).
+
+    한국어에는 낱말 경계가 없어 부분 문자열 매칭이 불가피하다. 그래서 겹침을 막는 규칙이
+    둘이다. 같은 자리에서는 긴 표기가 이기고(_surface_index), 이미 고른 구간과 겹치는
+    매칭은 버린다. 별칭으로 걸려도 각주에는 대표 용어와 그 설명이 나가고, 같은 용어는
+    본문에 몇 번 나오든 한 번만 설명한다.
+    """
+    if not text or limit <= 0:
+        return []
+
+    hits: list[tuple[int, int, TermEntry]] = []
+    for surface, entry in _surface_index():
+        position = text.find(surface)
+        if position >= 0:
+            hits.append((position, position + len(surface), entry))
+
+    # 위치 오름차순, 같은 위치면 긴 것 먼저.
+    hits.sort(key=lambda hit: (hit[0], -(hit[1] - hit[0])))
+
+    chosen: list[TermEntry] = []
+    taken: list[tuple[int, int]] = []
+    seen: set[str] = set()
+    for start, end, entry in hits:
+        if entry.term in seen:
+            continue
+        if any(start < taken_end and taken_start < end for taken_start, taken_end in taken):
+            continue
+        seen.add(entry.term)
+        taken.append((start, end))
+        chosen.append(entry)
+        if len(chosen) >= limit:
+            break
+    return chosen
+
+
+def term_footnote(text: str, *, level: str = DEFAULT_TELEGRAM_USER_LEVEL) -> str:
+    """용어 각주 블록. 중급이거나 걸린 용어가 없으면 빈 문자열 (#297).
+
+    각주가 본문에 비해 지나치게 길면 뒤에서부터 버린다(TERM_FOOTNOTE_MAX_BODY_RATIO).
+    설명이 설명 대상을 밀어내면 그건 도움이 아니다. 하나도 못 남기면 각주 없이 나간다.
+    """
+    if level != LEVEL_BEGINNER:
+        return ""
+    entries = find_terms(text)
+    if not entries:
+        return ""
+    lines = [
+        f"{TERM_FOOTNOTE_PREFIX} {entry.term} — {entry.description}" for entry in entries
+    ]
+    # 넘치면 뒤에서부터 버린다. 앞쪽이 본문에 먼저 등장한 용어이므로, 하나만 남길 수 있다면
+    # 사용자가 먼저 만난 말을 남기는 것이 맞다.
+    allowance = len(text) * TERM_FOOTNOTE_MAX_BODY_RATIO
+    while lines and len("\n".join(lines)) > allowance:
+        lines.pop()
+    return "\n".join(lines)
+
+
 # ---- 추론 각주 (#260에서 이관) ----
 
 REASONING_FOOTNOTE_SEPARATOR = "─────"
@@ -287,22 +476,36 @@ def kind_for_agent(routed_agent: Any) -> str:
 def render(
     text: Any,
     kind: str = KIND_ANALYSIS,
+    level: str = DEFAULT_TELEGRAM_USER_LEVEL,
     *,
     reasoning: str = "",
     limit: int = TELEGRAM_MESSAGE_LIMIT,
 ) -> str:
     """텔레그램으로 나가기 직전의 단일 통과 지점 (#297).
 
-    순서: 마크다운 정리 → 틀 적용 → 추론 각주 → 길이 예산.
+    순서: 마크다운 정리 → 틀 적용 → 용어 각주 → 추론 각주 → 길이 예산.
 
-    길이 예산은 뒤에서부터 확보한다. 추론 각주(근거) 자리를 먼저 잡고 남은 자리에 본문을
-    맞춘다 — 합친 뒤에 자르면 긴 답변에서만 각주가 통째로 사라져, 정작 근거가 필요한
-    메시지에서만 근거가 없어진다 (#260에서 온 규칙).
+    길이 예산은 뒤에서부터 확보한다. 추론 각주(근거) 자리를 먼저 잡고, 그다음 용어 각주,
+    남은 자리에 본문을 맞춘다 — 합친 뒤에 자르면 긴 답변에서만 각주가 통째로 사라져,
+    정작 근거와 설명이 필요한 메시지에서만 근거와 설명이 없어진다 (#260에서 온 규칙).
 
-    ``reasoning``이 비어 있으면 결과는 ``clamp(본문)``과 정확히 같다 — #260 이전 경로의
-    동작이 그대로 유지된다.
+    용어 스캔 대상은 본문뿐이다. 추론 각주에는 도구 라벨("KIS 시세·계좌 조회")이 들어
+    있어 함께 스캔하면 사용자가 쓰지도 않은 말에 설명이 붙는다.
+
+    ``reasoning``이 비어 있고 걸린 용어가 없으면 결과는 ``clamp(본문)``과 정확히 같다 —
+    #260 이전 경로의 동작이 그대로 유지된다.
     """
     body = template_for(kind).apply(sanitize_markdown(str(text)))
 
     reasoning_block = f"\n\n{reasoning}" if reasoning else ""
-    return f"{clamp(body, limit - len(reasoning_block))}{reasoning_block}"
+    budget = limit - len(reasoning_block)
+
+    terms = term_footnote(body, level=level)
+    term_block = f"\n\n{terms}" if terms else ""
+    # 용어 각주는 근거가 아니라 편의다. 자리가 모자라면 본문보다 먼저 포기한다 —
+    # 본문 예산을 절반 아래로 밀어내면서까지 설명을 남길 이유가 없다.
+    if len(term_block) > budget // 2:
+        term_block = ""
+    budget -= len(term_block)
+
+    return f"{clamp(body, budget)}{term_block}{reasoning_block}"
