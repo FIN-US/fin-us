@@ -1,3 +1,4 @@
+import math
 import os
 from pathlib import Path
 from dotenv import load_dotenv
@@ -79,7 +80,7 @@ DATABASE_URL = os.environ.get("DATABASE_URL") or f"sqlite:///{_FIN_US_ROOT}/back
 DB_ECHO = os.getenv("DB_ECHO", "false").lower() == "true"
 
 # 신호 유의성 점수화 (#298).
-# 2차 필터(services.check_signal_significance)가 YES/NO 대신 -3~+3 정수를 받는다.
+# 2차 필터(services.score_signal)가 YES/NO 대신 -3~+3 정수를 받는다.
 # 레인지를 좁게 잡은 것은 의도다 — 경량 모델은 0~100 같은 넓은 축에서 재현성이 없다.
 SIGNAL_SCORE_MIN = -3
 SIGNAL_SCORE_MAX = 3
@@ -117,7 +118,12 @@ def _float_env(name: str, default: float) -> float:
         value = float(raw)
     except ValueError:
         return default
-    return value if value >= 0 else default
+    # isfinite로 inf/nan을 함께 막는다. inf를 통과시키면 "기사 간 평가 엇갈림"이
+    # 영구히 침묵하는데, 이는 _int_env_in_range가 배격한 것과 같은 실패 유형이다
+    # (설정이 조용히 기능 하나를 끄는 것).
+    if not math.isfinite(value) or value < 0:
+        return default
+    return value
 
 
 # 기사별 점수의 표준편차가 이 값 이상이면 "기사 간 평가 엇갈림"을 알림에 표시한다.

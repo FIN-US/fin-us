@@ -228,3 +228,15 @@ def test_signal_uncertainty_alert_threshold_rejects_negative_and_garbage(
 
     monkeypatch.setenv("SIGNAL_UNCERTAINTY_ALERT_THRESHOLD", "0.75")
     assert importlib.reload(config).SIGNAL_UNCERTAINTY_ALERT_THRESHOLD == 0.75
+
+
+@pytest.mark.parametrize("raw", ["inf", "-inf", "nan"])
+def test_signal_uncertainty_alert_threshold_rejects_non_finite(monkeypatch, restore_config, raw):
+    """float()가 받아 주는 inf/nan을 통과시키면 안 된다.
+
+    inf면 "기사 간 평가 엇갈림"이 어떤 표준편차로도 표시되지 않아 기능 하나가 조용히
+    꺼진다. nan은 모든 비교가 False라 같은 결과다.
+    """
+    monkeypatch.setenv("SIGNAL_UNCERTAINTY_ALERT_THRESHOLD", raw)
+
+    assert importlib.reload(config).SIGNAL_UNCERTAINTY_ALERT_THRESHOLD == 1.0

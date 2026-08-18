@@ -1930,7 +1930,10 @@ async def test_score_signal_prompt_states_the_scale_and_headline_count(monkeypat
 
 @pytest.mark.asyncio
 async def test_check_signal_significance_still_returns_plain_bool(monkeypatch):
-    """공개 계약 유지: 반환값은 bool이다. 점수는 사이드 채널로만 노출한다."""
+    """공개 계약 유지: 판정만 필요한 호출부를 위해 bool 래퍼를 남겨 둔다.
+
+    점수까지 필요한 호출부(scheduler)는 score_signal을 직접 쓴다.
+    """
     async def fake_llm_chat(provider, prompt, *, conversation_id=None):
         return '{"score": -3, "reason": "회계 이슈", "headline_scores": [-3, -2]}'
 
@@ -1939,26 +1942,6 @@ async def test_check_signal_significance_still_returns_plain_bool(monkeypatch):
     result = await services.check_signal_significance("삼성전자", "감리 착수", source="news")
 
     assert result is True
-
-    scored = services.take_last_signal_score()
-    assert scored is not None
-    assert scored.score == -3
-    assert scored.reason == "회계 이슈"
-    assert scored.uncertainty == 0.5
-
-
-@pytest.mark.asyncio
-async def test_take_last_signal_score_is_consumed_once(monkeypatch):
-    """두 번째 호출은 None이어야 한다 — 남겨 두면 다음 종목이 앞 종목의 점수를 물려받는다."""
-    async def fake_llm_chat(provider, prompt, *, conversation_id=None):
-        return '{"score": 2}'
-
-    monkeypatch.setattr(services, "llm_chat", fake_llm_chat)
-
-    await services.check_signal_significance("삼성전자", "수주 공시", source="news")
-
-    assert services.take_last_signal_score() is not None
-    assert services.take_last_signal_score() is None
 
 
 @pytest.mark.asyncio
@@ -1971,65 +1954,48 @@ async def test_check_news_significance_keeps_delegating(monkeypatch):
     result = await services.check_news_significance("삼성전자", "신제품 홍보")
 
     assert result is False
-    assert services.take_last_signal_score().score == 0
+
+
+def test_signal_snippet_drops_the_line_cut_by_the_char_limit():
+    """상한에서 반토막 난 기사는 버린다.
+
+    남겨 두면 모델이 반토막을 온전한 기사 1건으로 세어 점수를 매기고, 그 값이
+    headline_scores를 거쳐 signal_uncertainty(표준편차)까지 오염시킨다.
+    """
+    limit = services._SIGNAL_SNIPPET_CHARS
+    first = "가" * (limit - 10)
+    content = f"{first}\n두 번째 기사인데 상한에서 잘린다"
+
+    assert services._signal_snippet(content) == first
+
+
+def test_signal_snippet_keeps_a_single_overlong_line():
+    """상한 안에 줄바꿈이 없으면 버릴 온전한 줄이 없다 — 자른 그대로 쓴다."""
+    content = "가" * (services._SIGNAL_SNIPPET_CHARS + 50)
+
+    snippet = services._signal_snippet(content)
+
+    assert len(snippet) == services._SIGNAL_SNIPPET_CHARS
+
+
+def test_signal_snippet_passes_short_content_through():
+    assert services._signal_snippet("기사1\n기사2") == "기사1\n기사2"
 
 
 @pytest.mark.asyncio
-async def test_perform_stock_analysis_persists_signal_score(monkeypatch):
-    """2차 필터의 채점 결과가 AgentReport와 API 응답 양쪽에 실려야 한다.
+async def test_score_signal_prompt_counts_only_whole_articles(monkeypatch):
+    """프롬프트의 기사 수는 잘린 반토막을 빼고 세야 한다."""
+    prompts = []
 
-    perform_stock_analysis가 signal_score를 무시하면 점수가 DB에도 알림에도 남지
-    않고, 나중에 평가셋으로 모델을 검증할 방법이 사라진다.
-    """
     async def fake_llm_chat(provider, prompt, *, conversation_id=None):
-        return "plain analysis"
-
-    async def fake_run_mcp_tool(params, tool_name, arguments):
-        return "삼성전자 (005930, KOSPI)"
+        prompts.append(prompt)
+        return '{"score": 1}'
 
     monkeypatch.setattr(services, "llm_chat", fake_llm_chat)
-    monkeypatch.setattr(services, "run_mcp_tool", fake_run_mcp_tool)
 
-    scored = services.SignalScore(
-        score=-2,
-        reason="주요 고객 이탈 보도",
-        uncertainty=1.5,
-        headline_scores=(-3, 0),
-        is_significant=True,
-    )
+    limit = services._SIGNAL_SNIPPET_CHARS
+    content = "기사1\n" + "가" * (limit - 10) + "\n잘리는 기사"
 
-    session = FakeSession()
-    result = await services.perform_stock_analysis(
-        "삼성전자", "openai", session, signal_score=scored
-    )
+    await services.score_signal("삼성전자", content, source="news")
 
-    assert session.report.signal_score == -2
-    assert session.report.signal_reason == "주요 고객 이탈 보도"
-    assert session.report.signal_uncertainty == 1.5
-    assert result["signal_score"] == -2
-    assert result["signal_reason"] == "주요 고객 이탈 보도"
-    assert result["signal_uncertainty"] == 1.5
-
-
-@pytest.mark.asyncio
-async def test_perform_stock_analysis_leaves_signal_score_null_without_filter(monkeypatch):
-    """필터를 거치지 않은 경로(수동 분석·API 직접 호출)는 세 값 모두 null이어야 한다.
-
-    0으로 채우면 "모델이 중립으로 채점했다"는 없던 사실이 생긴다 (#122·#162).
-    """
-    async def fake_llm_chat(provider, prompt, *, conversation_id=None):
-        return "plain analysis"
-
-    async def fake_run_mcp_tool(params, tool_name, arguments):
-        return "삼성전자 (005930, KOSPI)"
-
-    monkeypatch.setattr(services, "llm_chat", fake_llm_chat)
-    monkeypatch.setattr(services, "run_mcp_tool", fake_run_mcp_tool)
-
-    session = FakeSession()
-    result = await services.perform_stock_analysis("삼성전자", "openai", session)
-
-    assert session.report.signal_score is None
-    assert session.report.signal_reason is None
-    assert session.report.signal_uncertainty is None
-    assert result["signal_score"] is None
+    assert "기사 2건" in prompts[0]

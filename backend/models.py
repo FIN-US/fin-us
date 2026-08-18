@@ -72,11 +72,15 @@ class AgentReport(SQLModel, table=True):
         description="provider가 도구(MCP/KIS/뉴스) 호출 경로로 구성돼 있는지 여부 (provider 능력 신호, 실제 호출 관측 아님).",
     )
     # #298: 2차 필터가 매긴 신호 점수. 셋 다 nullable이며 기본값을 채우지 않는다 —
-    # "0과 모름"은 다른 값이다(#122·#162). signal_score=0은 "모델이 무관/중립이라고
-    # 판단했다"이고, null은 "채점 자체가 없었다"(LLM 호출·파싱 실패로 fail-open했거나,
-    # 점수화 이전에 저장된 행이거나, 스케줄러를 거치지 않은 수동 분석)이다.
-    # 이 구분이 무너지면 평가셋(scripts/build_signal_eval_set.py)의 모델점수 열이
-    # 실패를 중립으로 오염시킨다.
+    # "0과 모름"은 다른 값이다(#122·#162). null은 "채점 자체가 없었다"는 뜻이고,
+    # LLM 호출·파싱 실패로 fail-open했거나, 점수화 이전에 저장된 행이거나,
+    # 스케줄러를 거치지 않은 수동 분석인 경우다.
+    #
+    # 이 테이블에 실제로 남는 점수는 |score| >= SIGNAL_SCORE_THRESHOLD인 값뿐이다.
+    # 임계값 미만이면 스케줄러가 상세 분석 자체를 건너뛰므로 리포트 행이 생기지
+    # 않는다 — 즉 기본 임계값에서 0이나 ±1인 행은 구조적으로 존재할 수 없다.
+    # 걸러진 신호의 점수 분포는 scheduler의 "유의미한 변화 없음(score=...)" 로그와
+    # 평가셋(backend/scripts/build_signal_eval_set.py)에서 본다.
     signal_score: Optional[int] = Field(
         default=None,
         description=(

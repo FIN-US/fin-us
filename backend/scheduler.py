@@ -9,14 +9,18 @@ from sqlmodel import Session, select
 from .catalyst_repo import CatalystEventInput, SqliteCatalystEventRepo
 from .ws_manager import manager
 from .database import engine
-from .config import NEWS_MCP_PARAMS, TRADING_MCP_PARAMS, DART_MCP_PARAMS
+from .config import (
+    NEWS_MCP_PARAMS,
+    TRADING_MCP_PARAMS,
+    DART_MCP_PARAMS,
+    SIGNAL_SCORE_THRESHOLD,
+)
 from .redis_state import RedisSchedulerState, signal_hash, redis_state
 from .services import (
     perform_stock_analysis,
     run_mcp_tool,
-    check_signal_significance,
+    score_signal,
     generate_morning_briefing,
-    take_last_signal_score,
 )
 from .models import Portfolio
 from .timeutil import KST
@@ -762,21 +766,28 @@ async def _monitor_signal(
             last_signal = await state.get_last_signal_text(source.name, stock)
 
         # 2. 유의미성 판단 (Local Model or Mini LLM API)
-        #    #298: 판정은 |score| >= 임계값이다. bool 뒤에 딸린 점수·근거·불확실성은
-        #    take_last_signal_score()로 꺼내 분석 리포트와 알림까지 실어 나른다.
-        #    채점을 하지 못했으면(fail-open) None이며, 그대로 null로 남는다.
-        is_significant = await check_signal_significance(
+        #    #298: 판정은 |score| >= 임계값이다. 점수·근거·불확실성은 판정과 같은
+        #    호출에서 함께 받아 분석 리포트와 알림까지 실어 나른다. 채점하지 못했으면
+        #    (fail-open) score가 None이며 그대로 null로 남는다.
+        signal_score = await score_signal(
             stock,
             current_signal,
             last_signal,
             source=source.name,
             provider=FILTER_PROVIDER,
         )
-        signal_score = take_last_signal_score()
 
-        if not is_significant:
+        if not signal_score.is_significant:
             await _set_last_signal_state(state, source.name, stock, current_signal, current_digest)
-            logger.info(f"[{source.name}:{stock}] 유의미한 변화 없음. 분석을 건너뜁니다.")
+            # 걸러진 신호의 점수도 남긴다. 임계값 미만은 AgentReport에 저장되지 않으므로
+            # (분석 자체를 건너뛴다) 임계값을 조정할 때 참고할 분포가 이 로그뿐이다.
+            logger.info(
+                "[%s:%s] 유의미한 변화 없음(score=%s, 임계값=%s). 분석을 건너뜁니다.",
+                source.name,
+                stock,
+                signal_score.score,
+                SIGNAL_SCORE_THRESHOLD,
+            )
             return
 
         # 3. 유의미한 변화가 있을 때만 고성능 에이전트 분석 실행

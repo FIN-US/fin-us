@@ -2,7 +2,6 @@ import json
 import httpx
 import logging
 import re
-from contextvars import ContextVar
 from datetime import date
 from statistics import pstdev
 from typing import Any, Literal, NamedTuple, Optional, Sequence, get_args, overload
@@ -519,33 +518,6 @@ _SIGNAL_REASON_MAX_CHARS = 120
 # 채점 프롬프트에 넣는 signal 본문 상한 (기존 YES/NO 필터와 동일하게 유지).
 _SIGNAL_SNIPPET_CHARS = 1000
 
-# 직전 check_signal_significance 호출의 채점 결과를 담는 사이드 채널.
-#
-# check_signal_significance의 반환형은 bool로 유지한다 — "유의미한가"는 이 함수의
-# 공개 계약이고, 호출부(scheduler, check_news_significance)와 테스트가 그 계약에
-# 의존한다. 점수·근거·불확실성은 그 판정에 딸린 진단 정보이므로, 반환형을 바꿔
-# 모든 호출부를 흔드는 대신 컨텍스트 지역 변수로 흘린다.
-#
-# ContextVar를 쓰는 이유: 감시 루프는 종목·소스마다 별개의 asyncio 태스크로 갈릴 수
-# 있고, 모듈 전역 변수는 그때 서로의 점수를 덮어쓴다. ContextVar는 태스크별로
-# 격리되면서, await로 이어진 같은 태스크 안에서는 호출부에 그대로 보인다.
-_last_signal_score: ContextVar[Optional[SignalScore]] = ContextVar(
-    "fin_us_last_signal_score", default=None
-)
-
-
-def take_last_signal_score() -> Optional[SignalScore]:
-    """직전 채점 결과를 꺼내고 비운다. 채점이 없었으면 None.
-
-    꺼내면서 비우는 것이 중요하다. 남겨 두면 다음 종목이 채점 경로를 타지 않고
-    지나갈 때(테스트에서 함수가 monkeypatch된 경우 등) 앞 종목의 점수를 자기
-    것으로 착각한다.
-    """
-    value = _last_signal_score.get()
-    _last_signal_score.set(None)
-    return value
-
-
 def _coerce_signal_score(value: Any) -> Optional[int]:
     """임의의 JSON 값을 -3~+3 정수로 좁힌다. 숫자로 볼 수 없으면 None.
 
@@ -571,8 +543,11 @@ def _coerce_signal_score(value: Any) -> Optional[int]:
 def signal_score_uncertainty(headline_scores: Sequence[int]) -> Optional[float]:
     """기사별 점수의 표준편차. 기사가 2건 미만이면 None.
 
-    LLM에게 확신도를 묻지 않고 코드로 계산한다 — 모델이 스스로 신고하는 확신도는
-    보정되지 않은 값이지만, "여러 기사가 서로 다른 방향을 가리킨다"는 관측된 사실이다.
+    LLM에게 확신도를 직접 묻지 않고 코드로 계산한다. headline_scores도 결국 같은
+    모델의 자기보고이므로 이것이 "객관적 사실"이 되는 것은 아니다 — 다만 항목별로
+    따로 받은 점수의 흩어짐은 한 번에 물어본 확신도보다 다루기 쉽다. 계산 규칙이
+    코드에 고정돼 있어 프롬프트가 바뀌어도 일관되고, 사람이 같은 기사에 매긴 점수로
+    똑같이 계산해 대조할 수 있다.
 
     모집단 표준편차(pstdev)를 쓴다: 이 기사 묶음은 더 큰 모집단에서 뽑은 표본이
     아니라 판단에 실제로 쓴 전부다. 1건이면 0.0이 아니라 None이다 — 0.0은
@@ -621,6 +596,24 @@ def parse_signal_score(raw: str) -> Optional[SignalScore]:
             is_significant=abs(score) >= SIGNAL_SCORE_THRESHOLD,
         )
     return None
+
+
+def _signal_snippet(signal_content: str) -> str:
+    """채점에 넣을 본문을 상한까지 자르되, 잘려 나간 마지막 줄은 버린다.
+
+    signal은 기사 한 건이 한 줄이다. 상한에서 반토막 난 줄을 남기면 모델은 그것을
+    온전한 기사 1건으로 세어 점수를 매기고, 그 값이 headline_scores를 거쳐
+    signal_uncertainty(표준편차)까지 오염시킨다.
+
+    상한 안에 줄바꿈이 하나도 없으면 통째로 한 기사이므로 자른 그대로 쓴다 —
+    이때는 버릴 온전한 줄이 없어서, 버리면 채점할 내용 자체가 사라진다.
+    """
+    if len(signal_content) <= _SIGNAL_SNIPPET_CHARS:
+        return signal_content
+
+    truncated = signal_content[:_SIGNAL_SNIPPET_CHARS]
+    head, separator, _partial = truncated.rpartition("\n")
+    return head if separator else truncated
 
 
 def _build_signal_score_prompt(stock: str, source: str, snippet: str) -> str:
@@ -674,9 +667,7 @@ async def score_signal(
     if signal_content == last_signal_content:
         return _SKIPPED_SIGNAL_SCORE
 
-    prompt = _build_signal_score_prompt(
-        stock, source, signal_content[:_SIGNAL_SNIPPET_CHARS]
-    )
+    prompt = _build_signal_score_prompt(stock, source, _signal_snippet(signal_content))
 
     try:
         # 설정된 provider(ollama, openai 등)에 따라 경량 모델 호출
@@ -727,9 +718,11 @@ async def check_signal_significance(
     """외부 signal이 투자 관점에서 유의미한 변화인지 판단합니다.
 
     판정은 :func:`score_signal`의 점수를 ``|score| >= SIGNAL_SCORE_THRESHOLD``로
-    환산한 것이다 (#298 이전에는 경량 LLM에 YES/NO를 직접 물었다). 반환형은 bool
-    그대로 유지하고, 점수·근거·불확실성은 :func:`take_last_signal_score`로 꺼낸다
-    (사이드 채널을 쓰는 이유는 ``_last_signal_score`` 주석 참고).
+    환산한 것이다 (#298 이전에는 경량 LLM에 YES/NO를 직접 물었다).
+
+    점수·근거·불확실성까지 필요한 호출부는 :func:`score_signal`을 직접 쓴다 —
+    감시 파이프라인(scheduler)이 그렇게 한다. 이 함수는 "유의미한가"만 알면 되는
+    호출부를 위한 얇은 래퍼다.
     """
     scored = await score_signal(
         stock,
@@ -738,7 +731,6 @@ async def check_signal_significance(
         source=source,
         provider=provider,
     )
-    _last_signal_score.set(scored)
     return scored.is_significant
 
 
