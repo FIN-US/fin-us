@@ -57,6 +57,7 @@ from .stock_code import (
     _STOCK_CODE_EXTRACT_RE,
     _is_unresolved_echo,
 )
+from .order_assist import ProposalTrigger, run_order_assist
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +66,7 @@ BUY_COMMAND_HELP = "사용법: /buy <종목명> <수량> [지정가]"
 SELL_COMMAND_HELP = "사용법: /sell <종목명> <수량> [지정가]"
 WATCH_COMMAND_HELP = "사용법: /watch add <종목명> | remove <종목명> | list"
 CATALYST_COMMAND_HELP = "사용법: /catalysts <종목명>"
+ADVISE_COMMAND_HELP = "사용법: /advise <종목명>"
 EARNINGS_COMMAND_HELP = "사용법: /earnings <종목명> [기간]  예: /earnings 삼성전자 2025Q1"
 NATURAL_ORDER_HELP = "자연어 주문을 해석할 수 없습니다. /buy 또는 /sell 형식으로 입력하세요."
 # 미등록 코드는 mcp-trading/stock-master.js가 {code: X, name: X, market: "UNKNOWN"}을
@@ -199,6 +201,7 @@ TELEGRAM_INTERACTIVE_HELP = "\n".join(
         "/quote <종목명> - 현재가 조회",
         "/trend <종목명> - 외국인·기관·개인 수급 조회",
         "/earnings <종목명> [기간] - DART 실적·뉴스 분석",
+        "/advise <종목명> - 주문 보조: 제안 → 한도 검사 → 검증 → 확정 버튼",
         "/buy <종목명> <수량> [지정가] - 매수 주문 준비",
         "/sell <종목명> <수량> [지정가] - 매도 주문 준비",
         "/confirm - 대기 주문 확정",
@@ -218,6 +221,7 @@ TELEGRAM_BOT_COMMANDS = [
     {"command": "visualize", "description": "Unity 포트폴리오 시각화 링크"},
     {"command": "trade", "description": "매수·매도 주문 입력 안내"},
     {"command": "lookup", "description": "현재가·수급 조회 입력 안내"},
+    {"command": "advise", "description": "주문 보조 (예: /advise 삼성전자)"},
     {"command": "buy", "description": "매수 주문 준비 (예: /buy 삼성전자 1)"},
     {"command": "sell", "description": "매도 주문 준비 (예: /sell 삼성전자 1)"},
     {"command": "confirm", "description": "대기 주문 확정"},
@@ -517,6 +521,9 @@ class TelegramCommandHandler:
             return
         if self._matches_command(command, bot_username, "/earnings"):
             await self._handle_earnings(argument, str(chat.get("id", "")).strip())
+            return
+        if self._matches_command(command, bot_username, "/advise"):
+            await self._handle_advise(argument, str(chat.get("id", "")).strip())
             return
         if self._matches_command(command, bot_username, "/buy"):
             await self._handle_order_command("BUY", argument, str(chat.get("id", "")).strip())
@@ -1017,6 +1024,57 @@ class TelegramCommandHandler:
             _telegram_text(str(result)),
             reply_markup=self._market_reply_markup("trend", chat_id, stock),
         )
+
+    async def _handle_advise(self, argument: str, chat_id: str) -> None:
+        """``/advise <종목명>`` — 주문 보조 (#299).
+
+        이 메서드가 하는 일은 파싱, 호출, 결과 전달이 전부다. 제안·한도 판정·검증·
+        대기 주문 저장은 모두 order_assist.run_order_assist 안에 있다. 규칙이 두 파일에
+        나뉘면 "어느 쪽이 최종 판정인가"가 흐려지고, 그 순간 한쪽만 고치는 변경이 생긴다.
+
+        승인 결과의 버튼은 기존 _order_reply_markup을 그대로 쓴다 — 확정/취소 콜백,
+        60초 만료, 체결 흐름이 /buy와 완전히 같은 경로를 탄다.
+        """
+        stock_name = argument.strip()
+        if not stock_name:
+            await self._send_text_or_raise(ADVISE_COMMAND_HELP)
+            return
+
+        await self.notifier.send_chat_action("typing")
+        # 제안 에이전트 왕복은 수십 초가 걸린다. /earnings·NAT 폴백과 같은 방식으로
+        # 접수 즉시 진행 메시지를 남기고, 결과가 오면 치운다 (#260).
+        progress_message_id = await self._send_progress_message(NAT_PROGRESS_MESSAGE)
+        trigger = ProposalTrigger(source="telegram", stock=stock_name, chat_id=chat_id)
+        try:
+            result = await run_order_assist(
+                trigger,
+                pending_orders=self.pending_orders,
+                mcp_runner=self.mcp_runner,
+                now_factory=self.now_factory,
+            )
+        except Exception as exc:
+            await self._clear_progress_message(progress_message_id)
+            await self._send_text_or_raise(f"주문 보조 실패: {_short_error(exc)}")
+            return
+        await self._clear_progress_message(progress_message_id)
+
+        if result.order is None:
+            # 거부·충돌 둘 다 여기로 온다. 충돌을 조용히 버리면 사용자는 명령이 씹힌
+            # 것으로 읽는다 — 대기 주문이 있다는 사실을 반드시 알려야 한다.
+            await self._send_text_settled(result.message)
+            return
+
+        notified = await self._send_text_settled(
+            result.message,
+            reply_markup=self._order_reply_markup(result.order),
+        )
+        if not notified:
+            # /buy와 같은 처리다. 프롬프트가 끝내 안 나갔으면 사용자는 대기 주문의
+            # 존재를 모르고, 60초 안의 다음 명령이 영문 모를 충돌로 막힌다 (#247).
+            try:
+                await self.pending_orders.delete(chat_id)
+            except Exception as exc:
+                logger.error("제안 프롬프트 미전달 후 대기 주문 정리 실패: %s", exc)
 
     async def _handle_order_command(self, side: str, argument: str, chat_id: str) -> None:
         usage = BUY_COMMAND_HELP if side == "BUY" else SELL_COMMAND_HELP
