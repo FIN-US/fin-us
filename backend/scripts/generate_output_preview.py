@@ -30,7 +30,10 @@ from backend.presentation import (  # noqa: E402
     reasoning_footnote,
     render,
 )
-from backend.telegram_notifier import TelegramNotifier  # noqa: E402
+from backend.telegram_notifier import (  # noqa: E402
+    TelegramNotifier,
+    should_send_telegram_alert,
+)
 from backend.telegram_commands import (  # noqa: E402
     _format_trend_detail,
     _format_trend_summary,
@@ -55,6 +58,10 @@ URGENT_ALERT_DATA = {
 URGENT_ALERT_BODY = TelegramNotifier("token", "1").format_analysis_alert(
     stock="삼성전자", source="disclosure", analysis_data=URGENT_ALERT_DATA
 )
+# 배너 판정은 전송 게이트와 같은 것을 쓴다 (presentation.alert_kind 참조).
+URGENT_ALERT_KIND = alert_kind(
+    should_send_telegram_alert(URGENT_ALERT_DATA, alert_mode="urgent")
+)
 
 
 class Tool:
@@ -73,7 +80,7 @@ CASES = [
     (
         "1. 긴급 분석 알림 (긴급 알림 틀)",
         "scheduler → telegram_notifier.send_analysis_alert",
-        alert_kind(URGENT_ALERT_DATA["urgency"]),
+        URGENT_ALERT_KIND,
         URGENT_ALERT_BODY,
         "",
         "",

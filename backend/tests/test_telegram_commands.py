@@ -764,7 +764,10 @@ async def test_earnings_command_combines_dart_news_and_nat_analysis():
     assert "Markdown 문법" in prompt
     assert "호재`, `악재`, `중립" in prompt
     assert notifier.actions == ["typing"]
-    assert notifier.messages == ["⚪ 중립\n실적 분석 응답"]
+    # /earnings도 출력 계층을 지난다 — 본문이 자유 형식 LLM 텍스트인 유일한 명령이라
+    # 마크다운 정리와 용어 각주가 특히 필요한 자리다 (#297 자가리뷰).
+    assert notifier.messages[-1].startswith("⚪ 중립\n실적 분석 응답")
+    assert "ℹ️ 실적: " in notifier.messages[-1]
 
 
 @pytest.mark.asyncio
@@ -801,9 +804,9 @@ async def test_earnings_command_sends_plain_text_with_verdict_emoji():
     assert "호재\n호재" not in message
     assert "#" not in message
     assert "*" not in message
-    assert "- " not in message
     assert "실적 요약" in message
-    assert "• 매출: 전년 대비 증가" in message
+    # 글머리표는 이 봇의 나열 표시로 통일된다(예전에는 이 명령만 "•"를 썼다).
+    assert "- 매출: 전년 대비 증가" in message
 
 
 @pytest.mark.asyncio

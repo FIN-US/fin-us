@@ -173,7 +173,9 @@ async def test_morning_briefing_task_sends_telegram_message(monkeypatch):
     monkeypatch.setattr("backend.scheduler.telegram_notifier.format_morning_briefing", mock_format)
     monkeypatch.setattr("backend.scheduler.telegram_notifier.send_text", mock_send)
 
-    await morning_briefing_task()
+    # 수준을 명시해 redis를 열지 않는다. 인자 없이 부를 때 저장된 수준을 읽는지는
+    # test_morning_briefing_reads_the_saved_level이 따로 고정한다 (#297 자가리뷰).
+    await morning_briefing_task(level="beginner")
 
     assert calls == [["삼성전자"]]
     mock_format.assert_called_once_with(briefing)

@@ -4,6 +4,9 @@ test_telegram_commands.py에 얹지 않은 이유는 그 파일이 이미 3천 �
 것은 명령 라우팅이 아니라 "수준이 나가는 문장에 실제로 반영되는가"이기 때문이다.
 """
 
+from datetime import date
+from types import SimpleNamespace
+
 import pytest
 
 import backend.telegram_commands as telegram_commands
@@ -273,6 +276,66 @@ async def test_diary_answer_uses_the_diary_template():
     await _send(handler, "오늘 일지 써줘")
 
     assert notifier.messages[-1].startswith("📓 매매일지\n오늘 일지를 저장했습니다.")
+
+
+def _mcp_handler(notifier, response, state=None):
+    async def mcp_runner(server_params, tool_name, arguments):
+        return response
+
+    return TelegramCommandHandler(
+        notifier=notifier,
+        mcp_runner=mcp_runner,
+        state_factory=(lambda: state) if state is not None else BrokenState,
+    )
+
+
+@pytest.mark.asyncio
+async def test_balance_goes_through_the_output_layer():
+    """문서가 대표 예시로 든 용어(예수금·평가손익)가 사는 자리다 (#297 자가리뷰).
+
+    자연어로 물으면 설명되는데 /balance로 물으면 안 되는 차이는 설명할 수 없다.
+    """
+    notifier = FakeNotifier()
+    handler = _mcp_handler(
+        notifier,
+        "예수금: 1,204,300원\n**평가손익**: +48,000원",
+        FakeState(LEVEL_BEGINNER),
+    )
+
+    await _send(handler, "/balance")
+
+    message = notifier.messages[-1]
+    assert "**" not in message  # 마크다운 잔재도 함께 정리된다
+    assert f"{TERM_FOOTNOTE_MARK} 예수금: " in message
+
+
+@pytest.mark.asyncio
+async def test_catalysts_use_the_shared_list_marker():
+    """이 명령만 "•"를 쓰고 있었다. 한 화면에 두 종류가 섞이면 안 된다."""
+    notifier = FakeNotifier()
+
+    class FakeCatalystRepo:
+        async def list_upcoming(self, stock_name, *, today, limit=20):
+            return [
+                SimpleNamespace(
+                    event_date=date(2026, 8, 20),
+                    description="실적 발표",
+                    event_type="earnings",
+                )
+            ]
+
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        catalyst_repo=FakeCatalystRepo(),
+        state_factory=lambda: FakeState(LEVEL_INTERMEDIATE),
+    )
+
+    await _send(handler, "/catalysts 삼성전자")
+
+    lines = notifier.messages[-1].splitlines()
+    assert lines[0].startswith("📅 삼성전자")
+    assert lines[1].startswith("- 2026-08-20")
+    assert "•" not in notifier.messages[-1]
 
 
 @pytest.mark.asyncio

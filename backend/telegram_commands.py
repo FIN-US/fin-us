@@ -47,6 +47,7 @@ from .presentation import (
     TOOL_LABELS,
     as_list_items,
     clamp as _clamp,
+    sanitize_markdown,
     reasoning_footnote,
     kind_for_agent,
     level_label,
@@ -1226,13 +1227,21 @@ class TelegramCommandHandler:
             )
             return
 
-        lines = [f"📅 {stock} 예정 이벤트"]
-        for event in events:
-            label = self._format_catalyst_type(getattr(event, "event_type", ""))
-            lines.append(
-                f"• {event.event_date.isoformat()}  {getattr(event, 'description', '')} ({label})"
+        items = [
+            f"{event.event_date.isoformat()}  {getattr(event, 'description', '')}"
+            f" ({self._format_catalyst_type(getattr(event, 'event_type', ''))})"
+            for event in events
+        ]
+        # 제목은 목록 밖이다. 글머리표는 "•"가 아니라 이 봇의 나열 표시를 쓴다 (#297 자가리뷰).
+        lines = [f"📅 {stock} 예정 이벤트", *as_list_items(items)]
+        await self._send_text_or_raise(
+            render(
+                "\n".join(lines),
+                KIND_QUOTE,
+                await self._current_level(),
+                question=argument,
             )
-        await self._send_text_or_raise(_telegram_text("\n".join(lines)))
+        )
 
     async def _handle_balance(self) -> None:
         await self.notifier.send_chat_action("typing")
@@ -1242,7 +1251,7 @@ class TelegramCommandHandler:
             await self._send_text_or_raise(f"조회 실패: {_short_error(exc)}")
             return
         await self._send_text_or_raise(
-            _telegram_text(str(result)),
+            render(result, KIND_QUOTE, await self._current_level()),
             reply_markup=self._balance_reply_markup(),
         )
 
@@ -1899,6 +1908,9 @@ class TelegramCommandHandler:
             return
 
         stock, period = parsed
+        # LLM 호출 전에 읽는다 — 뒤로 미루면 수십 초짜리 왕복이 끝난 다음 redis 왕복이
+        # 한 번 더 붙는다 (_handle_chat_fallback과 같은 이유).
+        level = await self._current_level()
         dart_arguments: dict[str, Any] = {"stock_name": stock}
         if period:
             dart_arguments["period"] = period
@@ -1921,7 +1933,12 @@ class TelegramCommandHandler:
         # LLM 호출이 끝난 뒤다 — 재실행은 DART·뉴스 조회와 LLM 호출을 그대로 반복해
         # 예산만큼 재과금된다 (#247).
         await self._send_text_settled(
-            _telegram_text(self._format_earnings_response(str(result)))
+            render(
+                self._format_earnings_response(str(result)),
+                KIND_ANALYSIS,
+                level,
+                question=argument,
+            )
         )
 
     def _parse_earnings_argument(self, argument: str) -> tuple[str, str | None] | None:
@@ -1966,7 +1983,12 @@ class TelegramCommandHandler:
         )
 
     def _format_earnings_response(self, text: str) -> str:
-        plain = self._telegram_plain_text(text)
+        # 출력 계층의 정리기를 쓴다. 예전에는 이 클래스가 자체 정리기(_telegram_plain_text)를
+        # 갖고 있었는데, 그쪽은 머리글·굵게·글머리표만 알아서 링크·기울임·취소선·이스케이프를
+        # 그대로 흘렸고 글머리표도 "•"로 바꿔 나머지 메시지와 어긋났다 (#297 자가리뷰).
+        # 판정 접두어를 붙이려면 정리된 첫 줄을 봐야 해서 render보다 먼저 한 번 부른다 —
+        # sanitize_markdown은 이미 정리된 문장에 다시 걸어도 같은 결과다.
+        plain = sanitize_markdown(text)
         verdict = self._earnings_verdict(plain)
         if plain.startswith(("🟢 호재", "🔴 악재", "⚪ 중립")):
             return plain
@@ -1993,16 +2015,6 @@ class TelegramCommandHandler:
         if "호재" in text:
             return "🟢 호재"
         return "⚪ 중립"
-
-    def _telegram_plain_text(self, text: str) -> str:
-        lines = []
-        for raw_line in text.splitlines():
-            line = raw_line.strip()
-            line = re.sub(r"^#{1,6}\s*", "", line)
-            line = re.sub(r"^[-*]\s+", "• ", line)
-            line = line.replace("**", "").replace("__", "").replace("`", "")
-            lines.append(line)
-        return "\n".join(lines).strip()
 
     async def _send_progress_message(self, text: str) -> int | None:
         """진행 메시지를 보내고 나중에 치울 message_id를 반환한다 (#260).

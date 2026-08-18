@@ -95,6 +95,53 @@ def test_format_analysis_alert_marks_only_actual_urgent_alerts():
     assert "🚨" not in message
 
 
+@pytest.mark.asyncio
+async def test_the_urgent_banner_follows_the_send_gate(monkeypatch):
+    """배너 판정과 전송 게이트가 따로 놀면 어긋난다 (#297 자가리뷰).
+
+    alert_mode="all"이면 telegram_alert=False인 분석도 나간다. 그때 배너가 urgency만 보고
+    🚨를 달면, 본문은 비긴급 사유("판단 사유 없음")를 달고 머리는 긴급이라고 외친다.
+    게이트가 대소문자를 접지 않는다는 차이까지 겹쳐 "High"에서 실제로 갈렸다.
+    """
+    notifier = TelegramNotifier("token", "123")
+    sent: list[str] = []
+
+    async def fake_post(text, **kwargs):
+        sent.append(text)
+
+    monkeypatch.setattr(notifier, "_post_message", fake_post)
+
+    await notifier.send_analysis_alert(
+        "삼성전자",
+        "news",
+        {"urgency": "High", "telegram_alert": False, "details": {}},
+        alert_mode="all",
+    )
+
+    assert sent
+    assert sent[0].startswith("🔔 알림")
+
+
+@pytest.mark.asyncio
+async def test_a_real_urgent_alert_still_gets_the_urgent_banner(monkeypatch):
+    notifier = TelegramNotifier("token", "123")
+    sent: list[str] = []
+
+    async def fake_post(text, **kwargs):
+        sent.append(text)
+
+    monkeypatch.setattr(notifier, "_post_message", fake_post)
+
+    await notifier.send_analysis_alert(
+        "삼성전자",
+        "disclosure",
+        {"urgency": "critical", "telegram_alert": True, "details": {}},
+    )
+
+    assert sent
+    assert sent[0].startswith("🚨 긴급 알림")
+
+
 def test_format_morning_briefing_uses_expected_sections():
     notifier = TelegramNotifier("token", "123")
 

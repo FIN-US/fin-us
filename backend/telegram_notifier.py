@@ -9,7 +9,6 @@ from .config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, is_placeholder_secret
 from .presentation import (
     DEFAULT_TELEGRAM_USER_LEVEL,
     TELEGRAM_MESSAGE_LIMIT,
-    URGENT_ALERT_URGENCIES,
     alert_kind,
     as_list_items,
     decision_label,
@@ -25,9 +24,10 @@ _TELEGRAM_BOT_URL_RE = re.compile(r"(https://api\.telegram\.org/bot)[^/\s\"]+")
 # 알림도 render를 통과하므로 이 모듈이 presentation을 임포트하고, 그래서 상한의 정의는
 # 반대편(잎)에 있어야 순환이 생기지 않는다. 기존 임포트 경로는 그대로 살아 있다.
 
-# presentation이 배너(🚨 긴급 알림)를 고르는 데 쓰는 것과 같은 집합이다. 전송 게이트와
-# 배너가 다른 기준을 보면 "긴급이라 보냈는데 배너는 평범한 알림"이 생긴다 (#297 검수).
-URGENT_TELEGRAM_LEVELS = URGENT_ALERT_URGENCIES
+# 긴급으로 취급하는 urgency. 배너(🚨 긴급 알림)는 이 집합을 따로 보지 않고
+# should_send_telegram_alert의 판정 결과를 그대로 쓴다 — 판정이 두 곳에 있으면 어긋난다
+# (#297 자가리뷰). presentation.alert_kind 독스트링 참조.
+URGENT_TELEGRAM_LEVELS = {"high", "critical"}
 TELEGRAM_ALERT_MODES = {"urgent", "all", "off"}
 
 
@@ -387,6 +387,7 @@ class TelegramNotifier:
         if not should_send_telegram_alert(analysis_data, alert_mode=alert_mode):
             return False
 
+        is_urgent = should_send_telegram_alert(analysis_data, alert_mode="urgent")
         try:
             await self._post_message(
                 render(
@@ -395,7 +396,9 @@ class TelegramNotifier:
                         source=source,
                         analysis_data=analysis_data,
                     ),
-                    alert_kind(analysis_data.get("urgency")),
+                    # 배너는 전송 게이트와 같은 판정을 쓴다. "긴급 모드였어도 나갔을
+                    # 알림인가"가 곧 🚨의 뜻이고, 그 판정은 여기 한 번뿐이다.
+                    alert_kind(is_urgent),
                     level,
                 )
             )

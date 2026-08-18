@@ -24,7 +24,6 @@ from backend.presentation import (
     REASONING_FOOTNOTE_SEPARATOR,
     TELEGRAM_MESSAGE_LIMIT,
     TERM_FOOTNOTE_MARK,
-    URGENT_ALERT_URGENCIES,
     TermEntry,
     alert_kind,
     as_list_items,
@@ -101,6 +100,28 @@ def test_link_keeps_both_label_and_url():
     )
 
 
+def test_a_parenthesis_that_is_not_a_link_is_left_alone():
+    """링크가 아닌 괄호까지 먹고 내용을 지우면 "옮기되 지우지 않는다"의 정반대다 (#297 자가리뷰).
+
+    목적지에 공백을 넣으려면 마크다운도 <>를 요구한다. 그 모양이 아니면 링크가 아니다.
+    """
+    assert sanitize_markdown("[대량보유](5.1% → 6.3% 증가) 공시") == (
+        "[대량보유](5.1% → 6.3% 증가) 공시"
+    )
+
+
+def test_a_link_destination_with_spaces_needs_angle_brackets():
+    assert sanitize_markdown("[원문](<https://x.example/a b>)") == (
+        "원문 (https://x.example/a b)"
+    )
+
+
+def test_a_link_title_after_the_destination_is_dropped():
+    assert sanitize_markdown('[원문](https://x.example "제목")') == (
+        "원문 (https://x.example)"
+    )
+
+
 def test_unpaired_emphasis_residue_is_removed():
     """길이 제한에 잘린 LLM 출력은 여는 표기만 남기는 일이 흔하다."""
     assert sanitize_markdown("**중요한 소식인데 여기서 잘렸") == "중요한 소식인데 여기서 잘렸"
@@ -156,6 +177,25 @@ def test_longer_surface_wins_at_the_same_position(fake_terms):
     found = [entry.term for entry in find_terms("시가총액이 늘었습니다. 확인해 주세요.")]
 
     assert found == ["시가총액"]
+
+
+def test_a_later_standalone_occurrence_is_not_lost(fake_terms):
+    """첫 등장이 더 긴 용어에 먹혀도 뒤의 단독 등장은 살아야 한다 (#297 자가리뷰).
+
+    "미체결"이 "체결"을 품고 있어, 첫 등장만 보면 체결의 자리는 겹침으로 버려지고 11자 뒤의
+    진짜 체결은 보이지도 않았다. 절 순서를 바꾸면 둘 다 나오는 순서 의존 버그였다.
+    """
+    unfilled = TermEntry(term="미체결", description="아직 거래되지 않은 수량")
+    fake_terms([unfilled, FILL])
+
+    assert [entry.term for entry in find_terms("미체결 잔량이 있고 체결은 아직입니다.")] == [
+        "미체결",
+        "체결",
+    ]
+    assert [entry.term for entry in find_terms("체결은 아직이고 미체결 잔량이 있습니다.")] == [
+        "체결",
+        "미체결",
+    ]
 
 
 def test_intermediate_level_gets_no_term_footnote(fake_terms):
@@ -288,23 +328,10 @@ def test_four_message_kinds_render_through_their_own_template():
 
 def test_urgent_alerts_get_their_own_banner():
     """긴급 공시 알림과 일반 알림이 같은 얼굴이면 긴급의 의미가 죽는다 (#297 검수 1)."""
-    assert render("본문", alert_kind("critical"), LEVEL_INTERMEDIATE) == "🚨 긴급 알림\n본문"
-    assert render("본문", alert_kind("high"), LEVEL_INTERMEDIATE) == "🚨 긴급 알림\n본문"
-    assert render("본문", alert_kind("normal"), LEVEL_INTERMEDIATE) == "🔔 알림\n본문"
-
-
-def test_unknown_urgency_does_not_escalate_to_the_urgent_banner():
-    """오탈자 하나로 모든 알림이 🚨가 되면 긴급 표시가 다시 무의미해진다."""
-    assert alert_kind("crtical") == KIND_ALERT
-    assert alert_kind(None) == KIND_ALERT
-    assert alert_kind("") == KIND_ALERT
-
-
-def test_alert_banner_and_send_gate_share_one_urgency_set():
-    """전송 게이트와 배너가 다른 기준을 보면 '긴급이라 보냈는데 배너는 평범한 알림'이 된다."""
-    from backend.telegram_notifier import URGENT_TELEGRAM_LEVELS
-
-    assert URGENT_TELEGRAM_LEVELS == URGENT_ALERT_URGENCIES
+    assert render("본문", alert_kind(True), LEVEL_INTERMEDIATE) == "🚨 긴급 알림\n본문"
+    assert render("본문", alert_kind(False), LEVEL_INTERMEDIATE) == "🔔 알림\n본문"
+    assert alert_kind(True) == KIND_ALERT_URGENT
+    assert alert_kind(False) == KIND_ALERT
 
 
 # ---- 구조화된 필드의 한국어화 ----

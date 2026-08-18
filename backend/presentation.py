@@ -120,10 +120,6 @@ KIND_ANALYSIS = "analysis"
 KIND_DIARY = "diary"
 KIND_BRIEFING = "briefing"
 
-# 긴급으로 취급하는 urgency 값. telegram_notifier가 URGENT_TELEGRAM_LEVELS라는 이름으로
-# 다시 내보낸다 — 알림 전송 게이트와 배너가 같은 기준을 봐야 "긴급이라 보냈는데 배너는
-# 평범한 알림"이 생기지 않는다.
-URGENT_ALERT_URGENCIES = frozenset({"high", "critical"})
 
 
 @dataclass(frozen=True)
@@ -202,15 +198,21 @@ def as_list_items(lines: list[str]) -> list[str]:
     ]
 
 
-def alert_kind(urgency: Any) -> str:
-    """urgency 값에 맞는 알림 틀. 모르는 값이면 일반 알림 (#297).
+def alert_kind(urgent: bool) -> str:
+    """긴급 알림 틀 또는 일반 알림 틀 (#297).
 
-    모르는 값을 긴급으로 올리지 않는다. 오탈자 하나로 모든 알림이 🚨가 되면 긴급 표시가
-    다시 무의미해지는데, 그게 이 구분을 도입한 이유와 정반대다.
+    urgency 값이 아니라 **판정 결과**를 받는다. 처음에는 여기서 urgency 문자열을 직접
+    보고 긴급 여부를 정했는데, 그러면 판정이 두 곳에 생긴다 — 전송 게이트
+    (telegram_notifier.should_send_telegram_alert)와 여기. 두 판정은 실제로 어긋났다:
+    게이트는 telegram_alert 플래그도 함께 보고 urgency를 정확히 비교하는데 이쪽은
+    소문자로 접어 urgency만 봤다. alert_mode="all"에서 {"urgency": "High",
+    "telegram_alert": False}면 배너는 🚨인데 본문은 비긴급 사유를 달고 나갔다
+    (#297 자가리뷰).
+
+    판정을 호출부에서 한 번만 하고 그 결과를 넘기면 어긋날 자리가 없어진다. 판정 규칙을
+    바꿔도 배너가 따라오지 않는 일이 생기지 않는다.
     """
-    if isinstance(urgency, str) and urgency.strip().lower() in URGENT_ALERT_URGENCIES:
-        return KIND_ALERT_URGENT
-    return KIND_ALERT
+    return KIND_ALERT_URGENT if urgent else KIND_ALERT
 
 
 # ---- 구조화된 필드의 한국어화 ----
@@ -300,7 +302,20 @@ _BLOCKQUOTE_RE = re.compile(r"^[ \t]{0,3}>[ \t]?", re.M)
 # 마크다운 글머리표(-, *, +)를 하나로 맞춘다. 목적지는 LIST_MARKER("-")다 — 이 봇의 나열
 # 표시가 그것이고, 소스마다 다른 기호를 쓰면 한 화면에 세 종류가 섞인다.
 _BULLET_RE = re.compile(r"^([ \t]*)[*+\-][ \t]+", re.M)
-_LINK_RE = re.compile(r"!?\[([^\]\n]*)\]\(\s*<?([^)\s]*)>?[^)]*\)")
+# 마크다운 링크. 괄호 안이 **실제 링크 목적지일 때만** 걸린다.
+#
+# 처음에는 뒤쪽을 [^)]*로 흘려보냈는데, 그러면 링크가 아닌 괄호까지 먹고 그 내용을 지웠다:
+# "[대량보유](5.1% → 6.3% 증가)"가 "대량보유 (5.1%)"가 되어 수치가 사라졌다. 이 모듈의
+# 계약은 "옮기되 지우지 않는다"이므로 정반대다 (#297 자가리뷰).
+#
+# 마크다운에서 목적지에 공백을 넣으려면 <>로 감싸야 한다. 그래서 목적지는 <...>이거나
+# 공백·괄호 없는 한 덩어리이고, 그 뒤에는 제목("...", '...', (...))만 올 수 있다.
+# 이 모양이 아니면 링크가 아니므로 원문을 그대로 둔다 — 대괄호가 남더라도 내용은 산다.
+_LINK_RE = re.compile(
+    r"!?\[([^\]\n]*)\]\("
+    r"\s*(?:<([^>\n]*)>|([^()\s]*))"
+    r"(?:\s+(?:\"[^\"\n]*\"|'[^'\n]*'|\([^()\n]*\)))?\s*\)"
+)
 _BOLD_STAR_RE = re.compile(r"\*\*(?!\s)(.+?)(?<!\s)\*\*", re.S)
 _BOLD_UNDERSCORE_RE = re.compile(r"(?<![\w\\])__(?!\s)(.+?)(?<!\s)__(?!\w)", re.S)
 _ITALIC_STAR_RE = re.compile(r"(?<!\*)\*(?![\s*])([^*\n]+?)(?<!\s)\*(?!\*)")
@@ -321,7 +336,8 @@ _EXTRA_BLANKS_RE = re.compile(r"\n{3,}")
 
 def _replace_link(match: re.Match[str]) -> str:
     label = match.group(1).strip()
-    url = match.group(2).strip()
+    # 2번은 <...>로 감싼 목적지, 3번은 맨 목적지. 둘 중 하나만 잡힌다.
+    url = (match.group(2) or match.group(3) or "").strip()
     if not url:
         return label
     if not label or label == url:
@@ -368,7 +384,7 @@ def sanitize_markdown(text: str) -> str:
 # ---- 용어 사전 ----
 
 TERMS_PATH = Path(__file__).with_name("terms.json")
-# 한 메시지에 붙는 용어 각주 개수 상한. 셋을 넘어가면 각주가 본문만큼 길어지고, 그 시점부터
+# 한 메시지에 붙는 용어 각주 개수 상한. 둘을 넘어가면 각주가 본문만큼 길어지고, 그 시점부터
 # 사용자는 각주를 읽지 않는다 — 설명이 없는 것과 같아진다.
 TERM_FOOTNOTE_MAX_ENTRIES = 2
 # 각주 한 줄의 모양: "ℹ️ 예수금: 설명".
@@ -465,6 +481,11 @@ def find_terms(
     매칭은 버린다. 별칭으로 걸려도 각주에는 대표 용어와 그 설명이 나가고, 같은 용어는
     본문에 몇 번 나오든 한 번만 설명한다.
 
+    등장 위치는 첫 번째만이 아니라 **전부** 모은다. 첫 등장만 보면 그 자리가 더 긴 용어에
+    먹혔을 때 뒤에 있는 단독 등장까지 함께 사라진다 — "미체결 잔량이 있고 체결은 아직입니다"
+    에서 체결의 첫 등장은 미체결 안이라 버려지고, 11자 뒤의 진짜 체결은 보이지도 않았다
+    (#297 자가리뷰).
+
     ``exclude``는 상한을 적용하기 **전에** 걸러진다. 나중에 걸러내면 제외될 용어가 두
     자리 중 하나를 먹고 사라져, 설명이 필요한 말이 상한에 밀린다.
     """
@@ -473,9 +494,10 @@ def find_terms(
 
     hits: list[tuple[int, int, TermEntry]] = []
     for surface, entry in _surface_index():
-        position = text.find(surface)
-        if position >= 0:
-            hits.append((position, position + len(surface), entry))
+        start = text.find(surface)
+        while start >= 0:
+            hits.append((start, start + len(surface), entry))
+            start = text.find(surface, start + 1)
 
     # 위치 오름차순, 같은 위치면 긴 것 먼저.
     hits.sort(key=lambda hit: (hit[0], -(hit[1] - hit[0])))
