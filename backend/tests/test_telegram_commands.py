@@ -24,17 +24,22 @@ from backend.telegram_commands import (
     NAT_PROGRESS_MESSAGE,
     PROGRESS_DONE_MESSAGE,
     QUOTE_COMMAND_HELP,
-    REASONING_FOOTNOTE_SEPARATOR,
     TELEGRAM_INTERACTIVE_HELP,
     TRADE_COMMAND_HELP,
     LOOKUP_COMMAND_HELP,
-    TELEGRAM_MESSAGE_LIMIT,
-    TELEGRAM_TRUNCATION_SUFFIX,
     TREND_COMMAND_HELP,
     UNRESOLVED_STOCK_WARNING,
     TelegramCommandHandler,
     TelegramCommandPoller,
-    _reasoning_footnote,
+)
+# 길이 상한과 말줄임 규칙은 출력 계층이 정의한다. telegram_commands는 더 이상 그것을
+# 다시 내보내지 않는다 — 재수출만 남은 임포트는 이름이 두 곳에 있다는 착시를 만든다.
+from backend.presentation import (
+    REASONING_FOOTNOTE_MAX_CHARS,
+    REASONING_FOOTNOTE_SEPARATOR,
+    TELEGRAM_MESSAGE_LIMIT,
+    TELEGRAM_TRUNCATION_SUFFIX,
+    reasoning_footnote as _reasoning_footnote,
 )
 from backend.redis_state import (
     InMemoryPendingOrderStore,
@@ -3609,7 +3614,7 @@ def test_reasoning_footnote_length_is_capped():
         tuple(NatToolUse("아주_긴_도구_이름_" * 5 + str(i), ok=True) for i in range(50)),
     )
 
-    assert 0 < len(footnote) <= telegram_commands.REASONING_FOOTNOTE_MAX_CHARS
+    assert 0 < len(footnote) <= REASONING_FOOTNOTE_MAX_CHARS
 
 
 @pytest.mark.asyncio

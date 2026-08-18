@@ -41,12 +41,8 @@ from .presentation import (
     KIND_QUOTE,
     LEVEL_BEGINNER,
     LEVEL_INTERMEDIATE,
-    REASONING_FOOTNOTE_MAX_CHARS,
-    REASONING_FOOTNOTE_SEPARATOR,
-    TELEGRAM_TRUNCATION_SUFFIX,
     TOOL_LABELS,
     as_list_items,
-    clamp as _clamp,
     sanitize_markdown,
     reasoning_footnote,
     kind_for_agent,
@@ -58,7 +54,6 @@ from .services import llm_chat, run_mcp_tool
 from .watchlist_repo import SqliteWatchlistRepo
 from .telegram_notifier import (
     TELEGRAM_ALERT_MODES,
-    TELEGRAM_MESSAGE_LIMIT,
     TelegramNotifier,
     fetch_telegram_api,
     telegram_notifier,
@@ -287,7 +282,8 @@ PROGRESS_DONE_MESSAGE = "✅ 분석 완료"
 # 각주 상수(REASONING_FOOTNOTE_*)와 라벨 표(AGENT_LABELS·TOOL_LABELS), 각주 조립 자체는
 # #297에서 presentation으로 옮겼다. 동작은 그대로다 — 옮긴 이유는 나가는 문장을 조립하는
 # 지점이 하나여야 용어 각주와의 순서·길이 예산을 한 곳에서 정할 수 있기 때문이다.
-# 위 임포트가 이름을 그대로 유지하므로 기존 호출부와 테스트는 손대지 않는다.
+# 이 모듈은 그 이름들을 다시 내보내지 않는다. 재수출만 남은 임포트는 정의가 두 곳에 있다는
+# 착시를 만들고, 정적 검사에는 미사용 임포트로 보인다 (#297 자가리뷰).
 
 _telegram_command_task: asyncio.Task | None = None
 
@@ -316,12 +312,6 @@ def reset_level_cache() -> None:
     global _level_cache
     _level_cache = None
 
-
-def _telegram_text(text: str, limit: int = TELEGRAM_MESSAGE_LIMIT) -> str:
-    return _clamp(text, limit)
-
-
-_reasoning_footnote = reasoning_footnote
 
 
 def _nat_answer_message(
