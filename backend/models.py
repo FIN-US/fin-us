@@ -71,6 +71,30 @@ class AgentReport(SQLModel, table=True):
         default=False,
         description="provider가 도구(MCP/KIS/뉴스) 호출 경로로 구성돼 있는지 여부 (provider 능력 신호, 실제 호출 관측 아님).",
     )
+    # #298: 2차 필터가 매긴 신호 점수. 셋 다 nullable이며 기본값을 채우지 않는다 —
+    # "0과 모름"은 다른 값이다(#122·#162). signal_score=0은 "모델이 무관/중립이라고
+    # 판단했다"이고, null은 "채점 자체가 없었다"(LLM 호출·파싱 실패로 fail-open했거나,
+    # 점수화 이전에 저장된 행이거나, 스케줄러를 거치지 않은 수동 분석)이다.
+    # 이 구분이 무너지면 평가셋(scripts/build_signal_eval_set.py)의 모델점수 열이
+    # 실패를 중립으로 오염시킨다.
+    signal_score: Optional[int] = Field(
+        default=None,
+        description=(
+            "신호 영향도 점수 (-3~+3 정수). 감시 파이프라인의 2차 필터가 매긴다. "
+            "채점하지 못했으면 null (fail-open)."
+        ),
+    )
+    signal_reason: Optional[str] = Field(
+        default=None,
+        description="signal_score의 한 줄 근거. 점수가 null이면 함께 null.",
+    )
+    signal_uncertainty: Optional[float] = Field(
+        default=None,
+        description=(
+            "기사별 점수의 표준편차. 기사가 2건 미만이면 흩어짐을 정의할 수 없으므로 null "
+            "(0.0이 아니다 — 0.0은 '기사들이 완전히 일치했다'는 뜻)."
+        ),
+    )
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="생성 일시")
 
 class Diary(SQLModel, table=True):
