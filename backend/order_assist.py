@@ -860,11 +860,20 @@ async def _drop_expired_pending_order(pending_orders: Any, chat_id: str, now: da
     """앱 레벨 만료(``ORDER_EXPIRES_AFTER``)가 지난 대기 주문을 지운다.
 
     telegram_commands의 동명 메서드와 같은 판정이다. 두 곳이 같은 규칙을 쓰는 것이
-    핵심이라 만료 창(ORDER_EXPIRES_AFTER)을 공유하는 상수 하나에서 읽는다.
+    핵심이라 만료 창(ORDER_EXPIRES_AFTER)은 공유 상수 하나에서 읽고, tz 없는 값의
+    해석도 양쪽 모두 KST로 맞춘다.
+
+    *now*까지 보정하는 이유: ``now_factory`` 기본값이 ``datetime.now(KST)``라 지금은
+    naive가 들어오지 않지만, 보정을 빼면 이 헬퍼만 naive를 **시스템 로컬**로 읽는다.
+    같은 ``run_order_assist`` 안에서 ``is_korean_market_open``은 naive를 KST로 읽으므로,
+    한 함수 안에 해석이 두 갈래로 갈린 채 남는다. 상수를 공유하는 것만으로는 "두 경로의
+    만료 판정이 갈라지지 않는다"가 절반만 성립한다.
     """
     order = await pending_orders.get(chat_id)
     if order is None:
         return
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=KST)
     created_at = order.created_at
     if created_at.tzinfo is None:
         created_at = created_at.replace(tzinfo=KST)

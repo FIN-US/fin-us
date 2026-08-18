@@ -737,6 +737,41 @@ async def test_expired_pending_order_does_not_block_a_new_proposal():
 
 
 @pytest.mark.asyncio
+async def test_expiry_check_reads_a_naive_now_as_kst():
+    """tz 없는 now도 KST로 읽는다 — 같은 함수 안의 다른 시각 해석과 갈라지지 않게.
+
+    now_factory 기본값이 datetime.now(KST)라 프로덕션에서는 naive가 들어오지 않는
+    잠복 경로다. 다만 보정을 빼면 이 헬퍼만 naive를 시스템 로컬로 읽고,
+    is_korean_market_open은 같은 값을 KST로 읽어 한 함수 안에 해석이 두 갈래가 된다.
+
+    아래 30초는 KST로 읽으면 만료 전(유지), UTC로 읽으면 9시간 경과(삭제)라 판정이
+    갈린다. 따라서 이 테스트는 로컬 tz가 KST가 아닌 호스트(UTC로 도는 CI 등)에서
+    보정 누락을 잡아낸다. KST 호스트에서는 두 해석이 같아져 통과만 한다.
+    """
+    from backend.trading_orders import PendingOrder
+
+    store = InMemoryPendingOrderStore()
+    created_at = datetime(2026, 5, 20, 10, 0, tzinfo=KST)
+    await store.set_if_absent(
+        "123",
+        PendingOrder(
+            chat_id="123",
+            stock_name="NAVER",
+            stock_code="035420",
+            side="BUY",
+            quantity=1,
+            price=200_000,
+            created_at=created_at,
+        ),
+    )
+    naive_now = datetime(2026, 5, 20, 10, 0, 30)  # tzinfo 없음
+
+    await order_assist._drop_expired_pending_order(store, "123", naive_now)
+
+    assert await store.get("123") is not None
+
+
+@pytest.mark.asyncio
 async def test_unexpired_pending_order_still_conflicts():
     """만료 정리가 '충돌 검사를 없앤 것'이 되면 안 된다 — 살아 있는 주문은 그대로 막는다."""
     from backend.trading_orders import PendingOrder
