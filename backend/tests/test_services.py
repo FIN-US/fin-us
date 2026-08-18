@@ -1999,3 +1999,64 @@ async def test_score_signal_prompt_counts_only_whole_articles(monkeypatch):
     await services.score_signal("삼성전자", content, source="news")
 
     assert "기사 2건" in prompts[0]
+
+
+@pytest.mark.asyncio
+async def test_perform_stock_analysis_persists_signal_score(monkeypatch):
+    """2차 필터의 채점 결과가 AgentReport와 API 응답 양쪽에 실려야 한다.
+
+    perform_stock_analysis가 signal_score를 무시하면 점수가 DB에도 알림에도 남지
+    않고, 나중에 평가셋으로 모델을 검증할 방법이 사라진다.
+    """
+    async def fake_llm_chat(provider, prompt, *, conversation_id=None):
+        return "plain analysis"
+
+    async def fake_run_mcp_tool(params, tool_name, arguments):
+        return "삼성전자 (005930, KOSPI)"
+
+    monkeypatch.setattr(services, "llm_chat", fake_llm_chat)
+    monkeypatch.setattr(services, "run_mcp_tool", fake_run_mcp_tool)
+
+    scored = services.SignalScore(
+        score=-2,
+        reason="주요 고객 이탈 보도",
+        uncertainty=1.5,
+        headline_scores=(-3, 0),
+        is_significant=True,
+    )
+
+    session = FakeSession()
+    result = await services.perform_stock_analysis(
+        "삼성전자", "openai", session, signal_score=scored
+    )
+
+    assert session.report.signal_score == -2
+    assert session.report.signal_reason == "주요 고객 이탈 보도"
+    assert session.report.signal_uncertainty == 1.5
+    assert result["signal_score"] == -2
+    assert result["signal_reason"] == "주요 고객 이탈 보도"
+    assert result["signal_uncertainty"] == 1.5
+
+
+@pytest.mark.asyncio
+async def test_perform_stock_analysis_leaves_signal_score_null_without_filter(monkeypatch):
+    """필터를 거치지 않은 경로(수동 분석·API 직접 호출)는 세 값 모두 null이어야 한다.
+
+    0으로 채우면 "모델이 중립으로 채점했다"는 없던 사실이 생긴다 (#122·#162).
+    """
+    async def fake_llm_chat(provider, prompt, *, conversation_id=None):
+        return "plain analysis"
+
+    async def fake_run_mcp_tool(params, tool_name, arguments):
+        return "삼성전자 (005930, KOSPI)"
+
+    monkeypatch.setattr(services, "llm_chat", fake_llm_chat)
+    monkeypatch.setattr(services, "run_mcp_tool", fake_run_mcp_tool)
+
+    session = FakeSession()
+    result = await services.perform_stock_analysis("삼성전자", "openai", session)
+
+    assert session.report.signal_score is None
+    assert session.report.signal_reason is None
+    assert session.report.signal_uncertainty is None
+    assert result["signal_score"] is None
