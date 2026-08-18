@@ -15,6 +15,7 @@ from backend import presentation
 from backend.presentation import (
     DEFAULT_TELEGRAM_USER_LEVEL,
     KIND_ALERT,
+    KIND_ALERT_URGENT,
     KIND_ANALYSIS,
     KIND_DIARY,
     KIND_QUOTE,
@@ -23,7 +24,10 @@ from backend.presentation import (
     REASONING_FOOTNOTE_SEPARATOR,
     TELEGRAM_MESSAGE_LIMIT,
     TERM_FOOTNOTE_PREFIX,
+    URGENT_ALERT_URGENCIES,
     TermEntry,
+    alert_kind,
+    decision_label,
     find_terms,
     kind_for_agent,
     normalize_level,
@@ -31,6 +35,7 @@ from backend.presentation import (
     render,
     sanitize_markdown,
     term_footnote,
+    urgency_label,
 )
 
 
@@ -150,11 +155,61 @@ def test_intermediate_level_gets_no_term_footnote(fake_terms):
     assert term_footnote(text, level=LEVEL_INTERMEDIATE) == ""
 
 
-def test_footnote_longer_than_the_body_is_dropped(fake_terms):
-    """설명이 설명 대상보다 길면 도움이 아니라 화면을 밀어내는 것이다."""
+def test_a_short_body_still_gets_its_footnote(fake_terms):
+    """초보가 짧은 기본 질문을 던졌을 때가 각주가 가장 필요한 순간이다 (#297 검수 3).
+
+    처음에는 "각주가 본문보다 길면 생략"으로 막았는데, 그 규칙이 정확히 이 경우를 막았다.
+    """
     fake_terms([FLOW])
 
-    assert term_footnote("수급 응답", level=LEVEL_BEGINNER) == ""
+    assert term_footnote("수급 응답", level=LEVEL_BEGINNER) == (
+        f"{TERM_FOOTNOTE_PREFIX} 수급 — 누가 사고 누가 팔았는지"
+    )
+
+
+def test_terms_the_user_typed_are_not_explained(fake_terms):
+    """직접 타이핑한 단어는 아는 단어라는 신호다. 설명하면 참견이 된다."""
+    fake_terms([DEPOSIT, FILL])
+
+    footnote = term_footnote(
+        "예수금은 120만원이고 어제 주문은 전부 체결됐습니다.",
+        level=LEVEL_BEGINNER,
+        question="예수금 얼마야?",
+    )
+
+    assert footnote == f"{TERM_FOOTNOTE_PREFIX} 체결 — 주문이 거래로 이뤄진 것"
+
+
+def test_a_known_term_does_not_waste_a_footnote_slot(fake_terms):
+    """제외를 상한 뒤에 적용하면 설명이 필요한 말이 두 자리 밖으로 밀린다.
+
+    질문에 "예수금"이 있으면 그 자리는 다음 용어에게 넘어가야 한다 — 그러지 않으면
+    슬롯 하나가 조용히 버려져, 각주가 하나만 붙는다.
+    """
+    fake_terms([DEPOSIT, FILL, FLOW])
+    text = "예수금은 320만원이고 어제 주문은 전부 체결됐으며 수급도 나쁘지 않습니다."
+
+    found = [entry.term for entry in find_terms(text, exclude=frozenset({"예수금"}))]
+
+    assert found == ["체결", "수급"]
+
+
+def test_a_term_typed_as_an_alias_also_counts_as_known(fake_terms):
+    """사용자는 '주문가능금액'이라 쳤는데 '예수금'을 설명하면 같은 말을 두 번 하는 것이다."""
+    fake_terms([DEPOSIT])
+
+    assert term_footnote(
+        "예수금은 120만원입니다.",
+        level=LEVEL_BEGINNER,
+        question="주문가능금액 알려줘",
+    ) == ""
+
+
+def test_without_a_question_nothing_is_filtered_out(fake_terms):
+    """스케줄러 알림은 사용자가 부른 메시지가 아니라 '이미 안다'고 볼 근거가 없다."""
+    fake_terms([DEPOSIT])
+
+    assert term_footnote("예수금이 부족합니다.", level=LEVEL_BEGINNER) != ""
 
 
 def test_unknown_words_get_no_footnote(fake_terms):
@@ -218,6 +273,85 @@ def test_four_message_kinds_render_through_their_own_template():
     # 시세·분석답변은 사용자가 방금 요청한 것의 답이라 배너를 얹지 않는다 (TEMPLATES 주석).
     assert render(body, KIND_QUOTE, LEVEL_INTERMEDIATE) == "본문입니다"
     assert render(body, KIND_ANALYSIS, LEVEL_INTERMEDIATE) == "본문입니다"
+
+
+def test_urgent_alerts_get_their_own_banner():
+    """긴급 공시 알림과 일반 알림이 같은 얼굴이면 긴급의 의미가 죽는다 (#297 검수 1)."""
+    assert render("본문", alert_kind("critical"), LEVEL_INTERMEDIATE) == "🚨 긴급 알림\n본문"
+    assert render("본문", alert_kind("high"), LEVEL_INTERMEDIATE) == "🚨 긴급 알림\n본문"
+    assert render("본문", alert_kind("normal"), LEVEL_INTERMEDIATE) == "🔔 알림\n본문"
+
+
+def test_unknown_urgency_does_not_escalate_to_the_urgent_banner():
+    """오탈자 하나로 모든 알림이 🚨가 되면 긴급 표시가 다시 무의미해진다."""
+    assert alert_kind("crtical") == KIND_ALERT
+    assert alert_kind(None) == KIND_ALERT
+    assert alert_kind("") == KIND_ALERT
+
+
+def test_alert_banner_and_send_gate_share_one_urgency_set():
+    """전송 게이트와 배너가 다른 기준을 보면 '긴급이라 보냈는데 배너는 평범한 알림'이 된다."""
+    from backend.telegram_notifier import URGENT_TELEGRAM_LEVELS
+
+    assert URGENT_TELEGRAM_LEVELS == URGENT_ALERT_URGENCIES
+
+
+# ---- 구조화된 필드의 한국어화 ----
+
+
+@pytest.mark.parametrize(
+    ("decision", "expected"),
+    [("BUY", "매수"), ("SELL", "매도"), ("HOLD", "보유 유지"), ("hold", "보유 유지")],
+)
+def test_decision_is_translated_deterministically(decision, expected):
+    assert decision_label(decision) == expected
+
+
+def test_unknown_decision_passes_through_instead_of_defaulting():
+    """모르는 판단값을 기본값으로 접으면 지어낸 판단을 사용자가 실제 판단으로 읽는다 (#162)."""
+    assert decision_label("판단 없음 (도구 미사용 provider)") == (
+        "판단 없음 (도구 미사용 provider)"
+    )
+
+
+@pytest.mark.parametrize(
+    ("urgency", "expected"),
+    [("critical", "매우 높음"), ("high", "높음"), ("normal", "보통"), ("확인불가", "확인불가")],
+)
+def test_urgency_is_translated_deterministically(urgency, expected):
+    assert urgency_label(urgency) == expected
+
+
+# ---- 본문에 새어 나온 내부 도구명 ----
+
+
+def test_internal_tool_names_in_the_body_are_replaced(fake_terms):
+    """각주에서는 한국어로 보여주면서 본문에서는 내부 이름을 흘리면 안 된다 (#297 검수 5)."""
+    fake_terms([])
+
+    message = render(
+        "`get_investor_trading` 결과를 참고했습니다.", KIND_ANALYSIS, LEVEL_INTERMEDIATE
+    )
+
+    assert message == "수급 조회 결과를 참고했습니다."
+
+
+def test_a_longer_tool_name_is_not_half_replaced(fake_terms):
+    """finus_mcp_trading_get_balance가 'finus_mcp_trading_계좌 잔고 조회'가 되면 안 된다."""
+    fake_terms([])
+
+    assert render(
+        "finus_mcp_trading_get_balance 를 호출했습니다.", KIND_ANALYSIS, LEVEL_INTERMEDIATE
+    ) == "계좌 잔고 조회 를 호출했습니다."
+
+
+def test_unknown_tool_names_are_left_alone(fake_terms):
+    """모르는 도구를 감추면 사용자가 보는 근거가 실제보다 줄어든다 — 각주와 같은 규칙이다."""
+    fake_terms([])
+
+    assert render("get_brand_new_thing 호출", KIND_ANALYSIS, LEVEL_INTERMEDIATE) == (
+        "get_brand_new_thing 호출"
+    )
 
 
 def test_unknown_kind_falls_back_instead_of_raising():

@@ -8,9 +8,12 @@ import httpx
 from .config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, is_placeholder_secret
 from .presentation import (
     DEFAULT_TELEGRAM_USER_LEVEL,
-    KIND_ALERT,
     TELEGRAM_MESSAGE_LIMIT,
+    URGENT_ALERT_URGENCIES,
+    alert_kind,
+    decision_label,
     render,
+    urgency_label,
 )
 
 logger = logging.getLogger(__name__)
@@ -20,7 +23,9 @@ _TELEGRAM_BOT_URL_RE = re.compile(r"(https://api\.telegram\.org/bot)[^/\s\"]+")
 # 알림도 render를 통과하므로 이 모듈이 presentation을 임포트하고, 그래서 상한의 정의는
 # 반대편(잎)에 있어야 순환이 생기지 않는다. 기존 임포트 경로는 그대로 살아 있다.
 
-URGENT_TELEGRAM_LEVELS = {"high", "critical"}
+# presentation이 배너(🚨 긴급 알림)를 고르는 데 쓰는 것과 같은 집합이다. 전송 게이트와
+# 배너가 다른 기준을 보면 "긴급이라 보냈는데 배너는 평범한 알림"이 생긴다 (#297 검수).
+URGENT_TELEGRAM_LEVELS = URGENT_ALERT_URGENCIES
 TELEGRAM_ALERT_MODES = {"urgent", "all", "off"}
 
 
@@ -307,16 +312,22 @@ class TelegramNotifier:
         )
         summary = analysis_data.get("summary", "")
 
-        confidence_text = f" ({confidence:.2f})" if isinstance(confidence, Real) else ""
-        title = f"[긴급] {stock} / {source}" if is_urgent else f"{stock} / {source}"
+        confidence_text = f" (확신도 {confidence:.2f})" if isinstance(confidence, Real) else ""
+        # 필드명도 값도 한국어다 (#297 검수). decision/urgency는 LLM 자유 텍스트가 아니라
+        # AgentReport의 정해진 값이므로 출력 계층이 결정론적으로 번역할 수 있다 —
+        # 표에 없는 값은 presentation의 라벨 함수가 원문 그대로 통과시킨다.
+        #
+        # 제목에서 "[긴급]"을 뺐다. 긴급 여부는 이제 render가 붙이는 배너(🚨 긴급 알림)가
+        # 알리므로, 두 자리에서 같은 말을 하면 한쪽이 바뀔 때 어긋난다. is_urgent는
+        # urgency_reason의 기본 문구를 고르는 데 계속 쓴다.
         lines = [
-            title,
-            f"Decision: {decision}{confidence_text}",
-            f"Reason: {reason}",
-            f"Urgency: {urgency} - {urgency_reason}",
+            f"{stock} / {source}",
+            f"판단: {decision_label(decision)}{confidence_text}",
+            f"이유: {reason}",
+            f"긴급도: {urgency_label(urgency)} - {urgency_reason}",
         ]
         if summary:
-            lines.append(f"Summary: {summary}")
+            lines.append(f"요약: {summary}")
         return "\n".join(lines)[:TELEGRAM_MESSAGE_LIMIT]
 
     def format_morning_briefing(self, briefing: dict[str, Any]) -> str:
@@ -376,7 +387,7 @@ class TelegramNotifier:
                         source=source,
                         analysis_data=analysis_data,
                     ),
-                    KIND_ALERT,
+                    alert_kind(analysis_data.get("urgency")),
                     level,
                 )
             )

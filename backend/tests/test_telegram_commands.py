@@ -607,7 +607,8 @@ async def test_quote_result_trend_button_uses_same_stock_name():
         (TRADING_MCP_PARAMS, "get_investor_trading", {"stock_name": "삼성전자"}),
     ]
     assert notifier.callback_answers == [("trend-callback", None)]
-    assert notifier.messages[-1] == "수급 응답"
+    # 본문이 짧아도 "수급"은 사용자가 친 말이 아니므로 설명이 붙는다 (#297 검수 3).
+    assert notifier.messages[-1].startswith("수급 응답\n\nℹ️ 용어: 수급 — ")
 
 
 @pytest.mark.asyncio
@@ -667,7 +668,8 @@ async def test_trend_command_calls_mcp_runner_with_stock_name():
         (TRADING_MCP_PARAMS, "get_investor_trading", {"stock_name": "삼성전자"})
     ]
     assert notifier.actions == ["typing"]
-    assert notifier.messages == ["수급 응답"]
+    assert len(notifier.messages) == 1
+    assert notifier.messages[0].startswith("수급 응답\n\nℹ️ 용어: 수급 — ")
     assert notifier.reply_markups[-1]["inline_keyboard"][0][0]["text"] == "💵 현재가 보기"
 
 

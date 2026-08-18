@@ -3,7 +3,7 @@
 이 레포의 원칙은 일관되게 "형식은 코드로 강제하고 LLM은 내용만 만든다"였다 (#129의
 종목코드 검증, #260의 추론 각주). 이 모듈은 그 원칙을 문장 자체에 적용한다.
 
-책임이 넷이다.
+책임이 다섯이다.
 
 1. **마크다운 잔재 정리.** 이 봇은 ``sendMessage``에 ``parse_mode``를 넣지 않는다 —
    레포 전체에서 그 키를 쓰는 곳이 없다. 의도된 정책이다: MarkdownV2를 켜면 ``.``·``-``·
@@ -17,7 +17,12 @@
    않는다 — 틀린 시세는 다음 조회에서 정정되지만 틀린 정의는 사용자의 머릿속에 남는다.
    환각을 가장 늦게 발견하게 되는 층위가 교육이다.
 
-4. **길이 예산.** 각주 자리를 먼저 확보하고 본문을 자른다 (#260에서 온 규칙).
+4. **정해진 값의 한국어화.** decision(BUY/SELL/HOLD)·urgency(critical/…)처럼 값이 정해진
+   필드와, 본문에 새어 나온 내부 도구명(get_investor_trading)을 표로 옮긴다. 정해진 값의
+   번역을 LLM에게 시키면 매번 다른 말이 나오고 그중 일부는 뜻이 어긋난다 — 표로 하면
+   한 번 정한 말이 계속 같은 말로 나간다. 표에 없는 값은 감추지 않고 원문 그대로 통과시킨다.
+
+5. **길이 예산.** 각주 자리를 먼저 확보하고 본문을 자른다 (#260에서 온 규칙).
 
 임포트 방향: 이 모듈은 backend의 어떤 모듈도 임포트하지 않는다. 반대로 telegram_notifier·
 telegram_commands·redis_state가 이쪽을 임포트한다. 텔레그램 전송 계층이 출력 계층을 쓰는데
@@ -88,10 +93,16 @@ def level_label(level: str) -> str:
 # ---- 메시지 종류별 틀 ----
 
 KIND_ALERT = "alert"
+KIND_ALERT_URGENT = "alert_urgent"
 KIND_QUOTE = "quote"
 KIND_ANALYSIS = "analysis"
 KIND_DIARY = "diary"
 KIND_BRIEFING = "briefing"
+
+# 긴급으로 취급하는 urgency 값. telegram_notifier가 URGENT_TELEGRAM_LEVELS라는 이름으로
+# 다시 내보낸다 — 알림 전송 게이트와 배너가 같은 기준을 봐야 "긴급이라 보냈는데 배너는
+# 평범한 알림"이 생기지 않는다.
+URGENT_ALERT_URGENCIES = frozenset({"high", "critical"})
 
 
 @dataclass(frozen=True)
@@ -118,15 +129,20 @@ class MessageTemplate:
 # 줄에서 "무엇이 왔는가"를 바로 읽어야 한다.
 #
 # 시세(/quote·/trend)와 분석답변(자연어 질문)은 사용자가 방금 요청한 것의 답이다. 무엇에 대한
-# 답인지 이미 알고 있으므로 배너는 줄만 차지한다. 게다가 이 두 경로의 현재 출력 모양은 기존
-# 회귀 테스트가 문자열 동등성으로 고정하고 있다 — 배너를 붙이는 것은 눈에 보이는 동작 변경이고,
-# 그 판단은 사람이 preview.md를 보고 내릴 몫이다. 붙이기로 하면 아래 두 줄의 header를 채우면
-# 되고 그 외에 고칠 곳은 없다.
+# 답인지 이미 알고 있으므로 배너는 줄만 차지한다. #297 검수에서 이 판단을 유지하기로 했다.
+# 붙이기로 바뀌면 아래 두 줄의 header를 채우면 되고 그 외에 고칠 곳은 없다.
 #
 # 브리핑은 세 번째 경우다. 봇이 먼저 거는 메시지지만 본문 첫 줄이 이미 "📰 오늘의 시장 요약"
 # 이라 배너를 얹으면 머리글이 두 줄 연속으로 붙는다.
+#
+# 알림 배너가 둘인 이유: 긴급 공시 알림과 일반 알림이 같은 얼굴이면 긴급의 의미가 죽는다.
+# 사용자는 알림을 흘려보며 읽으므로 구분은 첫 줄에 있어야 한다. 이 표는 telegram_commands의
+# ALERT_MODE_EMOJIS(알림 모드 표시)와 같은 역할을 메시지 머리글에서 한다 — 그 옆에 두지 않은
+# 것은 임포트 방향 때문이다. 알림을 보내는 telegram_notifier가 telegram_commands를 임포트할
+# 수 없으므로, 두 계층이 함께 쓰는 상수는 잎인 이쪽에 있어야 한다.
 TEMPLATES: dict[str, MessageTemplate] = {
     KIND_ALERT: MessageTemplate(header="🔔 알림"),
+    KIND_ALERT_URGENT: MessageTemplate(header="🚨 긴급 알림"),
     KIND_DIARY: MessageTemplate(header="📓 매매일지"),
     KIND_BRIEFING: MessageTemplate(header=""),
     KIND_QUOTE: MessageTemplate(header=""),
@@ -139,6 +155,73 @@ _FALLBACK_TEMPLATE = MessageTemplate()
 
 def template_for(kind: str) -> MessageTemplate:
     return TEMPLATES.get(kind, _FALLBACK_TEMPLATE)
+
+
+def alert_kind(urgency: Any) -> str:
+    """urgency 값에 맞는 알림 틀. 모르는 값이면 일반 알림 (#297).
+
+    모르는 값을 긴급으로 올리지 않는다. 오탈자 하나로 모든 알림이 🚨가 되면 긴급 표시가
+    다시 무의미해지는데, 그게 이 구분을 도입한 이유와 정반대다.
+    """
+    if isinstance(urgency, str) and urgency.strip().lower() in URGENT_ALERT_URGENCIES:
+        return KIND_ALERT_URGENT
+    return KIND_ALERT
+
+
+# ---- 구조화된 필드의 한국어화 ----
+
+# AgentReport의 decision/urgency는 LLM 자유 텍스트가 아니라 정해진 값이다. 값이 정해져
+# 있으니 번역도 결정론적으로 할 수 있고, 그렇다면 사용자에게 "HOLD"를 보여줄 이유가 없다.
+# LLM에게 한국어로 달라고 시키는 대신 여기서 매핑하는 것이 이 계층의 존재 이유다 —
+# 시키면 매번 다른 말("보류", "관망", "홀드")이 나오고 그중 일부는 뜻이 어긋난다.
+DECISION_LABELS: dict[str, str] = {
+    "BUY": "매수",
+    "SELL": "매도",
+    "HOLD": "보유 유지",
+}
+URGENCY_LABELS: dict[str, str] = {
+    "critical": "매우 높음",
+    "high": "높음",
+    "normal": "보통",
+    "low": "낮음",
+}
+
+
+def decision_label(decision: Any) -> str:
+    """BUY/SELL/HOLD → 한국어. 표에 없으면 원문 그대로 (#297).
+
+    조용히 감추지 않는다. 모르는 판단값을 "보유 유지" 같은 기본값으로 접으면, 이 봇이
+    지어낸 판단을 사용자가 실제 판단으로 읽는다 — #162 리뷰에서 details=None을 HOLD로
+    채우지 않기로 한 것과 같은 이유다.
+    """
+    text = str(decision or "").strip()
+    return DECISION_LABELS.get(text.upper(), text)
+
+
+def urgency_label(urgency: Any) -> str:
+    """critical/high/normal/low → 한국어. 표에 없으면 원문 그대로."""
+    text = str(urgency or "").strip()
+    return URGENCY_LABELS.get(text.lower(), text)
+
+
+# ---- 본문에 새어 나온 내부 도구명 ----
+
+# NAT·MCP 서버가 쓰는 내부 도구명. LLM이 "get_investor_trading 결과를 참고했습니다"처럼
+# 본문에 그대로 적는 일이 잦다. #260이 각주용으로 만든 TOOL_LABELS와 같은 매핑을 본문에도
+# 적용한다 — 각주에서는 한국어로 보여주면서 본문에서는 내부 이름을 흘리면 같은 도구가 한
+# 메시지 안에서 두 이름으로 등장한다.
+MCP_TOOL_LABELS: dict[str, str] = {
+    "get_stock_quote": "현재가 조회",
+    "get_investor_trading": "수급 조회",
+    "get_balance": "계좌 잔고 조회",
+    "get_balance_rlz_pl": "실현손익 조회",
+    "get_today_daily_orders": "당일 주문·체결 조회",
+    "get_disclosure_signal": "지분공시 조회",
+    "get_earnings_report": "DART 실적 조회",
+    "get_market_news": "뉴스 검색",
+    "resolve_stock_code": "종목코드 조회",
+    "place_order": "주문 제출",
+}
 
 
 # ---- 마크다운 잔재 정리 ----
@@ -225,10 +308,6 @@ TERMS_PATH = Path(__file__).with_name("terms.json")
 # 사용자는 각주를 읽지 않는다 — 설명이 없는 것과 같아진다.
 TERM_FOOTNOTE_MAX_ENTRIES = 2
 TERM_FOOTNOTE_PREFIX = "ℹ️ 용어:"
-# 각주 총량이 본문의 몇 배까지 허용되는가. 2배는 "메시지의 2/3까지는 설명이어도 된다"는 뜻이다.
-# 이 상한이 없으면 "수급 응답" 다섯 글자 아래에 마흔 글자짜리 정의가 붙어, 설명이 설명 대상을
-# 밀어낸다. 반대로 너무 빡빡하게 잡으면 한두 문장짜리 답변에서 설명이 통째로 사라진다.
-TERM_FOOTNOTE_MAX_BODY_RATIO = 2
 
 
 @dataclass(frozen=True)
@@ -300,13 +379,21 @@ def _surface_index() -> tuple[tuple[str, TermEntry], ...]:
     return _surface_index_cache
 
 
-def find_terms(text: str, *, limit: int = TERM_FOOTNOTE_MAX_ENTRIES) -> list[TermEntry]:
+def find_terms(
+    text: str,
+    *,
+    limit: int = TERM_FOOTNOTE_MAX_ENTRIES,
+    exclude: frozenset[str] | set[str] = frozenset(),
+) -> list[TermEntry]:
     """본문에서 설명할 용어를 첫 등장 순서로 최대 ``limit``개 고른다 (#297).
 
     한국어에는 낱말 경계가 없어 부분 문자열 매칭이 불가피하다. 그래서 겹침을 막는 규칙이
     둘이다. 같은 자리에서는 긴 표기가 이기고(_surface_index), 이미 고른 구간과 겹치는
     매칭은 버린다. 별칭으로 걸려도 각주에는 대표 용어와 그 설명이 나가고, 같은 용어는
     본문에 몇 번 나오든 한 번만 설명한다.
+
+    ``exclude``는 상한을 적용하기 **전에** 걸러진다. 나중에 걸러내면 제외될 용어가 두
+    자리 중 하나를 먹고 사라져, 설명이 필요한 말이 상한에 밀린다.
     """
     if not text or limit <= 0:
         return []
@@ -324,7 +411,7 @@ def find_terms(text: str, *, limit: int = TERM_FOOTNOTE_MAX_ENTRIES) -> list[Ter
     taken: list[tuple[int, int]] = []
     seen: set[str] = set()
     for start, end, entry in hits:
-        if entry.term in seen:
+        if entry.term in seen or entry.term in exclude:
             continue
         if any(start < taken_end and taken_start < end for taken_start, taken_end in taken):
             continue
@@ -336,26 +423,44 @@ def find_terms(text: str, *, limit: int = TERM_FOOTNOTE_MAX_ENTRIES) -> list[Ter
     return chosen
 
 
-def term_footnote(text: str, *, level: str = DEFAULT_TELEGRAM_USER_LEVEL) -> str:
-    """용어 각주 블록. 중급이거나 걸린 용어가 없으면 빈 문자열 (#297).
+def term_footnote(
+    text: str,
+    *,
+    level: str = DEFAULT_TELEGRAM_USER_LEVEL,
+    question: str = "",
+) -> str:
+    """용어 각주 블록. 중급이거나 설명할 용어가 없으면 빈 문자열 (#297).
 
-    각주가 본문에 비해 지나치게 길면 뒤에서부터 버린다(TERM_FOOTNOTE_MAX_BODY_RATIO).
-    설명이 설명 대상을 밀어내면 그건 도움이 아니다. 하나도 못 남기면 각주 없이 나간다.
+    ``question``은 이 메시지를 부른 사용자 입력이다. 거기 이미 등장한 용어는 설명하지
+    않는다 — 사용자가 직접 타이핑한 단어는 아는 단어라는 신호이고, "예수금 얼마야?"라는
+    질문에 예수금의 정의가 따라붙는 건 설명이 아니라 참견이다.
+
+    길이로 거르지 않는다. 처음 도입할 때는 "각주가 본문보다 길면 생략"으로 막았는데,
+    그 규칙은 초보가 짧은 기본 질문을 던졌을 때 — 각주가 가장 필요한 순간 — 정확히
+    각주를 막았다. 질문에 없던 낯선 말이라면 답변이 한 줄이어도 설명할 값어치가 있다.
+
+    질문 텍스트가 없는 경로(스케줄러 알림·브리핑)는 아무것도 걸러내지 않는다. 사용자가
+    부르지 않은 메시지라 "이미 아는 말"이라고 볼 근거가 없다.
     """
     if level != LEVEL_BEGINNER:
         return ""
-    entries = find_terms(text)
-    if not entries:
-        return ""
-    lines = [
+    entries = find_terms(text, exclude=_terms_in(question))
+    return "\n".join(
         f"{TERM_FOOTNOTE_PREFIX} {entry.term} — {entry.description}" for entry in entries
-    ]
-    # 넘치면 뒤에서부터 버린다. 앞쪽이 본문에 먼저 등장한 용어이므로, 하나만 남길 수 있다면
-    # 사용자가 먼저 만난 말을 남기는 것이 맞다.
-    allowance = len(text) * TERM_FOOTNOTE_MAX_BODY_RATIO
-    while lines and len("\n".join(lines)) > allowance:
-        lines.pop()
-    return "\n".join(lines)
+    )
+
+
+def _terms_in(question: str) -> frozenset[str]:
+    """질문 텍스트에 등장한 용어 이름들. 개수 상한 없이 전부 본다.
+
+    find_terms의 상한(2개)을 쓰면 질문에 셋을 적은 사용자가 셋째 용어의 설명을 받게 된다.
+    여기서 세는 것은 "보여줄 것"이 아니라 "빼야 할 것"이라 상한이 없어야 맞다.
+    """
+    if not question:
+        return frozenset()
+    return frozenset(
+        entry.term for surface, entry in _surface_index() if surface in question
+    )
 
 
 # ---- 추론 각주 (#260에서 이관) ----
@@ -399,6 +504,27 @@ TOOL_LABELS: dict[str, str] = {
 AGENT_KINDS: dict[str, str] = {
     "diary_agent": KIND_DIARY,
 }
+
+# 본문 치환에 쓰는 도구명 표. 각주용 TOOL_LABELS와 MCP 서버 쪽 이름을 합친다.
+# 긴 이름을 먼저 시도해야 finus_mcp_trading_get_balance가 get_balance로 반쯤 치환되지 않는다.
+_TOOL_NAME_LABELS: dict[str, str] = {**MCP_TOOL_LABELS, **TOOL_LABELS}
+_TOOL_NAME_RE = re.compile(
+    r"(?<![\w])(?:%s)(?![\w])"
+    % "|".join(re.escape(name) for name in sorted(_TOOL_NAME_LABELS, key=len, reverse=True))
+)
+
+
+def humanize_tool_names(text: str) -> str:
+    """본문에 노출된 내부 도구명을 한국어 라벨로 바꾼다 (#297).
+
+    표에 없는 이름은 그대로 둔다. 각주에서와 같은 규칙이다 — 모르는 도구를 감추면 사용자가
+    보는 근거가 실제보다 줄어든다.
+
+    낱말 경계를 보므로 finus_mcp_trading_get_balance 안의 get_balance는 따로 걸리지 않는다.
+    """
+    if not text:
+        return text
+    return _TOOL_NAME_RE.sub(lambda match: _TOOL_NAME_LABELS[match.group(0)], text)
 
 
 def clamp(text: str, limit: int = TELEGRAM_MESSAGE_LIMIT) -> str:
@@ -479,11 +605,15 @@ def render(
     level: str = DEFAULT_TELEGRAM_USER_LEVEL,
     *,
     reasoning: str = "",
+    question: str = "",
     limit: int = TELEGRAM_MESSAGE_LIMIT,
 ) -> str:
     """텔레그램으로 나가기 직전의 단일 통과 지점 (#297).
 
-    순서: 마크다운 정리 → 틀 적용 → 용어 각주 → 추론 각주 → 길이 예산.
+    순서: 마크다운 정리 → 도구명 한국어화 → 틀 적용 → 용어 각주 → 추론 각주 → 길이 예산.
+
+    ``question``은 이 메시지를 부른 사용자 입력이다. 거기 이미 나온 용어는 설명하지
+    않는다(term_footnote 참조). 봇이 먼저 거는 메시지는 그냥 비워 둔다.
 
     길이 예산은 뒤에서부터 확보한다. 추론 각주(근거) 자리를 먼저 잡고, 그다음 용어 각주,
     남은 자리에 본문을 맞춘다 — 합친 뒤에 자르면 긴 답변에서만 각주가 통째로 사라져,
@@ -495,12 +625,14 @@ def render(
     ``reasoning``이 비어 있고 걸린 용어가 없으면 결과는 ``clamp(본문)``과 정확히 같다 —
     #260 이전 경로의 동작이 그대로 유지된다.
     """
-    body = template_for(kind).apply(sanitize_markdown(str(text)))
+    body = template_for(kind).apply(
+        humanize_tool_names(sanitize_markdown(str(text)))
+    )
 
     reasoning_block = f"\n\n{reasoning}" if reasoning else ""
     budget = limit - len(reasoning_block)
 
-    terms = term_footnote(body, level=level)
+    terms = term_footnote(body, level=level, question=question)
     term_block = f"\n\n{terms}" if terms else ""
     # 용어 각주는 근거가 아니라 편의다. 자리가 모자라면 본문보다 먼저 포기한다 —
     # 본문 예산을 절반 아래로 밀어내면서까지 설명을 남길 이유가 없다.

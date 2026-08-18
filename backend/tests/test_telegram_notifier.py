@@ -59,11 +59,13 @@ def test_format_analysis_alert_uses_plain_text():
         },
     )
 
-    assert "[긴급] 삼성전자 / disclosure" in message
-    assert "Decision: HOLD (0.82)" in message
-    assert "Reason: 단기 변동성 확대 가능성" in message
-    assert "Urgency: critical - 대량보유 변동 공시" in message
-    assert "Summary: 대량보유 변동" in message
+    # 필드명도 값도 한국어다 (#297 검수 2). decision/urgency는 AgentReport의 정해진
+    # 값이라 출력 계층이 결정론적으로 번역한다 — LLM에게 시키면 매번 다른 말이 나온다.
+    assert message.splitlines()[0] == "삼성전자 / disclosure"
+    assert "판단: 보유 유지 (확신도 0.82)" in message
+    assert "이유: 단기 변동성 확대 가능성" in message
+    assert "긴급도: 매우 높음 - 대량보유 변동 공시" in message
+    assert "요약: 대량보유 변동" in message
 
 
 def test_format_analysis_alert_marks_only_actual_urgent_alerts():
@@ -83,7 +85,10 @@ def test_format_analysis_alert_marks_only_actual_urgent_alerts():
     )
 
     assert message.splitlines()[0] == "삼성전자 / news"
-    assert "긴급" not in message
+    # 긴급 여부는 이제 render가 붙이는 배너(🚨 긴급 알림)가 알린다. 제목의 "[긴급]"을
+    # 뺐으므로 이 본문에는 긴급도 라벨 말고 긴급이라는 말이 없어야 한다 (#297 검수 1).
+    assert "긴급도: 보통" in message
+    assert "🚨" not in message
 
 
 def test_format_morning_briefing_uses_expected_sections():

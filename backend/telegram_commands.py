@@ -321,7 +321,11 @@ def _telegram_text(text: str, limit: int = TELEGRAM_MESSAGE_LIMIT) -> str:
 _reasoning_footnote = reasoning_footnote
 
 
-def _nat_answer_message(result: Any, level: str = DEFAULT_TELEGRAM_USER_LEVEL) -> str:
+def _nat_answer_message(
+    result: Any,
+    level: str = DEFAULT_TELEGRAM_USER_LEVEL,
+    question: str = "",
+) -> str:
     """NAT 응답을 텔레그램 메시지로 만든다 (#260, #297).
 
     ``routed_agent``/``tools_used``는 ``services.NatAnswer``가 실어 오는 속성이다.
@@ -338,6 +342,7 @@ def _nat_answer_message(result: Any, level: str = DEFAULT_TELEGRAM_USER_LEVEL) -
         kind_for_agent(routed_agent),
         level,
         reasoning=reasoning_footnote(routed_agent, getattr(result, "tools_used", ())),
+        question=question,
     )
 
 
@@ -1093,7 +1098,12 @@ class TelegramCommandHandler:
             await self._send_text_or_raise(f"조회 실패: {_short_error(exc)}")
             return
         await self._send_text_or_raise(
-            render(result, KIND_QUOTE, await self._current_level()),
+            render(
+                result,
+                KIND_QUOTE,
+                await self._current_level(),
+                question=argument,
+            ),
             reply_markup=self._market_reply_markup("trend", chat_id, stock),
         )
 
@@ -1675,7 +1685,12 @@ class TelegramCommandHandler:
             await self._send_text_or_raise(f"조회 실패: {_short_error(exc)}")
             return
         await self._send_text_or_raise(
-            render(result, KIND_QUOTE, await self._current_level()),
+            render(
+                result,
+                KIND_QUOTE,
+                await self._current_level(),
+                question=argument,
+            ),
             reply_markup=self._market_reply_markup("quote", chat_id, stock),
         )
 
@@ -1864,7 +1879,7 @@ class TelegramCommandHandler:
         await self._clear_progress_message(progress_message_id)
         # _nat_answer_message(→ presentation.render)가 각주 자리를 확보한 뒤 본문을 길이
         # 한도에 맞춘다 (#260, #297).
-        await self._send_text_settled(_nat_answer_message(result, level))
+        await self._send_text_settled(_nat_answer_message(result, level, text))
 
     @asynccontextmanager
     async def _state(self):
