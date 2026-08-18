@@ -230,6 +230,13 @@ URGENCY_LABELS: dict[str, str] = {
     "normal": "보통",
     "low": "낮음",
 }
+# 신호 출처. 키는 scheduler.SIGNAL_SOURCES의 name과 models.AgentReport.source 기본값이다.
+# 사용자에게는 "이 알림이 어디서 왔는가"이지 내부 식별자가 아니다 (#297 검수 2차).
+SOURCE_LABELS: dict[str, str] = {
+    "news": "뉴스",
+    "disclosure": "공시",
+    "manual": "직접 요청",
+}
 
 
 def decision_label(decision: Any) -> str:
@@ -247,6 +254,16 @@ def urgency_label(urgency: Any) -> str:
     """critical/high/normal/low → 한국어. 표에 없으면 원문 그대로."""
     text = str(urgency or "").strip()
     return URGENCY_LABELS.get(text.lower(), text)
+
+
+def source_label(source: Any) -> str:
+    """news/disclosure → 한국어. 표에 없으면 원문 그대로 (#297 검수 2차).
+
+    감추지 않는 규칙은 decision·urgency와 같다. 새 신호원이 생겼는데 표에 없으면 내부
+    이름이 그대로 보이고, 그게 "이 알림이 어디서 왔는지 아예 안 보인다"보다 낫다.
+    """
+    text = str(source or "").strip()
+    return SOURCE_LABELS.get(text.lower(), text)
 
 
 # ---- 본문에 새어 나온 내부 도구명 ----

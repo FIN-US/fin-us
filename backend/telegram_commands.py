@@ -367,9 +367,17 @@ _INVESTOR_ROW_RE = re.compile(
     r"외국인:\s*(-?[\d,]+)\s*\|\s*기관:\s*(-?[\d,]+)\s*$",
     re.M,
 )
-# 요약에 싣는 일수. 상세는 MCP가 준 만큼 전부 싣는다(현재 5일).
+# 요약에 싣는 일수. 상세는 MCP가 준 만큼 전부 싣는다.
 TREND_SUMMARY_DAYS = 1
-TREND_DETAIL_BUTTON_TEXT = "📊 5일 상세 보기"
+
+
+def trend_detail_button_text(days: int) -> str:
+    """상세 버튼 라벨. 일수를 고정값으로 박지 않는다 (#297 검수 2차).
+
+    MCP는 최대 5일을 주지만 실제로는 그날 데이터가 있는 만큼만 온다 — 연휴 직후면 3일치다.
+    라벨에 5를 박아 두면 "5일 상세 보기"를 눌렀는데 "3일 상세"가 나온다.
+    """
+    return f"📊 {days}일 상세 보기"
 
 
 @dataclass(frozen=True)
@@ -472,12 +480,12 @@ def _format_flow_block(flow: InvestorFlow, *, rounded: bool) -> list[str]:
     ]
 
 
-def _format_trend_summary(stock: str, raw: str) -> str | None:
-    """방향 한 줄 + 최근 1일 세로. 행을 못 읽으면 None (호출부가 원문을 쓴다)."""
-    flows = _parse_investor_flows(str(raw))
-    if not flows:
-        return None
+def _format_trend_summary(stock: str, flows: list[InvestorFlow]) -> str:
+    """방향 한 줄 + 최근 1일 세로.
 
+    파싱 결과를 인자로 받는다. 호출부가 이미 한 번 읽었고(빈 목록이면 원문으로 떨어진다)
+    그 길이가 상세 버튼 라벨에도 쓰이므로, 여기서 또 읽으면 두 값이 어긋날 수 있다.
+    """
     lines = [f"[{stock}] 투자자 매매동향"]
     headline = _trend_headline(flows)
     if headline:
@@ -487,12 +495,8 @@ def _format_trend_summary(stock: str, raw: str) -> str | None:
     return "\n".join(lines)
 
 
-def _format_trend_detail(stock: str, raw: str) -> str | None:
+def _format_trend_detail(stock: str, flows: list[InvestorFlow]) -> str:
     """전체 일수를 세로로. 반올림하지 않는다."""
-    flows = _parse_investor_flows(str(raw))
-    if not flows:
-        return None
-
     lines = [f"[{stock}] 투자자 매매동향 {len(flows)}일 상세", "단위: 주, +는 순매수"]
     for flow in flows:
         lines += ["", *_format_flow_block(flow, rounded=False)]
@@ -1704,6 +1708,8 @@ class TelegramCommandHandler:
         action: str,
         chat_id: str,
         stock: str,
+        *,
+        detail_days: int = 0,
     ) -> dict[str, Any]:
         token = secrets.token_urlsafe(8)
         if len(self.market_callbacks) >= MARKET_CALLBACK_LIMIT:
@@ -1722,7 +1728,7 @@ class TelegramCommandHandler:
                 "inline_keyboard": [
                     [
                         {
-                            "text": TREND_DETAIL_BUTTON_TEXT,
+                            "text": trend_detail_button_text(detail_days),
                             "callback_data": f"{MARKET_TREND_DETAIL_CALLBACK}:{token}",
                         }
                     ],
@@ -1862,9 +1868,20 @@ class TelegramCommandHandler:
             await self._send_text_or_raise(f"조회 실패: {_short_error(exc)}")
             return
 
-        format_trend = _format_trend_detail if detail else _format_trend_summary
-        # 형식이 바뀌어 파싱이 깨지면 원문을 그대로 보낸다. 요약이 사라질 뿐 조회는 된다.
-        body = format_trend(stock, str(result)) or str(result)
+        flows = _parse_investor_flows(str(result))
+        if not flows:
+            # 형식이 바뀌어 파싱이 깨졌다. 원문을 그대로 보내고 상세 버튼은 달지 않는다 —
+            # 눌러 봐야 같은 원문이 한 번 더 갈 뿐이다 (#297 검수 2차).
+            body = str(result)
+            markup = self._market_reply_markup("quote", chat_id, stock)
+        elif detail:
+            body = _format_trend_detail(stock, flows)
+            markup = self._market_reply_markup("quote", chat_id, stock)
+        else:
+            body = _format_trend_summary(stock, flows)
+            markup = self._market_reply_markup(
+                "trend_detail", chat_id, stock, detail_days=len(flows)
+            )
         await self._send_text_or_raise(
             render(
                 body,
@@ -1872,9 +1889,7 @@ class TelegramCommandHandler:
                 await self._current_level(),
                 question=argument,
             ),
-            reply_markup=self._market_reply_markup(
-                "trend_detail" if not detail else "quote", chat_id, stock
-            ),
+            reply_markup=markup,
         )
 
     async def _handle_earnings(self, argument: str, chat_id: str) -> None:

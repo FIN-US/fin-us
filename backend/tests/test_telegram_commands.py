@@ -677,7 +677,8 @@ async def test_trend_command_calls_mcp_runner_with_stock_name():
         for row in notifier.reply_markups[-1]["inline_keyboard"]
         for button in row
     ]
-    assert [button["text"] for button in buttons] == ["📊 5일 상세 보기", "💵 현재가 보기"]
+    # "수급 응답"은 파싱되지 않으므로 상세 버튼을 달지 않는다 (#297 검수 2차).
+    assert [button["text"] for button in buttons] == ["💵 현재가 보기"]
 
 
 @pytest.mark.asyncio

@@ -64,7 +64,7 @@ def test_format_analysis_alert_uses_plain_text():
     # 제목은 목록 밖이고 값이 늘어선 줄만 "- " 표시를 받는다. 좁은 말풍선에서 줄이 접혀도
     # 표시 없는 줄은 앞 줄의 계속이라는 뜻이 되므로 항목 경계가 유지된다 (#297 검수 3차).
     assert message.splitlines() == [
-        "삼성전자 / disclosure",
+        "삼성전자 / 공시",
         "- 판단: 보유 유지 (확신도 0.82)",
         "- 이유: 단기 변동성 확대 가능성",
         "- 긴급도: 매우 높음, 대량보유 변동 공시",
@@ -88,7 +88,7 @@ def test_format_analysis_alert_marks_only_actual_urgent_alerts():
         },
     )
 
-    assert message.splitlines()[0] == "삼성전자 / news"
+    assert message.splitlines()[0] == "삼성전자 / 뉴스"
     # 긴급 여부는 이제 render가 붙이는 배너(🚨 긴급 알림)가 알린다. 제목의 "[긴급]"을
     # 뺐으므로 이 본문에는 긴급도 라벨 말고 긴급이라는 말이 없어야 한다 (#297 검수 1).
     assert "긴급도: 보통" in message

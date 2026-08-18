@@ -14,6 +14,7 @@ from .presentation import (
     as_list_items,
     decision_label,
     render,
+    source_label,
     urgency_label,
 )
 
@@ -331,7 +332,7 @@ class TelegramNotifier:
         if summary:
             items.append(f"요약: {summary}")
         # 제목은 목록 밖이다. 값이 늘어선 줄만 표시를 받는다.
-        lines = [f"{stock} / {source}", *as_list_items(items)]
+        lines = [f"{stock} / {source_label(source)}", *as_list_items(items)]
         return "\n".join(lines)[:TELEGRAM_MESSAGE_LIMIT]
 
     def format_morning_briefing(self, briefing: dict[str, Any]) -> str:

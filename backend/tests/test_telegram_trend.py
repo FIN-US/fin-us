@@ -11,7 +11,7 @@ import pytest
 
 from backend.telegram_commands import (
     MARKET_TREND_DETAIL_CALLBACK,
-    TREND_DETAIL_BUTTON_TEXT,
+    trend_detail_button_text,
     TelegramCommandHandler,
     _format_trend_detail,
     _format_trend_summary,
@@ -100,8 +100,6 @@ def test_rows_are_sorted_even_if_the_source_reverses_them():
 def test_an_unparseable_response_yields_nothing():
     """다른 서비스의 출력 형식에 기대는 파싱이라 깨질 수 있다. 그때는 조용히 비운다."""
     assert _parse_investor_flows("수급 응답") == []
-    assert _format_trend_summary("삼성전자", "수급 응답") is None
-    assert _format_trend_detail("삼성전자", "수급 응답") is None
 
 
 def test_a_row_with_a_missing_value_is_skipped_not_zeroed():
@@ -115,7 +113,7 @@ def test_a_row_with_a_missing_value_is_skipped_not_zeroed():
 
 
 def test_summary_shows_direction_and_one_day_vertically():
-    assert _format_trend_summary("삼성전자", MCP_TREND_RESPONSE) == "\n".join(
+    assert _format_trend_summary("삼성전자", _parse_investor_flows(MCP_TREND_RESPONSE)) == "\n".join(
         [
             "[삼성전자] 투자자 매매동향",
             "외국인 3일 연속 순매수",
@@ -143,12 +141,12 @@ def test_the_headline_picks_the_longest_run():
     """외국인 흐름이 끊기면 3일 내리 순매도한 기관이 머리줄을 가져간다."""
     raw = MCP_TREND_RESPONSE.replace("외국인: 302,118", "외국인: -302,118")
 
-    assert _format_trend_summary("삼성전자", raw).splitlines()[1] == "기관 3일 연속 순매도"
+    assert _format_trend_summary("삼성전자", _parse_investor_flows(raw)).splitlines()[1] == "기관 3일 연속 순매도"
 
 
 def test_summary_rounds_but_detail_does_not():
-    summary = _format_trend_summary("삼성전자", MCP_TREND_RESPONSE)
-    detail = _format_trend_detail("삼성전자", MCP_TREND_RESPONSE)
+    summary = _format_trend_summary("삼성전자", _parse_investor_flows(MCP_TREND_RESPONSE))
+    detail = _format_trend_detail("삼성전자", _parse_investor_flows(MCP_TREND_RESPONSE))
 
     assert "-41만주" in summary
     assert "-410,123" not in summary
@@ -158,7 +156,7 @@ def test_summary_rounds_but_detail_does_not():
 
 
 def test_detail_lists_every_day():
-    detail = _format_trend_detail("삼성전자", MCP_TREND_RESPONSE)
+    detail = _format_trend_detail("삼성전자", _parse_investor_flows(MCP_TREND_RESPONSE))
 
     assert detail.splitlines()[0] == "[삼성전자] 투자자 매매동향 3일 상세"
     assert detail.count("- 외국인 ") == 3
@@ -169,8 +167,8 @@ def test_detail_lists_every_day():
 def test_every_value_line_carries_the_list_marker():
     """접힌 뒤에도 항목 경계가 남으려면 값 줄이 전부 표시로 시작해야 한다."""
     for text in (
-        _format_trend_summary("삼성전자", MCP_TREND_RESPONSE),
-        _format_trend_detail("삼성전자", MCP_TREND_RESPONSE),
+        _format_trend_summary("삼성전자", _parse_investor_flows(MCP_TREND_RESPONSE)),
+        _format_trend_detail("삼성전자", _parse_investor_flows(MCP_TREND_RESPONSE)),
     ):
         for line in text.splitlines():
             # 값이 실린 줄만 본다. 머리줄("외국인 3일 연속 순매수")에는 부호 붙은 수가 없다.
@@ -191,7 +189,7 @@ async def test_trend_offers_a_detail_button_first():
     )
 
     rows = notifier.reply_markups[-1]["inline_keyboard"]
-    assert rows[0][0]["text"] == TREND_DETAIL_BUTTON_TEXT
+    assert rows[0][0]["text"] == trend_detail_button_text(3)
     assert rows[0][0]["callback_data"].startswith(f"{MARKET_TREND_DETAIL_CALLBACK}:")
     assert notifier.messages[-1].startswith("[삼성전자] 투자자 매매동향")
 
@@ -222,7 +220,7 @@ async def test_the_detail_button_sends_the_full_table_as_a_new_message():
     # 상세 아래에 상세 버튼을 또 두지 않는다.
     detail_rows = notifier.reply_markups[-1]["inline_keyboard"]
     assert all(
-        TREND_DETAIL_BUTTON_TEXT != button["text"]
+        trend_detail_button_text(3) != button["text"]
         for row in detail_rows
         for button in row
     )
