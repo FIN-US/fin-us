@@ -34,6 +34,19 @@ from .redis_state import (
     create_redis_client,
     redis_state,
 )
+from .presentation import (
+    AGENT_LABELS,
+    KIND_ANALYSIS,
+    KIND_QUOTE,
+    REASONING_FOOTNOTE_MAX_CHARS,
+    REASONING_FOOTNOTE_SEPARATOR,
+    TELEGRAM_TRUNCATION_SUFFIX,
+    TOOL_LABELS,
+    clamp as _clamp,
+    reasoning_footnote,
+    kind_for_agent,
+    render,
+)
 from .services import llm_chat, run_mcp_tool
 from .watchlist_repo import SqliteWatchlistRepo
 from .telegram_notifier import (
@@ -240,129 +253,44 @@ LOOKUP_COMMAND_HELP = "\n".join(
         f"{TREND_COMMAND_HELP}  예: /trend 삼성전자",
     ]
 )
-TELEGRAM_TRUNCATION_SUFFIX = "...(이하 생략)"
 
 # ---- 추론 과정 표시 (#260) ----
 
 NAT_PROGRESS_MESSAGE = "⏳ 분석 중입니다..."
 # 진행 메시지 삭제가 거부됐을 때 남길 종료 표시. "분석 중"이 영원히 남지 않게 한다.
 PROGRESS_DONE_MESSAGE = "✅ 분석 완료"
-REASONING_FOOTNOTE_SEPARATOR = "─────"
-# 각주 전체 길이 상한. 각주 자리를 먼저 확보하고 본문을 자르는 구조라, 각주가 길어지면
-# 본문 몫이 그만큼 줄어든다. 상한이 없으면 본문 예산이 음수가 되어 답변이 통째로
-# 사라진 채 각주만 남을 수 있다.
-REASONING_FOOTNOTE_MAX_CHARS = 300
 
-# NAT supervisor 브랜치명 → 사용자에게 보여줄 한국어 라벨.
-# 키는 finus_nat/configs/router*.yml의 branches[].name과 같아야 한다.
-AGENT_LABELS: dict[str, str] = {
-    "trading_agent": "트레이딩 에이전트",
-    "monitoring_agent": "모니터링 에이전트",
-    "news_agent": "뉴스 에이전트",
-    "recommend_agent": "추천 에이전트",
-    "strategy_agent": "전략 에이전트",
-    "diary_agent": "매매일지 에이전트",
-}
-
-# 도구 강제 원장(finus_nat/src/nat_finus_nat/finus_api.py의 _record_to_ledger 호출부)에
-# 기록되는 내부 도구명 → 사용자에게 보여줄 한국어 라벨.
-# 매핑에 없는 도구는 내부 이름을 그대로 노출한다 — 조용히 감추면 각주가 "확인한 자료"를
-# 실제보다 적게 보여주게 되어, 근거를 보여준다는 목적 자체가 무너진다.
-TOOL_LABELS: dict[str, str] = {
-    "finus_account_balance": "KIS 시세·계좌 조회",
-    "finus_market_news": "뉴스 검색",
-    "finus_disclosure_signal": "지분공시 조회",
-    "finus_earnings_report": "DART 실적 조회",
-    "finus_mcp_trading_today_orders": "당일 주문·체결 조회",
-    "finus_mcp_trading_get_balance": "계좌 잔고 조회",
-    "finus_mcp_trading_balance_rlz_pl": "실현손익 조회",
-    "finus_save_diary": "매매일지 저장",
-    "finus_list_diaries": "매매일지 조회",
-}
+# 각주 상수(REASONING_FOOTNOTE_*)와 라벨 표(AGENT_LABELS·TOOL_LABELS), 각주 조립 자체는
+# #297에서 presentation으로 옮겼다. 동작은 그대로다 — 옮긴 이유는 나가는 문장을 조립하는
+# 지점이 하나여야 용어 각주와의 순서·길이 예산을 한 곳에서 정할 수 있기 때문이다.
+# 위 임포트가 이름을 그대로 유지하므로 기존 호출부와 테스트는 손대지 않는다.
 
 _telegram_command_task: asyncio.Task | None = None
 
-
 def _telegram_text(text: str, limit: int = TELEGRAM_MESSAGE_LIMIT) -> str:
-    stripped = text.strip()
-    if len(stripped) <= limit:
-        return stripped
-    # max(0, ...): limit이 말줄임 접미사보다 짧아도 음수 인덱스로 뒤집히지 않게 한다.
-    keep = max(0, limit - len(TELEGRAM_TRUNCATION_SUFFIX))
-    return f"{stripped[:keep]}{TELEGRAM_TRUNCATION_SUFFIX}"
+    return _clamp(text, limit)
 
 
-def _reasoning_footnote(routed_agent: Any, tools_used: Any) -> str:
-    """담당 에이전트·확인한 자료 각주를 만든다. 근거가 없으면 빈 문자열 (#260).
-
-    입력은 NAT 응답의 ``routed_agent``/``tools_used`` 필드에서만 온다 — 답변 텍스트를
-    파싱해 에이전트명이나 도구명을 추측하지 않는다 (#129와 같은 원칙). 파싱으로 만들면
-    "실제로 호출한 도구"가 아니라 "모델이 호출했다고 주장하는 도구"가 되어, 근거로
-    보여주는 각주가 오히려 환각을 사실처럼 전달하는 표면이 된다.
-
-    두 값이 모두 없으면(구버전 finus_nat 등) 각주를 조용히 생략한다. 라우팅은 됐는데
-    도구가 하나도 실행되지 않은 경우는 "없음"으로 드러낸다 — 도구 없이 나온 답변이라는
-    사실 자체가 사용자가 알아야 할 근거다.
-
-    호출했지만 실패한 도구는 ``(실패)``, 성공했지만 결과가 비었던 도구는 ``(결과 없음)``을
-    붙여 데이터를 얻은 호출과 구분한다. 둘 다 그냥 "확인한 자료"로 적으면 사용자는 답변이
-    그 데이터에 근거했다고 읽는다 — 실제로는 아니므로, 근거를 보여준다는 이 기능의 목적과
-    정반대의 오독이 된다. 빈 결과는 특히 NAT가 "[조회 결과 없음] ..."을 본문으로 돌려주는
-    경로(#209)와 겹쳐, 본문은 데이터가 없다고 말하는데 각주만 자료를 확인했다고 말하게
-    된다. 그렇다고 목록에서 빼면 시도조차 안 한 것처럼 보이므로, 빼지 않고 결과를 함께 적는다.
-    """
-    agent = routed_agent.strip() if isinstance(routed_agent, str) else ""
-    tools = list(tools_used) if isinstance(tools_used, (list, tuple)) else []
-    if not agent and not tools:
-        return ""
-
-    entries: list[str] = []
-    for tool in tools:
-        name = getattr(tool, "name", None)
-        if not isinstance(name, str) or not name.strip():
-            continue
-        entry = TOOL_LABELS.get(name.strip(), name.strip())
-        if getattr(tool, "ok", False) is not True:
-            entry = f"{entry}(실패)"
-        elif getattr(tool, "empty", False) is True:
-            entry = f"{entry}(결과 없음)"
-        if entry not in entries:  # 서로 다른 내부 도구가 같은 라벨로 접힐 수 있다
-            entries.append(entry)
-
-    if not agent and not entries:
-        return ""
-
-    parts: list[str] = []
-    if agent:
-        parts.append(f"🤖 {AGENT_LABELS.get(agent, agent)}")
-    parts.append(f"📚 확인한 자료: {', '.join(entries) if entries else '없음'}")
-    footnote = f"{REASONING_FOOTNOTE_SEPARATOR}\n{' · '.join(parts)}"
-    return _telegram_text(footnote, REASONING_FOOTNOTE_MAX_CHARS)
-
-
-def _answer_with_footnote(answer: str, footnote: str) -> str:
-    """답변 본문과 각주를 텔레그램 길이 한도 안에 함께 담는다 (#260).
-
-    각주 자리를 먼저 확보한 뒤 본문을 나머지에 맞춰 자른다. 합친 뒤에 자르면 긴 답변에서
-    각주가 통째로 잘려나가, 정작 근거가 필요한 답변에서만 근거가 사라진다.
-    """
-    if not footnote:
-        return _telegram_text(answer)
-    block = f"\n\n{footnote}"
-    return f"{_telegram_text(answer, TELEGRAM_MESSAGE_LIMIT - len(block))}{block}"
+_reasoning_footnote = reasoning_footnote
 
 
 def _nat_answer_message(result: Any) -> str:
-    """NAT 응답을 각주까지 붙인 텔레그램 메시지로 만든다 (#260).
+    """NAT 응답을 텔레그램 메시지로 만든다 (#260, #297).
 
     ``routed_agent``/``tools_used``는 ``services.NatAnswer``가 실어 오는 속성이다.
     속성이 없는 값(구버전 경로, 문자열만 주는 대역)이면 각주 없이 본문만 보낸다.
+
+    #297에서 조립을 presentation.render에 위임했다. 마크다운 정리가 함께 붙지만 각주의
+    모양과 길이 예산 규칙은 그대로다 — 각주 자리를 먼저 확보한 뒤 본문을 나머지에 맞춘다.
+    틀은 라우팅된 에이전트로 정한다(매매일지 답변은 일지 틀). 본문을 파싱해 추측하지 않는
+    것이 #260 각주와 같은 원칙이다.
     """
-    footnote = _reasoning_footnote(
-        getattr(result, "routed_agent", None),
-        getattr(result, "tools_used", ()),
+    routed_agent = getattr(result, "routed_agent", None)
+    return render(
+        result,
+        kind_for_agent(routed_agent),
+        reasoning=reasoning_footnote(routed_agent, getattr(result, "tools_used", ())),
     )
-    return _answer_with_footnote(str(result), footnote)
 
 
 def _short_error(exc: Exception) -> str:
@@ -1014,7 +942,7 @@ class TelegramCommandHandler:
             await self._send_text_or_raise(f"조회 실패: {_short_error(exc)}")
             return
         await self._send_text_or_raise(
-            _telegram_text(str(result)),
+            render(result, KIND_QUOTE),
             reply_markup=self._market_reply_markup("trend", chat_id, stock),
         )
 
@@ -1580,7 +1508,7 @@ class TelegramCommandHandler:
             await self._send_text_or_raise(f"조회 실패: {_short_error(exc)}")
             return
         await self._send_text_or_raise(
-            _telegram_text(str(result)),
+            render(result, KIND_QUOTE),
             reply_markup=self._market_reply_markup("quote", chat_id, stock),
         )
 
@@ -1764,7 +1692,8 @@ class TelegramCommandHandler:
         # LLM 호출이 끝난 뒤다. 재실행은 같은 conversation_id로 NAT를 다시 호출해 대화
         # 이력을 오염시키고 예산만큼 재과금된다 — 전송 실패 예산으로는 최대 10회다 (#247).
         await self._clear_progress_message(progress_message_id)
-        # _nat_answer_message가 각주 자리를 확보한 뒤 본문을 길이 한도에 맞춘다 (#260).
+        # _nat_answer_message(→ presentation.render)가 각주 자리를 확보한 뒤 본문을 길이
+        # 한도에 맞춘다 (#260, #297).
         await self._send_text_settled(_nat_answer_message(result))
 
     @asynccontextmanager

@@ -6,12 +6,14 @@ from typing import Any
 import httpx
 
 from .config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, is_placeholder_secret
+from .presentation import KIND_ALERT, TELEGRAM_MESSAGE_LIMIT, render
 
 logger = logging.getLogger(__name__)
 _TELEGRAM_BOT_URL_RE = re.compile(r"(https://api\.telegram\.org/bot)[^/\s\"]+")
 
-# 텔레그램 sendMessage 본문 상한(4096자)보다 여유를 둔 실사용 상한.
-TELEGRAM_MESSAGE_LIMIT = 4000
+# TELEGRAM_MESSAGE_LIMIT은 presentation이 정의하고 이 모듈이 이름만 다시 내보낸다 (#297).
+# 알림도 render를 통과하므로 이 모듈이 presentation을 임포트하고, 그래서 상한의 정의는
+# 반대편(잎)에 있어야 순환이 생기지 않는다. 기존 임포트 경로는 그대로 살아 있다.
 
 URGENT_TELEGRAM_LEVELS = {"high", "critical"}
 TELEGRAM_ALERT_MODES = {"urgent", "all", "off"}
@@ -344,6 +346,13 @@ class TelegramNotifier:
         *,
         alert_mode: str = "urgent",
     ) -> bool:
+        """분석 알림을 보낸다. 문장 조립은 format_analysis_alert, 마무리는 presentation.render.
+
+        둘을 나눠 둔 이유: format_analysis_alert는 analysis_data를 문장으로 바꾸는 순수
+        함수라 테스트가 그 매핑만 검사할 수 있고, 틀·용어 각주·마크다운 정리는 나가는 모든
+        메시지에 공통이라 한 지점(render)에 있어야 한다. 여기서 합치면 알림만 규칙이
+        갈라진다 (#297).
+        """
         if not self.enabled:
             return False
         if not should_send_telegram_alert(analysis_data, alert_mode=alert_mode):
@@ -351,10 +360,13 @@ class TelegramNotifier:
 
         try:
             await self._post_message(
-                self.format_analysis_alert(
-                    stock=stock,
-                    source=source,
-                    analysis_data=analysis_data,
+                render(
+                    self.format_analysis_alert(
+                        stock=stock,
+                        source=source,
+                        analysis_data=analysis_data,
+                    ),
+                    KIND_ALERT,
                 )
             )
             return True
