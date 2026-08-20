@@ -8,15 +8,22 @@
 검사는 이름을 아는 서비스를 훑는 대신 **전 서비스를 훑고 예외만 허용**하는 방향이다.
 그래야 새 서비스를 `"9000:9000"`으로 추가할 때 초록불로 지나가지 않고, 전 인터페이스에
 열겠다는 결정을 `_INTENTIONALLY_PUBLIC`에 적는 의식적인 행위로 만든다.
+
+좁힌 뒤로는 `.env.example`의 `REDIS_URL`·`NAT_BASE_URL`이 호스트에서 백엔드만 띄우는
+흐름의 유일한 접속 경로다. compose의 호스트 포트와 그 두 줄은 한쪽만 바뀌면 조용히
+끊기므로 서로 맞물려 고정한다.
 """
 
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import pytest
 import yaml
 
 
-_COMPOSE_PATH = Path(__file__).resolve().parents[2] / "docker-compose.yml"
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_COMPOSE_PATH = _REPO_ROOT / "docker-compose.yml"
+_ENV_EXAMPLE_PATH = _REPO_ROOT / ".env.example"
 
 # 전 인터페이스 게시가 의도된 서비스. 여기에 이름을 추가하는 것은 "인증이 있거나,
 # 없어도 노출을 감수한다"는 선언이므로 근거를 함께 남길 것.
@@ -35,6 +42,27 @@ _CONTAINER_PORTS = {
     "frontend": ["80"],
     "redis": ["6379"],
 }
+
+# 호스트에서 백엔드만 띄울 때 쓰는 `.env.example`의 값 → 그 값이 가리켜야 하는 서비스.
+# 루프백으로 좁힌 뒤 이 두 줄이 유일한 접속 경로가 됐는데, compose의 호스트 포트를
+# 바꾸면 조용히 끊긴다. 컨테이너 포트만 따로 보는 검사로는 호스트 쪽이 비므로,
+# 두 파일을 여기서 맞물려 고정한다.
+_HOST_URL_KEYS = {
+    "REDIS_URL": "redis",
+    "NAT_BASE_URL": "finus-nat",
+}
+
+
+@pytest.fixture(scope="module")
+def env_example_values():
+    values = {}
+    for line in _ENV_EXAMPLE_PATH.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, _, value = stripped.partition("=")
+        values[key.strip()] = value.strip()
+    return values
 
 
 @pytest.fixture(scope="module")
@@ -56,14 +84,14 @@ def _mappings(service_config):
 
 
 def test_services_outside_the_allowlist_publish_on_loopback_only(compose_services):
-    offenders = {
-        name: mapping
+    offenders = [
+        f"{name}: {mapping}"
         for name, config in compose_services.items()
         if name not in _INTENTIONALLY_PUBLIC
         for mapping in _mappings(config)
         if not mapping.startswith("127.0.0.1:")
-    }
-    assert offenders == {}, (
+    ]
+    assert offenders == [], (
         f"인증 여부를 따지지 않은 채 전 인터페이스에 게시된 서비스가 있다: {offenders}. "
         f"루프백으로 좁히거나, 노출이 의도라면 근거와 함께 _INTENTIONALLY_PUBLIC에 넣을 것."
     )
@@ -87,6 +115,27 @@ def test_container_side_ports_are_unchanged(compose_services, service):
         mapping.rsplit(":", 1)[-1] for mapping in _mappings(compose_services[service])
     ]
     assert listening == _CONTAINER_PORTS[service]
+
+
+@pytest.mark.parametrize("env_key", sorted(_HOST_URL_KEYS))
+def test_env_example_points_at_the_loopback_publish(
+    compose_services, env_example_values, env_key
+):
+    """`.env.example`의 호스트 실행용 URL이 compose가 실제로 게시하는 주소와 같아야 한다.
+
+    루프백으로 좁힌 뒤 호스트에서 백엔드만 띄우는 흐름은 이 두 줄에만 의존한다.
+    한쪽만 고치면 조용히 끊기므로 여기서 맞물려 둔다.
+    """
+
+    service = _HOST_URL_KEYS[env_key]
+    published = list(_mappings(compose_services[service]))
+    # 매핑이 하나뿐인 것은 `_CONTAINER_PORTS`가 이미 고정한다.
+    host_side = published[0].rsplit(":", 1)[0]
+
+    assert urlsplit(env_example_values[env_key]).netloc == host_side, (
+        f"`.env.example`의 {env_key}가 compose의 `{published[0]}` 게시와 어긋난다. "
+        f"둘 중 하나만 고치면 호스트에서 백엔드만 띄우는 흐름이 끊긴다."
+    )
 
 
 def test_backend_reaches_dependencies_through_compose_aliases(compose_services):
