@@ -28,6 +28,7 @@ from nat_finus_nat.verifier import (
     ProposalPayload,
     SnapshotPayload,
     VerifyOrderRequest,
+    _first_json_object,
     parse_verdict,
 )
 
@@ -154,6 +155,84 @@ def test_parse_verdict_rejects_missing_proposal_id():
 
     assert verdict.verdict == "REJECT"
     assert verdict.failure == FAILURE_ID_MISMATCH
+
+
+# ---------------------------------------------------------------------------
+# _first_json_object — 손으로 짠 중괄호 균형 파서
+#
+# parse_verdict를 통해 간접적으로만 덮이면, 이 파서를 고칠 때 어느 케이스가 깨졌는지
+# 실패 메시지가 말해주지 않는다. fail-closed 규칙상 이 함수의 오탐은 곧 정상 판정의
+# REJECT이고 오검출은 곧 엉뚱한 객체의 판정이라, 분기를 직접 걸어 둔다.
+# ---------------------------------------------------------------------------
+
+
+def test_first_json_object_reads_a_bare_object():
+    assert _first_json_object('{"verdict": "APPROVE"}') == {"verdict": "APPROVE"}
+
+
+def test_first_json_object_ignores_prose_on_both_sides():
+    """모델은 JSON 앞뒤에 설명 문장을 붙인다 — 전체 파싱이 실패하면 균형 세기로 넘어간다."""
+    raw = "검토했습니다.\n" '{"verdict": "REJECT", "reason": "근거 부족"}' "\n이상입니다."
+
+    assert _first_json_object(raw) == {"verdict": "REJECT", "reason": "근거 부족"}
+
+
+def test_first_json_object_is_not_fooled_by_braces_inside_a_string():
+    """사유 문장에 중괄호가 들어가도 객체가 거기서 끊기면 안 된다.
+
+    중괄호는 **짝이 맞지 않게** 넣는다. 짝이 맞으면 문자열 인식을 통째로 없애도
+    깊이가 우연히 0으로 돌아와 같은 결과가 나오고, 그러면 이 테스트가 아무것도
+    고정하지 못한다(뮤테이션 실측으로 확인).
+    """
+    raw = '설명\n{"verdict": "REJECT", "reason": "가격 조건 {일부가 어긋납니다"}\n끝'
+
+    assert _first_json_object(raw) == {
+        "verdict": "REJECT",
+        "reason": "가격 조건 {일부가 어긋납니다",
+    }
+
+
+def test_first_json_object_handles_escaped_quotes_in_a_string():
+    """이스케이프된 따옴표가 문자열을 조기 종료시키면 그 뒤 중괄호 세기가 어긋난다.
+
+    이스케이프 따옴표를 **홀수 개**로 두고 그 뒤에 여는 중괄호를 놓는다. 짝수 개면
+    문자열 안팎이 다시 뒤집혀 이스케이프 처리를 없애도 결과가 같아진다 — 여기서는
+    ``\\"`` 하나를 놓쳐 문자열이 조기 종료되는 순간 그다음 ``{``를 바깥으로 세고,
+    닫는 ``}``는 문자열 안으로 세어 깊이가 0으로 돌아오지 못한다.
+    """
+    raw = '앞말 {"verdict": "REJECT", "reason": "보류\\" {주의"} 뒷말'
+
+    assert _first_json_object(raw) == {"verdict": "REJECT", "reason": '보류" {주의'}
+
+
+def test_first_json_object_keeps_nested_objects_whole():
+    raw = '설명 {"verdict": "APPROVE", "meta": {"depth": {"n": 2}}} 끝'
+
+    assert _first_json_object(raw) == {"verdict": "APPROVE", "meta": {"depth": {"n": 2}}}
+
+
+def test_first_json_object_takes_the_first_object_when_several_appear():
+    """두 판정이 실려 오면 앞의 것을 쓴다 — 뒤엣것을 고르면 어느 쪽이 판정인지 흔들린다."""
+    raw = '앞말 {"verdict": "REJECT", "reason": "첫 번째"} 그리고 {"verdict": "APPROVE"}'
+
+    assert _first_json_object(raw) == {"verdict": "REJECT", "reason": "첫 번째"}
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "판정할 수 없습니다.",
+        '{"verdict": "APPROVE"',
+        '앞말 {"verdict": "APPROVE", ',
+        "[]",
+        '["APPROVE"]',
+        "",
+    ],
+    ids=["no_brace", "unclosed", "unclosed_after_prose", "empty_array", "array", "empty"],
+)
+def test_first_json_object_returns_none_when_no_object_can_be_read(raw: str):
+    """객체를 못 뽑으면 None이다 — 호출부(parse_verdict)가 이것을 REJECT로 바꾼다."""
+    assert _first_json_object(raw) is None
 
 
 # ---------------------------------------------------------------------------

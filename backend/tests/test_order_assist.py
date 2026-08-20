@@ -966,6 +966,55 @@ async def test_market_closed_is_rejected_before_anything_else():
 
 
 @pytest.mark.asyncio
+async def test_verify_payload_shape_matches_the_verifier_contract():
+    """검증 요청의 필드 이름을 고정한다.
+
+    반대편(finus_nat/src/nat_finus_nat/verifier.py)의 요청 모델은 전부
+    ``extra="allow"``다 — backend가 필드명을 바꾸거나 오타를 내도 422가 아니라
+    **조용히 무시**되고, 검증자는 그 필드의 기본값(0·""·False)으로 판정한다.
+    한도 수치가 0으로 읽히는 쪽이 승인 방향이라 이 드리프트는 위험한 방향으로 샌다.
+
+    ``extra="forbid"``로 잡을 수도 있지만 그러면 backend 배포가 앞서는 순간 주문 보조
+    경로가 통째로 422로 죽는다(모르는 필드는 무시하고 아는 필드로 판정하는 편이 낫다는
+    것이 그 모델들의 설계 의도다). 드리프트를 만드는 쪽은 backend이므로 여기서 잡는다.
+    """
+    _, verify_calls = await _run()
+
+    payload = verify_calls[0][0]
+    assert set(payload) == {
+        "proposal_id",
+        "proposal",
+        "snapshot",
+        "limits",
+        "usage",
+        "hard_check",
+    }
+    # ProposalPayload
+    assert set(payload["proposal"]) == {
+        "stock_name",
+        "stock_code",
+        "side",
+        "quantity",
+        "order_type",
+        "price",
+        "rationale",
+        "confidence",
+    }
+    # SnapshotPayload
+    assert set(payload["snapshot"]) == {"current_price", "cash", "total_value", "holding_qty"}
+    # HardCheckPayload
+    assert set(payload["hard_check"]) == {"passed", "violations"}
+    # limits/usage는 검증자 쪽이 dict로 받는다(판정에 쓰지 않는 참고 신호라 느슨하다).
+    # 그래도 soft 신호가 이름째 사라지면 검증자가 볼 수 없으므로 여기서 고정한다.
+    assert "min_confidence_soft" in payload["limits"]
+    assert set(payload["usage"]) == {
+        "order_count",
+        "order_amount",
+        "confidence_below_soft_threshold",
+    }
+
+
+@pytest.mark.asyncio
 async def test_soft_confidence_signal_is_passed_to_the_verifier():
     """확신도는 코드가 거부하지 않지만 검증자에게는 신호로 전달된다."""
     low = PROPOSAL_JSON.replace('"confidence": 0.72', '"confidence": 0.2')
