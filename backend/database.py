@@ -19,6 +19,26 @@ _PENDING_COLUMN_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
         # 있으므로(#162) 반드시 0(False)이어야 한다.
         "ALTER TABLE agentreport ADD COLUMN provider_supports_tools BOOLEAN NOT NULL DEFAULT 0",
     ),
+    # #298: 신호 점수화. 세 컬럼 모두 NULL 허용이고 DEFAULT를 주지 않는다 —
+    # provider_supports_tools와 정반대의 선택이며, 이유도 정반대다. 저쪽은 "구버전
+    # 행은 도구를 쓰지 않았다"가 코드로 증명되는 사실이라 0으로 채웠다. 이쪽은
+    # 구버전 행이 몇 점이었는지 알 방법이 없다. DEFAULT 0을 주면 "모델이 중립이라고
+    # 판단함"이라는 없던 사실이 소급 생성된다(#122·#162의 "0과 모름 구분").
+    (
+        "agentreport",
+        "signal_score",
+        "ALTER TABLE agentreport ADD COLUMN signal_score INTEGER",
+    ),
+    (
+        "agentreport",
+        "signal_reason",
+        "ALTER TABLE agentreport ADD COLUMN signal_reason VARCHAR",
+    ),
+    (
+        "agentreport",
+        "signal_uncertainty",
+        "ALTER TABLE agentreport ADD COLUMN signal_uncertainty FLOAT",
+    ),
 )
 
 
@@ -82,12 +102,16 @@ _RECREATE_AGENTREPORT_NULLABLE_DDL = (
     "confidence_score FLOAT, "      # nullable: 도구 없는 provider는 null
     "reason VARCHAR NOT NULL DEFAULT '', "
     "provider_supports_tools BOOLEAN NOT NULL DEFAULT 0, "
+    "signal_score INTEGER, "            # nullable: 채점 실패(fail-open)와 구버전 행은 null (#298)
+    "signal_reason VARCHAR, "           # nullable: 위와 동일
+    "signal_uncertainty FLOAT, "        # nullable: 기사 2건 미만이면 흩어짐이 정의되지 않음
     "created_at DATETIME NOT NULL"
     ")"
 )
 _RECREATE_AGENTREPORT_COLS = (
     "id, stock_code, stock_name, provider, summary, decision, "
-    "confidence_score, reason, provider_supports_tools, created_at"
+    "confidence_score, reason, provider_supports_tools, "
+    "signal_score, signal_reason, signal_uncertainty, created_at"
 )
 # Improvement #1 (#162 리뷰): 재생성 직전 실제 컬럼 집합과 DDL 가정을 비교하는 단언에 쓴다.
 # _PENDING_COLUMN_MIGRATIONS에 agentreport 컬럼이 추가되어도 이 집합을 갱신하지 않으면

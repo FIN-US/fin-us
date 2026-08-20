@@ -71,6 +71,34 @@ class AgentReport(SQLModel, table=True):
         default=False,
         description="provider가 도구(MCP/KIS/뉴스) 호출 경로로 구성돼 있는지 여부 (provider 능력 신호, 실제 호출 관측 아님).",
     )
+    # #298: 2차 필터가 매긴 신호 점수. 셋 다 nullable이며 기본값을 채우지 않는다 —
+    # "0과 모름"은 다른 값이다(#122·#162). null은 "채점 자체가 없었다"는 뜻이고,
+    # LLM 호출·파싱 실패로 fail-open했거나, 점수화 이전에 저장된 행이거나,
+    # 스케줄러를 거치지 않은 수동 분석인 경우다.
+    #
+    # 이 테이블에 실제로 남는 점수는 |score| >= SIGNAL_SCORE_THRESHOLD인 값뿐이다.
+    # 임계값 미만이면 스케줄러가 상세 분석 자체를 건너뛰므로 리포트 행이 생기지
+    # 않는다 — 즉 기본 임계값에서 0이나 ±1인 행은 구조적으로 존재할 수 없다.
+    # 걸러진 신호의 점수 분포는 scheduler의 "유의미한 변화 없음(score=...)" 로그와
+    # 평가셋(backend/scripts/build_signal_eval_set.py)에서 본다.
+    signal_score: Optional[int] = Field(
+        default=None,
+        description=(
+            "신호 영향도 점수 (-3~+3 정수). 감시 파이프라인의 2차 필터가 매긴다. "
+            "채점하지 못했으면 null (fail-open)."
+        ),
+    )
+    signal_reason: Optional[str] = Field(
+        default=None,
+        description="signal_score의 한 줄 근거. 점수가 null이면 함께 null.",
+    )
+    signal_uncertainty: Optional[float] = Field(
+        default=None,
+        description=(
+            "기사별 점수의 표준편차. 기사가 2건 미만이면 흩어짐을 정의할 수 없으므로 null "
+            "(0.0이 아니다 — 0.0은 '기사들이 완전히 일치했다'는 뜻)."
+        ),
+    )
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="생성 일시")
 
 class Diary(SQLModel, table=True):
