@@ -2,8 +2,9 @@
 
 ``/advise <종목명>`` 한 번이 여기로 들어와 다섯 단계를 지난다:
 
-1. NAT ``/v1/propose-order``로 제안을 받는다(전용 프롬프트, JSON 응답 요구).
-2. 제안을 파싱하고, 종목코드를 MCP로 다시 확인하고, KIS 스냅샷(현금·현재가·보유량·
+1. 종목코드를 MCP로 확정하고(냉각 키와 주문 가능 여부가 이 코드 위에 선다),
+   냉각이 아니면 NAT ``/v1/propose-order``로 제안을 받는다(전용 프롬프트, JSON 응답 요구).
+2. 제안을 파싱해 확정한 코드와 대조하고, KIS 스냅샷(현금·현재가·보유량·
    총평가)을 직접 조회한 뒤 **하드 한도를 코드로 판정한다**.
 3. 한도를 통과한 제안만 NAT ``/v1/verify-order``로 넘긴다.
 4. verdict를 파싱한다. APPROVE가 아니면 거부다.
@@ -86,8 +87,11 @@ class ProposalTrigger:
     """제안을 요청한 계기.
 
     ``source``를 지금 두는 이유는 스케줄러 룰 트리거(후속 작업, 이 PR 범위 밖)가 같은
-    함수로 들어오게 하기 위해서다. 냉각 키가 종목+룰 단위라, 룰이 없는 텔레그램 수동 요청과 룰 기반
-    자동 제안이 서로의 냉각을 잡아먹지 않는다.
+    함수로 들어오게 하기 위해서다. 냉각 키가 종목코드+룰 단위라, 룰이 없는 텔레그램 수동
+    요청과 룰 기반 자동 제안이 서로의 냉각을 잡아먹지 않는다.
+
+    ``stock``은 사용자가 친 문자열 그대로다 — 종목명일 수도 코드일 수도 있다. 냉각 키와
+    한도 판정에 쓰는 정본 식별자는 :func:`run_order_assist`가 MCP로 확정한 종목코드다.
     """
 
     source: ProposalSource
@@ -596,10 +600,14 @@ def load_daily_usage(session_factory: Callable[[], Any], now: datetime) -> Daily
 
 
 class ProposalCooldown:
-    """종목+룰 단위 재제안 냉각. redis TTL 하나로 강제한다.
+    """종목코드+룰 단위 재제안 냉각. redis TTL 하나로 강제한다.
 
     조회에 실패하면 "냉각 아님"이 아니라 **냉각 중으로 본다**. redis가 죽었을 때
     한도가 조용히 풀리면 그게 이 클래스가 막으려던 상황 그 자체다.
+
+    키가 종목**코드**인 것이 이 클래스의 전제다. 사용자가 친 문자열을 키로 쓰면
+    "삼성전자"와 "005930"이 다른 키가 되어 냉각이 별칭 한 번에 뚫린다. 호출부
+    (:func:`run_order_assist`)가 제안 왕복 전에 코드를 확인해 두는 이유가 이것이다.
     """
 
     def __init__(self, client_factory: Callable[[], Any] | None = None, *, ttl_seconds: int | None = None):
@@ -616,12 +624,12 @@ class ProposalCooldown:
         return create_redis_client
 
     @staticmethod
-    def key(stock: str, rule_id: str | None) -> str:
+    def key(stock_code: str, rule_id: str | None) -> str:
         from .redis_state import RedisKeys
 
-        return RedisKeys().order_proposal_cooldown(stock, rule_id)
+        return RedisKeys().order_proposal_cooldown(stock_code, rule_id)
 
-    async def active(self, stock: str, rule_id: str | None) -> tuple[bool, bool]:
+    async def active(self, stock_code: str, rule_id: str | None) -> tuple[bool, bool]:
         """``(냉각 중인가, 조회에 성공했는가)``.
 
         두 값을 함께 돌려주는 이유는 호출부가 "냉각 중"과 "확인 불가"를 사용자에게
@@ -629,18 +637,18 @@ class ProposalCooldown:
         """
         client = self._factory()()
         try:
-            return bool(await client.exists(self.key(stock, rule_id))), True
+            return bool(await client.exists(self.key(stock_code, rule_id))), True
         except Exception as exc:  # noqa: BLE001 — fail-closed
             logger.error("재제안 냉각 조회 실패 — 진행을 막는다: %s", exc)
             return True, False
         finally:
             await _aclose(client)
 
-    async def mark(self, stock: str, rule_id: str | None) -> None:
+    async def mark(self, stock_code: str, rule_id: str | None) -> None:
         """냉각을 건다. 실패해도 예외를 올리지 않는다 — 이미 판정은 끝났다."""
         client = self._factory()()
         try:
-            await client.set(self.key(stock, rule_id), "proposed", ex=self.ttl_seconds)
+            await client.set(self.key(stock_code, rule_id), "proposed", ex=self.ttl_seconds)
         except Exception as exc:  # noqa: BLE001
             logger.error("재제안 냉각 기록 실패: %s", exc)
         finally:
@@ -969,8 +977,42 @@ async def run_order_assist(
     if has_pending:
         return OrderAssistResult(status="conflict", message=CONFLICT_MESSAGE)
 
-    # ② 냉각 — 제안 호출 전에 본다. 냉각 중이면 LLM을 부를 이유가 없다.
-    cooling, checked = await cooldown.active(stock, trigger.rule_id)
+    # ② 종목코드 확인 — 냉각도 제안도 이 코드 위에 선다.
+    #
+    #    제안 왕복보다 **먼저** 하는 이유는 냉각 키 때문이다. 냉각을 사용자가 친
+    #    문자열로 걸면 이름↔코드 별칭 한 번에 뚫린다 — "/advise 삼성전자"로 냉각이
+    #    걸린 직후 "/advise 005930"은 키가 달라 그대로 통과한다. resolve_stock_code는
+    #    이름과 코드를 같은 코드로 해석하므로 두 입력은 같은 종목이고, "같은 종목에
+    #    대한 반복 제안을 막는다"는 냉각의 목적이 그 자리에서 무너진다. 한 종목을
+    #    가리키는 정본 식별자는 종목코드 하나뿐이라 그것을 먼저 확보한다.
+    #
+    #    부수 효과가 하나 더 있다: 해석되지 않는 종목·주문 불가 코드가 제안 왕복
+    #    (최대 ORDER_PROPOSE_TIMEOUT_SECONDS초)을 태우기 전에 끊긴다. 이 구간의 거부는
+    #    냉각을 걸지 않는다 — 냉각이 아끼려는 자원(제안 왕복)을 애초에 쓰지 않았고,
+    #    오타 한 번이 그 문자열을 냉각 시간만큼 잠글 이유도 없다.
+    try:
+        resolved = str(await mcp_runner(TRADING_MCP_PARAMS, "resolve_stock_code", {"stock_name": stock}))
+    except Exception as exc:  # noqa: BLE001
+        return _rejected(stock, (LimitViolation("resolve_failed", f"종목코드를 확인하지 못했습니다: {short_error(exc)}"),))
+
+    code_match = _STOCK_CODE_EXTRACT_RE.search(resolved)
+    if code_match is None or _is_unresolved_echo(resolved):
+        return _rejected(
+            stock,
+            (LimitViolation("unresolved_stock", f"{stock} — 종목마스터에서 확인하지 못했습니다."),),
+        )
+    stock_code = code_match.group(1).upper()
+    resolved_name = resolved.split("(")[0].strip() or stock
+
+    # "이 코드로 주문을 낼 수 있는가"는 순수 함수 하나로 끝난다. 주문 금지 종목에
+    # 제안 왕복을 태울 이유가 없어 여기서 본다.
+    code_violation = check_orderable_code(stock_code, limits.blacklist)
+    if code_violation is not None:
+        return _rejected(stock, (code_violation,))
+
+    # ③ 냉각 — 제안 호출 전에 본다. 냉각 중이면 LLM을 부를 이유가 없다.
+    #    키는 ②에서 확인한 종목코드다. 입력 문자열이 아니다.
+    cooling, checked = await cooldown.active(stock_code, trigger.rule_id)
     if cooling:
         message = (
             f"같은 종목의 재제안 냉각 시간({limits.cooldown_minutes}분)이 아직 남았습니다."
@@ -979,7 +1021,7 @@ async def run_order_assist(
         )
         return _rejected(stock, (LimitViolation("cooldown", message),))
 
-    # ③ 제안 받기
+    # ④ 제안 받기 — 여기부터가 비싼 구간이다.
     try:
         raw = await propose(build_proposal_prompt(trigger))
     except Exception as exc:  # noqa: BLE001
@@ -990,30 +1032,13 @@ async def run_order_assist(
     if proposal is None:
         # 여기서부터는 제안 왕복을 실제로 소비했다 — 같은 종목으로 즉시 재시도해
         # 같은 실패를 반복하지 않도록 냉각을 건다.
-        await cooldown.mark(stock, trigger.rule_id)
+        await cooldown.mark(stock_code, trigger.rule_id)
         return _rejected(stock, (LimitViolation("proposal_parse", parse_error),))
-
-    # ④ 종목코드 재확인 — 제안이 말한 코드를 그대로 믿지 않는다.
-    try:
-        resolved = str(await mcp_runner(TRADING_MCP_PARAMS, "resolve_stock_code", {"stock_name": stock}))
-    except Exception as exc:  # noqa: BLE001
-        await cooldown.mark(stock, trigger.rule_id)
-        return _rejected(stock, (LimitViolation("resolve_failed", f"종목코드를 확인하지 못했습니다: {short_error(exc)}"),))
-
-    code_match = _STOCK_CODE_EXTRACT_RE.search(resolved)
-    if code_match is None or _is_unresolved_echo(resolved):
-        await cooldown.mark(stock, trigger.rule_id)
-        return _rejected(
-            stock,
-            (LimitViolation("unresolved_stock", f"{stock} — 종목마스터에서 확인하지 못했습니다."),),
-        )
-    stock_code = code_match.group(1).upper()
-    resolved_name = resolved.split("(")[0].strip() or stock
 
     if proposal.stock_code and proposal.stock_code != stock_code:
         # 제안이 다른 종목을 말한 것이다. 우리가 확인한 코드로 "고쳐서" 진행하면
         # 근거와 주문이 어긋난 채 사용자에게 나간다.
-        await cooldown.mark(stock, trigger.rule_id)
+        await cooldown.mark(stock_code, trigger.rule_id)
         return _rejected(
             stock,
             (
@@ -1024,11 +1049,6 @@ async def run_order_assist(
             ),
         )
 
-    code_violation = check_orderable_code(stock_code, limits.blacklist)
-    if code_violation is not None:
-        await cooldown.mark(stock, trigger.rule_id)
-        return _rejected(stock, (code_violation,), proposal=proposal)
-
     # ⑤ 스냅샷 조회
     try:
         quote_text, balance_text = await asyncio.gather(
@@ -1036,7 +1056,7 @@ async def run_order_assist(
             mcp_runner(TRADING_MCP_PARAMS, "get_balance", {}),
         )
     except Exception as exc:  # noqa: BLE001
-        await cooldown.mark(stock, trigger.rule_id)
+        await cooldown.mark(stock_code, trigger.rule_id)
         return _rejected(
             stock,
             (LimitViolation("snapshot_failed", f"계좌·시세를 조회하지 못했습니다: {short_error(exc)}"),),
@@ -1045,14 +1065,14 @@ async def run_order_assist(
 
     snapshot, snapshot_error = parse_snapshot(str(quote_text), str(balance_text), stock_code)
     if snapshot is None:
-        await cooldown.mark(stock, trigger.rule_id)
+        await cooldown.mark(stock_code, trigger.rule_id)
         return _rejected(stock, (LimitViolation("snapshot_parse", snapshot_error),), proposal=proposal)
 
     try:
         usage = load_daily_usage(session_factory, now)
     except Exception as exc:  # noqa: BLE001
         logger.error("일일 사용량 집계 실패 — 진행을 막는다: %s", exc)
-        await cooldown.mark(stock, trigger.rule_id)
+        await cooldown.mark(stock_code, trigger.rule_id)
         return _rejected(
             stock,
             (LimitViolation("usage_failed", f"오늘 주문 사용량을 확인하지 못했습니다: {short_error(exc)}"),),
@@ -1073,7 +1093,7 @@ async def run_order_assist(
 
     # ⑥ 하드 한도 — 코드가 판정한다. 위반이 있으면 검증자를 부르지 않는다.
     hard_check = evaluate_hard_limits(proposal, snapshot, limits, usage)
-    await cooldown.mark(stock, trigger.rule_id)
+    await cooldown.mark(stock_code, trigger.rule_id)
     if not hard_check.passed:
         logger.info(
             "하드 한도 위반으로 거부 — 검증자 미호출 (stock=%s, violations=%s)",

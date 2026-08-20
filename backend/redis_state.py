@@ -117,13 +117,17 @@ class RedisKeys:
     def telegram_poller_state(self) -> str:
         return f"{self.prefix}:telegram:poller_state"
 
-    def order_proposal_cooldown(self, stock: str, rule_id: str | None) -> str:
-        """주문 보조(#299)의 재제안 냉각 키 — 종목+룰 단위.
+    def order_proposal_cooldown(self, stock_code: str, rule_id: str | None) -> str:
+        """주문 보조(#299)의 재제안 냉각 키 — 종목코드+룰 단위.
 
         룰이 없는 수동 요청(``/advise``)은 ``manual``로 묶는다. 룰 기반 자동 제안이
         추가돼도(후속 이슈) 서로의 냉각을 잡아먹지 않는다.
+
+        첫 자리는 사용자가 친 문자열이 아니라 **해석된 종목코드**다. 입력 문자열을
+        키로 쓰면 "삼성전자"와 "005930"이 다른 키가 되어 같은 종목의 냉각이 별칭
+        한 번에 뚫린다. 호출부는 이 키를 만들기 전에 코드를 확정해야 한다.
         """
-        return f"{self.prefix}:order_assist:cooldown:{stock}:{rule_id or 'manual'}"
+        return f"{self.prefix}:order_assist:cooldown:{stock_code}:{rule_id or 'manual'}"
 
 
 class RedisSchedulerState:

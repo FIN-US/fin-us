@@ -582,12 +582,16 @@ class FakeCooldown:
         self._active = active
         self._checked = checked
         self.marked: list[tuple[str, str | None]] = []
+        # 어떤 키로 조회했는지도 남긴다 — 냉각이 별칭으로 뚫리지 않으려면 조회 키와
+        # 기록 키가 둘 다 종목코드여야 한다.
+        self.checked_keys: list[str] = []
 
-    async def active(self, stock, rule_id):
+    async def active(self, stock_code, rule_id):
+        self.checked_keys.append(stock_code)
         return self._active, self._checked
 
-    async def mark(self, stock, rule_id):
-        self.marked.append((stock, rule_id))
+    async def mark(self, stock_code, rule_id):
+        self.marked.append((stock_code, rule_id))
 
 
 def _mcp_runner(*, quote=QUOTE_TEXT, balance=BALANCE_TEXT, resolved="삼성전자 (005930, KOSPI)"):
@@ -632,10 +636,14 @@ async def _run(
     limits=None,
     now=MARKET_OPEN_NOW,
     verify_calls=None,
+    propose_calls=None,
+    stock="삼성전자",
 ):
     verify_calls = verify_calls if verify_calls is not None else []
+    propose_calls = propose_calls if propose_calls is not None else []
 
     async def propose(prompt):
+        propose_calls.append(prompt)
         return proposal_text
 
     async def verify(payload, proposal_id):
@@ -643,7 +651,7 @@ async def _run(
         return verdict if verdict is not None else VerifierVerdict(True, "근거가 명확합니다.")
 
     result = await run_order_assist(
-        ProposalTrigger(source="telegram", stock="삼성전자", chat_id="123"),
+        ProposalTrigger(source="telegram", stock=stock, chat_id="123"),
         pending_orders=store if store is not None else InMemoryPendingOrderStore(),
         mcp_runner=mcp if mcp is not None else _mcp_runner(),
         now_factory=lambda: now,
@@ -838,14 +846,23 @@ async def test_verifier_failure_reason_numbers_do_not_reach_the_user():
 
 @pytest.mark.asyncio
 async def test_cooldown_blocks_before_any_proposal_call():
+    """냉각이 아끼는 자원은 제안 왕복이다 — 그 호출까지 가지 않는다.
+
+    종목코드 확인(resolve_stock_code)은 냉각 검사보다 앞이라 한 번 나간다. 냉각 키가
+    종목코드여야 이름↔코드 별칭으로 뚫리지 않기 때문이고, 시세·잔고 조회는 아직이다.
+    """
     cooldown = FakeCooldown(active=True)
     mcp = _mcp_runner()
+    propose_calls = []
 
-    result, verify_calls = await _run(cooldown=cooldown, mcp=mcp)
+    result, verify_calls = await _run(
+        cooldown=cooldown, mcp=mcp, propose_calls=propose_calls
+    )
 
     assert result.status == "rejected"
     assert [v.code for v in result.violations] == ["cooldown"]
-    assert mcp.calls == []
+    assert propose_calls == []
+    assert mcp.calls == ["resolve_stock_code"]
     assert verify_calls == []
 
 
@@ -865,7 +882,32 @@ async def test_cooldown_is_marked_after_a_completed_decision():
     result, _ = await _run(cooldown=cooldown)
 
     assert result.status == "approved"
-    assert cooldown.marked == [("삼성전자", None)]
+    # 사용자가 친 "삼성전자"가 아니라 해석된 종목코드로 건다.
+    assert cooldown.marked == [("005930", None)]
+
+
+@pytest.mark.asyncio
+async def test_cooldown_is_keyed_on_the_resolved_code_not_the_typed_text():
+    """이름으로 걸린 냉각이 코드 입력으로 뚫리면 안 된다.
+
+    resolve_stock_code는 "삼성전자"와 "005930"을 같은 코드로 해석하므로 두 입력은
+    같은 종목이다. 냉각을 사용자가 친 문자열로 걸면 키가 갈라져 "/advise 삼성전자"
+    직후의 "/advise 005930"이 그대로 통과하고, "같은 종목에 대한 반복 제안을 막는다"는
+    냉각의 목적이 무너진다. 두 입력이 같은 키를 보는 것을 고정한다.
+    """
+    by_name = FakeCooldown()
+    by_code = FakeCooldown()
+
+    await _run(cooldown=by_name, stock="삼성전자")
+    await _run(
+        cooldown=by_code,
+        stock="005930",
+        mcp=_mcp_runner(resolved="삼성전자 (005930, KOSPI)"),
+    )
+
+    assert by_name.marked == by_code.marked == [("005930", None)]
+    # 조회도 같은 키로 나가야 별칭 입력이 냉각 검사에 걸린다.
+    assert by_name.checked_keys == by_code.checked_keys == ["005930"]
 
 
 @pytest.mark.asyncio
@@ -945,8 +987,8 @@ async def test_soft_confidence_signal_is_passed_to_the_verifier():
 def test_cooldown_key_separates_manual_and_rule_triggers():
     keys = RedisKeys()
 
-    assert keys.order_proposal_cooldown("삼성전자", None).endswith(":삼성전자:manual")
-    assert keys.order_proposal_cooldown("삼성전자", "rule-7").endswith(":삼성전자:rule-7")
+    assert keys.order_proposal_cooldown("005930", None).endswith(":005930:manual")
+    assert keys.order_proposal_cooldown("005930", "rule-7").endswith(":005930:rule-7")
 
 
 @pytest.mark.asyncio
@@ -968,10 +1010,10 @@ async def test_proposal_cooldown_marks_with_ttl():
     client = _FakeRedis()
     cooldown = order_assist.ProposalCooldown(lambda: client, ttl_seconds=3600)
 
-    assert await cooldown.active("삼성전자", None) == (False, True)
-    await cooldown.mark("삼성전자", None)
+    assert await cooldown.active("005930", None) == (False, True)
+    await cooldown.mark("005930", None)
 
-    assert client.sets == [(RedisKeys().order_proposal_cooldown("삼성전자", None), "proposed", 3600)]
+    assert client.sets == [(RedisKeys().order_proposal_cooldown("005930", None), "proposed", 3600)]
     assert client.closed is True
 
 
@@ -986,7 +1028,7 @@ async def test_proposal_cooldown_reports_lookup_failure():
 
     cooldown = order_assist.ProposalCooldown(lambda: _BrokenRedis())
 
-    assert await cooldown.active("삼성전자", None) == (True, False)
+    assert await cooldown.active("005930", None) == (True, False)
 
 
 # ---------------------------------------------------------------------------
