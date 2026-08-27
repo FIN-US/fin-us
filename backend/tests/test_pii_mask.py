@@ -339,7 +339,7 @@ class TestAmountRecognizer:
         되고 아무도 안 받으면 그 숫자는 평문으로 나간다(=유출).
 
         이 테스트가 잡는 mutation:
-        - amount 그룹의 `(?![\\d,]*(?:\\.\\d+)?<qty>)` 배제 제거
+        - amount 그룹의 `(?![\\d,]*\\d(?:\\.\\d+)?<qty>)` 배제 제거
           -> "잔고 1,234주"가 <AMOUNT_1>로 오분류된다.
         - 배제를 amount 그룹 **끝**의 `(?!\\s*주)`로 바꾸기 (리뷰 제안 형태)
           -> \\s*가 개행을 넘어 "예수금 1,234,567\\n주식 평가액"에서 잘못 발동하고,
@@ -377,6 +377,37 @@ class TestAmountRecognizer:
             masked, mapping = mask_pii(text)
             assert _norm(masked) == expected, f"숫자가 어느 자리표시자도 받지 못했다: {text} -> {masked}"
             assert unmask_pii(masked, mapping) == text
+
+    def test_labeled_number_with_trailing_comma_is_not_leaked(self):
+        """후행 콤마로 끝나는 숫자 런도 어느 한쪽 자리표시자는 반드시 받아야 한다.
+
+        위 test_labeled_quantity_is_not_misclassified_as_amount가 고정한 "배제는
+        _QTY_RE가 받아 줄 때만 발동한다"는 불변식의 구멍이었다. 배제 lookahead가
+        `[\\d,]*`로 끝나면 콤마로 끝나는 런까지 받는데 _QTY_RE의 `\\d(?:[\\d,]*\\d)?`는
+        숫자로 끝나야 해서, "잔고 1,234,주"에서 라벨 정규식은 배제로 소비를 포기하고
+        _QTY_RE는 `(?=주)`에서 실패한다 — "1,234"가 어느 자리표시자도 받지 못한 채
+        평문으로 외부 LLM에 나간다.
+
+        후행 콤마는 정상 표기가 아니라 재현성이 낮지만, 배제 조건을 _QTY_RE와 정확히
+        일치시켜(끝을 \\d로 강제) 불변식 자체를 참으로 만든다.
+
+        이 테스트가 잡는 mutation: 배제를 `(?![\\d,]*\\d(?:\\.\\d+)?<qty>)`에서
+        `(?![\\d,]*(?:\\.\\d+)?<qty>)`로 되돌리기.
+        """
+        for text, expected in [
+            ("잔고 1,234,주", "잔고 <AMOUNT_1>,주"),
+            ("잔고 12,345,주식", "잔고 <AMOUNT_1>,주식"),
+        ]:
+            masked, mapping = mask_pii(text)
+            assert _norm(masked) == expected, (
+                f"숫자가 어느 자리표시자도 받지 못했다: {text!r} -> {masked!r}"
+            )
+            assert unmask_pii(masked, mapping) == text
+
+        # 대조군: 후행 콤마가 없는 정상 표기는 종전대로 QTY가 가져간다.
+        masked, mapping = mask_pii("잔고 1,234주")
+        assert _norm(masked) == "잔고 <QTY_1>주"
+        assert _norm_mapping(mapping) == {"<QTY_1>": "1,234"}
 
     def test_account_and_amount_coexist_correctly(self):
         """계좌번호와 금액이 한 문장에 함께 있어도 각자의 타입으로 정확히 분류되어야 한다."""
