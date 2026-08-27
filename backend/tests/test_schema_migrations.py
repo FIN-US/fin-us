@@ -524,3 +524,97 @@ def test_nullable_migration_preserves_indexes(tmp_path, monkeypatch):
     assert _agentreport_index_names(str(db_path)) == before, (
         "테이블 재생성 마이그레이션이 인덱스를 잃었습니다"
     )
+
+
+# --- #298: 신호 점수화 컬럼 -------------------------------------------------
+
+
+def test_init_db_adds_nullable_signal_scoring_columns(tmp_path, monkeypatch):
+    """구버전 DB에 signal_score·signal_reason·signal_uncertainty가 추가되어야 한다.
+
+    셋 다 NULL 허용이어야 하고 DEFAULT가 없어야 한다. provider_supports_tools처럼
+    DEFAULT 0을 주면 "모델이 0점(무관/중립)으로 채점했다"는 없던 사실이 과거 행에
+    소급 생성된다 — #122·#162의 "0과 모름 구분" 원칙 위반이다.
+
+    이 테스트가 잡는 mutation: _PENDING_COLUMN_MIGRATIONS의 세 항목 제거,
+    또는 NOT NULL DEFAULT 0 추가.
+    """
+    db_path = tmp_path / "old_schema_signal.db"
+    _create_old_schema_agentreport(str(db_path))
+
+    test_engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
+    monkeypatch.setattr(database, "engine", test_engine)
+
+    database.init_db()
+
+    conn = sqlite3.connect(str(db_path))
+    cols = {row[1]: row for row in conn.execute("PRAGMA table_info(agentreport)")}
+    raw = conn.execute(
+        "SELECT signal_score, signal_reason, signal_uncertainty FROM agentreport"
+    ).fetchone()
+    conn.close()
+
+    expected_types = {
+        "signal_score": "INTEGER",
+        "signal_reason": "VARCHAR",
+        "signal_uncertainty": "FLOAT",
+    }
+    for name, expected_type in expected_types.items():
+        assert name in cols, f"{name} 컬럼이 추가되지 않았다"
+        _, _, col_type, notnull, default, _pk = cols[name]
+        assert col_type.upper() == expected_type
+        assert notnull == 0, f"{name}이 NOT NULL이면 '모름'을 표현할 수 없다"
+        assert default is None, f"{name}에 DEFAULT가 있으면 과거 행에 없던 점수가 생긴다"
+
+    # 마이그레이션 이전에 저장된 행은 세 값 모두 NULL로 남아야 한다.
+    assert raw == (None, None, None)
+
+
+def _create_pre_signal_scoring_agentreport(db_path: str) -> None:
+    """#298 이전이면서 decision이 아직 NOT NULL인 agentreport를 재현한다.
+
+    signal_* 컬럼은 _run_schema_migrations()의 ALTER로 먼저 붙으므로, 테이블 재생성
+    (_run_table_recreate_migrations)이 도는 시점에는 이미 존재한다. 재생성 DDL이
+    이 컬럼들을 모르면 컬럼과 데이터가 통째로 사라진다 — 그 경로를 고정한다.
+    """
+    _create_post_c_schema_agentreport(db_path)
+
+    conn = sqlite3.connect(db_path)
+    for alter in (
+        "ALTER TABLE agentreport ADD COLUMN signal_score INTEGER",
+        "ALTER TABLE agentreport ADD COLUMN signal_reason VARCHAR",
+        "ALTER TABLE agentreport ADD COLUMN signal_uncertainty FLOAT",
+    ):
+        conn.execute(alter)
+    conn.execute(
+        "UPDATE agentreport SET signal_score = -2, signal_reason = '수주 취소 공시', "
+        "signal_uncertainty = 1.25"
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_nullable_recreation_preserves_signal_scoring_columns(tmp_path, monkeypatch):
+    """테이블 재생성 마이그레이션이 signal_* 컬럼과 그 값을 보존해야 한다.
+
+    이 테스트가 잡는 mutation: _RECREATE_AGENTREPORT_NULLABLE_DDL 또는
+    _RECREATE_AGENTREPORT_COLS에서 signal_* 누락 (누락 시 RuntimeError로 부팅이
+    막히거나, DDL만 고치고 COLS를 빠뜨리면 값이 조용히 사라진다).
+    """
+    db_path = tmp_path / "pre_signal_scoring.db"
+    _create_pre_signal_scoring_agentreport(str(db_path))
+
+    test_engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
+    monkeypatch.setattr(database, "engine", test_engine)
+
+    database.init_db()
+
+    conn = sqlite3.connect(str(db_path))
+    col_info = {row[1]: row for row in conn.execute("PRAGMA table_info(agentreport)")}
+    row = conn.execute(
+        "SELECT signal_score, signal_reason, signal_uncertainty FROM agentreport"
+    ).fetchall()
+    conn.close()
+
+    assert col_info["decision"][3] == 0, "재생성이 수행되지 않았다 (decision이 여전히 NOT NULL)"
+    assert row == [(-2, "수주 취소 공시", 1.25)], "재생성이 신호 점수 값을 잃었다"

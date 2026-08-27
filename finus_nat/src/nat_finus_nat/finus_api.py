@@ -267,6 +267,13 @@ def _record_to_ledger(tool_name: str, result: str) -> None:
     ContextVar (e.g., outside a run_subagent context).  The resulting empty
     ledger causes the gate to trip for any numeric claim, which is the
     correct conservative behaviour.
+
+    ``tool_name`` leaves this service: backend renders it in the reasoning
+    footnote through ``TOOL_LABELS`` (backend/presentation.py, #260).
+    Renaming a tool without updating that map degrades gracefully — the raw
+    internal name shows up instead of the Korean label — so the mismatch is
+    caught by backend/tests/test_label_drift.py in CI (#282). Keep the name a
+    literal or a module-level constant; that check reads it statically.
     """
     ledger = DATA_TOOL_LEDGER.get()
     if ledger is None:

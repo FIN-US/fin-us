@@ -34,6 +34,9 @@ erDiagram
         float confidence_score "신뢰도 점수"
         string reason "투자 결정 근거"
         boolean provider_supports_tools "provider가 도구 호출 가능 경로인지 (실제 호출 관측 아님, #162)"
+        int signal_score "신호 영향도 -3~+3 (채점 실패·필터 미경유 시 null, #298)"
+        string signal_reason "signal_score의 한 줄 근거 (#298)"
+        float signal_uncertainty "기사별 점수의 표준편차 (기사 2건 미만이면 null, #298)"
         datetime created_at "생성 일시"
     }
     Diary {

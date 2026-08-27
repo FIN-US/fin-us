@@ -35,13 +35,11 @@ from .redis_state import (
     redis_state,
 )
 from .presentation import (
-    AGENT_LABELS,
     DEFAULT_TELEGRAM_USER_LEVEL,
     KIND_ANALYSIS,
     KIND_QUOTE,
     LEVEL_BEGINNER,
     LEVEL_INTERMEDIATE,
-    TOOL_LABELS,
     as_list_items,
     sanitize_markdown,
     reasoning_footnote,
