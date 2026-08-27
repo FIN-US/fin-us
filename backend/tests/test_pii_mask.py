@@ -176,6 +176,52 @@ class TestAmountRecognizer:
                 f"{text!r} -> {normed!r} (앞자리 숫자와 콤마가 자리표시자 앞에 남음)"
             )
 
+    def test_masks_korean_numeral_unit_amount(self):
+        """숫자와 만/억 사이에 한글 수사(천/백/십)가 끼어도 금액 전체가 마스킹돼야 한다.
+
+        "3천만원"은 한국어 구어와 증권 기사에서 "3,000만원"보다 흔한 표기다. 수사 체인을
+        허용하지 않으면 세 금액 정규식 중 어느 것도 매치하지 못한다 — _AMOUNT_WON_RE는
+        숫자 바로 뒤에 "원"을 요구해 "3천…"에서 멈추고, _AMOUNT_UNIT_RE는 숫자 바로 뒤에
+        만/억을 요구해 "천"에서 멈춘다. 그 결과 값 **전체**가 평문으로 외부 LLM에 나간다.
+        위 test_masks_comma_grouped_unit_amount_entirely가 고정한 "3,000만원" 앞자리
+        유출과 같은 자리·같은 근거이고, 부분 유출이 아니라 전량 유출이라 방향이 더 나쁘다.
+
+        직격하는 경로는 자유 입력 두 곳이다: telegram_commands._handle_chat_fallback이
+        넘기는 사용자 원문("3천만원 있는데 어디 투자할까요?")과
+        services.check_signal_significance가 프롬프트에 싣는 뉴스 원문 1000자
+        ("영업이익 1천억원", "시가총액 3천억원").
+
+        이 테스트가 잡는 mutation: _AMOUNT_UNIT_RE에서 (?:[천백십]\\d*)+ 갈래 제거.
+        """
+        for text, expected in [
+            ("3천만원", "<AMOUNT_1>"),
+            ("1천억원", "<AMOUNT_1>"),
+            ("1백만원", "<AMOUNT_1>"),
+            ("1천원", "<AMOUNT_1>"),
+            ("예수금 1천5백만원", "예수금 <AMOUNT_1>"),
+            ("영업이익 1천억원 기록", "영업이익 <AMOUNT_1> 기록"),
+            ("시가총액 3천억원", "시가총액 <AMOUNT_1>"),
+        ]:
+            masked, mapping = mask_pii(text)
+            assert _norm(masked) == expected, (
+                f"한글 수사 금액이 유출됐다: {text!r} -> {masked!r}"
+            )
+            assert unmask_pii(masked, mapping) == text
+
+    def test_does_not_mask_ordinal_before_won_syllable(self):
+        """수사도 만/억도 없는 형태를 \\s?원으로 삼키면 안 된다.
+
+        _AMOUNT_UNIT_RE의 두 갈래(수사 체인 | 만·억)를 (?:만|억)? 하나로 느슨하게
+        합치면 "제1 원칙"이 "제<AMOUNT_1>칙"이 된다 — 마스킹 대상이 아닌 문자열을
+        깨뜨리면서 자리표시자를 만들어 LLM이 읽는 문장 자체가 망가진다.
+
+        이 테스트가 잡는 mutation: 위 두 갈래를 (?:만|억)? 하나로 합치는 단순화.
+        """
+        for text in ["제1 원칙에 따라", "제1 원칙", "제2 원칙과 제3 원칙"]:
+            masked, mapping = mask_pii(text)
+            assert masked == text, f"금액이 아닌 표기가 마스킹됐다: {text!r} -> {masked!r}"
+            assert mapping == {}
+
     def test_masks_labeled_bare_digits_without_won_suffix(self):
         """'원' 접미사가 없는 표기 편차(예: 총자산 1234567)는 금액 라벨 컨텍스트에서만 마스킹한다."""
         masked, mapping = mask_pii("총자산 1234567")
