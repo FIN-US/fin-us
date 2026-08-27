@@ -275,6 +275,58 @@ class TestAmountRecognizer:
         assert _norm_mapping(mapping) == {"<ACCOUNT_1>": "12345678-01"}
         assert unmask_pii(masked, mapping) == text
 
+    def test_labeled_quantity_is_not_misclassified_as_amount(self):
+        """금액 라벨 뒤라도 "주"가 붙은 숫자는 AMOUNT가 아니라 QTY여야 한다.
+
+        _LABELED_AMOUNT_RE가 _QTY_RE보다 먼저 적용되므로, 배제가 없으면 콤마가 들어가거나
+        4자리 이상인 수량이 금액으로 먹혀 "잔고 <AMOUNT_1>주"가 된다. 왕복은 무손실이지만
+        이 설계가 유일하게 보존한다고 선언한 능력(자리표시자끼리의 상대 비교)이 깨진다 —
+        주식 수가 금액 이름공간에 끼어들어 AMOUNT_2 > AMOUNT_1 비교가 서로 다른 종류의
+        값을 비교하게 된다.
+
+        아래 세 갈래를 함께 고정한다. 배제는 _QTY_RE가 받아 줄 때만 발동해야지, 배제만
+        되고 아무도 안 받으면 그 숫자는 평문으로 나간다(=유출).
+
+        이 테스트가 잡는 mutation:
+        - amount 그룹의 `(?![\\d,]*(?:\\.\\d+)?<qty>)` 배제 제거
+          -> "잔고 1,234주"가 <AMOUNT_1>로 오분류된다.
+        - 배제를 amount 그룹 **끝**의 `(?!\\s*주)`로 바꾸기 (리뷰 제안 형태)
+          -> \\s*가 개행을 넘어 "예수금 1,234,567\\n주식 평가액"에서 잘못 발동하고,
+             (?:,\\d{3})+가 되감기해 "예수금 <AMOUNT_1>,567"이 되어 ",567"이 유출된다.
+        - 배제 조건을 _QTY_UNIT_SUFFIX 재사용이 아닌 별도 문자열로 복제
+          -> 두 곳이 갈라지는 순간 "잔고 1234주일"처럼 _QTY_RE가 거부하는 형태에서
+             배제만 발동해 숫자가 어느 자리표시자도 받지 못한다.
+        """
+        # (1) 라벨 + 수량 -> QTY
+        for text, expected in [
+            ("잔고 1,234주", "잔고 <QTY_1>주"),
+            ("잔고 12345주", "잔고 <QTY_1>주"),
+            ("보유 잔고 500주", "보유 잔고 <QTY_1>주"),
+        ]:
+            masked, mapping = mask_pii(text)
+            assert _norm(masked) == expected, f"수량이 금액으로 오분류됐다: {text} -> {masked}"
+            assert unmask_pii(masked, mapping) == text
+
+        # (2) 배제가 줄을 넘어가면 안 된다 — 다음 줄이 "주"로 시작해도 금액은 금액이다.
+        text = "예수금 1,234,567\n주식 평가액"
+        masked, mapping = mask_pii(text)
+        assert _norm(masked) == "예수금 <AMOUNT_1>\n주식 평가액", (
+            f"라벨 금액이 부분 마스킹되거나 유출됐다: {masked}"
+        )
+        assert _norm_mapping(mapping) == {"<AMOUNT_1>": "1,234,567"}
+        assert unmask_pii(masked, mapping) == text
+
+        # (3) _QTY_RE가 거부하는 "주" 접미(기간 표현)는 배제도 발동하지 않아야 한다.
+        #     발동하면 숫자가 AMOUNT도 QTY도 아니게 되어 평문으로 나간다.
+        for text, expected in [
+            ("잔고 1234주일", "잔고 <AMOUNT_1>주일"),
+            ("손익 12345주간", "손익 <AMOUNT_1>주간"),
+            ("잔고 1234주 신고가", "잔고 <AMOUNT_1>주 신고가"),
+        ]:
+            masked, mapping = mask_pii(text)
+            assert _norm(masked) == expected, f"숫자가 어느 자리표시자도 받지 못했다: {text} -> {masked}"
+            assert unmask_pii(masked, mapping) == text
+
     def test_account_and_amount_coexist_correctly(self):
         """계좌번호와 금액이 한 문장에 함께 있어도 각자의 타입으로 정확히 분류되어야 한다."""
         text = "계좌번호 1234567801 예수금 3,000,000원"
@@ -332,6 +384,34 @@ class TestQuantityRecognizer:
         assert _norm(masked) == "- 카카오 (035720) · <QTY_1>주"
         assert "12," not in masked
         assert unmask_pii(masked, mapping) == text
+
+    def test_masks_fractional_quantity_entirely(self):
+        """소수 표기 수량("0.5주")은 정수부까지 통째로 마스킹돼야 한다.
+
+        _QTY_RE의 (?<![\\d,])는 소수점을 배제하지 않으므로, 소수 갈래가 없으면 매치가
+        소수점 **뒤**에서 시작해 "0.<QTY_1>주"(매핑 "5")가 되고 "0."이 평문으로 남는다.
+        _AMOUNT_WON_RE·_AMOUNT_UNIT_RE는 이미 같은 (?:\\.\\d+)?를 갖고 있어 수량만
+        빠져 있던 자리다.
+
+        이 테스트가 잡는 mutation:
+        - _QTY_RE에서 (?:\\.\\d+)? 제거 -> "0.5주"가 "0.<QTY_1>주"로 부분 마스킹된다.
+        - 대신 lookbehind를 (?<![\\d,.])로 막는 방향 -> "0.5주"가 통째로 미매치가 되어
+          부분 유출이 전량 유출로 나빠진다("0.5"가 그대로 남는다).
+        """
+        for text, expected, value in [
+            ("0.5주", "<QTY_1>주", "0.5"),
+            ("12.5주 보유", "<QTY_1>주 보유", "12.5"),
+            ("1,234.5주", "<QTY_1>주", "1,234.5"),
+        ]:
+            masked, mapping = mask_pii(text)
+            assert _norm(masked) == expected, f"소수 수량이 부분/미마스킹됐다: {text} -> {masked}"
+            assert _norm_mapping(mapping) == {"<QTY_1>": value}
+            assert unmask_pii(masked, mapping) == text
+
+        # 대조군: 소수점이 아니라 번호 매기기 뒤의 수량은 종전대로 숫자만 잡는다.
+        masked, mapping = mask_pii("3. 5주")
+        assert _norm(masked) == "3. <QTY_1>주"
+        assert _norm_mapping(mapping) == {"<QTY_1>": "5"}
 
     def test_does_not_mask_period_idioms_with_share_unit(self):
         """'주'가 기간 단위로 쓰인 표현은 보유 수량이 아니므로 마스킹하지 않는다.
