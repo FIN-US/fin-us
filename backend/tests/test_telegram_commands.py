@@ -1,7 +1,9 @@
 import ast
 import asyncio
 import logging
+import socket
 import textwrap
+from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,6 +13,8 @@ from zoneinfo import ZoneInfo
 import pytest
 from fastapi import HTTPException
 
+import backend.config as backend_config
+import backend.redis_state as redis_state_module
 import backend.telegram_commands as telegram_commands
 from backend.config import DART_MCP_PARAMS, NEWS_MCP_PARAMS, TRADING_MCP_PARAMS
 from backend.telegram_commands import (
@@ -35,6 +39,7 @@ from backend.telegram_commands import (
 from backend.redis_state import (
     InMemoryPendingOrderStore,
     InMemoryTelegramPollerStore,
+    RedisPendingOrderStore,
     TelegramPollerState,
     TelegramPollerStore,
 )
@@ -4268,10 +4273,14 @@ def test_the_static_send_failure_guard_allows_try_finally():
 async def test_poller_keeps_polling_when_state_store_hangs(monkeypatch, caplog):
     """저장소가 예외 대신 hang하면 fail-open이 fail-hang으로 무너진다 (PR #251 리뷰).
 
-    create_redis_client()가 socket_timeout을 주지 않아 redis 호스트가 RST 없이 패킷을
-    drop하면 set()이 무한 블록되고, 그 await는 run()의 배치 루프 안이라 폴러 태스크가
-    통째로 멈춘다. except Exception은 예외가 나야 도는 방어라 여기서는 발화하지 않는다.
+    저장소의 await가 돌아오지 않으면 그 await는 run()의 배치 루프 안이라 폴러 태스크가
+    통째로 멈춘다. except Exception은 예외가 나야 도는 방어라 여기서는 발화하지 않으므로
     BrokenStore(즉시 raise)는 이 경로를 재현하지 못한다.
+
+    #268이 소켓 레벨 상한을 따로 걸었지만 여기서 고정하는 것은 그게 아니다. state_store는
+    덕 타이핑된 주입 지점이라 redis가 아닌 구현이 들어올 수 있고, 파이썬 레벨의 대기에는
+    소켓 타임아웃이 닿지 않는다 — 그 상한은 test_*_returns_bounded_when_redis_blackholes가
+    실제 소켓으로 검증한다.
     """
     notifier = FakeNotifier()
     notifier.enabled = True
@@ -4309,3 +4318,304 @@ async def test_poller_keeps_polling_when_state_store_hangs(monkeypatch, caplog):
     assert poller.offset == 42
     assert "상태 복원 실패" in caplog.text
     assert "상태 저장 실패" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# 체결 확정 ~ 상태 영속화 사이의 창 (#269)
+# ---------------------------------------------------------------------------
+
+
+class _SettledSendBlocker(FakeNotifier):
+    """체결 결과("주문 완료") 전송에서 영원히 블록한다 (#269).
+
+    429 flood-wait에 붙잡힌 _send_text_settled의 모형이다. 실제로는 백오프 sleep과
+    재시도로 최대 SETTLED_SEND_TIMEOUT_SECONDS(20초)를 쓰지만, 테스트가 고정하려는 것은
+    "그 구간에 취소가 떨어지면 무슨 일이 벌어지는가"이므로 구간을 열어둔 채 붙잡기만 한다.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.settled_send_started = asyncio.Event()
+
+    async def send_text(self, text, *, reply_markup=None):
+        self.messages.append(text)
+        self.reply_markups.append(reply_markup)
+        if text.startswith("주문 완료"):
+            self.settled_send_started.set()
+            await asyncio.Event().wait()
+        return True
+
+
+@pytest.mark.asyncio
+async def test_confirmed_order_is_reexecuted_when_restart_lands_in_the_settled_send(monkeypatch):
+    """체결 성공 후 _send_text_settled 도중 취소되면 재시작 뒤 같은 update가 재실행된다 (#269).
+
+    창의 정체: place_order 성공(telegram_commands.py의 _handle_confirm)과 _persist_state()
+    (run()의 배치 루프) 사이에 _send_text_settled가 최대 20초 들어앉는다. 그 사이 SIGTERM이
+    오면 offset이 전진하지 못한 채 죽고, Telegram이 같은 update를 재배달하며, _handled_ahead도
+    비어 있어 재실행된다. claim(GETDEL)은 이미 주문을 소비했으므로 재실행은 "확정할 대기
+    주문이 없습니다"로 끝난다 — 체결된 주문을 미체결로 오표시한다.
+
+    이 테스트는 지금 열려 있는 창을 **기록**하는 것이지 승인하는 것이 아니다. 닫는 작업은
+    #293으로 뺐고, 그 이슈가 닫히면 아래 마지막 두 단언이 뒤집혀야 한다.
+
+    심각도를 함께 고정한다: 중복 체결은 일어나지 않는다(gateway.orders가 1건). GETDEL claim이
+    두 번째 실행에 주문을 주지 않고 체결 이력도 recorder에 그대로 남아, 피해는 오표시 문구
+    한정이다. 이 단언이 깨지면 그때는 성격이 다른 문제다.
+    """
+    now = datetime(2026, 5, 20, 10, 0, tzinfo=KST)
+    gateway = FakeOrderGateway()
+    recorder = FakeTradeRecorder()
+    # redis처럼 프로세스 교체를 넘어 살아남는 두 저장소. 폴러만 새로 만든다.
+    poller_state = InMemoryTelegramPollerStore()
+    pending_orders = InMemoryPendingOrderStore()
+    await pending_orders.set(
+        "123",
+        PendingOrder(
+            chat_id="123",
+            stock_name="삼성전자",
+            stock_code="005930",
+            side="BUY",
+            quantity=1,
+            price=75000,
+            created_at=now,
+            order_type="LIMIT",
+            callback_token="token",
+        ),
+    )
+    update = {"update_id": 41, "message": {"chat": {"id": 123}, "text": "/confirm"}}
+
+    def make_poller(notifier):
+        notifier.enabled = True
+        notifier.bot_token = "token"
+        handler = TelegramCommandHandler(
+            notifier=notifier,
+            order_gateway=gateway,
+            trade_recorder=recorder,
+            pending_order_store=pending_orders,
+            now_factory=lambda: now,
+        )
+        return _make_poller(notifier, handler=handler, state_store=poller_state)
+
+    def install_telegram(poller):
+        """실제 Telegram처럼 offset 이후의 미확정 update만 배달한다.
+
+        offset을 무시하고 무조건 재배달하면 창을 닫아도 이 테스트가 그대로 통과한다 —
+        재배달 여부가 곧 창의 존재이므로 서버 쪽 규칙을 여기서 지켜야 한다.
+        """
+        polls = []
+
+        async def _get_updates():
+            if polls:
+                # 한 배치만 배달하고 폴러를 세운다.
+                raise asyncio.CancelledError
+            polls.append(poller.offset)
+            if poller.offset is not None and update["update_id"] < poller.offset:
+                return []
+            return [update]
+
+        monkeypatch.setattr(poller, "_get_updates", _get_updates)
+        return polls
+
+    # 1) 체결까지 가고 결과 전송에서 붙잡힌 채 SIGTERM을 맞는다.
+    blocked_notifier = _SettledSendBlocker()
+    first = make_poller(blocked_notifier)
+    install_telegram(first)
+
+    task = asyncio.create_task(first.run())
+    await asyncio.wait_for(blocked_notifier.settled_send_started.wait(), timeout=5.0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert len(gateway.orders) == 1  # 돈은 실제로 움직였다
+    # 창의 존재 자체. persist에 도달하지 못해 offset이 전진하지 않았다.
+    assert poller_state.state == TelegramPollerState()
+
+    # 2) 재시작. 41은 여전히 미확정이라 Telegram이 그대로 재배달한다.
+    second_notifier = FakeNotifier()
+    second = make_poller(second_notifier)
+    polls = install_telegram(second)
+
+    with pytest.raises(asyncio.CancelledError):
+        await second.run()
+
+    # 중복 체결은 없다 — claim(GETDEL)이 두 번째 실행에 주문을 주지 않는다.
+    assert len(gateway.orders) == 1
+    assert len(recorder.results) == 1
+    # 그 대가가 오표시다. 창을 닫으면 아래 두 줄이 뒤집힌다: 복원된 offset이 41을 지나가
+    # 재배달 자체가 없어지고(polls == [42]) 사용자에게 나가는 메시지도 없어진다.
+    assert polls == [None]
+    assert second_notifier.messages == ["확정할 대기 주문이 없습니다."]
+
+
+# ---------------------------------------------------------------------------
+# redis 소켓 타임아웃 (#268)
+# ---------------------------------------------------------------------------
+
+# 블랙홀 앞에서 명령 하나가 무는 시간. 실제 값(REDIS_SOCKET_TIMEOUT_SECONDS = 3.0)을 그대로
+# 쓰면 테스트 세 개가 10초 가까이 걸린다. 검증 대상은 값이 아니라 "상한이 존재한다"이므로
+# 짧게 줄인다 — test_poller_keeps_polling_when_state_store_hangs가 STATE_STORE_TIMEOUT_SECONDS를
+# 다루는 방식과 같다.
+_BLACKHOLE_SOCKET_TIMEOUT = 0.2
+# 소켓 타임아웃이 사라지면 아래 wait_for가 대신 발화해, 테스트가 영원히 멈추는 대신 실패로
+# 끝난다. 뮤테이션(create_redis_client에서 socket_timeout 인자를 지움)을 관찰 가능하게 만드는
+# 장치이므로 함께 지우면 안 된다.
+_BLACKHOLE_BOUND_SECONDS = 5.0
+
+
+@asynccontextmanager
+async def _blackhole_redis_url(monkeypatch):
+    """REDIS_URL을 "SYN은 받지만 응답은 영원히 없는" TCP 엔드포인트로 돌린다 (#268).
+
+    listen만 하고 accept를 하지 않는다. 커널이 백로그에서 3-way 핸드셰이크를 끝내주므로
+    connect는 성공하고, 그 뒤 명령의 응답 읽기만 영원히 막힌다 — 호스트가 RST 없이 패킷을
+    drop하는 실제 장애(네트워크 blackhole, 호스트 freeze)와 같은 모양이다. redis 서버도,
+    프로토콜을 흉내내는 더블도 필요 없다.
+
+    파이썬 더블로는 이 경로를 재현할 수 없다. BrokenStore류(즉시 raise)는 hang이 아니고,
+    반대로 asyncio.Event().wait()로 hang하는 더블은 소켓 타임아웃이 고칠 수 있는 대상이
+    아니다 — 고치는 주체가 소켓이라 파이썬 레벨의 대기에는 손이 닿지 않는다. 그래서
+    진짜 소켓을 쓴다.
+    """
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(8)
+    monkeypatch.setattr(
+        redis_state_module, "REDIS_SOCKET_TIMEOUT_SECONDS", _BLACKHOLE_SOCKET_TIMEOUT
+    )
+    # create_redis_client는 호출 시점에 config에서 REDIS_URL을 읽으므로 여기 패치가 먹는다.
+    monkeypatch.setattr(
+        backend_config, "REDIS_URL", f"redis://127.0.0.1:{listener.getsockname()[1]}/0"
+    )
+    try:
+        yield
+    finally:
+        listener.close()
+
+
+@asynccontextmanager
+async def _blackholed_redis(monkeypatch):
+    """블랙홀을 향하는 클라이언트까지 만들어 준다 (#268).
+
+    저장소를 직접 주입하는 테스트만 클라이언트가 필요하다. state_factory처럼 안에서 자기
+    클라이언트를 만드는 경로는 _blackhole_redis_url을 그대로 쓴다 (PR #289 리뷰).
+    """
+    async with _blackhole_redis_url(monkeypatch):
+        client = redis_state_module.create_redis_client()
+        try:
+            yield client
+        finally:
+            await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_confirm_returns_bounded_when_redis_blackholes(monkeypatch):
+    """redis가 hang해도 /confirm이 유계 시간 안에 돌아온다 (#268).
+
+    소켓 타임아웃이 없으면 claim()의 await가 돌아오지 않고, 그 await는 폴러 배치 루프
+    안이라 폴러 태스크가 통째로 멈춘다 — /help·자연어까지 무응답이 된다.
+
+    fail-closed는 그대로다: 저장소가 답하지 않으면 주문은 실행되지 않고 사용자는 명시적
+    오류를 받는다. 타임아웃이 바꾸는 것은 "언제 실패하는가"이지 "실패하는가"가 아니다.
+    """
+    gateway = FakeOrderGateway()
+    notifier = FakeNotifier()
+
+    async with _blackholed_redis(monkeypatch) as client:
+        handler = TelegramCommandHandler(
+            notifier=notifier,
+            order_gateway=gateway,
+            pending_order_store=RedisPendingOrderStore(client),
+            now_factory=lambda: datetime(2026, 5, 20, 10, 0, tzinfo=KST),
+        )
+
+        await asyncio.wait_for(
+            handler.handle_update({"message": {"chat": {"id": 123}, "text": "/confirm"}}),
+            timeout=_BLACKHOLE_BOUND_SECONDS,
+        )
+
+    assert "주문 저장소 오류" in notifier.messages[-1]
+    assert gateway.orders == []  # 저장소가 답하지 않으면 체결도 없다
+
+
+@pytest.mark.asyncio
+async def test_buy_returns_bounded_when_redis_blackholes(monkeypatch):
+    """redis가 hang해도 /buy가 유계 시간 안에 돌아온다 (#268)."""
+    notifier = FakeNotifier()
+
+    async with _blackholed_redis(monkeypatch) as client:
+        handler = TelegramCommandHandler(
+            notifier=notifier,
+            mcp_runner=_order_mcp_runner(),
+            order_gateway=FakeOrderGateway(),
+            pending_order_store=RedisPendingOrderStore(client),
+            now_factory=lambda: datetime(2026, 5, 20, 10, 0, tzinfo=KST),
+        )
+
+        await asyncio.wait_for(
+            handler.handle_update(
+                {"message": {"chat": {"id": 123}, "text": "/buy 삼성전자 1 75000"}}
+            ),
+            timeout=_BLACKHOLE_BOUND_SECONDS,
+        )
+
+    assert "주문 저장소 오류" in notifier.messages[-1]
+
+
+@pytest.mark.asyncio
+async def test_alerts_returns_bounded_when_redis_blackholes(monkeypatch):
+    """redis가 hang해도 /alerts가 유계 시간 안에 돌아온다 (#268).
+
+    /alerts는 예외를 사용자 메시지로 바꾸지 않고 그대로 올린다 — 폴러가 재시도 예산으로
+    받아 처리하는 기존 경로다. 여기서 고정하는 것은 그 예외가 "언젠가는 온다"는 것이다.
+    """
+    from redis.exceptions import RedisError
+
+    notifier = FakeNotifier()
+
+    async with _blackhole_redis_url(monkeypatch):
+        handler = TelegramCommandHandler(
+            notifier=notifier,
+            state_factory=redis_state_module.redis_state,
+        )
+
+        with pytest.raises(RedisError):
+            await asyncio.wait_for(
+                handler.handle_update(
+                    {"message": {"chat": {"id": 123}, "text": "/alerts status"}}
+                ),
+                timeout=_BLACKHOLE_BOUND_SECONDS,
+            )
+
+    assert notifier.messages == []
+
+
+def test_create_redis_client_bounds_each_command(monkeypatch):
+    """명령 하나가 무는 시간의 상한이 socket_timeout 그 자체임을 고정한다 (#268).
+
+    상한이 서려면 두 가지가 필요하고, 블랙홀 테스트들은 둘을 구분하지 못한다.
+
+    첫째는 타임아웃이 실제 커넥션 인자로 전달되는 것이다. 위 세 테스트는 값을 0.2초로 줄여
+    검증하므로 프로덕션 기본값이 None으로 되돌아가는 회귀는 잡지 못한다.
+    socket_connect_timeout은 redis-py가 None일 때 socket_timeout으로 대신 채우지만, 그 암묵적
+    대입에 기대지 않고 명시했다는 사실까지 함께 고정한다.
+
+    둘째는 재시도가 0인 것이다. redis 7.4.0의 Redis.__init__은 기본 retry가 이미
+    Retry(ExponentialWithJitterBackoff, retries=3)이고 supported_errors에 TimeoutError가 들어
+    있다 — 지금 0인 것은 retry_on_timeout=False 덕이 아니라 from_url이 그 클라이언트 레벨
+    기본값을 connection_kwargs로 넘기지 않기 때문이다. Redis(host=..., port=...)로 바꾸는
+    기계적으로 보이는 리팩터링만으로 상한이 4시도 + 백오프(≈20초)로 불어난다. 블랙홀
+    테스트는 이 회귀에서도 실패하지만(0.2 × 4 + 백오프가 상한 5초를 넘는다) 실패 원인이
+    "타임아웃 소실"로 오독되므로, 재시도 횟수는 여기서 직접 못 박는다.
+    """
+    monkeypatch.setattr(backend_config, "REDIS_URL", "redis://localhost:6379/0")
+
+    client = redis_state_module.create_redis_client()
+    kwargs = client.connection_pool.connection_kwargs
+
+    assert kwargs["socket_timeout"] == redis_state_module.REDIS_SOCKET_TIMEOUT_SECONDS
+    assert kwargs["socket_connect_timeout"] == redis_state_module.REDIS_SOCKET_TIMEOUT_SECONDS
+    assert redis_state_module.REDIS_SOCKET_TIMEOUT_SECONDS > 0
+    # make_connection은 풀에서 커넥션을 하나 만들 뿐 연결하지는 않는다 — 서버가 없어도 된다.
+    assert client.connection_pool.make_connection().retry.get_retries() == 0
