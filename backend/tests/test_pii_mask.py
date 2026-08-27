@@ -442,11 +442,11 @@ class TestQuantityRecognizer:
     def test_masks_comma_grouped_quantity_entirely(self):
         """콤마가 들어간 보유 수량은 앞자리까지 통째로 마스킹돼야 한다.
 
-        mcp-trading/balance.js:208-215의 formatQuantity()가 toLocaleString("ko-KR")을
+        mcp-trading/balance.js의 formatQuantity()가 toLocaleString("ko-KR")을
         쓰므로 1,000주 이상은 "1,234주"처럼 콤마가 들어간다. 콤마를 처리하지 못하면
         "1,"이 마스킹되지 않고 남아 **보유 수량의 앞자리가 그대로 외부 LLM으로 나간다**
         — F-17이 막으려던 바로 그 유출이다. 같은 사실을 이미 반영한 선례가
-        backend/scheduler.py:171-175의 r"\\)\\s*·\\s*([\\d,]+)주"다.
+        backend/scheduler.py의 _QTY_RE(r"\\)\\s*·\\s*([\\d,]+)주")다.
 
         이 테스트가 잡는 mutation: _QTY_RE에서 콤마 지원 제거
         (r"(?<![\\d,])\\d(?:[\\d,]*\\d)?" -> r"(?<!\\d)\\d+").
@@ -499,7 +499,7 @@ class TestQuantityRecognizer:
         """'주'가 기간 단위로 쓰인 표현은 보유 수량이 아니므로 마스킹하지 않는다.
 
         '52주 신고가'는 주식 뉴스에서 가장 흔한 관용구인데,
-        backend/services.py:497-512의 check_signal_significance()가 외부 뉴스 원문
+        backend/services.py의 check_signal_significance()가 외부 뉴스 원문
         1000자를 그대로 프롬프트에 넣으므로(mcp-news/index.js의 네이버 뉴스 검색
         title/description, 필터링 없음) 과탐이 곧바로 판정 품질을 떨어뜨린다.
 
@@ -524,7 +524,7 @@ class TestQuantityRecognizer:
     def test_masks_quantity_in_free_form_user_message(self):
         """텔레그램 자유 입력 경로의 보유 수량도 마스킹돼야 한다.
 
-        backend/telegram_commands.py:1349-1356의 _handle_chat_fallback은 사용자 원문을
+        backend/telegram_commands.py의 _handle_chat_fallback은 사용자 원문을
         가공 없이 llm_chat으로 보낸다. 잔고 리포트의 "· {qty}주" 형태로만 앵커링하면
         이 경로의 실제 보유 수량을 통째로 놓치므로, 앵커 없는 "3주"도 잡아야 한다.
         """
@@ -542,7 +542,7 @@ class TestQuantityRecognizer:
         놓쳐 **실제 보유 수량이 그대로 외부 LLM으로 나간다.**
 
         그리고 그 경로가 하필 잔고 리포트 앵커링("· {qty}주"로만 매치)을 거절한 유일한
-        근거였다 — backend/telegram_commands.py:1349-1356의 _handle_chat_fallback이
+        근거였다 — backend/telegram_commands.py의 _handle_chat_fallback이
         텔레그램 사용자 원문을 가공 없이 llm_chat으로 넘기는 경로. 앵커링을
         포기하면서까지 지키려던 경로를 조사 하나로 다시 놓치면 안 되므로 여기서 고정한다.
 
@@ -588,7 +588,8 @@ class TestQuantityRecognizer:
 
         _QTY_RE의 관용구 배제 lookahead를 `(?!\\s*(?:신고가|...))`로 쓰면 \\s*가
         개행을 넘는다. 잔고 리포트는 수량이 줄 끝에 오는 여러 줄 텍스트이므로
-        (mcp-trading\\balance.js:278의 "- {종목} ({코드}) · {수량}주\\n  평단가 ..."),
+        (mcp-trading\\balance.js의 formatBalanceReport()가 만드는
+        "- {종목} ({코드}) · {수량}주\\n  평단가 ..."),
         다음 줄이 배제 목록 단어로 시작하면 배제가 잘못 발동해 **보유 수량이 전혀
         마스킹되지 않은 채 외부 LLM으로 나간다.** 배제는 같은 줄의 후속 어절만
         보려는 것이므로 [ \\t]*로 한정해야 한다.

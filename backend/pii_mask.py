@@ -21,8 +21,8 @@ LLM이 수행할 수 있어 유지되지만, **절대 금액 기반 판단**("�
 
 대상 3종(한국 계좌번호/원화 금액/보유 수량)은 모두 정규식으로 충분히 식별 가능한
 구조화된 패턴이다. 이 계층에는 자유 입력 경로가 실제로 존재한다 —
-`backend/telegram_commands.py:1349-1356`의 `_handle_chat_fallback`은 텔레그램 사용자
-원문을 가공 없이 `llm_chat`으로 넘기고, `backend/services.py:497-512`의
+`backend/telegram_commands.py`의 `_handle_chat_fallback`은 텔레그램 사용자
+원문을 가공 없이 `llm_chat`으로 넘기고, `backend/services.py`의
 `check_signal_significance`는 외부 뉴스 원문 1000자를 프롬프트에 넣는다. 다만 F-17이
 정의한 대상 3종은 그 자유 입력 안에서도 정규식으로 충분히 식별되며, 한국어 인명·연락처
 등 NER이 필요한 대상은 이번 이슈(#230) 범위 밖이다. presidio-analyzer는 spaCy NER 모델
@@ -35,14 +35,14 @@ LLM이 수행할 수 있어 유지되지만, **절대 금액 기반 판단**("�
   backend가 보지 못하므로 이 계층 밖이다 (#231에서 다룬다).
 - Telegram 경로 중 **LLM을 아예 거치지 않고 원값을 그대로 사용자에게 표시하는** 것들
   (예: `/balance`)은 이 계층이 손댈 지점이 없다 (#232에서 다룬다). 반대로
-  `_handle_chat_fallback`(`telegram_commands.py:1353`)과 `/earnings`
-  (`telegram_commands.py:1259`)는 `llm_runner("nat", ...)`를 부르고 `llm_runner`의
-  기본값이 `services.llm_chat`이므로(`telegram_commands.py:246, 258`) 이 계층을 탄다 —
+  `telegram_commands.py`의 `_handle_chat_fallback`과 `/earnings`(`_handle_earnings`)는
+  둘 다 `llm_runner("nat", ...)`를 부르고, `llm_runner`의 기본값이 `services.llm_chat`
+  이므로(`TelegramCommandHandler.__init__`의 기본 인자) 이 계층을 탄다 —
   "Telegram 명령은 이 경로를 타지 않는다"는 진술은 사실이 아니다.
 - 정규식 기반이므로 위 3종 패턴에서 벗어난 표기(예: 계좌번호를 자릿수가 다른 증권사
   형식으로 표기)는 놓칠 수 있다. `_ACCOUNT_RE`는 KIS_ACCOUNT_NO 형식(CANO 8자리 +
-  상품코드 2자리, 총 10자리, 하이픈 유무 무관)만 다룬다(mcp-trading/index.js:96,
-  mcp-trading/balance.js:23-26 기준).
+  상품코드 2자리, 총 10자리, 하이픈 유무 무관)만 다룬다(mcp-trading/index.js의
+  KIS_ACCOUNT_NO 검증, mcp-trading/balance.js의 buildBalanceParams() 기준).
 """
 from __future__ import annotations
 
@@ -146,7 +146,7 @@ _LABELED_AMOUNT_RE = re.compile(
     #                    들어가거나 4자리 이상인 수량이 AMOUNT로 먹혀
     #                    "잔고 <AMOUNT_1>주"가 된다. 왕복은 무손실이지만, 이 설계가
     #                    유일하게 보존한다고 선언한 능력(자리표시자끼리의 상대 비교,
-    #                    모듈 docstring 14-15행)이 깨진다 — 주식 수가 금액 이름공간에
+    #                    모듈 docstring "## 방식" 절)이 깨진다 — 주식 수가 금액 이름공간에
     #                    끼어들어 AMOUNT_2 > AMOUNT_1 비교가 서로 다른 종류의 값을
     #                    비교하게 된다. 3자리 수량("보유 잔고 500주")은 라벨 정규식이
     #                    애초에 4자리 이상만 인정해 이미 정상 동작한다.
@@ -190,8 +190,9 @@ _LABELED_AMOUNT_RE = re.compile(
 # - (?<![\d,]) : 콤마 중간에서 매치가 시작되지 않게 한다. 이게 없으면 "12,345주"에서
 #                "345"부터 매치가 시작돼 앞자리 "12,"가 마스킹되지 않고 새어 나간다.
 # - \d(?:[\d,]*\d)? : formatQuantity()가 toLocaleString("ko-KR")을 쓰므로 1,000주
-#                이상은 콤마가 들어간다(mcp-trading/balance.js:208-215). 같은 사실을
-#                이미 반영한 선례가 backend/scheduler.py:171-175의 r"\)\s*·\s*([\d,]+)주"다.
+#                이상은 콤마가 들어간다(mcp-trading/balance.js의 formatQuantity()).
+#                같은 사실을 이미 반영한 선례가 backend/scheduler.py의 _QTY_RE
+#                (r"\)\s*·\s*([\d,]+)주")다.
 #                끝을 숫자로 강제해 "1,234," 같은 후행 콤마를 삼키지 않는다.
 # - (?:\.\d+)? : 소수 표기 수량("0.5주"). 이 갈래가 없으면 정수부가 남는다 —
 #                (?<![\d,])는 소수점을 배제하지 않으므로 매치가 소수점 **뒤**에서
@@ -238,7 +239,7 @@ _LABELED_AMOUNT_RE = re.compile(
 #
 # 리뷰에서 제안된 "잔고 리포트의 '· ' 앵커링"(즉 "\)\s*·\s*[\d,]+주"만 마스킹)은
 # 채택하지 않았다. 보유 수량이 프롬프트에 들어가는 경로가 잔고 리포트 하나가 아니기
-# 때문이다 — backend/telegram_commands.py:1349-1356의 _handle_chat_fallback은 텔레그램
+# 때문이다 — backend/telegram_commands.py의 _handle_chat_fallback은 텔레그램
 # 사용자 원문("삼성전자 3주 보유중인데 팔아야 할까요?")을 가공 없이 llm_chat으로 보내며,
 # 앵커링은 이 경로의 실제 보유 수량을 통째로 놓친다. F-17의 취지상 유출을 만드는
 # 과소탐보다 품질 문제에 그치는 과탐을 택한다.
@@ -296,16 +297,19 @@ class _Counter:
     카운터가 호출마다 0에서 다시 시작하므로 모든 호출이 항상 <AMOUNT_1>부터 쓴다.
     그런데 NAT 경로의 대화 히스토리는 **호출을 넘어 서버 쪽에 유지**된다:
 
-    - backend/services.py:648-653 — backend는 messages에 현재 메시지 1건만 보내고,
-      conversation-id 헤더로 세션을 식별한다.
-    - finus_nat/src/nat_finus_nat/agents.py:643-665 `_load_history()` — SQLite
+    - backend/services.py의 _llm_nat_chat() — backend는 messages에 현재 메시지 1건만
+      보내고, conversation-id 헤더로 세션을 식별한다.
+    - finus_nat/src/nat_finus_nat/agents.py의 `_load_history()` — SQLite
       chat_messages에서 `WHERE conversation_id = ?`로 과거 메시지를 로드한다.
-    - finus_nat/src/nat_finus_nat/agents.py:696-732 — `forward_messages =
-      history + chat_request.messages`로 과거 턴과 현재 턴을 합쳐 내부 라우터에 넘긴다.
-    - finus_nat/configs/router.yml:58-61 — `max_history_messages: 30`으로 실제 배선됨.
-    - conversation_id는 호출 간 재사용된다: backend/services.py:166-176
+    - finus_nat/src/nat_finus_nat/agents.py의 `finus_sqlite_transcript_agent()` — 그 안
+      `_response_fn`이 `forward_messages = history + chat_request.messages`로 과거 턴과
+      현재 턴을 합쳐 내부 라우터에 넘긴다.
+    - finus_nat/configs/router.yml의 `transcript_router_agent`에
+      `max_history_messages: 30`으로 실제 배선됨(같은 파일 `router_supervisor_agent`
+      쪽의 6과 다른 값이라 키 이름만으로는 구분되지 않는다).
+    - conversation_id는 호출 간 재사용된다: backend/services.py의
       `_nat_conversation_id`는 "{trigger_source}:{stock}:{today}"(하루에 같은 종목을
-      여러 번 분석하면 동일), backend/telegram_commands.py:1355는
+      여러 번 분석하면 동일), backend/telegram_commands.py의 `_handle_chat_fallback`은
       f"telegram:{chat_id}"(그 사용자의 모든 메시지가 영구히 같은 스레드).
 
     따라서 nonce가 없으면 다음이 성립한다:
@@ -330,8 +334,9 @@ class _Counter:
     뽑아 위 충돌이 그대로 재발할 수 있다 — `random`은 프로세스 재시작 시 같은 시드에서
     같은 수열을 낼 수 있고, 전역 카운터는 프로세스가 다르면(워커 여러 개) 겹친다.
     `secrets.token_hex(3)`은 CSPRNG에서 6자리 hex(16^6 ≈ 1,678만 가지)를 뽑는다.
-    한 conversation_id의 히스토리 창은 30 메시지(router.yml:58-61)이므로 충돌 확률은
-    무시할 수 있고, 설령 충돌해도 결과는 nonce 이전 상태와 같을 뿐 더 나빠지지 않는다.
+    한 conversation_id의 히스토리 창은 30 메시지(router.yml의 transcript_router_agent)
+    이므로 충돌 확률은 무시할 수 있고, 설령 충돌해도 결과는 nonce 이전 상태와 같을 뿐
+    더 나빠지지 않는다.
     """
 
     def __init__(self) -> None:
