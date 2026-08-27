@@ -81,7 +81,7 @@ class TestPlaceholderScope:
         assert "5,000,000원" not in restored, "이전 턴 자리표시자가 현재 턴 값으로 잘못 복원됐다"
         assert "12,345,000원" not in restored, "이전 턴의 원값이 노출됐다"
         assert placeholder_turn1 not in restored, "내부 토큰이 사용자 화면에 노출됐다"
-        assert "이전에 언급된 금액" in restored
+        assert "(이전 금액 1)" in restored
 
 
 class TestAccountRecognizer:
@@ -517,11 +517,55 @@ class TestUnmaskFailOpen:
         text = "평가금액은 <AMOUNT_deadbe_1>이고 총자산은 <AMOUNT_deadbe_9>이다."
         with caplog.at_level("WARNING", logger="backend.pii_mask"):
             restored = unmask_pii(text, mapping)
-        assert restored == "평가금액은 12,345,000원이고 총자산은 이전에 언급된 금액이다."
+        assert restored == "평가금액은 12,345,000원이고 총자산은 (이전 금액 1)이다."
         assert "<AMOUNT_deadbe_9>" not in restored, "내부 토큰이 사용자 화면에 노출됐다"
         assert "<AMOUNT_deadbe_9>" in caplog.text, (
             "매핑에 없는 자리표시자를 만났는데 경고 로그가 남지 않았다"
         )
+
+    def test_distinct_unknown_placeholders_restore_to_distinct_phrases(self):
+        """서로 다른 자리표시자는 서로 다른 중립 문구로 복원돼야 한다.
+
+        종류별 서수가 없으면 한 응답에 인용된 이전 턴 자리표시자가 전부 같은 문자열로
+        접힌다. "지난달 <AMOUNT_..._1>에서 이번 달 <AMOUNT_..._2>로 늘었고"가
+        "지난달 이전에 언급된 금액에서 이번 달 이전에 언급된 금액로 늘었고"가 되어
+        **서로 다른 두 값이 같아 보인다** — 토큰 노출을 막으려던 치환이 없던 오정보를
+        만든다. 값을 지어내지 않는다는 성질은 서수를 붙여도 그대로다.
+
+        같은 자리표시자가 여러 번 나오면 같은 서수를 유지해야 하고(같은 값을 가리키므로),
+        종류가 다르면 각자 1부터 세어야 한다(한 카운터를 공유하면 첫 수량 인용이
+        "(이전 수량 3)"이 되어 있지도 않은 앞선 수량 둘을 암시한다).
+
+        이 테스트가 잡는 mutation: _restore에서 서수 부여를 제거해
+        _FALLBACK_LABEL 값을 그대로 반환하도록 되돌리는 변경.
+        """
+        text = (
+            "지난달 <AMOUNT_deadbe_1>에서 이번 달 <AMOUNT_deadbe_2>로 늘었고, "
+            "보유는 <QTY_deadbe_1>주입니다. 재차 <AMOUNT_deadbe_1> 기준입니다."
+        )
+        restored = unmask_pii(text, {})
+
+        assert "(이전 금액 1)" in restored
+        assert "(이전 금액 2)" in restored, (
+            "서로 다른 두 금액 자리표시자가 같은 문구로 접혔다 — "
+            f"다른 값이 같아 보인다: {restored!r}"
+        )
+        # 종류가 다르면 각자 1부터 센다.
+        assert "(이전 수량 1)" in restored, f"수량 서수가 금액과 카운터를 공유했다: {restored!r}"
+        # 같은 자리표시자의 재등장은 같은 서수를 유지한다.
+        assert restored.count("(이전 금액 1)") == 2, (
+            f"같은 자리표시자가 서로 다른 서수로 복원됐다: {restored!r}"
+        )
+        assert "<AMOUNT_deadbe_1>" not in restored
+        assert "<QTY_deadbe_1>" not in restored
+
+    def test_known_placeholder_restores_to_value_even_when_others_are_unknown(self):
+        """매핑에 있는 자리표시자는 서수 도입과 무관하게 원값 그대로 복원된다."""
+        mapping = {"<AMOUNT_deadbe_1>": "12,345,000원"}
+        restored = unmask_pii(
+            "평가금액 <AMOUNT_deadbe_1>, 총자산 <AMOUNT_deadbe_9>", mapping
+        )
+        assert restored == "평가금액 12,345,000원, 총자산 (이전 금액 1)"
 
     def test_legacy_unscoped_placeholder_is_left_as_is_without_raising(self):
         """scope 없는 구형식(<AMOUNT_9>)은 _PLACEHOLDER_RE에 매치되지 않아 그대로 남는다.
@@ -556,7 +600,7 @@ class TestUnmaskFailOpen:
         """
         with caplog.at_level("WARNING", logger="backend.pii_mask"):
             result = unmask_pii("앞서 말씀하신 <AMOUNT_deadbe_1> 기준으로는", {})
-        assert "이전에 언급된 금액" in result, "중립 문구로 치환되지 않았다"
+        assert "(이전 금액 1)" in result, "중립 문구로 치환되지 않았다"
         assert "<AMOUNT_deadbe_1>" not in result, "내부 토큰이 사용자 화면에 노출됐다"
         assert "<AMOUNT_deadbe_1>" in caplog.text, (
             "매핑에 없는 자리표시자를 만났는데 경고 로그가 남지 않았다"

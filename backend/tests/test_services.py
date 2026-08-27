@@ -1817,7 +1817,7 @@ async def test_llm_chat_unmask_fails_open_on_unknown_placeholder(monkeypatch):
     result = await services.llm_chat("openai", "평가금액 12,345,000원")
 
     # <AMOUNT_deadbe_9>: 형식 유효, 매핑에 없음 -> 중립 문구로 치환
-    assert "이전에 언급된 금액" in result
+    assert "(이전 금액 1)" in result
     assert "<AMOUNT_deadbe_9>" not in result, "내부 토큰이 사용자 화면에 노출됐다"
     # <AMOUNT_9>: _PLACEHOLDER_RE에 매치 안 됨 -> 원문 그대로
     assert "<AMOUNT_9>" in result

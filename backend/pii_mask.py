@@ -174,10 +174,24 @@ _QTY_RE = re.compile(
 # 사용자 화면에 내부 토큰(<AMOUNT_xxx_1> 등)이 그대로 노출되는 대신 중립적인
 # 자연어로 대체한다 — 값을 지어내지 않으면서 토큰 노출을 막는 균형점이다.
 # 종류를 추가할 때 여기만 수정하면 아래 _PLACEHOLDER_RE 얼터네이션이 자동으로 맞춰진다.
+#
+# 값이 짧은 명사인 것과 _restore가 "(이전 {명사} {n})" 꼴로 감싸는 것은 한 쌍이다.
+# 근거 둘:
+#   1. 서수 n이 없으면 한 응답에 인용된 서로 다른 자리표시자가 전부 같은 문자열로
+#      접힌다. "지난달 <AMOUNT_..._1>에서 이번 달 <AMOUNT_..._2>로 늘었고"가
+#      "지난달 이전에 언급된 금액에서 이번 달 이전에 언급된 금액로 늘었고"가 되어,
+#      **서로 다른 두 값이 같아 보인다** — 토큰 노출을 막으려다 없던 오정보를 만든다.
+#      이 치환이 도입된 목적("값을 지어내지 않으면서 토큰 노출만 막는다")과 정면으로
+#      어긋나는 자리라, 등장 순서대로 종류별 서수를 붙여 구분한다.
+#   2. 괄호가 없으면 조사가 깨진다. 자리표시자는 원래 단위·조사 바로 앞에 놓이는
+#      토큰이라("<AMOUNT_..._1>로", "<QTY_..._1>주") 그 자리에 자연어 명사를 그대로
+#      넣으면 "금액로", "수량주입니다"가 된다. 괄호는 이 자리가 값이 아니라 **참조**
+#      라는 신호도 겸한다.
+# (회귀: test_distinct_unknown_placeholders_restore_to_distinct_phrases)
 _FALLBACK_LABEL: dict[str, str] = {
-    "ACCOUNT": "이전에 언급된 계좌",
-    "AMOUNT": "이전에 언급된 금액",
-    "QTY": "이전에 언급된 수량",
+    "ACCOUNT": "계좌",
+    "AMOUNT": "금액",
+    "QTY": "수량",
 }
 
 # 자리표시자 형식: <KIND_{scope}_{n}> — scope는 mask_pii 호출마다 새로 뽑는 6자리 hex.
@@ -341,17 +355,32 @@ def unmask_pii(text: str, mapping: dict[str, str]) -> str:
     # 비례해(매핑 크기와 무관) 동작하므로 전형적인 LLM 응답(~수KB)에서 비용은 무시할 수 있다.
 
     missing: list[str] = []
+    # 같은 자리표시자가 응답에 여러 번 나오면 같은 서수를 유지하고, 서로 다른
+    # 자리표시자에는 종류별로 1부터 새 번호를 준다 — "(이전 금액 1)", "(이전 금액 2)",
+    # "(이전 수량 1)". 종류를 가로질러 한 카운터를 쓰면 두 번째 종류의 첫 인용이
+    # "(이전 수량 3)"이 되어 있지도 않은 앞선 수량 둘을 암시한다.
+    ordinals: dict[str, int] = {}
+    kind_counts: dict[str, int] = {}
 
     def _restore(match: re.Match[str]) -> str:
         placeholder = match.group(0)
         value = mapping.get(placeholder)
-        if value is None:
-            missing.append(placeholder)
-            # 내부 토큰을 그대로 돌려주면 텔레그램 메시지에 "<AMOUNT_xxx_1>"이
-            # 노출된다. 값을 지어내는 대신 중립 문구로 대체해 토큰 노출만 막는다.
-            # match.group(1)은 _PLACEHOLDER_RE의 첫 캡처 그룹(ACCOUNT/AMOUNT/QTY).
-            return _FALLBACK_LABEL.get(match.group(1), "이전에 언급된 값")
-        return value
+        if value is not None:
+            return value
+        missing.append(placeholder)
+        # 내부 토큰을 그대로 돌려주면 텔레그램 메시지에 "<AMOUNT_xxx_1>"이
+        # 노출된다. 값을 지어내는 대신 중립 문구로 대체해 토큰 노출만 막는다.
+        # match.group(1)은 _PLACEHOLDER_RE의 첫 캡처 그룹(ACCOUNT/AMOUNT/QTY).
+        kind = match.group(1)
+        ordinal = ordinals.get(placeholder)
+        if ordinal is None:
+            ordinal = kind_counts.get(kind, 0) + 1
+            kind_counts[kind] = ordinal
+            ordinals[placeholder] = ordinal
+        # .get()의 기본값 "값"은 얼터네이션이 _FALLBACK_LABEL 키와 정확히 같아
+        # 실제로는 도달하지 않지만, _Counter.values에만 종류를 추가하는 드리프트에서
+        # KeyError가 나지 않도록 남긴다(_PLACEHOLDER_RE 주석과 같은 근거).
+        return f"(이전 {_FALLBACK_LABEL.get(kind, '값')} {ordinal})"
 
     try:
         restored = _PLACEHOLDER_RE.sub(_restore, text)
