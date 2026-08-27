@@ -367,7 +367,7 @@ _CURRENT_PRICE_RE = re.compile(r"현재가:\s*([\d,]+)\s*원")
 # 라벨이 붙어 있을 뿐 KIS의 주문가능현금(inquire-psbl-order의 ord_psbl_cash)이 아니다.
 # 미수/증거금/미결제 정산이 반영되지 않으므로 실제 주문가능액과 어긋날 수 있다.
 # 그래서 사용자에게도 "예수금"으로 표기한다(format_approval_message).
-# 정확한 주문가능현금 조회는 후속 이슈다.
+# 정확한 주문가능현금 조회는 후속 이슈다 (#310).
 #
 # "주문가능금액" 대안은 mcp-trading 어디에도 없는 라벨이라 지금은 아무것도 매치하지
 # 않는다. 방어적으로 남겨 두지만 계약이 아니다 — 라벨이 바뀌면 cash=None으로 떨어져
@@ -614,7 +614,7 @@ def load_daily_usage(session_factory: Callable[[], Any], now: datetime) -> Daily
     #
     # /buy에서 지정가를 생략하면 price=0, order_type="MARKET"으로 파싱되고, 그 0이
     # OrderExecutionResult → TradeHistory.price까지 그대로 내려간다(체결가를 되받아
-    # 기록하는 경로가 아직 없다 — 후속 이슈). 그 행을 0원으로 더하면 일 거래대금
+    # 기록하는 경로가 아직 없다 — #309). 그 행을 0원으로 더하면 일 거래대금
     # 한도가 시장가 이력에 대해 **있는 척만 하는 한도**가 된다.
     #
     # 그래서 더하지 않고 집계를 포기한다. 이 모듈의 규칙("확인하지 못했다"가
