@@ -208,6 +208,57 @@ class TestAmountRecognizer:
             )
             assert unmask_pii(masked, mapping) == text
 
+    def test_masks_amount_with_korean_numerals_only(self):
+        """선행 아라비아 숫자 없이 수사만으로 표기된 금액도 전체가 마스킹돼야 한다.
+
+        "천만원"·"오천만원"은 telegram_commands._handle_chat_fallback이 넘기는 자유
+        입력에서 "3천만원"만큼(오히려 그보다 더) 흔하다. _AMOUNT_UNIT_RE가 선두 \\d+로
+        숫자를 강제하면 세 금액 정규식 중 어느 것에도 걸리지 않아 값 **전체**가 평문으로
+        외부 LLM에 나간다 — 위 test_masks_korean_numeral_unit_amount가 고정한 "3천만원"과
+        같은 자리·같은 전량 유출이다.
+
+        이 테스트가 잡는 mutation: _AMOUNT_UNIT_RE에서 수사 체인 단독 갈래
+        ([일이삼사오육칠팔구]?(?:[천백십]...)+) 제거.
+        """
+        for text, expected in [
+            ("천만원", "<AMOUNT_1>"),
+            ("백만원", "<AMOUNT_1>"),
+            ("십만원", "<AMOUNT_1>"),
+            ("천억원", "<AMOUNT_1>"),
+            ("삼천만원", "<AMOUNT_1>"),
+            ("오천만원", "<AMOUNT_1>"),
+            ("이천만원", "<AMOUNT_1>"),
+            ("오천원", "<AMOUNT_1>"),
+            ("구십원", "<AMOUNT_1>"),
+            ("천만원 정도 있는데 어디 투자할까요?", "<AMOUNT_1> 정도 있는데 어디 투자할까요?"),
+            ("자산이 천만원입니다", "자산이 <AMOUNT_1>입니다"),
+        ]:
+            masked, mapping = mask_pii(text)
+            assert _norm(masked) == expected, (
+                f"한글 수사 금액이 유출됐다: {text!r} -> {masked!r}"
+            )
+            assert unmask_pii(masked, mapping) == text
+
+    def test_does_not_mask_won_syllable_without_numeral_chain(self):
+        """수사 체인 갈래를 넣더라도 "원"으로 시작하는 일반 어휘를 삼키면 안 된다.
+
+        선두 \\d+를 통째로 (?:\\d+)?로 옵션화하는 단순화를 택하면 두 번째 갈래의
+        (?:만|억)이 숫자 없이도 발동해 "지금만 원하는 것은"이 "지금<AMOUNT_1>하는 것은"이
+        된다 — 마스킹 대상이 아닌 문장을 깨뜨리면서 자리표시자를 만든다. 그래서 수사
+        ([천백십])가 실재할 때만 숫자를 생략하도록 갈래를 나눴다.
+
+        이 테스트가 잡는 mutation: _AMOUNT_UNIT_RE의 선두 \\d+를 (?:\\d+)?로 옵션화.
+        """
+        for text in [
+            "지금만 원하는 것은",
+            "그것만 원칙대로",
+            "천천히 원상복구",
+            "10년 뒤 원금",
+        ]:
+            masked, mapping = mask_pii(text)
+            assert masked == text, f"금액이 아닌 표기가 마스킹됐다: {text!r} -> {masked!r}"
+            assert mapping == {}
+
     def test_does_not_mask_ordinal_before_won_syllable(self):
         """수사도 만/억도 없는 형태를 \\s?원으로 삼키면 안 된다.
 
