@@ -256,3 +256,105 @@ test("fetchAllPaged: rows가 없어도 truncated 값이 반환돼 호출자가 �
   assert.notEqual(result.truncated, null);
   assert.equal(result.truncated, "time_budget");
 });
+
+// ─── 이슈 #210: pageDelayMs ──────────────────────────────────────────────────
+
+test("fetchAllPaged: pageDelayMs를 넘기지 않으면 대기 없이 기존과 동일하게 동작한다 (기본값 0)", async () => {
+  let callCount = 0;
+  const sleepCalls = [];
+  const sleep = async (ms) => {
+    sleepCalls.push(ms);
+  };
+  const fetchPage = async () => {
+    callCount += 1;
+    return {
+      body: {
+        output1: [{ pdno: String(callCount).padStart(6, "0") }],
+        output2: callCount === 1 ? [{ tot: "1" }] : [],
+        ctx_area_fk100: callCount < 3 ? `FK${callCount}` : "",
+        ctx_area_nk100: callCount < 3 ? `NK${callCount}` : "",
+      },
+      trCont: "F",
+    };
+  };
+
+  const result = await fetchAllPaged(fetchPage, {
+    maxPages: MAX_PAGES,
+    timeBudgetMs: TIME_BUDGET_MS,
+    sleep, // pageDelayMs를 안 넘겼으니 호출되지 않아야 함
+  });
+
+  assert.equal(callCount, 3);
+  assert.equal(result.pages, 3);
+  assert.equal(result.truncated, "no_cursor");
+  assert.deepEqual(sleepCalls, []);
+});
+
+test("fetchAllPaged: pageDelayMs > 0이면 페이지 사이에만 대기하고, 첫 요청 전·마지막 이후에는 대기하지 않는다", async () => {
+  const pageOrder = [];
+  let callCount = 0;
+  const sleepCalls = [];
+  const sleep = async (ms) => {
+    sleepCalls.push({ ms, beforeCall: callCount + 1 });
+  };
+  const fetchPage = async () => {
+    callCount += 1;
+    pageOrder.push(callCount);
+    return {
+      body: {
+        output1: [{ pdno: String(callCount).padStart(6, "0") }],
+        output2: callCount === 1 ? [{ tot: "1" }] : [],
+        // 3번째 응답에서 커서가 끊겨 루프가 끝난다 (총 3회 호출)
+        ctx_area_fk100: callCount < 3 ? `FK${callCount}` : "",
+        ctx_area_nk100: callCount < 3 ? `NK${callCount}` : "",
+      },
+      trCont: "F",
+    };
+  };
+
+  const result = await fetchAllPaged(fetchPage, {
+    maxPages: MAX_PAGES,
+    timeBudgetMs: TIME_BUDGET_MS,
+    pageDelayMs: 250,
+    sleep,
+  });
+
+  assert.equal(callCount, 3);
+  assert.equal(result.truncated, "no_cursor");
+  // 대기는 페이지 사이(2번째 호출 전, 3번째 호출 전)에만 발생해야 한다.
+  // 1번째 호출(첫 페이지) 전에는 대기가 없고, 3번째(마지막) 호출 이후에도 대기가 없다.
+  assert.deepEqual(sleepCalls, [
+    { ms: 250, beforeCall: 2 },
+    { ms: 250, beforeCall: 3 },
+  ]);
+});
+
+test("fetchAllPaged: pageDelayMs가 0이면 sleep을 주입해도 호출되지 않는다", async () => {
+  let callCount = 0;
+  let sleepCallCount = 0;
+  const sleep = async () => {
+    sleepCallCount += 1;
+  };
+  const fetchPage = async () => {
+    callCount += 1;
+    return {
+      body: {
+        output1: [{ pdno: String(callCount).padStart(6, "0") }],
+        output2: callCount === 1 ? [{ tot: "1" }] : [],
+        ctx_area_fk100: "",
+        ctx_area_nk100: "",
+      },
+      trCont: "F",
+    };
+  };
+
+  const result = await fetchAllPaged(fetchPage, {
+    maxPages: MAX_PAGES,
+    timeBudgetMs: TIME_BUDGET_MS,
+    pageDelayMs: 0,
+    sleep,
+  });
+
+  assert.equal(result.truncated, "no_cursor");
+  assert.equal(sleepCallCount, 0);
+});

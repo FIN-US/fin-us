@@ -57,6 +57,11 @@ const DAILY_CCLD_MAX_PAGES = 50;
 // 100 < 120이므로 상한 안에 안전하게 들어온다. 90초 초과가 이상 상황이라고 판단하기에
 // 충분하다고 본다. 실제 페이지당 지연 측정치가 확보되면 이 값을 재조정해야 한다.
 const DAILY_CCLD_TIME_BUDGET_MS = 90_000;
+// 이슈 #210: 페이지 간 대기(fetchAllPaged의 pageDelayMs). 값을 0으로 비워둔다 — KIS
+// 유량 제한의 실제 임계(초당 호출 수)를 아직 측정하지 못했다. backend/telegram_commands.py의
+// `/watch list`가 종목당 1.1초를 쓰지만 그 값의 근거도 확인되지 않았고, 애초에 다른 TR이라
+// 그대로 가져다 쓸 근거가 안 된다. 측정치가 나오면 이 값을 채운다(이슈 #210 조사 항목).
+const DAILY_CCLD_PAGE_DELAY_MS = 0;
 const BALANCE_RLZ_PL_PATH = "/uapi/domestic-stock/v1/trading/inquire-balance-rlz-pl";
 const BALANCE_RLZ_PL_TR_ID = (() => {
   const override = (process.env.KIS_TR_ID_BALANCE_RLZ_PL || process.env.FINUS_KIS_TR_ID_BALANCE_RLZ_PL || "").trim();
@@ -67,6 +72,8 @@ const BALANCE_RLZ_PL_MAX_PAGES = 50;
 // inquire-balance-rlz-pl 연속조회 전체 시간 예산. DAILY_CCLD_TIME_BUDGET_MS와 같은 근거.
 // 두 TR의 호출자·상한·요청당 타임아웃이 동일하므로 동일한 값을 쓴다.
 const BALANCE_RLZ_PL_TIME_BUDGET_MS = 90_000;
+// 이슈 #210: DAILY_CCLD_PAGE_DELAY_MS와 같은 이유로 0. 실측 전까지 비워둔다.
+const BALANCE_RLZ_PL_PAGE_DELAY_MS = 0;
 const TOKEN_TTL_MARGIN_MS = 60_000;
 const TOKEN_CACHE_PATH = process.env.KIS_TOKEN_CACHE_PATH || path.join(
   os.tmpdir(),
@@ -381,6 +388,7 @@ async function fetchAllDailyOrderCcld({
       maxPages: DAILY_CCLD_MAX_PAGES,
       timeBudgetMs: DAILY_CCLD_TIME_BUDGET_MS,
       label: "일별 주문체결 연속조회",
+      pageDelayMs: DAILY_CCLD_PAGE_DELAY_MS,
     },
   );
 
@@ -498,6 +506,7 @@ async function fetchAllBalanceRlzPl() {
       maxPages: BALANCE_RLZ_PL_MAX_PAGES,
       timeBudgetMs: BALANCE_RLZ_PL_TIME_BUDGET_MS,
       label: "실현손익 연속조회",
+      pageDelayMs: BALANCE_RLZ_PL_PAGE_DELAY_MS,
     },
   );
 

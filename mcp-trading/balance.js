@@ -52,6 +52,8 @@ export function buildBalanceParams(accountNo, { ctxAreaFk100 = "", ctxAreaNk100 
  * @param {number}   options.timeBudgetMs  전체 시간 예산 ms (필수; 루프마다 다름)
  * @param {Function} [options.now]         현재 시각 반환 함수 (테스트 주입용, 기본 Date.now)
  * @param {string}   [options.label]       오류 로그 접두사 (기본 "연속조회")
+ * @param {number}   [options.pageDelayMs] 페이지 사이 대기 시간 ms (기본 0 = 대기 없음; 이슈 #210)
+ * @param {Function} [options.sleep]       대기 함수 (테스트 주입용, 기본 setTimeout 기반 실제 대기)
  * @returns {Promise<{ rows, summary, pages, truncated }>}
  *   truncated: null | "max_pages" | "time_budget" | "no_cursor" | "repeated_cursor" | "error"
  */
@@ -60,6 +62,8 @@ export async function fetchAllPaged(fetchPage, {
   timeBudgetMs,
   now = () => Date.now(),
   label = "연속조회",
+  pageDelayMs = 0,
+  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 } = {}) {
   const rows = [];
   let summary = null;
@@ -82,6 +86,23 @@ export async function fetchAllPaged(fetchPage, {
     if (pages > 0 && now() - startedAt >= timeBudgetMs) {
       truncated = "time_budget";
       break;
+    }
+
+    // 페이지 사이에만 대기한다. `pages > 0`이므로 첫 페이지 요청 전에는 대기가 없고,
+    // 위 두 break(max_pages/time_budget)나 아래쪽의 no_cursor/repeated_cursor/정상
+    // 종료 break는 모두 이 지점을 다시 지나기 전에 루프를 빠져나가므로 마지막 페이지
+    // 이후에도 대기가 붙지 않는다.
+    //
+    // 대기 시간을 시간 예산 소진에서 일부러 빼지 않는다: 이 함수의 상위 호출자는
+    // 내부 시간 예산과 무관하게 실제 벽시계 시간으로 잘린다 — backend/services.py의
+    // run_mcp_tool 30초 하드컷(get_balance), diary_agent.yml의 timeout_sec: 120
+    // (fetchAllDailyOrderCcld/fetchAllBalanceRlzPl). 대기 시간을 예산 계산에서
+    // 제외하면 내부적으로는 예산 안에 있다고 판단해도 실제 총 소요 시간이 이 상위
+    // 하드컷을 넘어설 수 있다. now/sleep 모두 기본값이 실제 시각(Date.now)·실제
+    // 대기(setTimeout)이므로 별도 처리 없이 두면 대기 시간이 자연히 다음 반복의
+    // `now() - startedAt`에 반영된다 — 이것이 의도한 동작이다.
+    if (pageDelayMs > 0 && pages > 0) {
+      await sleep(pageDelayMs);
     }
 
     let body;
@@ -165,6 +186,11 @@ export async function fetchAllPaged(fetchPage, {
  *
  * 반환: { rows, summary, pages, truncated }
  *   - truncated: null | "max_pages" | "time_budget" | "no_cursor" | "repeated_cursor" | "error"
+ *
+ * 이슈 #210: fetchAllPaged에 pageDelayMs를 의도적으로 넘기지 않는다(기본값 0 유지).
+ * 이 함수의 관측 가능한 동작이 전부 불변이어야 한다는 것이 PR #200의 수용 기준이었고,
+ * 이슈 #210도 이를 그대로 이어받는다 — 페이지 간 지연은 daily-ccld/balance-rlz-pl
+ * 두 루프(index.js)에만 옵션으로 열어두고, 이 함수는 대상이 아니다.
  */
 export async function fetchAllBalance(fetchPage, {
   maxPages = BALANCE_MAX_PAGES,
