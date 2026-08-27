@@ -56,6 +56,7 @@ from .stock_code import (
     _ORDERABLE_STOCK_CODE_RE,
     _STOCK_CODE_EXTRACT_RE,
     _is_unresolved_echo,
+    extract_stock_name,
 )
 from .order_assist import ProposalTrigger, run_order_assist
 
@@ -1384,11 +1385,9 @@ class TelegramCommandHandler:
         return match.group(1) if match else None
 
     def _extract_stock_name(self, text: str) -> str | None:
-        # resolve_stock_code 응답 "종목명 (코드, 시장)"에서 코드 앵커 앞부분이 종목명이다.
-        match = _STOCK_CODE_EXTRACT_RE.search(text)
-        if match is None:
-            return None
-        return text[: match.start()].strip() or None
+        # 규칙은 stock_code.extract_stock_name 하나가 소유한다 — order_assist도 같은
+        # 것을 쓴다. 두 곳이 각자 자르면 같은 종목이 화면마다 다른 이름으로 남는다.
+        return extract_stock_name(text)
 
     def _extract_order_callback_token(self, data: str) -> str | None:
         if data in {ORDER_CONFIRM_CALLBACK, ORDER_CANCEL_CALLBACK}:

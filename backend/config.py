@@ -1,7 +1,10 @@
+import logging
 import os
 from pathlib import Path
 from dotenv import load_dotenv
 from mcp import StdioServerParameters
+
+logger = logging.getLogger(__name__)
 
 _FIN_US_ROOT = Path(__file__).resolve().parent.parent
 _ROOT_ENV = _FIN_US_ROOT / ".env"
@@ -110,11 +113,29 @@ KIS_REAL_ORDER_ENABLED = _is_truthy_flag(os.environ.get("KIS_REAL_ORDER_ENABLED"
 # 한도가 사라지는 것이 아니라 좁은 한도가 걸리는 쪽이 안전하다.
 
 
+def _warn_bad_limit_env(name: str, raw: str, default: object) -> None:
+    """한도 env 파싱 실패를 경고로 남긴다.
+
+    '기본값 복귀'는 앱이 죽지 않게 하지만, 한도에서는 **기본값이 곧 가장 넓은 값**이다
+    (#299 2차 리뷰). ``ORDER_MAX_ORDER_AMOUNT=500,000``처럼 쉼표를 넣으면 ``int()``가
+    실패해 기본값 100만원, 즉 의도한 한도의 두 배가 조용히 걸린다. 같은 레포의 다른
+    fail-open 지점(stock_code의 마스터 로드, scheduler의 잔고 동기화)이 모두 경고를
+    남기는 것과 같은 이유로 여기서도 흔적을 남긴다.
+    """
+    logger.warning(
+        "%s 값을 해석하지 못해 기본값 %s를 사용합니다 (입력=%r). 한도가 의도보다 "
+        "넓어질 수 있으니 값을 확인하세요.",
+        name,
+        default,
+        raw,
+    )
+
+
 def _int_env(name: str, default: int) -> int:
     """정수 env를 읽되, 값이 비었거나 정수가 아니면 기본값으로 되돌린다.
 
-    오타 하나로 한도가 0이 되거나(모든 주문 거부) 예외로 앱이 죽는 대신,
-    경고 없이 조용히 넓어지지도 않게 '기본값 복귀'로 고정한다.
+    오타 하나로 한도가 0이 되거나(모든 주문 거부) 예외로 앱이 죽는 대신
+    '기본값 복귀'로 고정하되, 되돌아간 사실은 경고로 남긴다.
     """
     raw = os.environ.get(name, "").strip()
     if not raw:
@@ -122,6 +143,7 @@ def _int_env(name: str, default: int) -> int:
     try:
         return int(raw)
     except ValueError:
+        _warn_bad_limit_env(name, raw, default)
         return default
 
 
@@ -132,6 +154,7 @@ def _float_env(name: str, default: float) -> float:
     try:
         return float(raw)
     except ValueError:
+        _warn_bad_limit_env(name, raw, default)
         return default
 
 

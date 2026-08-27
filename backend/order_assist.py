@@ -61,7 +61,12 @@ from .config import (
 # 호출 시점에 늦게 가져오지만(테스트가 주입하는 것이 기본 경로다) short_error는
 # 순수 포매터라 여기서 바로 묶는다.
 from .services import short_error
-from .stock_code import _ORDERABLE_STOCK_CODE_RE, _is_unresolved_echo, _STOCK_CODE_EXTRACT_RE
+from .stock_code import (
+    _ORDERABLE_STOCK_CODE_RE,
+    _is_unresolved_echo,
+    _STOCK_CODE_EXTRACT_RE,
+    extract_stock_name,
+)
 from .timeutil import KST
 from .trading_orders import ORDER_EXPIRES_AFTER, OrderSide, OrderType, PendingOrder, is_korean_market_open
 
@@ -356,7 +361,17 @@ def parse_proposal(raw: str) -> tuple[OrderProposal | None, str]:
 # mcp-trading/index.js getStockQuote(): "- 현재가: 74,500원"
 _CURRENT_PRICE_RE = re.compile(r"현재가:\s*([\d,]+)\s*원")
 # mcp-trading/balance.js formatBalanceReport(): "- 거래가능금액: 1,000,000원"
-# 실전/모의 계좌에 따라 라벨이 갈릴 수 있어 주문가능금액도 함께 받는다.
+#
+# 이 값의 출처는 balance.js:292의 summary.dnca_tot_amt, 즉 **예수금총금액**이다. 같은
+# 필드를 balance-rlz-pl-report.js:25는 "예수금"이라고 부른다 — "거래가능금액"이라는
+# 라벨이 붙어 있을 뿐 KIS의 주문가능현금(inquire-psbl-order의 ord_psbl_cash)이 아니다.
+# 미수/증거금/미결제 정산이 반영되지 않으므로 실제 주문가능액과 어긋날 수 있다.
+# 그래서 사용자에게도 "예수금"으로 표기한다(format_approval_message).
+# 정확한 주문가능현금 조회는 후속 이슈다.
+#
+# "주문가능금액" 대안은 mcp-trading 어디에도 없는 라벨이라 지금은 아무것도 매치하지
+# 않는다. 방어적으로 남겨 두지만 계약이 아니다 — 라벨이 바뀌면 cash=None으로 떨어져
+# fail-closed로 거부되므로, 이 대안이 없어도 한도가 헐거워지지는 않는다.
 _CASH_RE = re.compile(r"(?:거래가능금액|주문가능금액):\s*([\d,]+)\s*원")
 # "- 총 평가금액: 1,210,000원"
 _TOTAL_VALUE_RE = re.compile(r"총\s*평가금액:\s*([\d,]+)\s*원")
@@ -408,7 +423,7 @@ def parse_snapshot(
 
     cash = _first_amount(_CASH_RE, balance_text)
     if cash is None:
-        return None, "주문가능금액을 확인하지 못해 진행하지 않았습니다."
+        return None, "예수금을 확인하지 못해 진행하지 않았습니다."
 
     total_value = _first_amount(_TOTAL_VALUE_RE, balance_text)
     if total_value is None or total_value <= 0:
@@ -537,7 +552,7 @@ def evaluate_hard_limits(
             violations.append(
                 LimitViolation(
                     "insufficient_cash",
-                    f"주문가능금액 부족: 주문금액 {amount:,}원 > 가능금액 {snapshot.cash:,}원",
+                    f"예수금 부족: 주문금액 {amount:,}원 > 예수금 {snapshot.cash:,}원",
                 )
             )
         else:
@@ -594,6 +609,25 @@ def load_daily_usage(session_factory: Callable[[], Any], now: datetime) -> Daily
         close = getattr(session, "close", None)
         if callable(close):
             close()
+
+    # 단가가 0 이하인 행은 "0원짜리 거래"가 아니라 **금액을 모르는 거래**다.
+    #
+    # /buy에서 지정가를 생략하면 price=0, order_type="MARKET"으로 파싱되고, 그 0이
+    # OrderExecutionResult → TradeHistory.price까지 그대로 내려간다(체결가를 되받아
+    # 기록하는 경로가 아직 없다 — 후속 이슈). 그 행을 0원으로 더하면 일 거래대금
+    # 한도가 시장가 이력에 대해 **있는 척만 하는 한도**가 된다.
+    #
+    # 그래서 더하지 않고 집계를 포기한다. 이 모듈의 규칙("확인하지 못했다"가
+    # "괜찮다"로 바뀌는 지점을 남기지 않는다)이 여기에도 그대로 걸린다. 대가는
+    # 분명하다 — 오늘 시장가 주문이 한 건이라도 있으면 /advise가 그날은 막힌다.
+    # 그 대가를 없애는 방법은 한도를 헐겁게 만드는 것이 아니라 TradeHistory가
+    # 체결가를 기록하게 하는 것이다.
+    unpriced = [row for row in rows if int(row.price) <= 0]
+    if unpriced:
+        raise ValueError(
+            f"단가가 기록되지 않은 오늘 거래 {len(unpriced)}건이 있어 일 거래대금을 "
+            "집계할 수 없습니다(시장가 주문 이력)."
+        )
 
     amount = sum(int(row.quantity) * int(row.price) for row in rows)
     return DailyUsage(order_count=len(rows), order_amount=amount)
@@ -771,26 +805,39 @@ async def request_verification(
 # 사용자 메시지 조립 — 수치는 전부 코드가 만든다
 # ---------------------------------------------------------------------------
 
-_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?。])\s+|\n+")
-_DIGIT_RE = re.compile(r"\d")
+# 숫자 한 덩어리(자릿수 구분 쉼표·소수점 포함)를 통째로 잡는다. "74,500"이 "74"와
+# "500" 둘로 쪼개져 마스킹되지 않도록 쉼표·마침표를 숫자 사이에서만 붙여 받는다.
+_NUMBER_RUN_RE = re.compile(r"\d[\d,.]*")
+_NUMBER_MASK = "[수치]"
+# 마스킹 뒤 "[수치][수치]"처럼 붙어 남는 것을 하나로 접는다(예: "3~4%" → "[수치]~[수치]"는
+# 그대로 두고, "1,2,3" 같은 나열이 만드는 연속 마스크만 정리한다).
+_REPEATED_MASK_RE = re.compile(r"(?:\[수치\]\s*){2,}")
 
 
 def qualitative_reason(reason: str) -> str:
-    """검증자 문장에서 **숫자가 든 문장을 버리고** 정성 사유만 남긴다.
+    """검증자 문장의 **숫자를 가리고** 정성 사유는 남긴다.
 
     검증자는 도구 없이 답하므로 그 문장 속 수치는 backend가 관측한 값이라는 보장이
-    없다. 사용자에게 보이는 숫자는 전부 페이로드 원본(제안·스냅샷)에서만 만들고,
-    검증자에게서는 정성 문장만 받는다. 남는 문장이 없으면 고정 문구로 대체한다.
+    없다. 사용자에게 보이는 숫자는 전부 페이로드 원본(제안·스냅샷)에서만 만든다 —
+    그 불변식은 마스킹으로도 그대로 성립한다(마스킹 후 응답에는 숫자가 남지 않는다).
+
+    문장 단위로 버리지 않는 이유(#299 2차 리뷰): ``_SENTENCE_SPLIT_RE``는 구두점+공백이나
+    개행을 요구하는데, 검증자는 한국어 한 문장으로 답하는 경우가 많다. 그러면 전체가
+    한 덩어리라 숫자 하나 때문에 사유가 통째로 사라지고, 거부 메시지의 위반 목록은
+    "검증자가 보류를 권고했습니다." 한 줄뿐이라 사용자는 **거부 사유를 하나도 못 본다**.
+    수치만 가리면 "현재가 [수치]원 수준에서 단기 과열로 판단되어 보류를 권고합니다"가
+    남아 사유가 전달되고, 수치 노출 위험은 없다.
     """
     text = (reason or "").strip()
     if not text:
         return _GENERIC_VERDICT_REASON
-    kept = [
-        sentence.strip()
-        for sentence in _SENTENCE_SPLIT_RE.split(text)
-        if sentence.strip() and not _DIGIT_RE.search(sentence)
-    ]
-    return " ".join(kept) if kept else _GENERIC_VERDICT_REASON
+    masked = _NUMBER_RUN_RE.sub(_NUMBER_MASK, text)
+    masked = _REPEATED_MASK_RE.sub(f"{_NUMBER_MASK} ", masked).strip()
+    # 수치 나열뿐이던 응답은 마스크와 구분기호만 남는다 — 정성 사유가 없는 것이므로
+    # 고정 문구로 간다. 공백·구두점만으로는 "사유가 있다"고 볼 수 없어 글자·숫자가
+    # 하나라도 남는지로 판정한다("[수치] / [수치]"의 잔여물 " / "는 사유가 아니다).
+    residual = masked.replace(_NUMBER_MASK, "")
+    return masked if any(ch.isalnum() for ch in residual) else _GENERIC_VERDICT_REASON
 
 
 def _side_text(side: OrderSide) -> str:
@@ -822,7 +869,7 @@ def format_approval_message(
         [
             f"예상 주문금액: {amount:,}원",
             f"현재가: {snapshot.current_price:,}원",
-            f"주문가능금액: {snapshot.cash:,}원",
+            f"예수금: {snapshot.cash:,}원",
             f"보유수량: {snapshot.holding_qty:,}주",
             f"확신도: {proposal.confidence:.2f}",
         ]
@@ -1002,7 +1049,8 @@ async def run_order_assist(
             (LimitViolation("unresolved_stock", f"{stock} — 종목마스터에서 확인하지 못했습니다."),),
         )
     stock_code = code_match.group(1).upper()
-    resolved_name = resolved.split("(")[0].strip() or stock
+    # split("(")로 자르면 이름에 괄호가 든 종목(주문 가능 코드만 178건)이 잘려 나간다.
+    resolved_name = extract_stock_name(resolved) or stock
 
     # "이 코드로 주문을 낼 수 있는가"는 순수 함수 하나로 끝난다. 주문 금지 종목에
     # 제안 왕복을 태울 이유가 없어 여기서 본다.
@@ -1035,16 +1083,21 @@ async def run_order_assist(
         await cooldown.mark(stock_code, trigger.rule_id)
         return _rejected(stock, (LimitViolation("proposal_parse", parse_error),))
 
-    if proposal.stock_code and proposal.stock_code != stock_code:
+    if proposal.stock_code != stock_code:
         # 제안이 다른 종목을 말한 것이다. 우리가 확인한 코드로 "고쳐서" 진행하면
         # 근거와 주문이 어긋난 채 사용자에게 나간다.
+        #
+        # 빈 문자열도 여기서 걸린다. parse_proposal은 수량·지정가·확신도를 "못 읽으면
+        # 거부"로 처리하는데(그 값이 없으면 판정할 근거가 없으므로) 종목코드만 예외를
+        # 두면, 코드를 못 읽은 제안이 대조 없이 통과해 이 주석이 막겠다고 적은 상황이
+        # 그대로 성립한다 — 어느 종목 근거인지 모르는 문장이 확정 버튼과 함께 나간다.
         await cooldown.mark(stock_code, trigger.rule_id)
         return _rejected(
             stock,
             (
                 LimitViolation(
                     "proposal_stock_mismatch",
-                    f"제안 종목({proposal.stock_code})이 요청 종목({stock_code})과 다릅니다.",
+                    f"제안 종목({proposal.stock_code or '미상'})이 요청 종목({stock_code})과 다릅니다.",
                 ),
             ),
         )
@@ -1150,6 +1203,27 @@ async def run_order_assist(
         )
 
     # ⑧ 승인 — 기존 대기 주문 경로에 합류한다. 여기서 만드는 것은 대기 주문까지다.
+    #
+    #    장 운영 시간을 여기서 한 번 더 본다. ②의 판정은 제안 왕복(기본 120초) + MCP
+    #    왕복 + 검증(기본 40초) **이전** 시각이라, 15:29에 친 /advise가 15:32에 60초짜리
+    #    확정 버튼을 띄울 수 있다. _handle_confirm에는 장 운영 재검사가 없어 사용자는
+    #    눌러도 브로커 거절만 본다. created_at과 같은 시각으로 판정해 둘이 갈리지 않게 한다.
+    created_at = now_factory()
+    if not is_korean_market_open(created_at):
+        logger.info("검증 통과 후 장 마감 — 대기 주문을 만들지 않는다 (stock=%s)", stock)
+        return _rejected(
+            stock,
+            (
+                LimitViolation(
+                    "market_closed",
+                    "검증을 마치는 사이 장 운영 시간이 끝났습니다. (평일 09:00~15:30)",
+                ),
+            ),
+            verifier_called=True,
+            proposal=proposal,
+            snapshot=snapshot,
+        )
+
     order = PendingOrder(
         chat_id=trigger.chat_id,
         stock_name=proposal.stock_name,
@@ -1160,7 +1234,7 @@ async def run_order_assist(
         # 현재가를 그대로 넣어, 만료 시각과 마찬가지로 사용자가 보는 값과 저장된 값이
         # 어긋나지 않게 한다.
         price=proposal.price if proposal.order_type == "LIMIT" else snapshot.current_price,
-        created_at=now_factory(),
+        created_at=created_at,
         order_type=proposal.order_type,
         callback_token=secrets.token_urlsafe(8),
     )

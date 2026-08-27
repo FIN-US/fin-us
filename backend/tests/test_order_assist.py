@@ -392,7 +392,7 @@ def test_parse_snapshot_reports_zero_holdings_for_an_unheld_stock():
     [
         ("현재가 없음", BALANCE_TEXT, "현재가"),
         (QUOTE_TEXT, "잔고를 읽지 못했습니다", "계좌 잔고"),
-        (QUOTE_TEXT, "[보유 종목 리스트]\n- 총 평가금액: 100원", "주문가능금액"),
+        (QUOTE_TEXT, "[보유 종목 리스트]\n- 총 평가금액: 100원", "예수금"),
         (QUOTE_TEXT, "[보유 종목 리스트]\n- 거래가능금액: 100원", "총 평가금액"),
     ],
     ids=["no_price", "no_marker", "no_cash", "no_total"],
@@ -529,14 +529,40 @@ async def test_verification_fails_closed_on_http_error(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_qualitative_reason_drops_sentences_containing_numbers():
+def test_qualitative_reason_masks_numbers_but_keeps_the_sentence():
+    """수치는 가리고 사유는 남긴다 — 문장을 통째로 버리면 사유가 사라진다."""
     reason = "근거가 충분합니다. 현재가는 99,999원으로 보입니다. 리스크는 제한적입니다."
 
-    assert qualitative_reason(reason) == "근거가 충분합니다. 리스크는 제한적입니다."
+    result = qualitative_reason(reason)
+
+    assert result == "근거가 충분합니다. 현재가는 [수치]원으로 보입니다. 리스크는 제한적입니다."
+    assert not any(ch.isdigit() for ch in result)
 
 
-def test_qualitative_reason_falls_back_when_every_sentence_has_numbers():
-    result = qualitative_reason("총 평가금액 12,345,678원 대비 비중이 3% 입니다.")
+def test_qualitative_reason_keeps_a_single_sentence_korean_reason():
+    """한국어 단문 응답이 통째로 사라지던 회귀 (#299 2차 리뷰).
+
+    _SENTENCE_SPLIT_RE는 구두점+공백이나 개행을 요구하므로 이런 한 문장 응답은
+    분할되지 않는다. 문장 단위로 버리면 이 응답 전체가 사라지고, 검증자 거부 경로의
+    위반 목록은 "검증자가 보류를 권고했습니다." 한 줄뿐이라 사용자는 사유를 하나도
+    못 본다.
+    """
+    reason = "현재가 74,500원 수준에서 단기 과열로 판단되어 보류를 권고합니다."
+
+    result = qualitative_reason(reason)
+
+    assert result == "현재가 [수치]원 수준에서 단기 과열로 판단되어 보류를 권고합니다."
+    assert "단기 과열" in result
+    assert not any(ch.isdigit() for ch in result)
+
+
+def test_qualitative_reason_masks_a_whole_number_run_not_its_digits():
+    """자릿수 쉼표가 든 수치가 여러 마스크로 쪼개지지 않는다."""
+    assert qualitative_reason("평가금액 12,345,678원") == "평가금액 [수치]원"
+
+
+def test_qualitative_reason_falls_back_when_nothing_qualitative_remains():
+    result = qualitative_reason("74,500 / 3.2 / 10")
 
     assert result == order_assist._GENERIC_VERDICT_REASON
     assert not any(ch.isdigit() for ch in result)
@@ -638,6 +664,8 @@ async def _run(
     verify_calls=None,
     propose_calls=None,
     stock="삼성전자",
+    now_factory=None,
+    session_factory=None,
 ):
     verify_calls = verify_calls if verify_calls is not None else []
     propose_calls = propose_calls if propose_calls is not None else []
@@ -654,10 +682,10 @@ async def _run(
         ProposalTrigger(source="telegram", stock=stock, chat_id="123"),
         pending_orders=store if store is not None else InMemoryPendingOrderStore(),
         mcp_runner=mcp if mcp is not None else _mcp_runner(),
-        now_factory=lambda: now,
+        now_factory=now_factory or (lambda: now),
         limits=limits or OrderLimits(),
         cooldown=cooldown or FakeCooldown(),
-        session_factory=lambda: _EmptySession(),
+        session_factory=session_factory or (lambda: _EmptySession()),
         propose=propose,
         verify=verify,
     )
@@ -1215,3 +1243,312 @@ async def test_advise_failure_is_reported_not_swallowed(monkeypatch):
     await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/advise 삼성전자"}})
 
     assert "주문 보조 실패" in notifier.messages[-1]
+
+
+# ---------------------------------------------------------------------------
+# #299 2차 리뷰 — Critical 2건과 무커버 가드
+# ---------------------------------------------------------------------------
+
+
+def _usage_session(rows):
+    class _Query:
+        def filter(self, criterion):
+            return self
+
+        def all(self):
+            return rows
+
+    class _Session:
+        def query(self, model):
+            return _Query()
+
+        def close(self):
+            return None
+
+    return lambda: _Session()
+
+
+def test_daily_usage_refuses_to_total_unpriced_trades():
+    """단가 0인 행은 "0원짜리 거래"가 아니라 "금액을 모르는 거래"다.
+
+    /buy에서 지정가를 생략하면 price=0, MARKET으로 파싱되고 그 0이 TradeHistory까지
+    내려간다. 0으로 더하면 일 거래대금 한도가 시장가 이력에 대해 있는 척만 하는
+    한도가 된다 — 집계를 포기하고 상위 경로가 fail-closed로 거부하게 한다.
+    """
+    rows = [SimpleNamespace(quantity=2, price=1000.0), SimpleNamespace(quantity=10, price=0.0)]
+
+    with pytest.raises(ValueError, match="집계할 수 없습니다"):
+        load_daily_usage(_usage_session(rows), MARKET_OPEN_NOW)
+
+
+def test_daily_usage_totals_normally_when_every_trade_has_a_price():
+    usage = load_daily_usage(
+        _usage_session([SimpleNamespace(quantity=2, price=1000.0)]), MARKET_OPEN_NOW
+    )
+
+    assert usage == DailyUsage(order_count=1, order_amount=2000)
+
+
+@pytest.mark.asyncio
+async def test_unpriced_trade_history_blocks_the_flow_before_the_verifier():
+    """집계 실패는 거부다 — 한도를 모른 채 검증자에게 넘기지 않는다."""
+    rows = [SimpleNamespace(quantity=10, price=0.0)]
+
+    result, verify_calls = await _run(session_factory=_usage_session(rows))
+
+    assert result.status == "rejected"
+    assert [v.code for v in result.violations] == ["usage_failed"]
+    assert verify_calls == []
+
+
+@pytest.mark.asyncio
+async def test_proposal_without_a_stock_code_is_rejected():
+    """종목코드를 못 읽은 제안은 대조 없이 통과하면 안 된다 (#299 2차 리뷰).
+
+    parse_proposal은 수량·지정가·확신도를 "못 읽으면 거부"로 처리한다. 종목코드만
+    예외를 두면 어느 종목 근거인지 모르는 문장이 확정 버튼과 함께 나간다.
+    """
+    without_code = PROPOSAL_JSON.replace('"stock_code": "005930", ', "")
+
+    result, verify_calls = await _run(proposal_text=without_code)
+
+    assert result.status == "rejected"
+    assert [v.code for v in result.violations] == ["proposal_stock_mismatch"]
+    assert verify_calls == []
+
+
+@pytest.mark.asyncio
+async def test_stock_name_with_parentheses_survives_resolution():
+    """이름에 괄호가 든 종목(주문 가능 코드만 178건)이 잘리지 않는다."""
+    mcp = _mcp_runner(resolved="KODEX 골드선물(H) (132030, KOSPI)")
+    proposal = PROPOSAL_JSON.replace('"stock_code": "005930"', '"stock_code": "132030"')
+
+    result, _ = await _run(mcp=mcp, proposal_text=proposal)
+
+    assert result.status == "approved"
+    assert result.order.stock_name == "KODEX 골드선물(H)"
+
+
+@pytest.mark.asyncio
+async def test_market_close_during_verification_stops_the_pending_order():
+    """②의 장 운영 판정은 제안·검증 왕복 이전 시각이라 그 사이 장이 닫힐 수 있다.
+
+    _handle_confirm에 장 운영 재검사가 없어, 여기서 막지 않으면 사용자는 눌러도
+    브로커 거절만 본다.
+    """
+    store = InMemoryPendingOrderStore()
+    times = iter(
+        [
+            datetime(2026, 5, 20, 15, 29, tzinfo=KST),
+            datetime(2026, 5, 20, 15, 33, tzinfo=KST),
+        ]
+    )
+
+    result, verify_calls = await _run(store=store, now_factory=lambda: next(times))
+
+    assert result.status == "rejected"
+    assert [v.code for v in result.violations] == ["market_closed"]
+    # 검증까지는 갔다 — 막는 지점은 대기 주문 생성 직전이다.
+    assert len(verify_calls) == 1
+    assert await store.get("123") is None
+
+
+class _BrokenStore:
+    """조회·저장이 던지는 대기 주문 저장소. InMemory 더블은 던지지 않는다."""
+
+    def __init__(self, *, on_has=False, on_set=False):
+        self._on_has = on_has
+        self._on_set = on_set
+
+    async def get(self, chat_id):
+        if self._on_has:
+            raise RuntimeError("redis 연결 실패")
+        return None
+
+    async def has(self, chat_id):
+        if self._on_has:
+            raise RuntimeError("redis 연결 실패")
+        return False
+
+    async def set_if_absent(self, chat_id, order):
+        if self._on_set:
+            raise RuntimeError("redis 쓰기 실패")
+        return False
+
+    async def delete(self, chat_id):
+        return None
+
+
+@pytest.mark.asyncio
+async def test_pending_order_lookup_failure_blocks_the_flow():
+    result, verify_calls = await _run(store=_BrokenStore(on_has=True))
+
+    assert result.status == "rejected"
+    assert [v.code for v in result.violations] == ["store_error"]
+    assert verify_calls == []
+
+
+@pytest.mark.asyncio
+async def test_pending_order_write_failure_is_rejected_not_swallowed():
+    result, verify_calls = await _run(store=_BrokenStore(on_set=True))
+
+    assert result.status == "rejected"
+    assert [v.code for v in result.violations] == ["store_error"]
+    assert len(verify_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_losing_the_slot_race_becomes_a_conflict():
+    """제안을 만드는 사이 /buy가 슬롯을 먼저 잡으면 충돌이다 — 조용히 사라지면 안 된다."""
+    result, _ = await _run(store=_BrokenStore())
+
+    assert result.status == "conflict"
+    assert result.message == CONFLICT_MESSAGE
+
+
+@pytest.mark.asyncio
+async def test_empty_stock_is_rejected_without_any_call():
+    mcp = _mcp_runner()
+
+    result, verify_calls = await _run(stock="   ", mcp=mcp)
+
+    assert result.status == "rejected"
+    assert [v.code for v in result.violations] == ["empty_stock"]
+    assert mcp.calls == []
+    assert verify_calls == []
+
+
+@pytest.mark.asyncio
+async def test_no_cooldown_is_marked_before_the_proposal_roundtrip():
+    """냉각을 걸지 않아야 하는 구간을 고정한다.
+
+    오타 한 번(/advise 없는종목)이 그 문자열을 냉각 시간만큼 잠그면 안 된다. 냉각이
+    아끼는 자원은 제안 왕복인데, 이 구간은 그것을 쓰기 전이다.
+    """
+    unresolved = FakeCooldown()
+    await _run(cooldown=unresolved, mcp=_mcp_runner(resolved="999999 (999999, UNKNOWN)"))
+    assert unresolved.marked == []
+
+    blacklisted = FakeCooldown()
+    await _run(cooldown=blacklisted, limits=OrderLimits(blacklist=frozenset({"005930"})))
+    assert blacklisted.marked == []
+
+    cooling = FakeCooldown(active=True)
+    await _run(cooldown=cooling)
+    assert cooling.marked == []
+
+
+# ---------------------------------------------------------------------------
+# request_proposal — NAT {"value": ...} 봉투 계약
+#
+# 이 계약이 깨지면 모든 /advise가 조용히 거부로 굳는다. 함수를 한 번도 부르지 않으면
+# 그 사고를 테스트가 알려주지 못한다 (#299 2차 리뷰).
+# ---------------------------------------------------------------------------
+
+
+def _patch_post_json(monkeypatch, payload=None, error=None):
+    calls = []
+
+    async def fake_post(path, body, timeout):
+        calls.append((path, body, timeout))
+        if error is not None:
+            raise error
+        return payload
+
+    monkeypatch.setattr(order_assist, "_post_json", fake_post)
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_request_proposal_unwraps_the_value_envelope(monkeypatch):
+    calls = _patch_post_json(monkeypatch, {"value": "제안 본문입니다."})
+
+    answer = await order_assist.request_proposal("프롬프트", timeout=12.5)
+
+    assert answer == "제안 본문입니다."
+    assert calls == [("/v1/propose-order", {"input_message": "프롬프트"}, 12.5)]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"code": "WORKFLOW_ERROR", "message": "실패", "details": None},
+        {"value": 42},
+        {},
+        [],
+        "그냥 문자열",
+    ],
+    ids=["error_envelope", "non_string_value", "empty", "not_an_object", "bare_string"],
+)
+@pytest.mark.asyncio
+async def test_request_proposal_refuses_anything_but_a_string_value(monkeypatch, payload):
+    """봉투가 아니면 답변 텍스트가 아니다 — 진행하지 않는다."""
+    _patch_post_json(monkeypatch, payload)
+
+    with pytest.raises(RuntimeError):
+        await order_assist.request_proposal("프롬프트")
+
+
+@pytest.mark.asyncio
+async def test_post_json_raises_on_http_error(monkeypatch):
+    """4xx/5xx 본문을 정상 응답으로 읽지 않는다."""
+
+    class _Response:
+        status_code = 500
+        text = "internal error"
+
+        def json(self):
+            return {"value": "이건 답변이 아니다"}
+
+    class _Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def post(self, url, headers=None, json=None):
+            return _Response()
+
+    monkeypatch.setattr(httpx, "AsyncClient", _Client)
+
+    with pytest.raises(RuntimeError, match="500"):
+        await order_assist._post_json("/v1/propose-order", {}, 5.0)
+
+
+@pytest.mark.asyncio
+async def test_advise_deletes_the_pending_order_when_the_prompt_never_sends(monkeypatch):
+    """프롬프트가 안 나갔으면 대기 주문도 남기지 않는다 — 사용자는 그 존재를 모른다."""
+    from backend.order_assist import OrderAssistResult
+    from backend.trading_orders import PendingOrder
+
+    order = PendingOrder(
+        chat_id="123",
+        stock_name="삼성전자",
+        stock_code="005930",
+        side="BUY",
+        quantity=10,
+        price=74_500,
+        created_at=MARKET_OPEN_NOW,
+        callback_token="tok123",
+    )
+    handler, notifier = _advise_handler(
+        monkeypatch, OrderAssistResult(status="approved", message="제안 본문", order=order)
+    )
+    deleted = []
+
+    async def fail_send(text, *, reply_markup=None):
+        return False
+
+    async def record_delete(chat_id):
+        deleted.append(chat_id)
+
+    monkeypatch.setattr(notifier, "send_text", fail_send)
+    monkeypatch.setattr(handler.pending_orders, "delete", record_delete)
+
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/advise 삼성전자"}})
+
+    assert deleted == ["123"]

@@ -22,9 +22,18 @@ general:
     # _post_propose_order / _post_verify_order 주석이 같은 계약을 반대편에서 고정한다.
     endpoints:
       # 제안 생성. strategy_agent가 아니라 strategy_branch_agent(fe_branch)를 노출한다 —
-      # fe_branch가 _run_with_gate(도구 강제 환각 게이트)를 감싸고 있으므로, 이 엔드포인트로
-      # 들어온 요청도 채팅 경로와 똑같이 게이트를 통과한다. 안쪽 react_agent를 직접 노출하면
-      # 주문 제안이라는 가장 위험한 경로만 게이트 밖으로 빠져나간다.
+      # fe_branch가 _run_with_gate(도구 강제 환각 게이트)를 감싸고 있으므로 이 엔드포인트로
+      # 들어온 요청도 게이트를 지난다. 안쪽 react_agent를 직접 노출하면 주문 제안이라는
+      # 가장 위험한 경로만 게이트 밖으로 빠져나간다.
+      #
+      # 다만 "채팅 경로와 똑같이"는 아니다 (#299 2차 리뷰). _check_tool_enforcement는
+      # chat_request.messages에 **이미 등장한 수치**를 화이트리스트로 삼는데, 이 경로는
+      # {"input_message": <제안 프롬프트>} 하나가 곧 transcript 전체다. 즉 프롬프트 본문에
+      # 실린 수치는 도구 호출 없이도 게이트를 통과한다. 지금은 build_proposal_prompt가
+      # 종목명만 넣어 실질 차이가 없지만, ProposalTrigger.trigger_signal에 수치를 실으면
+      # 그만큼 화이트리스트가 넓어진다 — 스케줄러 룰 트리거(후속 작업)를 붙일 때
+      # trigger_signal은 수치가 아니라 "무엇을 확인하라"는 지시 문구로 넣어야 한다.
+      #
       # fe_branch는 ChatRequestOrMessage를 받고 str을 반환하므로
       # 요청 {"input_message": "..."} / 응답 {"value": "..."}이다.
       - path: /v1/propose-order

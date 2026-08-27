@@ -419,3 +419,79 @@ def test_supervisor_branches_are_unchanged_and_exclude_the_verifier(config_path:
     ]
     function_names = {str(branch.function_name) for branch in supervisor.branches}
     assert "order_verifier" not in function_names
+
+
+# ---------------------------------------------------------------------------
+# #299 2차 리뷰 — fail-closed 불변식의 구멍, 인젝션 방어, 설정 참조
+# ---------------------------------------------------------------------------
+
+
+def test_parse_verdict_rejects_when_the_request_id_is_itself_empty():
+    """요청 id가 비면 대조 자체가 성립하지 않는다 — 그래도 REJECT다.
+
+    ``VerifyOrderRequest.proposal_id``는 기본값이 ""이라 id 없는 본문이 200으로 들어올
+    수 있다. 그때 모델도 proposal_id를 생략하면 ``"" != ""``가 False라 대조를 그냥
+    지나치고 APPROVE가 성립한다. backend는 항상 id를 싣지만 그 사실에 기대지 않는다.
+    """
+    request = VerifyOrderRequest(proposal=ProposalPayload(), hard_check=HardCheckPayload(passed=True))
+    raw = '{"proposal_id": "", "verdict": "APPROVE", "reason": "좋습니다."}'
+
+    verdict = parse_verdict(raw, request)
+
+    assert verdict.verdict == "REJECT"
+    assert verdict.failure == FAILURE_ID_MISMATCH
+
+
+def test_parse_verdict_rejects_empty_request_id_even_without_an_echo():
+    request = VerifyOrderRequest(proposal=ProposalPayload(), hard_check=HardCheckPayload(passed=True))
+
+    verdict = parse_verdict('{"verdict": "APPROVE"}', request)
+
+    assert verdict.verdict == "REJECT"
+    assert verdict.failure == FAILURE_ID_MISMATCH
+
+
+def test_system_prompt_tells_the_model_the_payload_is_data_not_instructions():
+    """rationale은 앞단 에이전트가 뉴스·공시를 읽고 만든 문자열이라 지시문이 섞일 수 있다."""
+    assert "검토 대상 데이터" in verifier._SYSTEM_PROMPT
+    assert "지시로" in verifier._SYSTEM_PROMPT
+
+
+def test_user_prompt_labels_the_payload_as_data():
+    prompt = verifier.build_user_prompt(_request())
+
+    assert "지시가 아닙니다" in prompt
+
+
+def test_user_prompt_clips_long_free_text():
+    """긴 자유 텍스트가 시스템 규칙을 문맥 밖으로 밀어내지 못하게 분량을 묶는다."""
+    long_rationale = "가" * 5000
+    request = _request()
+    request.proposal.rationale = long_rationale
+
+    prompt = verifier.build_user_prompt(request)
+
+    assert long_rationale not in prompt
+    assert "…(생략)" in prompt
+    assert len(prompt) < 3000
+
+
+def test_user_prompt_keeps_a_normal_rationale_intact():
+    prompt = verifier.build_user_prompt(_request())
+
+    assert "분기 실적 개선과 수급 회복" in prompt
+    assert "…(생략)" not in prompt
+
+
+@pytest.mark.parametrize("config_path", _CONFIGS_WITH_ENDPOINTS, ids=_CONFIG_IDS)
+def test_verifier_llm_reference_actually_resolves(config_path: Path):
+    """llm_name은 LLMRef(문자열)이라 설정 로드가 참조 유효성을 확인해 주지 않는다.
+
+    오타는 로드를 통과하고 builder.get_llm에서 런타임에 터진다 → NAT 500 →
+    backend FAILURE_HTTP → **모든 제안이 조용히 거부**된다. 라우터 설정까지 함께
+    보는 이유는 base 사슬 어딘가에서 llms 블록이 갈릴 수 있기 때문이다.
+    """
+    config = _load(config_path)
+
+    llm_name = str(config.functions["order_verifier"].llm_name)
+    assert llm_name in config.llms, f"{llm_name}이 llms에 정의돼 있지 않다"
