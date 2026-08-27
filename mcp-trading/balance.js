@@ -91,18 +91,35 @@ export async function fetchAllPaged(fetchPage, {
     // 페이지 사이에만 대기한다. `pages > 0`이므로 첫 페이지 요청 전에는 대기가 없고,
     // 위 두 break(max_pages/time_budget)나 아래쪽의 no_cursor/repeated_cursor/정상
     // 종료 break는 모두 이 지점을 다시 지나기 전에 루프를 빠져나가므로 마지막 페이지
-    // 이후에도 대기가 붙지 않는다.
+    // 이후에도 대기가 붙지 않는다. 아래 재확인 break는 대기가 이미 끝난 뒤에 걸리므로
+    // 이 불변식에 대기를 하나도 더 보태지 않는다 — 다만 그 마지막 대기 자체는 "다음
+    // 페이지를 요청한다"는 전제로 이미 들어간 뒤라 되돌릴 수 없다. 되돌리려면 대기 전에
+    // pageDelayMs를 미리 차감해 예측해야 하는데, 그건 아직 흐르지 않은 시간을 예산에서
+    // 빼는 다른 설계다.
     //
-    // 대기 시간을 시간 예산 소진에서 일부러 빼지 않는다: 이 함수의 상위 호출자는
-    // 내부 시간 예산과 무관하게 실제 벽시계 시간으로 잘린다 — backend/services.py의
-    // run_mcp_tool 30초 하드컷(get_balance), diary_agent.yml의 timeout_sec: 120
-    // (fetchAllDailyOrderCcld/fetchAllBalanceRlzPl). 대기 시간을 예산 계산에서
-    // 제외하면 내부적으로는 예산 안에 있다고 판단해도 실제 총 소요 시간이 이 상위
-    // 하드컷을 넘어설 수 있다. now/sleep 모두 기본값이 실제 시각(Date.now)·실제
-    // 대기(setTimeout)이므로 별도 처리 없이 두면 대기 시간이 자연히 다음 반복의
-    // `now() - startedAt`에 반영된다 — 이것이 의도한 동작이다.
+    // 대기 시간은 여전히 시간 예산에서 빼지 않는다(대기한 만큼 예산이 그대로 줄어든다):
+    // 이 함수의 상위 호출자는 내부 시간 예산과 무관하게 실제 벽시계 시간으로 잘린다 —
+    // backend/services.py의 run_mcp_tool 30초 하드컷(get_balance), diary_agent.yml의
+    // timeout_sec: 120 (fetchAllDailyOrderCcld/fetchAllBalanceRlzPl). 대기 시간을
+    // 예산 계산에서 제외하면 내부적으로는 예산 안에 있다고 판단해도 실제 총 소요 시간이
+    // 이 상위 하드컷을 넘어설 수 있다. now/sleep 모두 기본값이 실제 시각(Date.now)·실제
+    // 대기(setTimeout)이므로 대기 시간은 자연히 `now() - startedAt`에 반영된다.
+    // 이 방침 자체는 그대로다.
+    //
+    // 바뀐 것은 "예산을 언제 보는가"다(이슈 #307). 위쪽 체크는 대기가 시작되기 전 시각을
+    // 기준으로 하므로, 그 시점에는 예산이 남아 있었더라도 대기 중에 소진되면 예산이 끝난
+    // 상태로 다음 요청이 나가고 그 응답까지 기다리게 된다(초과분 ≈ pageDelayMs). 그래서
+    // 대기가 끝난 뒤 같은 조건을 한 번 더 본다. 비교 연산자는 위쪽 체크와 똑같이 `>=`로
+    // 맞춘다 — 한쪽만 `>`로 두면 정확히 경계인 시각에서 두 체크의 판단이 갈린다.
+    // 재확인에서 break하면 truncated/pages/rows가 위쪽 time_budget break와 완전히 같은
+    // 상태로 수렴한다(지금까지 받은 부분 결과는 그대로 보존된다).
     if (pageDelayMs > 0 && pages > 0) {
       await sleep(pageDelayMs);
+      // 이 블록은 `pages > 0`일 때만 실행되므로 위쪽 체크의 `pages > 0` 조건은 이미 참이다.
+      if (now() - startedAt >= timeBudgetMs) {
+        truncated = "time_budget";
+        break;
+      }
     }
 
     let body;
