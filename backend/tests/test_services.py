@@ -1876,13 +1876,13 @@ async def test_placeholders_do_not_collide_across_calls_in_same_conversation(mon
     """같은 conversation_id로 연속 호출할 때 이전 턴 자리표시자가 현재 턴 값으로 복원되면 안 된다.
 
     NAT 경로는 마스킹 매핑과 달리 대화 히스토리를 **호출을 넘어 서버 쪽에 유지**한다:
-    backend/services.py:648-653이 messages에 현재 메시지 1건만 보내고 conversation-id
-    헤더로 세션을 식별하면, finus_nat/src/nat_finus_nat/agents.py:643-665의
-    _load_history()가 SQLite chat_messages에서 과거 턴을 읽어 오고 같은 파일
-    696-732가 `history + chat_request.messages`로 합쳐 라우터에 넘긴다
-    (finus_nat/configs/router.yml:58-61, max_history_messages: 30). conversation_id는
-    호출 간 재사용된다(backend/telegram_commands.py:1355의 f"telegram:{chat_id}"는
-    그 사용자의 모든 메시지가 같은 스레드).
+    backend/services.py의 _llm_nat_chat이 messages에 현재 메시지 1건만 보내고
+    conversation-id 헤더로 세션을 식별하면, finus_nat/src/nat_finus_nat/agents.py의
+    _load_history()가 SQLite chat_messages에서 과거 턴을 읽어 오고 같은 파일의
+    finus_sqlite_transcript_agent가 `history + chat_request.messages`로 합쳐
+    라우터에 넘긴다(finus_nat/configs/router.yml의 max_history_messages: 30).
+    conversation_id는 호출 간 재사용된다(backend/telegram_commands.py의
+    f"telegram:{chat_id}"는 그 사용자의 모든 메시지가 같은 스레드).
 
     따라서 NAT은 이전 턴의 자리표시자를 응답에 인용할 수 있다. 자리표시자 이름이
     호출마다 <AMOUNT_1>부터 다시 시작하면 그 인용이 **현재 턴의 다른 값으로 조용히**
