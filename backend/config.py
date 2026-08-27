@@ -132,7 +132,10 @@ SIGNAL_UNCERTAINTY_ALERT_THRESHOLD = _float_env("SIGNAL_UNCERTAINTY_ALERT_THRESH
 
 
 # Redis cache/lock settings for scheduler state.
-REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
+# 기본값이 `localhost`가 아닌 것은 compose의 redis 게시가 루프백 IPv4 전용이기
+# 때문이다(#285). `localhost`가 `::1`로 먼저 풀리는 호스트에서 주소 폴백에 기대지
+# 않는다. `.env.example`과 어긋나면 test_compose_ports.py가 잡는다.
+REDIS_URL = os.environ.get("REDIS_URL", "redis://127.0.0.1:6379/0")
 
 # Telegram urgent alert settings.
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
