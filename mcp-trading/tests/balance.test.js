@@ -90,11 +90,23 @@ test("fetchAllBalance concatenates holdings across multiple continuation pages",
 
 // 이슈 #210: fetchAllPaged에 pageDelayMs 옵션이 생겼지만 fetchAllBalance는 이를 넘기지
 // 않는다(기본값 0 유지) — PR #200의 수용 기준("fetchAllBalance의 관측 가능한 동작이
-// 전부 불변일 것")을 이어받는 이 작업의 핵심 조건. fetchAllBalance는 pageDelayMs/sleep을
-// 주입받을 방법이 없으므로 직접 스파이할 수 없고, 대신 여러 페이지를 지연 없이
-// 실행했을 때 실제 벽시계 시간이 거의 걸리지 않는지로 회귀를 방어한다 — 만약 나중에
-// 누군가 실수로 fetchAllBalance에 pageDelayMs를 하드코딩해 넣으면 이 테스트가 느려져 실패한다.
-test("fetchAllBalance runs across multiple pages with no page-to-page delay (regression guard for issue #210)", async () => {
+// 전부 불변일 것")을 이어받는 이 작업의 핵심 조건.
+//
+// 이슈 #306: 원래 이 가드는 5페이지의 벽시계 시간이 500ms 미만인지로 판정했지만,
+// 5페이지는 페이지 간격이 4번뿐이라 125ms 미만을 하드코딩하면 총 대기가 임계 아래에
+// 머물러 그대로 통과했다(PR #264 리뷰에서 pageDelayMs: 100 → elapsed=440ms로 재현).
+// 반대로 부하 걸린 CI에서는 지연이 없는데도 500ms를 넘겨 오탐할 여지도 있었다.
+//
+// fetchAllBalance는 pageDelayMs/sleep을 주입받을 방법이 없어 sleep을 직접 스파이할 수
+// 없다. 대신 fetchAllPaged의 기본 sleep이 `(ms) => new Promise((resolve) =>
+// setTimeout(resolve, ms))`라서 호출 시점에 전역 setTimeout을 조회한다는 점(balance.js)을
+// 이용해, 전역 setTimeout을 스파이하고 "스케줄된 지연이 하나도 없다"를 단언한다.
+// pageDelayMs가 0이면 sleep 자체가 호출되지 않으므로, 이 단언은 지연 값의 크기와
+// 무관하게 하드코딩을 잡는다 — 1ms여도 실패한다. 벽시계를 재지 않으니 오탐도 없다.
+//
+// node:test는 한 프로세스에서 여러 테스트가 전역을 공유하므로, 스파이는 반드시
+// try/finally로 원복해 다른 테스트로 새지 않게 한다.
+test("fetchAllBalance schedules no page-to-page delay across multiple pages (regression guard for issues #210, #306)", async () => {
   const totalPages = 5;
   let calls = 0;
   const fetchPage = async () => {
@@ -110,16 +122,31 @@ test("fetchAllBalance runs across multiple pages with no page-to-page delay (reg
     };
   };
 
-  const startedAt = Date.now();
-  const result = await fetchAllBalance(fetchPage, { maxPages: 20, timeBudgetMs: 60_000 });
-  const elapsedMs = Date.now() - startedAt;
+  const originalSetTimeout = globalThis.setTimeout;
+  const scheduledDelays = [];
+  let result;
+
+  globalThis.setTimeout = function spySetTimeout(handler, delay, ...args) {
+    scheduledDelays.push(delay);
+    return originalSetTimeout.call(this, handler, delay, ...args);
+  };
+
+  try {
+    result = await fetchAllBalance(fetchPage, { maxPages: 20, timeBudgetMs: 60_000 });
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
 
   assert.equal(calls, totalPages);
   assert.equal(result.pages, totalPages);
   assert.equal(result.truncated, "no_cursor");
-  // 페이지 간 지연이 없다면 5페이지 모두 수 ms 안에 끝난다. 지연이 하나라도 붙으면
-  // (예: 실수로 pageDelayMs를 하드코딩) 이 여유(500ms)를 넘긴다.
-  assert.ok(elapsedMs < 500, `elapsedMs(${elapsedMs})가 500ms 미만이어야 함 — 페이지 간 지연이 없어야 한다`);
+  // 누군가 fetchAllBalance에 pageDelayMs를 하드코딩하면 기본 sleep이 그 값으로
+  // setTimeout을 걸고, 그 값이 그대로 여기에 기록된다.
+  assert.deepEqual(
+    scheduledDelays,
+    [],
+    `페이지 간 지연이 하나도 스케줄되지 않아야 함 — 관측된 지연: ${util.inspect(scheduledDelays)}`,
+  );
 });
 
 test("fetchAllBalance stops and reports truncation when the page cap is hit", async () => {
