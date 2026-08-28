@@ -5,7 +5,12 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { DEFAULT_TOKEN_TTL_MARGIN_MS, KisTokenCache } from "../token-cache.js";
+import {
+  DEFAULT_LOCK_STALE_MS,
+  DEFAULT_LOCK_WAIT_MS,
+  DEFAULT_TOKEN_TTL_MARGIN_MS,
+  KisTokenCache,
+} from "../token-cache.js";
 
 const MODULE_URL = new URL("../token-cache.js", import.meta.url);
 const HOUR_MS = 3_600_000;
@@ -216,6 +221,22 @@ test("getOrIssue()는 토큰 없는 발급 결과를 캐시에 쓰지 않고 던
   assert.equal(fs.existsSync(`${filePath}.lock`), false, "락은 회수되어야 합니다");
 });
 
+// 만료 시각이 숫자가 아니면(KIS의 expires_in이 쓰레기 값이면 index.js의 Number()가
+// NaN을 낸다) 캐시에는 expiresAt: null이 남고 read()가 그 캐시를 영원히 미스로 본다.
+// 락은 멀쩡히 도는데 매 호출이 발급을 치는, #324 이전 상태로 조용히 되돌아간다.
+test("getOrIssue()는 만료 시각이 숫자가 아닌 발급 결과를 캐시에 쓰지 않고 던진다", async (t) => {
+  const filePath = tempCachePath(t);
+  const clock = fixedClock();
+  const cache = new KisTokenCache({ filePath, now: clock.now });
+
+  await assert.rejects(
+    cache.getOrIssue(async () => ({ token: "t", expiresAt: Number("abc") })),
+    /만료 시각이 숫자가 아닙니다/,
+  );
+  assert.equal(fs.existsSync(filePath), false, "캐시 파일을 만들면 안 됩니다");
+  assert.equal(fs.existsSync(`${filePath}.lock`), false, "락은 회수되어야 합니다");
+});
+
 // 이슈 #324의 본체. 같은 캐시 파일을 보는 두 호출자가 동시에 들어와도 발급은
 // 한 번뿐이어야 한다. 잡는 뮤테이션: 락을 걷어내면 두 번 발급돼 실패한다.
 test("동시에 들어온 두 호출자 중 하나만 발급하고 나머지는 캐시로 통과한다", async (t) => {
@@ -271,6 +292,93 @@ test("대기 상한을 넘기면 락 없이라도 발급한다", async (t) => {
     "someone-else",
     "무락 발급은 남의 락을 건드리면 안 됩니다",
   );
+});
+
+// 락 파일을 아예 만들 수 없는 환경(쓰기 불가 마운트 등)에서는 기다려도 달라지는 것이
+// 없다. 대기 상한을 소진하면 그 환경의 모든 MCP 호출이 10초씩 늦어지고 그동안 폴링
+// 로그가 수백 줄 나간다. 잡는 뮤테이션: #tryAcquireLock이 EEXIST와 그 외 실패를 같은
+// 값으로 뭉뚱그리면(예전 구현) sleep이 불려 이 테스트가 실패한다.
+test("락을 만들 수 없는 환경이면 기다리지 않고 바로 발급한다", async (t) => {
+  const filePath = tempCachePath(t);
+  const lockPath = `${filePath}.lock`;
+  const clock = fixedClock();
+  t.mock.method(console, "error", () => {});
+
+  const originalWrite = fs.writeFileSync;
+  t.mock.method(fs, "writeFileSync", (target, data, options) => {
+    if (target === lockPath) {
+      const error = new Error("read-only file system");
+      error.code = "EROFS";
+      throw error;
+    }
+    return originalWrite(target, data, options);
+  });
+
+  let slept = 0;
+  const cache = new KisTokenCache({
+    filePath,
+    now: clock.now,
+    sleep: async () => {
+      slept += 1;
+    },
+  });
+  const token = await cache.getOrIssue(async () => ({
+    token: "issued-without-lock",
+    expiresAt: clock.now() + HOUR_MS,
+  }));
+
+  assert.equal(token, "issued-without-lock");
+  assert.equal(slept, 0, "락을 만들 수 없는 환경에서는 한 번도 대기하면 안 됩니다");
+});
+
+// 대기 상한은 호출마다 좁힐 수 있어야 한다. 주문 경로가 그 좁힌 값을 쓴다
+// (index.js의 ORDER_TOKEN_LOCK_WAIT_MS). 잡는 뮤테이션: getOrIssue가 인자를 무시하고
+// 인스턴스 기본값(여기서는 1시간)을 쓰면 이 테스트가 타임아웃으로 죽는다.
+test("getOrIssue()의 lockWaitMs 인자가 인스턴스 기본값을 덮어쓴다", async (t) => {
+  const filePath = tempCachePath(t);
+  const lockPath = `${filePath}.lock`;
+  fs.writeFileSync(lockPath, JSON.stringify({ owner: "someone-else", pid: 1, at: Date.now() }));
+  t.mock.method(console, "error", () => {});
+
+  const cache = new KisTokenCache({
+    filePath,
+    lockWaitMs: HOUR_MS,
+    lockStaleMs: HOUR_MS,
+    pollMs: 5,
+  });
+  const token = await cache.getOrIssue(
+    async () => ({ token: "issued-without-lock", expiresAt: Date.now() + HOUR_MS }),
+    { lockWaitMs: 30 },
+  );
+
+  assert.equal(token, "issued-without-lock");
+});
+
+// 고아 락 인수는 대기가 끝나기 전에 성립해야 의미가 있다. 임계가 대기 상한보다 크면
+// 락을 처음 만난 호출은 인수를 시도조차 못 하고 대기만 버린 뒤 무락 발급으로 내려간다.
+// 잡는 뮤테이션: DEFAULT_LOCK_STALE_MS를 다시 대기 상한 이상으로 올리면 실패한다.
+test("기본 낡음 임계는 기본 대기 상한보다 작다", () => {
+  assert.ok(
+    DEFAULT_LOCK_STALE_MS < DEFAULT_LOCK_WAIT_MS,
+    `낡음 임계(${DEFAULT_LOCK_STALE_MS}ms)는 대기 상한(${DEFAULT_LOCK_WAIT_MS}ms)보다 작아야 합니다`,
+  );
+});
+
+// 대기 루프는 pollMs마다 read()를 부른다. 캐시가 손상돼 있으면 그때마다 같은 실패
+// 로그가 나가 10초 대기 하나에 200줄이 쌓인다. 잡는 뮤테이션: 로그 1회 플래그를 빼면
+// 호출 수만큼 찍혀 실패한다.
+test("손상된 캐시 읽기 실패 로그는 인스턴스당 한 번만 나간다", (t) => {
+  const filePath = tempCachePath(t);
+  const clock = fixedClock();
+  fs.writeFileSync(filePath, '{"token":"trunc');
+  const errors = t.mock.method(console, "error", () => {});
+
+  const cache = new KisTokenCache({ filePath, now: clock.now });
+  for (let i = 0; i < 5; i += 1) {
+    assert.equal(cache.read(), null);
+  }
+
+  assert.equal(errors.mock.callCount(), 1, "같은 읽기 실패를 반복해서 찍으면 안 됩니다");
 });
 
 // SIGKILL·OOM으로 죽은 프로세스가 남긴 락 때문에 발급이 영구히 막히면 안 된다.

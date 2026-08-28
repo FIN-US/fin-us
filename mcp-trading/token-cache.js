@@ -25,21 +25,42 @@ export const DEFAULT_TOKEN_TTL_MARGIN_MS = 60_000;
 // 넘기면 무락 발급으로 넘어간다(fail-open) — 락 때문에 토큰 발급 자체가 막히는 쪽이
 // 더 나쁘기 때문이다.
 //
-// 상위 시간 예산과의 관계: 이 상한을 통째로 소진하는 경우(보유자가 자기 타임아웃마저
-// 넘겨 멈춘 드문 상황)의 최악은 대기 10초 + 자기 발급 8초 = 18초다. MCP 호출 하나의
-// 상한은 backend/services.py run_mcp_tool의 30초이므로, 기동 오버헤드(~1-2초)와
-// 조회 요청 1회(8초)를 더해도 그 안에 들어온다. get_balance의 15초 예산
-// (BALANCE_TIME_BUDGET_MS, mcp-trading/balance.js)은 이보다 먼저 걸릴 수 있는데,
-// 그 결과는 실패가 아니라 연속조회 페이지를 덜 가져오는 축소다.
+// 상위 시간 예산과의 관계. MCP 호출 하나의 상한은 backend/services.py run_mcp_tool의
+// 30초이고, 이 상한을 통째로 소진하는 경우(보유자가 자기 타임아웃마저 넘겨 멈춘 드문
+// 상황)의 토큰 확보 최악은 대기 10초 + 자기 발급 8초 = 18초다.
+//   - 조회 경로: 18 + 조회 요청 1회 8초 + 기동 ~2초 = 28초 < 30초. get_balance의 15초
+//     예산(BALANCE_TIME_BUDGET_MS, mcp-trading/balance.js)이 먼저 걸릴 수 있지만 그
+//     결과는 실패가 아니라 연속조회 페이지를 덜 가져오는 축소다.
+//   - 주문 경로(place_order): hashkey POST와 주문 POST를 각각 치므로(kis-client.js의
+//     kisOrderPost) 8초짜리 요청이 하나 더 붙는다. 18 + 8 + 8 + 2 = 36초로 30초를
+//     넘긴다. 그래서 주문 경로는 이 기본값을 쓰지 않고 index.js의
+//     ORDER_TOKEN_LOCK_WAIT_MS(3초)를 주입한다.
 export const DEFAULT_LOCK_WAIT_MS = 10_000;
 // 이 시각보다 오래된 락 파일은 죽은 프로세스가 남긴 것으로 보고 걷어낸다.
-// 살아 있는 보유자의 최장 보유 시간은 발급 요청 8초 + 캐시 쓰기이므로 15초면
-// 살아 있는 보유자를 밀어낼 위험 없이 고아만 걷어낸다.
-export const DEFAULT_LOCK_STALE_MS = 15_000;
+// 살아 있는 보유자의 최장 보유 시간은 발급 요청 8초(kisAxios 타임아웃) + 캐시 쓰기다.
+// 그 위로 1초 여유를 둔 9초로 잡는다 — DEFAULT_LOCK_WAIT_MS(10초)보다 작아야 죽은
+// 보유자가 남긴 락을 "지금 이 호출" 안에서 인수할 수 있다. 이 값이 대기 상한보다 크면
+// 첫 호출은 인수를 시도조차 못 하고 대기만 소진한 뒤 무락 발급으로 내려가고, 인수는
+// 5초 뒤에 뜨는 다음 프로세스의 몫이 된다.
+//
+// 9초와 10초 사이에서 살아 있는 보유자를 밀어낼 여지는 남는다. 다만 그 구간에 있는
+// 보유자는 이미 자기 타임아웃(8초)을 넘겨 멈춘 쪽이고, 밀어낸 최악의 결과도 발급 1회
+// 중복이라 감수한다 — 반대편(고아 락 때문에 매 호출이 대기를 통째로 버리는 것)이 더 비싸다.
+// 주문 경로는 대기 상한이 3초라 이 인수가 성립하지 않는다. 그쪽은 예산이 좁아 대기 대신
+// 무락 발급으로 바로 내려가는 쪽을 택한 것이고, 고아 락 정리는 다음 조회 호출이 한다.
+export const DEFAULT_LOCK_STALE_MS = 9_000;
 // 대기 중 캐시를 다시 읽는 간격. 락 보유자가 캐시를 쓴 직후 대기자가 통과하기까지의
 // 지연이 이 값이다. 발급 자체가 보통 수백 ms라 50ms면 사람이 느낄 만큼 늘어나지 않고,
 // 대기자 하나가 10초 동안 읽는 횟수도 200회에 그친다.
 export const DEFAULT_LOCK_POLL_MS = 50;
+
+// #tryAcquireLock의 세 결과. "락을 못 잡았다"를 하나로 뭉뚱그리면 호출부가 기다릴
+// 가치가 있는 실패(남이 잡고 있다)와 기다려도 달라지지 않는 실패(락 파일을 만들 수
+// 없는 환경)를 구분하지 못한다. 후자에서 대기 상한을 통째로 소진하면 KIS_TOKEN_CACHE_PATH가
+// 쓰기 불가 경로일 때 모든 MCP 호출이 10초씩 늦어진다.
+const LOCK_ACQUIRED = "acquired";
+const LOCK_CONTENDED = "contended";
+const LOCK_UNAVAILABLE = "unavailable";
 
 function defaultSleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -72,6 +93,11 @@ export class KisTokenCache {
     // 락 파일이 놓일 디렉터리를 만들었는지 여부. 대기 중에는 이 함수가 pollMs마다
     // 불리므로 mkdir을 매번 걸지 않는다.
     this.lockDirEnsured = false;
+    // 대기 루프는 pollMs(기본 50ms)마다 돈다. 그 안에서 매번 찍는 로그는 10초 대기
+    // 하나에 200줄이 되어 MCP 로그(stderr)를 통째로 덮는다. 반복되는 진단은 인스턴스당
+    // 한 번만 남긴다 — 같은 원인이 반복되는 것이라 두 번째 줄부터는 새 정보가 없다.
+    this.loggedReadFailure = false;
+    this.loggedStaleTakeover = false;
     // 락 파일에 적어 두는 소유자 식별자. 해제할 때 "내가 잡은 락"인지 확인하는 데만
     // 쓴다(#releaseLock). pid를 쓰지 않는 이유는 캐시 경로가 컨테이너 사이에
     // 공유될 수 있어 pid가 유일하지 않기 때문이다.
@@ -91,7 +117,8 @@ export class KisTokenCache {
     try {
       cached = JSON.parse(fs.readFileSync(this.filePath, "utf8"));
     } catch (error) {
-      if (error.code !== "ENOENT") {
+      if (error.code !== "ENOENT" && !this.loggedReadFailure) {
+        this.loggedReadFailure = true;
         console.error(`KIS token cache read failed: ${error.message}`);
       }
       return null;
@@ -155,15 +182,26 @@ export class KisTokenCache {
 
   // 캐시 히트면 그대로, 아니면 issue()로 발급해 캐시에 넣고 돌려준다.
   // 동시에 뜬 프로세스 중 실제로 issue()를 부르는 것은 락을 잡은 하나뿐이다.
-  async getOrIssue(issue) {
+  //
+  // lockWaitMs를 호출마다 좁힐 수 있다. 주문 경로처럼 상위 시간 예산이 좁은 호출은
+  // 기다리는 대신 일찍 무락 발급으로 내려가야 하기 때문이다(index.js의
+  // ORDER_TOKEN_LOCK_WAIT_MS).
+  async getOrIssue(issue, { lockWaitMs = this.lockWaitMs } = {}) {
     const hit = this.read();
     if (hit) return hit;
 
-    const deadline = this.now() + this.lockWaitMs;
+    const deadline = this.now() + lockWaitMs;
     let held = false;
     for (;;) {
-      held = this.#tryAcquireLock();
-      if (held) break;
+      const lockState = this.#tryAcquireLock();
+      if (lockState === LOCK_ACQUIRED) {
+        held = true;
+        break;
+      }
+
+      // 락을 쓸 수 없는 환경이다. 기다려도 달라지지 않으므로 대기 없이 바로
+      // 무락 발급으로 내려간다(사유는 #tryAcquireLock이 이미 로그로 남겼다).
+      if (lockState === LOCK_UNAVAILABLE) break;
 
       // 락 보유자가 캐시를 쓰는 즉시 통과한다 — 락이 풀리기를 기다리지 않는다.
       const late = this.read();
@@ -172,7 +210,7 @@ export class KisTokenCache {
       // 대기 상한을 넘겼다. 락을 못 잡았지만 여기서 포기하면 호출자는 토큰 없이
       // 실패한다. 락이 없던 예전 동작(무락 발급)으로 내려가는 쪽이 낫다.
       if (this.now() >= deadline) {
-        console.error(`KIS token lock wait timed out (${this.lockWaitMs}ms); issuing without the lock`);
+        console.error(`KIS token lock wait timed out (${lockWaitMs}ms); issuing without the lock`);
         break;
       }
 
@@ -195,6 +233,14 @@ export class KisTokenCache {
         throw new Error("KIS 토큰 발급 결과에 access token이 없습니다.");
       }
 
+      // 만료 시각도 같은 자리에서 끊는다. KIS 응답의 expires_in이 숫자가 아니면
+      // (index.js의 Number(...)가 NaN을 낸다) 캐시에 expiresAt: null이 남고 read()가
+      // 그 캐시를 영원히 미스로 본다 — 락은 멀쩡히 도는데 매 호출이 발급을 치는,
+      // #324 이전 상태로 조용히 되돌아간다.
+      if (!Number.isFinite(Number(issued.expiresAt))) {
+        throw new Error("KIS 토큰 발급 결과의 만료 시각이 숫자가 아닙니다.");
+      }
+
       this.write(issued);
       return issued.token;
     } finally {
@@ -203,8 +249,11 @@ export class KisTokenCache {
   }
 
   // O_EXCL 생성으로 락을 잡는다. 이미 있으면 낡았을 때만 걷어내고 한 번 더 시도한다.
-  // 생성 실패(EEXIST 외)는 "락을 쓸 수 없는 환경"으로 보고 false를 돌려준다 —
-  // 호출부가 무락 발급으로 내려가므로 락 파일을 못 만드는 환경에서도 토큰은 나온다.
+  // 결과는 세 가지다.
+  //   LOCK_ACQUIRED    — 내가 잡았다.
+  //   LOCK_CONTENDED   — 남이 잡고 있다. 기다리면 풀리거나 캐시가 채워진다.
+  //   LOCK_UNAVAILABLE — 이 환경에서는 락 파일을 만들 수 없다(EACCES·EROFS·ENOENT 등).
+  //                      기다려도 달라지지 않으므로 호출부가 즉시 무락 발급으로 간다.
   #tryAcquireLock({ allowStaleTakeover = true } = {}) {
     try {
       if (!this.lockDirEnsured) {
@@ -217,26 +266,31 @@ export class KisTokenCache {
         flag: "wx",
         mode: 0o600,
       });
-      return true;
+      return LOCK_ACQUIRED;
     } catch (error) {
       if (error.code !== "EEXIST") {
         console.error(`KIS token lock unavailable (${error.code || error.name}): ${error.message}`);
-        return false;
+        return LOCK_UNAVAILABLE;
       }
     }
 
-    if (!allowStaleTakeover) return false;
+    if (!allowStaleTakeover) return LOCK_CONTENDED;
 
     // 낡은 락만 걷어낸다. mtime을 쓰는 이유는 파일 내용(pid·at)이 부분 쓰기나
     // 다른 구현으로 깨져 있어도 판정이 성립하기 때문이다.
     try {
       const ageMs = this.now() - fs.statSync(this.lockPath).mtimeMs;
-      if (ageMs <= this.lockStaleMs) return false;
-      console.error(`KIS token lock looked stale (${Math.round(ageMs)}ms); taking it over`);
+      if (ageMs <= this.lockStaleMs) return LOCK_CONTENDED;
+      if (!this.loggedStaleTakeover) {
+        this.loggedStaleTakeover = true;
+        console.error(`KIS token lock looked stale (${Math.round(ageMs)}ms); taking it over`);
+      }
       fs.unlinkSync(this.lockPath);
     } catch {
       // stat/unlink 실패는 대개 다른 프로세스가 방금 락을 푼 경우(ENOENT)다.
       // 어느 쪽이든 아래에서 한 번만 더 잡아 보고, 실패하면 대기로 돌아간다.
+      // (unlink가 권한 문제로 계속 실패하는 환경이라면 재시도도 EEXIST로 끝나
+      // LOCK_CONTENDED가 되고, 대기 상한이 만료되면 무락 발급으로 내려간다.)
     }
 
     // 재시도는 한 번뿐이다(allowStaleTakeover: false). 여러 프로세스가 같은 낡은
