@@ -30,6 +30,7 @@ from backend.presentation import (  # noqa: E402
     load_terms,
     reasoning_footnote,
     render,
+    split_for_telegram,
 )
 from backend.telegram_notifier import (  # noqa: E402
     TelegramNotifier,
@@ -165,7 +166,7 @@ CASES = [
         "오늘 일지 써줘",
     ),
     (
-        "8. 아주 긴 답변 (본문은 잘려도 각주는 남는다)",
+        "8. 아주 긴 답변 (잘리지 않고 여러 통으로 나뉜다)",
         "자연어 질문 → NAT, 4000자 초과",
         KIND_ANALYSIS,
         LONG_BODY,
@@ -220,6 +221,21 @@ RULER = "─" * BUBBLE + "┆ 44칸 (모바일 말풍선 한 줄)"
 
 def display_width(text):
     return sum(2 if unicodedata.east_asian_width(c) in "WF" else 1 for c in text)
+
+
+def blocks(text, *, elide=False):
+    """실제로 나가는 메시지 단위로 코드블록을 만든다 (#313).
+
+    상한 안이면 한 덩이라 예전과 같고, 넘으면 조각 수만큼 블록이 늘어난다 — 미리보기가
+    "한 통에 다 들어간다"고 말하지 않으려면 여기가 분할을 그대로 보여줘야 한다.
+    """
+    parts = split_for_telegram(text)
+    if len(parts) == 1:
+        return [block(parts[0], elide=elide)]
+    rendered = []
+    for index, part in enumerate(parts, 1):
+        rendered += [f"조각 {index}/{len(parts)} (별도 메시지)", "", block(part, elide=elide), ""]
+    return rendered[:-1]
 
 
 def block(text, *, elide=False):
@@ -279,6 +295,9 @@ lines = [
     "6. **용어 각주는 검수된 사전에서만.** `backend/terms.json`에 있는 말만, 첫 등장 2개까지.",
     "   사용자가 질문에 직접 쓴 말은 아는 말로 보고 건너뛴다 (9번: 질문에 있는 예수금·",
     "   평가손익 대신 지정가·체결을 설명한다).",
+    "7. **상한을 넘으면 자르지 않고 나눈다.** 4000자를 넘는 답변은 여러 통으로 나가고,",
+    "   조각마다 `📄 n/N`이 붙는다 (8번). 각주는 마지막 조각에 통째로 실린다 — 전송이",
+    "   도중에 끊겨 일부만 도착해도 번호가 그 사실을 드러낸다 (#313).",
     "",
     "## 아직 사람이 정해야 하는 것",
     "",
@@ -286,7 +305,6 @@ lines = [
     # 없애려던 "낡은 표제어 서술"(위 모듈 docstring)이 정확히 이 자리에서 다시 났다 (#310).
     f"- `terms.json`의 설명 {len(load_terms())}개는 LLM 초안이다. 제도 수치와 표현을 검수해야 한다",
     "  (파일 맨 위 `_readme`에 기준이 있다).",
-    "- 8번처럼 4000자를 넘는 답변은 지금 잘린다. 분할 전송으로 바꾸는 건 후속 과제다.",
     "",
     "---",
     "",
@@ -315,14 +333,14 @@ for title, source, kind, body, reasoning, question in CASES:
         "",
         "**after (초보)**",
         "",
-        block(
+        *blocks(
             render(body, kind, LEVEL_BEGINNER, reasoning=reasoning, question=question),
             elide=elide,
         ),
         "",
         "**after (중급)**",
         "",
-        block(
+        *blocks(
             render(body, kind, LEVEL_INTERMEDIATE, reasoning=reasoning, question=question),
             elide=elide,
         ),

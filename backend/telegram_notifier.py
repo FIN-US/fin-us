@@ -16,10 +16,12 @@ from .presentation import (
     TELEGRAM_MESSAGE_LIMIT,
     alert_kind,
     as_list_items,
+    clamp,
     decision_label,
     format_signal_score_line,
     render,
     source_label,
+    split_for_telegram,
     urgency_label,
 )
 
@@ -29,6 +31,10 @@ _TELEGRAM_BOT_URL_RE = re.compile(r"(https://api\.telegram\.org/bot)[^/\s\"]+")
 # TELEGRAM_MESSAGE_LIMIT은 presentation이 정의하고 이 모듈이 이름만 다시 내보낸다 (#297).
 # 알림도 render를 통과하므로 이 모듈이 presentation을 임포트하고, 그래서 상한의 정의는
 # 반대편(잎)에 있어야 순환이 생기지 않는다. 기존 임포트 경로는 그대로 살아 있다.
+#
+# 이 모듈은 상한을 **자르는 데 쓰지 않는다** (#313). 상한을 넘는 본문은 split_for_telegram이
+# 여러 통으로 나누고, 나눌 수 없는 조작(editMessageText, 나중에 지울 메시지)만 clamp로
+# 자른다 — 그쪽도 생짜 슬라이스가 아니라 말줄임 접미사가 붙어 잘렸다는 사실이 보인다.
 
 # 긴급으로 취급하는 urgency. 배너(🚨 긴급 알림)는 이 집합을 따로 보지 않고
 # should_send_telegram_alert의 판정 결과를 그대로 쓴다 — 판정이 두 곳에 있으면 어긋난다
@@ -353,7 +359,9 @@ class TelegramNotifier:
             items.append(f"요약: {summary}")
         # 제목은 목록 밖이다. 값이 늘어선 줄만 표시를 받는다.
         lines = [f"{stock} / {source_label(source)}", *as_list_items(items)]
-        return "\n".join(lines)[:TELEGRAM_MESSAGE_LIMIT]
+        # 여기서 자르지 않는다. 상한 맞추기는 전송 직전 한 곳(split_for_telegram)이 하고,
+        # 이 함수는 analysis_data를 문장으로 바꾸는 순수 함수로 남는다 (#313).
+        return "\n".join(lines)
 
     def format_morning_briefing(self, briefing: dict[str, Any]) -> str:
         lines = [
@@ -369,7 +377,9 @@ class TelegramNotifier:
             "⚡ 주요 촉매 이벤트",
             *self._format_bullets(briefing.get("catalysts")),
         ]
-        return "\n".join(lines)[:TELEGRAM_MESSAGE_LIMIT]
+        # format_analysis_alert와 같은 이유로 자르지 않는다 (#313). 브리핑은 네 묶음이
+        # 빈 줄로 갈라져 있어, 나뉘더라도 조각 경계가 묶음 사이에 떨어진다.
+        return "\n".join(lines)
 
     @staticmethod
     def _format_bullets(items: Any) -> list[str]:
@@ -409,7 +419,7 @@ class TelegramNotifier:
 
         is_urgent = should_send_telegram_alert(analysis_data, alert_mode="urgent")
         try:
-            await self._post_message(
+            await self._post_parts(
                 render(
                     self.format_analysis_alert(
                         stock=stock,
@@ -433,11 +443,30 @@ class TelegramNotifier:
         *,
         reply_markup: dict[str, Any] | None = None,
     ) -> bool:
+        """상한을 넘으면 잘라내지 않고 나눠 보낸다 (#313).
+
+        조각이 하나뿐이면 이전과 똑같이 한 번 호출한다 — 짧은 메시지의 경로는 달라지지
+        않는다. 이미 조각인 문자열을 다시 넘겨도 상한 안이라 그대로 한 통으로 나간다.
+        telegram_commands._send_text_settled가 이 멱등성에 기대 조각 단위로 재시도한다.
+
+        도중에 실패하면 남은 조각을 보내지 않고 False를 돌려준다. 앞이 빠진 채 뒤만
+        도착하면 사용자는 빠진 자리를 알 수 없는데, 조각마다 붙는 머리표("📄 2/3")가
+        여기서 값을 한다 — 받은 번호가 끊기면 무엇이 오지 않았는지 보인다.
+        """
         if not self.enabled:
             return False
 
+        parts = split_for_telegram(text)
+        delivered = 0
         try:
-            await self._post_message(text[:TELEGRAM_MESSAGE_LIMIT], reply_markup=reply_markup)
+            for position, part in enumerate(parts, 1):
+                # 버튼은 마지막 조각에만 단다. 앞 조각에 달면 본문이 끝나기 전에 답을
+                # 고르라고 재촉하는 꼴이고, 조각마다 달면 같은 버튼이 여러 벌 남는다.
+                await self._post_message(
+                    part,
+                    reply_markup=reply_markup if position == len(parts) else None,
+                )
+                delivered = position
             self.last_retry_after_seconds = None
             return True
         except Exception as exc:
@@ -446,14 +475,19 @@ class TelegramNotifier:
             # telegram_commands._send_text_settled가 이 값으로 "남은 예산 안에 풀리는
             # ban인가"를 판단한다 — 없으면 재시도 간격이 순전히 추측이 된다 (PR #253 리뷰).
             self.last_retry_after_seconds = retry_after
+            # 나뉜 메시지는 "몇 조각까지 갔는가"가 진단의 핵심이다. 한 조각짜리 메시지의
+            # 로그 문구는 건드리지 않는다 — 대부분의 전송이 그쪽이고, 조각 수가 늘 붙으면
+            # 원래 있던 429 진단이 잡음에 묻힌다.
+            progress = f" ({delivered}/{len(parts)} parts delivered)" if len(parts) > 1 else ""
             if retry_after is None:
-                logger.error("Telegram message send failed: %s", exc)
+                logger.error("Telegram message send failed%s: %s", progress, exc)
             else:
                 # 호출부(telegram_commands._send_text_settled)의 재시도 간격은 이 값을
                 # 볼 수 없어 고정 추측값이다. 실제 ban 길이가 그 가정과 맞는지 판단할
                 # 근거를 남긴다 — 어긋나면 간격을 조정하거나 값을 전달하도록 바꿔야 한다.
                 logger.error(
-                    "Telegram message send failed (429, retry_after=%ss): %s",
+                    "Telegram message send failed%s (429, retry_after=%ss): %s",
+                    progress,
                     retry_after,
                     exc,
                 )
@@ -469,13 +503,19 @@ class TelegramNotifier:
 
         진행 메시지처럼 나중에 지우거나 고칠 메시지에 쓴다. 성공/실패 bool을 주는
         :meth:`send_text`와 달리 후속 조작에 필요한 식별자를 준다.
+
+        여기서는 나누지 않고 자른다 (#313). 이 함수의 계약이 "식별자 하나로 다시 손댈 수
+        있는 메시지 하나"라서, 나누는 순간 그 계약이 깨진다 — 앞 조각들의 식별자를 잃고
+        진행 메시지가 지워지지 않은 채 남는다. 대신 생짜 슬라이스가 아니라 clamp를 써서
+        잘렸다는 사실이 말줄임으로 보이게 한다. 실제로는 이 경로에 들어오는 문장이
+        진행 안내 상수뿐이라 잘릴 일이 없다.
         """
         if not self.enabled:
             return None
 
         try:
             body = await self._post_message_returning_body(
-                text[:TELEGRAM_MESSAGE_LIMIT], reply_markup=reply_markup
+                clamp(text), reply_markup=reply_markup
             )
         except Exception as exc:
             logger.error("Telegram message send failed: %s", exc)
@@ -511,6 +551,10 @@ class TelegramNotifier:
         최종 답변을 내보내는 용도로는 쓰지 않는다 — 텔레그램은 편집에 대해 푸시 알림을
         보내지 않는다. 진행 메시지 삭제가 실패했을 때 "분석 중"이 영원히 남지 않도록
         종료 표시로 바꾸는 폴백 경로에 쓴다.
+
+        :meth:`send_text_returning_id`와 같은 이유로 나누지 않고 clamp한다 (#313).
+        editMessageText는 이미 존재하는 메시지 **하나**를 고치는 조작이라 여러 통으로
+        늘릴 방법이 아예 없다.
         """
         if not self.enabled:
             return False
@@ -522,7 +566,7 @@ class TelegramNotifier:
                 payload={
                     "chat_id": self.chat_id,
                     "message_id": message_id,
-                    "text": text[:TELEGRAM_MESSAGE_LIMIT],
+                    "text": clamp(text),
                     "disable_web_page_preview": True,
                 },
             )
@@ -627,6 +671,16 @@ class TelegramNotifier:
             "sendMessage",
             payload=self._send_message_payload(text, reply_markup),
         )
+
+    async def _post_parts(self, text: str) -> None:
+        """상한을 넘으면 나눠 보낸다. 실패는 그대로 올린다 (#313).
+
+        :meth:`send_text`가 예외를 삼키고 bool로 바꾸는 것과 달리, 이쪽은 호출부가 이미
+        자기 try 안에서 처리하는 경로(:meth:`send_analysis_alert`)를 위한 것이다. 버튼을
+        받지 않는 것도 그 경로의 모양이다 — 알림에는 버튼이 붙지 않는다.
+        """
+        for part in split_for_telegram(text):
+            await self._post_message(part)
 
     async def _post_message_returning_body(
         self,
