@@ -1429,8 +1429,9 @@ class TelegramCommandHandler:
             reference_price = parse_current_price(str(quote_result))
             if reference_price is None:
                 logger.warning(
-                    "시장가 참고단가를 읽지 못했다 (stock=%s) — 단가 없이 기록되고 "
-                    "오늘 /advise는 일 거래대금 집계 실패로 막힌다 (#309)",
+                    "시장가 참고단가를 읽지 못했다 (stock=%s) — 이 주문이 확정되면 단가 "
+                    "없이 기록되고, 그때부터 오늘 /advise가 일 거래대금 집계 실패로 "
+                    "막힌다 (#309)",
                     stock_code,
                 )
             else:
@@ -1861,13 +1862,20 @@ class TelegramCommandHandler:
                     f"주문금액: {amount:,}원",
                 ]
             )
+        elif order.price > 0:
+            # 시장가에도 참고단가가 잡히면서 금액을 셀 수 있게 됐다(#309). 돈이 나가는
+            # 확인 단계에서 금액만 빠져 있을 이유가 없다 — 일 거래대금 한도에 가산될
+            # 값도 이것이다. 체결가가 아니라 주문 시점 현재가 기준이므로 "예상"이고,
+            # 제안 경로의 승인 메시지도 같은 라벨을 쓴다 (PR #323 리뷰).
+            lines.append(f"예상 주문금액: {order.quantity * order.price:,}원")
 
-        current_price = self._first_line_containing(
-            str(quote_result),
-            ("현재가:", "price:", "Price:"),
-        )
-        if current_price:
-            lines.append(current_price)
+        # 기록용 참고단가와 **같은 파서**로 읽는다. 원문 줄을 그대로 집어 오면 표시와
+        # 기록이 서로 다른 라벨 집합을 보게 되고("price:"는 여기서만 매치된다), 라벨이
+        # 바뀌는 날 사용자는 확인 화면에서 현재가를 보는데 기록은 0("금액 모름")이 되는
+        # 어긋남이 생긴다. 하나로 묶어 두면 둘이 함께 사라진다 (PR #323 리뷰).
+        current_price = parse_current_price(str(quote_result))
+        if current_price is not None:
+            lines.append(f"- 현재가: {current_price:,}원")
 
         balance = self._first_line_containing(
             str(balance_result),

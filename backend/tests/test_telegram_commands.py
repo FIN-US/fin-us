@@ -1036,7 +1036,8 @@ async def test_buy_command_without_price_creates_market_order_and_prompts_confir
     assert "삼성전자 매수 주문 확인" in notifier.messages[-1]
     assert "주문유형: 시장가" in notifier.messages[-1]
     assert "지정가:" not in notifier.messages[-1]
-    assert "주문금액:" not in notifier.messages[-1]
+    # 체결가가 아니라 주문 시점 현재가 기준이므로 "예상"이다 (#309).
+    assert "예상 주문금액: 745,000원" in notifier.messages[-1]
     assert "/confirm" in notifier.messages[-1]
     assert "/cancel" in notifier.messages[-1]
     assert _orders(handler)["123"].stock_name == "삼성전자"
@@ -1049,7 +1050,7 @@ async def test_buy_command_without_price_creates_market_order_and_prompts_confir
 
 
 @pytest.mark.asyncio
-async def test_market_order_proceeds_without_reference_price_when_quote_is_unreadable():
+async def test_market_order_proceeds_without_reference_price_when_quote_is_unreadable(caplog):
     """참고단가를 못 읽어도 주문은 막지 않는다 — 대신 단가 0이 그대로 남는다 (#309).
 
     사용자가 명시적으로 낸 주문을 기록 사정으로 되돌리지는 않는다. 대가는
@@ -1074,13 +1075,17 @@ async def test_market_order_proceeds_without_reference_price_when_quote_is_unrea
         now_factory=lambda: datetime(2026, 5, 20, 10, 0, tzinfo=KST),
     )
 
-    await handler.handle_update(
-        {"message": {"chat": {"id": 123}, "text": "/buy 삼성전자 10"}}
-    )
+    with caplog.at_level("WARNING"):
+        await handler.handle_update(
+            {"message": {"chat": {"id": 123}, "text": "/buy 삼성전자 10"}}
+        )
 
     assert "삼성전자 매수 주문 확인" in notifier.messages[-1]
+    assert "예상 주문금액" not in notifier.messages[-1]
     assert _orders(handler)["123"].price == 0
     assert _orders(handler)["123"].order_type == "MARKET"
+    # 조용히 0으로 떨어지지 않는다 — 운영자가 알아야 그날 /advise가 막히는 이유를 안다.
+    assert "시장가 참고단가를 읽지 못했다" in caplog.text
 
 
 @pytest.mark.asyncio
