@@ -618,3 +618,40 @@ def test_nullable_recreation_preserves_signal_scoring_columns(tmp_path, monkeypa
 
     assert col_info["decision"][3] == 0, "재생성이 수행되지 않았다 (decision이 여전히 NOT NULL)"
     assert row == [(-2, "수주 취소 공시", 1.25)], "재생성이 신호 점수 값을 잃었다"
+
+
+def test_init_db_creates_filtered_signal_table_on_existing_db(tmp_path, monkeypatch):
+    """#304: 이미 쓰고 있던 DB 파일에도 filteredsignal 테이블이 생겨야 한다.
+
+    새 테이블은 create_all()이 만들어 주므로 _PENDING_COLUMN_MIGRATIONS에 넣을
+    필요가 없다 — 하지만 그 전제가 깨지면 기록 경로가 조용히 실패하고(로그만 남고)
+    임계값 조정 근거는 계속 없는 상태가 된다. 전제를 여기서 못박는다.
+    """
+    db_path = tmp_path / "existing.db"
+    _create_old_schema_agentreport(str(db_path))
+
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("DROP TABLE IF EXISTS filteredsignal")
+    conn.commit()
+    conn.close()
+
+    test_engine = create_engine(
+        f"sqlite:///{db_path}", connect_args={"check_same_thread": False}
+    )
+    monkeypatch.setattr(database, "engine", test_engine)
+
+    database.init_db()
+
+    conn = sqlite3.connect(str(db_path))
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(filteredsignal)")}
+    conn.close()
+    assert columns == {
+        "id",
+        "stock_name",
+        "source",
+        "score",
+        "threshold",
+        "reason",
+        "uncertainty",
+        "created_at",
+    }

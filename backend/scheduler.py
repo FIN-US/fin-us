@@ -7,16 +7,19 @@ from typing import Any, Callable
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from sqlmodel import Session, select
 from .catalyst_repo import CatalystEventInput, SqliteCatalystEventRepo
+from .filtered_signal_repo import SqliteFilteredSignalRepo
 from .ws_manager import manager
 from .database import engine
 from .config import (
     NEWS_MCP_PARAMS,
     TRADING_MCP_PARAMS,
     DART_MCP_PARAMS,
+    FILTERED_SIGNAL_RETENTION_DAYS,
     SIGNAL_SCORE_THRESHOLD,
 )
 from .redis_state import RedisSchedulerState, signal_hash, redis_state
 from .services import (
+    SignalScore,
     perform_stock_analysis,
     run_mcp_tool,
     score_signal,
@@ -99,6 +102,11 @@ def _default_watchlist_repo() -> SqliteWatchlistRepo:
 
 def _default_catalyst_repo() -> SqliteCatalystEventRepo:
     return SqliteCatalystEventRepo(lambda: Session(engine))
+
+
+def _default_filtered_signal_repo() -> SqliteFilteredSignalRepo:
+    return SqliteFilteredSignalRepo(lambda: Session(engine))
+
 
 # "- 종목명 (코드) ..." 형식의 잔고 종목 줄을 검증하는 정규식.
 # 줄에 "(코드)" 그룹이 없는 경우(예: "- 삼성전자 · 3주")를 계약 위반으로 거부한다.
@@ -570,7 +578,10 @@ async def catalyst_calendar_task(
         level=level or DEFAULT_TELEGRAM_USER_LEVEL,
     )
 
-async def monitor_market_task(watchlist_repo: SqliteWatchlistRepo | None = None):
+async def monitor_market_task(
+    watchlist_repo: SqliteWatchlistRepo | None = None,
+    filtered_signal_repo: SqliteFilteredSignalRepo | None = None,
+):
     """
     주기적으로 시장 상황을 모니터링합니다.
     """
@@ -584,7 +595,7 @@ async def monitor_market_task(watchlist_repo: SqliteWatchlistRepo | None = None)
 
             fallback_to_memory = False
             try:
-                await _monitor_market_task(state, watchlist_repo)
+                await _monitor_market_task(state, watchlist_repo, filtered_signal_repo)
             finally:
                 try:
                     await state.release_lock(state.keys.scheduler_lock("market_monitoring"), scheduler_token)
@@ -599,12 +610,13 @@ async def monitor_market_task(watchlist_repo: SqliteWatchlistRepo | None = None)
             "Redis 스케줄러 상태를 사용할 수 없어 인메모리 fallback으로 시장 모니터링을 실행합니다: %s",
             e,
         )
-        await _monitor_market_task(None, watchlist_repo)
+        await _monitor_market_task(None, watchlist_repo, filtered_signal_repo)
 
 
 async def _monitor_market_task(
     state: RedisSchedulerState | None,
     watchlist_repo: SqliteWatchlistRepo | None = None,
+    filtered_signal_repo: SqliteFilteredSignalRepo | None = None,
 ):
     global _balance_failure_streak, _last_balance_error
 
@@ -739,7 +751,9 @@ async def _monitor_market_task(
         with Session(engine) as session:
             for stock in stocks_to_monitor:
                 for source in SIGNAL_SOURCES:
-                    await _monitor_signal(stock, source, session, state)
+                    await _monitor_signal(
+                        stock, source, session, state, filtered_signal_repo
+                    )
                     
     except Exception as e:
         logger.error(f"모니터링 태스크 시작 중 오류: {e}")
@@ -768,11 +782,47 @@ async def _send_telegram_alert_if_needed(
         logger.error("[%s:%s] Telegram 알림 처리 중 오류: %s", source, stock, e)
 
 
+async def _record_filtered_signal(
+    repo: SqliteFilteredSignalRepo | None,
+    stock: str,
+    source: str,
+    signal_score: SignalScore,
+) -> None:
+    """걸러진 신호의 채점 결과를 남긴다 (#304). 실패해도 감시는 계속한다.
+
+    로그 한 줄로는 grep만 되고 집계가 안 돼서 임계값을 조정할 근거가 없었다. 기록이
+    실패했다고 감시 루프를 멈추지는 않는다 — 이 값은 사후 분석용이고, 여기서 예외를
+    올리면 DB 문제 하나가 다음 종목·소스의 감시까지 통째로 건너뛰게 만든다.
+    """
+    if signal_score.score is None:
+        # 채점 자체가 없었던 경로(빈 본문·직전과 동일). repo.record도 같은 조건에서
+        # 걸러 내지만, 여기서 먼저 끊어 세션을 열지도 않는다.
+        return
+    try:
+        await (repo or _default_filtered_signal_repo()).record(
+            stock_name=stock,
+            source=source,
+            score=signal_score.score,
+            threshold=SIGNAL_SCORE_THRESHOLD,
+            reason=signal_score.reason,
+            uncertainty=signal_score.uncertainty,
+        )
+    except Exception as e:
+        logger.error(
+            "[%s:%s] 걸러진 신호 점수 기록 실패(score=%s): %s",
+            source,
+            stock,
+            signal_score.score,
+            e,
+        )
+
+
 async def _monitor_signal(
     stock: str,
     source: SignalSource,
     session: Session,
     state: RedisSchedulerState | None,
+    filtered_signal_repo: SqliteFilteredSignalRepo | None = None,
 ):
     analysis_token = None
     try:
@@ -829,6 +879,9 @@ async def _monitor_signal(
                 stock,
                 signal_score.score,
                 SIGNAL_SCORE_THRESHOLD,
+            )
+            await _record_filtered_signal(
+                filtered_signal_repo, stock, source.name, signal_score
             )
             return
 
@@ -932,6 +985,36 @@ async def morning_briefing_task(
         logger.error("모닝 브리핑 작업 중 오류: %s", e)
 
 
+async def purge_filtered_signals_task(
+    filtered_signal_repo: SqliteFilteredSignalRepo | None = None,
+) -> None:
+    """보존 기간이 지난 걸러진 신호 기록을 정리한다 (#304).
+
+    감시 루프가 종목·소스마다 10분 주기로 돌아 행이 빠르게 쌓이므로, 보존 정책을
+    두지 않으면 이 테이블이 SQLite 파일을 조용히 불린다. 하루 한 번 잘라 낸다.
+
+    monitor_market_task와 달리 Redis 스케줄러 락을 잡지 않는다. 워커가 둘 다 같은
+    조건으로 지우면 늦게 도착한 쪽이 0건을 지울 뿐이라 락으로 지킬 상태가 없다.
+    """
+    repo = filtered_signal_repo or _default_filtered_signal_repo()
+    try:
+        deleted = await repo.purge_expired(FILTERED_SIGNAL_RETENTION_DAYS)
+    except Exception as e:
+        # 정리 실패는 다음 주기에 다시 시도된다. 재시도하면 같은 조건으로 지우므로
+        # 이번에 못 지운 행도 함께 정리된다.
+        logger.error(
+            "걸러진 신호 기록 정리 실패 (보존 %d일): %s",
+            FILTERED_SIGNAL_RETENTION_DAYS,
+            e,
+        )
+        return
+    logger.info(
+        "걸러진 신호 기록 정리 완료: %d건 삭제 (보존 %d일)",
+        deleted,
+        FILTERED_SIGNAL_RETENTION_DAYS,
+    )
+
+
 def start_scheduler():
     """스케줄러를 시작하고 작업을 등록합니다."""
     if not scheduler.running:
@@ -961,6 +1044,15 @@ def start_scheduler():
             hour=8,
             minute=30,
             id="morning_briefing",
+        )
+        # 걸러진 신호 기록 정리 (#304). 장 시작 전 한산한 시각에 돌려 감시 주기와
+        # DB 접근이 겹치지 않게 한다.
+        scheduler.add_job(
+            purge_filtered_signals_task,
+            "cron",
+            hour=4,
+            minute=10,
+            id="purge_filtered_signals",
         )
         
         scheduler.start()

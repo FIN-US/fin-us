@@ -1,12 +1,22 @@
 import os
 import logging
 from contextlib import asynccontextmanager
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from fastapi import FastAPI, HTTPException, Query, Depends, Request, WebSocket, WebSocketDisconnect, Body
 from fastapi.middleware.cors import CORSMiddleware
 from sqlmodel import Session, select
 
-from .config import NEWS_MCP_PARAMS, TRADING_MCP_PARAMS, DART_MCP_PARAMS, ALLOW_ORIGINS
+from .config import (
+    NEWS_MCP_PARAMS,
+    TRADING_MCP_PARAMS,
+    DART_MCP_PARAMS,
+    ALLOW_ORIGINS,
+    FILTERED_SIGNAL_RETENTION_DAYS,
+    SIGNAL_SCORE_MAX,
+    SIGNAL_SCORE_MIN,
+    SIGNAL_SCORE_THRESHOLD,
+)
+from .filtered_signal_repo import fill_score_axis, score_histogram
 from .ws_manager import manager
 from .scheduler import start_scheduler, stop_scheduler
 from .telegram_commands import start_telegram_commands, stop_telegram_commands
@@ -331,6 +341,66 @@ async def get_db_catalysts(
         "status": "success",
         "data": rows[:limit],
         "message": "truncated" if truncated else None,
+    }
+
+
+@app.get(
+    "/api/v1/db/filtered-signals/histogram",
+    response_model=CommonResponse,
+    tags=["Database"],
+)
+async def get_filtered_signal_histogram(
+    source: str | None = Query(
+        None, min_length=1, description="신호 출처 정확 일치 필터 (news | disclosure). 생략 시 전체."
+    ),
+    stock_name: str | None = Query(
+        None, min_length=1, description="종목명 정확 일치 필터. 생략 시 전체 종목."
+    ),
+    days: int | None = Query(
+        None,
+        ge=1,
+        le=365,
+        description="최근 N일(UTC 기준)만 집계. 생략 시 보관 중인 전체 구간.",
+    ),
+    session: Session = Depends(get_session),
+):
+    """임계값 미만으로 걸러진 신호를 점수 구간별로 집계합니다 (#304).
+
+    임계값(SIGNAL_SCORE_THRESHOLD)을 조정할 때 "지금 값에서 걸러지고 있는 신호가
+    점수대별로 몇 건인지"를 로그 grep 없이 확인하는 경로다. 통과한 쪽의 점수는 이
+    테이블이 아니라 AgentReport.signal_score에 있다.
+
+    buckets는 -3~+3 전 구간을 0으로 채워 돌려준다. 이 응답은 사람이 임계값을 정하려고
+    읽는 표라서, "그 점수를 한 건도 못 봤다"가 빈 칸이 아니라 0으로 보여야 한다.
+
+    recorded_thresholds에 값이 둘 이상이면 집계 구간 중간에 임계값이 바뀐 것이다.
+    그때 buckets는 서로 다른 설정에서 걸러진 신호가 섞인 분포이므로 한 덩어리로
+    읽으면 안 된다 — days를 좁혀 다시 조회해야 한다.
+    """
+    since = (
+        datetime.now(timezone.utc) - timedelta(days=days) if days is not None else None
+    )
+    histogram = score_histogram(
+        session, source=source, stock_name=stock_name, since=since
+    )
+    return {
+        "status": "success",
+        "data": {
+            "threshold": SIGNAL_SCORE_THRESHOLD,
+            "retention_days": FILTERED_SIGNAL_RETENTION_DAYS,
+            "window_days": days,
+            "since": since.isoformat() if since is not None else None,
+            "total": histogram.total,
+            "buckets": [
+                {"score": bucket.score, "count": bucket.count}
+                for bucket in fill_score_axis(
+                    histogram.buckets, SIGNAL_SCORE_MIN, SIGNAL_SCORE_MAX
+                )
+            ],
+            "recorded_thresholds": list(histogram.thresholds),
+            "oldest": histogram.oldest,
+            "newest": histogram.newest,
+        },
     }
 
 

@@ -2289,3 +2289,271 @@ async def test_monitor_signal_passes_none_when_scoring_fails_open(monkeypatch):
     assert passed is not None
     assert passed.is_significant is True
     assert passed.score is None
+
+
+class FakeFilteredSignalRepo:
+    """걸러진 신호 기록을 메모리에 모으는 repo (#304)."""
+
+    def __init__(self, fail: bool = False):
+        self.recorded = []
+        self.purged = []
+        self._fail = fail
+
+    async def record(self, **kwargs):
+        if self._fail:
+            raise RuntimeError("filtered signal db unavailable")
+        self.recorded.append(kwargs)
+        return kwargs
+
+    async def purge_expired(self, retention_days, *, now=None):
+        if self._fail:
+            raise RuntimeError("filtered signal db unavailable")
+        self.purged.append(retention_days)
+        return 7
+
+
+def _filtered_scored(score: int, reason: str | None = None, uncertainty=None) -> SignalScore:
+    """임계값 미만으로 걸러진 채점 결과."""
+    return SignalScore(
+        score=score,
+        reason=reason,
+        uncertainty=uncertainty,
+        headline_scores=(),
+        is_significant=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_monitor_signal_records_filtered_score(monkeypatch):
+    """임계값 미만으로 걸러진 신호의 점수가 구조화돼 남아야 한다 (#304).
+
+    이 값이 로그에만 남으면 grep은 되지만 집계가 안 돼 임계값을 조정할 근거가 없다.
+    """
+    from ..config import SIGNAL_SCORE_THRESHOLD
+    from ..scheduler import SignalSource, monitor_market_task
+
+    state = RedisSchedulerState(FakeRedis())
+
+    @asynccontextmanager
+    async def fake_redis_state():
+        yield state
+
+    async def mock_run_mcp_tool(params, name, args):
+        if name == "get_balance":
+            return "[보유 종목 리스트]\n- 삼성전자 (005930): 10주"
+        return "삼성전자 관련 뉴스"
+
+    async def mock_score_signal(stock, current, last, *, source, provider):
+        return _filtered_scored(1, reason="단순 시황 나열", uncertainty=0.5)
+
+    mock_perform_analysis = MagicMock()
+    monkeypatch.setattr("backend.scheduler.redis_state", fake_redis_state)
+    monkeypatch.setattr(
+        "backend.scheduler.SIGNAL_SOURCES",
+        [SignalSource(name="news", mcp_params=object(), tool_name="get_market_news")],
+    )
+    monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
+    monkeypatch.setattr("backend.scheduler.score_signal", mock_score_signal)
+    monkeypatch.setattr("backend.scheduler.perform_stock_analysis", mock_perform_analysis)
+    monkeypatch.setattr("backend.scheduler.manager.broadcast", _resolved_broadcast_mock())
+    monkeypatch.setattr(
+        "backend.scheduler._sync_portfolio_from_balance",
+        lambda balance_text, session, **kwargs: None,
+    )
+
+    repo = FakeFilteredSignalRepo()
+    await monitor_market_task(
+        watchlist_repo=FakeWatchlistRepo(), filtered_signal_repo=repo
+    )
+
+    assert mock_perform_analysis.call_count == 0
+    assert repo.recorded == [
+        {
+            "stock_name": "삼성전자",
+            "source": "news",
+            "score": 1,
+            "threshold": SIGNAL_SCORE_THRESHOLD,
+            "reason": "단순 시황 나열",
+            "uncertainty": 0.5,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_monitor_signal_does_not_record_passing_score(monkeypatch):
+    """통과한 신호는 이 테이블이 아니라 AgentReport에 남는다 — 두 번 세면 안 된다."""
+    from ..scheduler import SignalSource, monitor_market_task
+
+    state = RedisSchedulerState(FakeRedis())
+
+    @asynccontextmanager
+    async def fake_redis_state():
+        yield state
+
+    async def mock_run_mcp_tool(params, name, args):
+        if name == "get_balance":
+            return "[보유 종목 리스트]\n- 삼성전자 (005930): 10주"
+        return "삼성전자 대형 수주"
+
+    async def mock_score_signal(stock, current, last, *, source, provider):
+        return _scored(True, score=3)
+
+    mock_perform_analysis = MagicMock(return_value=asyncio.Future())
+    mock_perform_analysis.return_value.set_result({"summary": "Mocked"})
+
+    monkeypatch.setattr("backend.scheduler.redis_state", fake_redis_state)
+    monkeypatch.setattr(
+        "backend.scheduler.SIGNAL_SOURCES",
+        [SignalSource(name="news", mcp_params=object(), tool_name="get_market_news")],
+    )
+    monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
+    monkeypatch.setattr("backend.scheduler.score_signal", mock_score_signal)
+    monkeypatch.setattr("backend.scheduler.perform_stock_analysis", mock_perform_analysis)
+    monkeypatch.setattr("backend.scheduler.manager.broadcast", _resolved_broadcast_mock())
+    monkeypatch.setattr(
+        "backend.scheduler._sync_portfolio_from_balance",
+        lambda balance_text, session, **kwargs: None,
+    )
+
+    repo = FakeFilteredSignalRepo()
+    await monitor_market_task(
+        watchlist_repo=FakeWatchlistRepo(), filtered_signal_repo=repo
+    )
+
+    assert mock_perform_analysis.call_count == 1
+    assert repo.recorded == []
+
+
+@pytest.mark.asyncio
+async def test_monitor_signal_does_not_record_unscored_signal(monkeypatch):
+    """채점 자체가 없었던 신호(빈 본문·직전과 동일)는 기록하지 않는다.
+
+    점수 없는 행은 분포에 보탤 정보가 없는데, 감시 루프가 10분마다 도는 탓에
+    그런 행만으로 테이블이 가득 찬다.
+    """
+    from ..scheduler import SignalSource, monitor_market_task
+
+    state = RedisSchedulerState(FakeRedis())
+
+    @asynccontextmanager
+    async def fake_redis_state():
+        yield state
+
+    async def mock_run_mcp_tool(params, name, args):
+        if name == "get_balance":
+            return "[보유 종목 리스트]\n- 삼성전자 (005930): 10주"
+        return "삼성전자 관련 뉴스"
+
+    async def mock_score_signal(stock, current, last, *, source, provider):
+        return _scored(False)
+
+    monkeypatch.setattr("backend.scheduler.redis_state", fake_redis_state)
+    monkeypatch.setattr(
+        "backend.scheduler.SIGNAL_SOURCES",
+        [SignalSource(name="news", mcp_params=object(), tool_name="get_market_news")],
+    )
+    monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
+    monkeypatch.setattr("backend.scheduler.score_signal", mock_score_signal)
+    monkeypatch.setattr("backend.scheduler.manager.broadcast", _resolved_broadcast_mock())
+    monkeypatch.setattr(
+        "backend.scheduler._sync_portfolio_from_balance",
+        lambda balance_text, session, **kwargs: None,
+    )
+
+    repo = FakeFilteredSignalRepo()
+    await monitor_market_task(
+        watchlist_repo=FakeWatchlistRepo(), filtered_signal_repo=repo
+    )
+
+    assert repo.recorded == []
+
+
+@pytest.mark.asyncio
+async def test_monitor_signal_continues_when_recording_fails(monkeypatch):
+    """기록이 실패해도 감시는 다음 종목까지 계속돼야 한다.
+
+    이 값은 사후 분석용이다. 여기서 예외가 올라오면 DB 문제 하나가 그 주기의 감시를
+    통째로 멈춘다 — 놓침 방지(REQ-04)와 정면으로 충돌한다.
+    """
+    from ..scheduler import SignalSource, monitor_market_task
+
+    state = RedisSchedulerState(FakeRedis())
+
+    @asynccontextmanager
+    async def fake_redis_state():
+        yield state
+
+    monitored_stocks = []
+
+    async def mock_run_mcp_tool(params, name, args):
+        if name == "get_balance":
+            return "[보유 종목 리스트]\n- 삼성전자 (005930): 10주"
+        monitored_stocks.append(args["stock_name"])
+        return f"{args['stock_name']} 관련 뉴스"
+
+    async def mock_score_signal(stock, current, last, *, source, provider):
+        return _filtered_scored(0, reason="중립")
+
+    monkeypatch.setattr("backend.scheduler.redis_state", fake_redis_state)
+    monkeypatch.setattr(
+        "backend.scheduler.SIGNAL_SOURCES",
+        [SignalSource(name="news", mcp_params=object(), tool_name="get_market_news")],
+    )
+    monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
+    monkeypatch.setattr("backend.scheduler.score_signal", mock_score_signal)
+    monkeypatch.setattr("backend.scheduler.manager.broadcast", _resolved_broadcast_mock())
+    monkeypatch.setattr(
+        "backend.scheduler._sync_portfolio_from_balance",
+        lambda balance_text, session, **kwargs: None,
+    )
+
+    await monitor_market_task(
+        watchlist_repo=FakeWatchlistRepo(["NAVER"]),
+        filtered_signal_repo=FakeFilteredSignalRepo(fail=True),
+    )
+
+    assert monitored_stocks == ["삼성전자", "NAVER"]
+
+
+@pytest.mark.asyncio
+async def test_purge_filtered_signals_task_deletes_expired_rows():
+    from ..config import FILTERED_SIGNAL_RETENTION_DAYS
+    from ..scheduler import purge_filtered_signals_task
+
+    repo = FakeFilteredSignalRepo()
+
+    await purge_filtered_signals_task(filtered_signal_repo=repo)
+
+    assert repo.purged == [FILTERED_SIGNAL_RETENTION_DAYS]
+
+
+@pytest.mark.asyncio
+async def test_purge_filtered_signals_task_swallows_failure():
+    """정리 실패가 스케줄러 잡을 죽이지 않는다 — 다음 주기에 같은 조건으로 다시 지운다."""
+    from ..scheduler import purge_filtered_signals_task
+
+    await purge_filtered_signals_task(
+        filtered_signal_repo=FakeFilteredSignalRepo(fail=True)
+    )
+
+
+def test_start_scheduler_registers_purge_job(monkeypatch):
+    """정리 잡이 등록되지 않으면 보존 정책이 조용히 사라진다."""
+    from .. import scheduler as scheduler_module
+
+    registered = []
+
+    class FakeScheduler:
+        running = False
+        timezone = scheduler_module.scheduler.timezone
+
+        def add_job(self, func, trigger, **kwargs):
+            registered.append(kwargs.get("id"))
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(scheduler_module, "scheduler", FakeScheduler())
+    scheduler_module.start_scheduler()
+
+    assert "purge_filtered_signals" in registered

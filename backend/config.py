@@ -131,6 +131,16 @@ def _float_env(name: str, default: float) -> float:
 SIGNAL_UNCERTAINTY_ALERT_THRESHOLD = _float_env("SIGNAL_UNCERTAINTY_ALERT_THRESHOLD", 1.0)
 
 
+# 임계값 미만으로 걸러진 신호의 채점 기록(models.FilteredSignal, #304)을 며칠 보관할지.
+# 감시 루프가 종목·소스마다 10분 주기로 돌아 행이 빠르게 쌓이므로 무기한 보관하지
+# 않는다. 기본 30일은 임계값을 한 번 조정하고 그 효과를 관찰하는 주기를 덮으면서도
+# SQLite 한 파일이 감당할 수 있는 크기다.
+# 상한 365일: 그보다 오래 보관해야 할 이유가 생겼다면 SQLite가 아니라 별도 저장소를
+# 검토할 시점이라는 뜻이다. 하한 1일: 0을 허용하면 기록하자마자 지워져 기능이 조용히
+# 꺼진다 — _int_env_in_range가 임계값에서 배격한 것과 같은 실패 유형이다.
+FILTERED_SIGNAL_RETENTION_DAYS = _int_env_in_range("FILTERED_SIGNAL_RETENTION_DAYS", 30, 1, 365)
+
+
 # Redis cache/lock settings for scheduler state.
 # 기본값이 `localhost`가 아닌 것은 compose의 redis 게시가 루프백 IPv4 전용이기
 # 때문이다(#285). `localhost`가 `::1`로 먼저 풀리는 호스트에서 주소 폴백에 기대지
