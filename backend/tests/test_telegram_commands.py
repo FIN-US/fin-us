@@ -1043,8 +1043,72 @@ async def test_buy_command_without_price_creates_market_order_and_prompts_confir
     assert _orders(handler)["123"].stock_code == "005930"
     assert _orders(handler)["123"].side == "BUY"
     assert _orders(handler)["123"].quantity == 10
+    # 지정가가 아니라 주문 시점 현재가다 — 표시·기록용이며 주문 조건이 아니다 (#309).
+    assert _orders(handler)["123"].price == 74500
+    assert _orders(handler)["123"].order_type == "MARKET"
+
+
+@pytest.mark.asyncio
+async def test_market_order_proceeds_without_reference_price_when_quote_is_unreadable():
+    """참고단가를 못 읽어도 주문은 막지 않는다 — 대신 단가 0이 그대로 남는다 (#309).
+
+    사용자가 명시적으로 낸 주문을 기록 사정으로 되돌리지는 않는다. 대가는
+    load_daily_usage가 그날 집계를 포기해 /advise가 막히는 것이고, 한도가 조용히
+    넓어지는 것보다 그쪽이 낫다는 것이 #309의 결론이다.
+    """
+
+    async def mcp_runner(server_params, tool_name, arguments):
+        if tool_name == "resolve_stock_code":
+            return "삼성전자 (005930, KOSPI)"
+        if tool_name == "get_stock_quote":
+            # 라벨이 바뀌어 현재가를 읽지 못하는 상황
+            return "시세 조회 중 에러 발생: upstream timeout"
+        if tool_name == "get_balance":
+            return "주문가능금액: 1,000,000원"
+        raise AssertionError(f"unexpected tool: {tool_name}")
+
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        mcp_runner=mcp_runner,
+        now_factory=lambda: datetime(2026, 5, 20, 10, 0, tzinfo=KST),
+    )
+
+    await handler.handle_update(
+        {"message": {"chat": {"id": 123}, "text": "/buy 삼성전자 10"}}
+    )
+
+    assert "삼성전자 매수 주문 확인" in notifier.messages[-1]
     assert _orders(handler)["123"].price == 0
     assert _orders(handler)["123"].order_type == "MARKET"
+
+
+@pytest.mark.asyncio
+async def test_limit_order_keeps_the_typed_price_even_when_it_differs_from_the_quote():
+    """참고단가 주입은 시장가 전용이다 — 지정가를 현재가로 덮으면 주문 조건이 바뀐다."""
+
+    async def mcp_runner(server_params, tool_name, arguments):
+        if tool_name == "resolve_stock_code":
+            return "삼성전자 (005930, KOSPI)"
+        if tool_name == "get_stock_quote":
+            return "현재가: 74,500원"
+        if tool_name == "get_balance":
+            return "주문가능금액: 1,000,000원"
+        raise AssertionError(f"unexpected tool: {tool_name}")
+
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        mcp_runner=mcp_runner,
+        now_factory=lambda: datetime(2026, 5, 20, 10, 0, tzinfo=KST),
+    )
+
+    await handler.handle_update(
+        {"message": {"chat": {"id": 123}, "text": "/buy 삼성전자 10 70000"}}
+    )
+
+    assert _orders(handler)["123"].price == 70000
+    assert _orders(handler)["123"].order_type == "LIMIT"
 
 
 @pytest.mark.asyncio
@@ -1107,7 +1171,7 @@ async def test_natural_language_market_buy_creates_pending_order_without_nat():
     assert _orders(handler)["123"].stock_name == "삼성전자"
     assert _orders(handler)["123"].side == "BUY"
     assert _orders(handler)["123"].quantity == 1
-    assert _orders(handler)["123"].price == 0
+    assert _orders(handler)["123"].price == 74500
     assert _orders(handler)["123"].order_type == "MARKET"
 
 

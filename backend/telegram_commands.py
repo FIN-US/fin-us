@@ -72,7 +72,7 @@ from .stock_code import (
     _is_unresolved_echo,
     extract_stock_name,
 )
-from .order_assist import ProposalTrigger, run_order_assist
+from .order_assist import ProposalTrigger, parse_current_price, run_order_assist
 
 logger = logging.getLogger(__name__)
 
@@ -1415,12 +1415,35 @@ class TelegramCommandHandler:
             await self._send_text_or_raise(f"주문 준비 실패: {_short_error(exc)}")
             return
 
+        if order_type == "MARKET":
+            # 시장가에는 지정가가 없지만, 단가를 모르는 채로 두면 그 0이 체결 기록
+            # (TradeHistory.price)까지 그대로 내려가 일 거래대금 한도를 무력화한다(#309).
+            # KIS 현금주문 응답에는 체결가가 없으므로(order-cash output은 ODNO·ORD_TMD뿐)
+            # 방금 프롬프트용으로 받아 둔 현재가를 기록용 참고단가로 쓴다. /advise는 이미
+            # 같은 값을 같은 자리에 넣는다(order_assist.run_order_assist).
+            #
+            # 읽지 못해도 주문은 막지 않는다 — 사용자가 명시적으로 낸 주문을 기록 사정으로
+            # 되돌리는 것이기 때문이다. 대신 0이 그대로 남고, load_daily_usage의 가드가
+            # 그날 /advise를 usage_failed로 막는다. 한도가 조용히 넓어지는 것보다 그쪽이
+            # 낫다는 것이 #309의 결론이다.
+            reference_price = parse_current_price(str(quote_result))
+            if reference_price is None:
+                logger.warning(
+                    "시장가 참고단가를 읽지 못했다 (stock=%s) — 단가 없이 기록되고 "
+                    "오늘 /advise는 일 거래대금 집계 실패로 막힌다 (#309)",
+                    stock_code,
+                )
+            else:
+                price = reference_price
+
         order = PendingOrder(
             chat_id=chat_id,
             stock_name=resolved_name,
             stock_code=stock_code,
             side=side,
             quantity=quantity,
+            # MARKET이면 표시·기록용 참고단가(주문 시점 현재가)다. 주문 자체에는 쓰이지
+            # 않는다 — McpTradingOrderGateway가 시장가에는 price=0을 보낸다.
             price=price,
             # now(명령 수신 시각)가 아니라 저장 직전 시각으로 스탬프한다. 위 MCP 조회는
             # run_mcp_tool의 wait_for(30초)를 두 구간(resolve, gather) 쓰므로 최대 60초가

@@ -260,3 +260,113 @@ async def test_market_order_calls_local_mcp_runner_with_order_type():
     ]
     assert result.order_type == "MARKET"
     assert result.price == 0
+
+
+@pytest.mark.asyncio
+async def test_market_order_keeps_reference_price_for_the_record_but_not_for_the_order():
+    """시장가의 참고단가는 기록용이다 — 주문에는 0이 나가고 결과에는 참고단가가 남는다.
+
+    KIS 현금주문 응답에 체결가가 없어(#309) 주문 시점 현재가를 대신 싣는다. 그 값이
+    주문 조건처럼 KIS로 흘러가면 안 되고, 반대로 결과에서 0으로 덮이면 TradeHistory가
+    다시 "금액 모름"이 된다. 두 방향을 한 테스트에서 함께 고정한다.
+    """
+    calls = []
+
+    async def fake_mcp_runner(server_params, tool_name, arguments):
+        calls.append(arguments)
+        return '{"msg1":"시장가 주문 접수"}'
+
+    gateway = McpTradingOrderGateway(
+        server_params="trading-params",
+        mcp_runner=fake_mcp_runner,
+        order_env="demo",
+        real_order_enabled=False,
+    )
+    order = PendingOrder(
+        chat_id="123",
+        stock_name="삼성전자",
+        stock_code="005930",
+        side="BUY",
+        quantity=5,
+        price=74500,
+        order_type="MARKET",
+        created_at=datetime(2026, 5, 20, 10, 0, tzinfo=KST),
+    )
+
+    result = await gateway.place_order(order)
+
+    assert calls[0]["price"] == 0
+    assert calls[0]["order_type"] == "MARKET"
+    assert result.price == 74500
+
+
+def test_trade_recorder_writes_the_market_reference_price():
+    """시장가 참고단가가 TradeHistory까지 내려간다 — 여기가 #309의 종착지다."""
+
+    class FakeSession:
+        def __init__(self):
+            self.added = []
+
+        def add(self, item):
+            self.added.append(item)
+
+        def commit(self):
+            return None
+
+        def close(self):
+            return None
+
+    session = FakeSession()
+    TradeRecorder(lambda: session).record(
+        OrderExecutionResult(
+            stock_code="005930",
+            stock_name="삼성전자",
+            side="BUY",
+            quantity=5,
+            price=74500,
+            order_type="MARKET",
+            message="시장가 주문 접수",
+            raw_result="{}",
+        )
+    )
+
+    assert session.added[0].price == 74500.0
+
+
+def test_trade_recorder_still_records_the_row_when_the_price_is_unknown(caplog):
+    """단가를 몰라도 행은 남긴다 — 빠뜨리면 일 주문 횟수 한도까지 함께 헐거워진다.
+
+    금액 쪽은 order_assist.load_daily_usage의 가드가 받는다(집계 실패 → /advise 거부).
+    """
+
+    class FakeSession:
+        def __init__(self):
+            self.added = []
+
+        def add(self, item):
+            self.added.append(item)
+
+        def commit(self):
+            return None
+
+        def close(self):
+            return None
+
+    session = FakeSession()
+    with caplog.at_level("WARNING"):
+        TradeRecorder(lambda: session).record(
+            OrderExecutionResult(
+                stock_code="005930",
+                stock_name="삼성전자",
+                side="BUY",
+                quantity=5,
+                price=0,
+                order_type="MARKET",
+                message="시장가 주문 접수",
+                raw_result="{}",
+            )
+        )
+
+    assert len(session.added) == 1
+    assert session.added[0].price == 0.0
+    assert "단가 없이" in caplog.text

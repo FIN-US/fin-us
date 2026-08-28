@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta
 from typing import Any, Awaitable, Callable, Literal
@@ -8,6 +9,8 @@ from typing import Any, Awaitable, Callable, Literal
 from fastapi import HTTPException
 
 from .timeutil import KST
+
+logger = logging.getLogger(__name__)
 
 OrderSide = Literal["BUY", "SELL"]
 OrderType = Literal["LIMIT", "MARKET"]
@@ -26,6 +29,10 @@ class PendingOrder:
     stock_code: str
     side: OrderSide
     quantity: int
+    # LIMIT이면 주문 조건(지정가)이다. MARKET이면 주문 조건이 아니라 **표시·기록용
+    # 참고단가**로, 주문 시점 현재가가 들어온다 (#309). 시장가 주문의 체결가는 KIS
+    # 현금주문 응답에 없으므로(order-cash output은 KRX_FWDG_ORD_ORGNO·ODNO·ORD_TMD뿐)
+    # 이것이 주문 시점에 얻을 수 있는 최선의 단가다.
     price: int
     created_at: datetime
     order_type: OrderType = "LIMIT"
@@ -38,6 +45,9 @@ class OrderExecutionResult:
     stock_name: str
     side: OrderSide
     quantity: int
+    # PendingOrder.price와 같은 뜻이다 — MARKET이면 체결가가 아니라 주문 시점 현재가다.
+    # TradeHistory.price로 그대로 내려가므로 0이면 "0원 거래"가 아니라 "금액 모름"이고,
+    # order_assist.load_daily_usage가 그 상태에서 일 거래대금 집계를 포기한다 (#309).
     price: int
     message: str
     raw_result: str
@@ -50,6 +60,18 @@ class TradeRecorder:
 
     def record(self, result: OrderExecutionResult) -> None:
         from .models import TradeHistory
+
+        if result.price <= 0:
+            # 여기서 막지는 않는다. 주문은 이미 나갔고, 행을 통째로 빠뜨리면 일 주문
+            # **횟수** 한도까지 함께 헐거워진다 — 단가만 모르는 행이 낫다. 대신 남긴다:
+            # 이 경고가 찍힌 날은 load_daily_usage가 집계를 포기해 /advise가 막힌다.
+            logger.warning(
+                "단가 없이 거래 이력을 기록한다 (%s %s %d주) — 오늘 /advise는 일 거래대금 "
+                "집계 실패로 막힌다 (#309)",
+                result.stock_code,
+                result.side,
+                result.quantity,
+            )
 
         session = self.session_factory()
         try:
@@ -114,7 +136,11 @@ class McpTradingOrderGateway:
             "stock_code": order.stock_code,
             "side": order.side,
             "quantity": order.quantity,
-            "price": order.price,
+            # 시장가에는 참고단가를 보내지 않는다. mcp-trading은 어차피 시장가면
+            # ORD_UNPR을 0으로 고정하고(order.js buildCashOrderBody) 중복 방지 키에서도
+            # 가격을 "0"으로 정규화하므로(order-dedup.js) 보내도 주문 결과는 같지만,
+            # 기록용 값이 주문 조건처럼 읽히는 자리를 만들지 않는다 (#309).
+            "price": 0 if order.order_type == "MARKET" else order.price,
             "order_env": self.order_env,
         }
         if order.order_type == "MARKET":
@@ -131,6 +157,8 @@ class McpTradingOrderGateway:
             stock_name=order.stock_name,
             side=order.side,
             quantity=order.quantity,
+            # 주문에 보낸 값(시장가면 0)이 아니라 대기 주문이 들고 있던 참고단가를 싣는다.
+            # 여기서 0으로 덮으면 체결 기록이 다시 "금액 모름"이 된다 (#309).
             price=order.price,
             message=_extract_order_message(raw_result),
             raw_result=raw_result,
