@@ -269,7 +269,7 @@ def _record_to_ledger(tool_name: str, result: str) -> None:
     correct conservative behaviour.
 
     ``tool_name`` leaves this service: backend renders it in the reasoning
-    footnote through ``TOOL_LABELS`` (backend/telegram_commands.py, #260).
+    footnote through ``TOOL_LABELS`` (backend/presentation.py, #260).
     Renaming a tool without updating that map degrades gracefully — the raw
     internal name shows up instead of the Korean label — so the mismatch is
     caught by backend/tests/test_label_drift.py in CI (#282). Keep the name a

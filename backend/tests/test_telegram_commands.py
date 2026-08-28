@@ -24,17 +24,22 @@ from backend.telegram_commands import (
     NAT_PROGRESS_MESSAGE,
     PROGRESS_DONE_MESSAGE,
     QUOTE_COMMAND_HELP,
-    REASONING_FOOTNOTE_SEPARATOR,
     TELEGRAM_INTERACTIVE_HELP,
     TRADE_COMMAND_HELP,
     LOOKUP_COMMAND_HELP,
-    TELEGRAM_MESSAGE_LIMIT,
-    TELEGRAM_TRUNCATION_SUFFIX,
     TREND_COMMAND_HELP,
     UNRESOLVED_STOCK_WARNING,
     TelegramCommandHandler,
     TelegramCommandPoller,
-    _reasoning_footnote,
+)
+# 길이 상한과 말줄임 규칙은 출력 계층이 정의한다. telegram_commands는 더 이상 그것을
+# 다시 내보내지 않는다 — 재수출만 남은 임포트는 이름이 두 곳에 있다는 착시를 만든다.
+from backend.presentation import (
+    REASONING_FOOTNOTE_MAX_CHARS,
+    REASONING_FOOTNOTE_SEPARATOR,
+    TELEGRAM_MESSAGE_LIMIT,
+    TELEGRAM_TRUNCATION_SUFFIX,
+    reasoning_footnote as _reasoning_footnote,
 )
 from backend.redis_state import (
     InMemoryPendingOrderStore,
@@ -450,7 +455,8 @@ def test_bot_command_menu_includes_all_user_commands():
 
     assert commands == [
         "help", "balance", "watch", "catalysts", "quote", "trend", "earnings",
-        "alerts", "visualize", "trade", "lookup", "buy", "sell", "confirm", "cancel",
+        "alerts", "level", "start", "visualize", "trade", "lookup", "buy", "sell",
+        "confirm", "cancel",
     ]
 
 
@@ -606,7 +612,8 @@ async def test_quote_result_trend_button_uses_same_stock_name():
         (TRADING_MCP_PARAMS, "get_investor_trading", {"stock_name": "삼성전자"}),
     ]
     assert notifier.callback_answers == [("trend-callback", None)]
-    assert notifier.messages[-1] == "수급 응답"
+    # 본문이 짧아도 "수급"은 사용자가 친 말이 아니므로 설명이 붙는다 (#297 검수 3).
+    assert notifier.messages[-1].startswith("수급 응답\n\nℹ️ 수급: ")
 
 
 @pytest.mark.asyncio
@@ -666,8 +673,17 @@ async def test_trend_command_calls_mcp_runner_with_stock_name():
         (TRADING_MCP_PARAMS, "get_investor_trading", {"stock_name": "삼성전자"})
     ]
     assert notifier.actions == ["typing"]
-    assert notifier.messages == ["수급 응답"]
-    assert notifier.reply_markups[-1]["inline_keyboard"][0][0]["text"] == "💵 현재가 보기"
+    assert len(notifier.messages) == 1
+    assert notifier.messages[0].startswith("수급 응답\n\nℹ️ 수급: ")
+    # 수급 요약 아래에는 상세가 먼저다 — 방금 받은 메시지에 이어지는 동작이라 다른
+    # 종류의 조회(현재가)보다 앞에 온다 (#297 검수 4차).
+    buttons = [
+        button
+        for row in notifier.reply_markups[-1]["inline_keyboard"]
+        for button in row
+    ]
+    # "수급 응답"은 파싱되지 않으므로 상세 버튼을 달지 않는다 (#297 검수 2차).
+    assert [button["text"] for button in buttons] == ["💵 현재가 보기"]
 
 
 @pytest.mark.asyncio
@@ -686,7 +702,13 @@ async def test_trend_result_quote_button_uses_same_stock_name():
     handler = TelegramCommandHandler(notifier=notifier, mcp_runner=mcp_runner)
 
     await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/trend 삼성전자"}})
-    callback_data = notifier.reply_markups[-1]["inline_keyboard"][0][0]["callback_data"]
+    # 자리가 아니라 콜백 접두어로 고른다. 버튼 순서는 이 테스트가 지킬 계약이 아니다.
+    callback_data = next(
+        button["callback_data"]
+        for row in notifier.reply_markups[-1]["inline_keyboard"]
+        for button in row
+        if button["callback_data"].startswith("market:quote:")
+    )
     await handler.handle_update(
         {
             "callback_query": {
@@ -747,7 +769,10 @@ async def test_earnings_command_combines_dart_news_and_nat_analysis():
     assert "Markdown 문법" in prompt
     assert "호재`, `악재`, `중립" in prompt
     assert notifier.actions == ["typing"]
-    assert notifier.messages == ["⚪ 중립\n실적 분석 응답"]
+    # /earnings도 출력 계층을 지난다 — 본문이 자유 형식 LLM 텍스트인 유일한 명령이라
+    # 마크다운 정리와 용어 각주가 특히 필요한 자리다 (#297 자가리뷰).
+    assert notifier.messages[-1].startswith("⚪ 중립\n실적 분석 응답")
+    assert "ℹ️ 실적: " in notifier.messages[-1]
 
 
 @pytest.mark.asyncio
@@ -784,9 +809,9 @@ async def test_earnings_command_sends_plain_text_with_verdict_emoji():
     assert "호재\n호재" not in message
     assert "#" not in message
     assert "*" not in message
-    assert "- " not in message
     assert "실적 요약" in message
-    assert "• 매출: 전년 대비 증가" in message
+    # 글머리표는 이 봇의 나열 표시로 통일된다(예전에는 이 명령만 "•"를 썼다).
+    assert "- 매출: 전년 대비 증가" in message
 
 
 @pytest.mark.asyncio
@@ -3589,7 +3614,7 @@ def test_reasoning_footnote_length_is_capped():
         tuple(NatToolUse("아주_긴_도구_이름_" * 5 + str(i), ok=True) for i in range(50)),
     )
 
-    assert 0 < len(footnote) <= telegram_commands.REASONING_FOOTNOTE_MAX_CHARS
+    assert 0 < len(footnote) <= REASONING_FOOTNOTE_MAX_CHARS
 
 
 @pytest.mark.asyncio

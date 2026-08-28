@@ -59,11 +59,17 @@ def test_format_analysis_alert_uses_plain_text():
         },
     )
 
-    assert "[긴급] 삼성전자 / disclosure" in message
-    assert "Decision: HOLD (0.82)" in message
-    assert "Reason: 단기 변동성 확대 가능성" in message
-    assert "Urgency: critical - 대량보유 변동 공시" in message
-    assert "Summary: 대량보유 변동" in message
+    # 필드명도 값도 한국어다 (#297 검수 2). decision/urgency는 AgentReport의 정해진
+    # 값이라 출력 계층이 결정론적으로 번역한다 — LLM에게 시키면 매번 다른 말이 나온다.
+    # 제목은 목록 밖이고 값이 늘어선 줄만 "- " 표시를 받는다. 좁은 말풍선에서 줄이 접혀도
+    # 표시 없는 줄은 앞 줄의 계속이라는 뜻이 되므로 항목 경계가 유지된다 (#297 검수 3차).
+    assert message.splitlines() == [
+        "삼성전자 / 공시",
+        "- 판단: 보유 유지 (확신도 0.82)",
+        "- 이유: 단기 변동성 확대 가능성",
+        "- 긴급도: 매우 높음, 대량보유 변동 공시",
+        "- 요약: 대량보유 변동",
+    ]
 
 
 def test_format_analysis_alert_marks_only_actual_urgent_alerts():
@@ -82,8 +88,58 @@ def test_format_analysis_alert_marks_only_actual_urgent_alerts():
         },
     )
 
-    assert message.splitlines()[0] == "삼성전자 / news"
-    assert "긴급" not in message
+    assert message.splitlines()[0] == "삼성전자 / 뉴스"
+    # 긴급 여부는 이제 render가 붙이는 배너(🚨 긴급 알림)가 알린다. 제목의 "[긴급]"을
+    # 뺐으므로 이 본문에는 긴급도 라벨 말고 긴급이라는 말이 없어야 한다 (#297 검수 1).
+    assert "긴급도: 보통" in message
+    assert "🚨" not in message
+
+
+@pytest.mark.asyncio
+async def test_the_urgent_banner_follows_the_send_gate(monkeypatch):
+    """배너 판정과 전송 게이트가 따로 놀면 어긋난다 (#297 자가리뷰).
+
+    alert_mode="all"이면 telegram_alert=False인 분석도 나간다. 그때 배너가 urgency만 보고
+    🚨를 달면, 본문은 비긴급 사유("판단 사유 없음")를 달고 머리는 긴급이라고 외친다.
+    게이트가 대소문자를 접지 않는다는 차이까지 겹쳐 "High"에서 실제로 갈렸다.
+    """
+    notifier = TelegramNotifier("token", "123")
+    sent: list[str] = []
+
+    async def fake_post(text, **kwargs):
+        sent.append(text)
+
+    monkeypatch.setattr(notifier, "_post_message", fake_post)
+
+    await notifier.send_analysis_alert(
+        "삼성전자",
+        "news",
+        {"urgency": "High", "telegram_alert": False, "details": {}},
+        alert_mode="all",
+    )
+
+    assert sent
+    assert sent[0].startswith("🔔 알림")
+
+
+@pytest.mark.asyncio
+async def test_a_real_urgent_alert_still_gets_the_urgent_banner(monkeypatch):
+    notifier = TelegramNotifier("token", "123")
+    sent: list[str] = []
+
+    async def fake_post(text, **kwargs):
+        sent.append(text)
+
+    monkeypatch.setattr(notifier, "_post_message", fake_post)
+
+    await notifier.send_analysis_alert(
+        "삼성전자",
+        "disclosure",
+        {"urgency": "critical", "telegram_alert": True, "details": {}},
+    )
+
+    assert sent
+    assert sent[0].startswith("🚨 긴급 알림")
 
 
 def test_format_morning_briefing_uses_expected_sections():
@@ -954,10 +1010,12 @@ def test_format_analysis_alert_includes_signal_score_line():
     )
 
     lines = message.split("\n")
-    assert lines[0] == "[긴급] 삼성전자 / news"
-    # 제목 바로 아래 — Decision보다 먼저 읽혀야 한다.
-    assert lines[1] == "📊 영향도 -2 (주요 고객 이탈 보도) · ⚠️ 기사 간 평가 엇갈림"
-    assert lines[2].startswith("Decision: SELL")
+    # 제목에서 "[긴급]"이 빠지고 source가 한국어가 된 것은 #297이다 — 긴급 배너는
+    # 이제 render가 붙인다. 점수 줄이 놓이는 자리(#298)는 그와 무관하게 그대로다.
+    assert lines[0] == "삼성전자 / 뉴스"
+    # 제목 바로 아래 — 판단보다 먼저 읽혀야 한다.
+    assert lines[1] == "- 📊 영향도 -2 (주요 고객 이탈 보도) · ⚠️ 기사 간 평가 엇갈림"
+    assert lines[2].startswith("- 판단: 매도")
 
 
 def test_format_analysis_alert_without_signal_score_is_unchanged():
@@ -974,4 +1032,4 @@ def test_format_analysis_alert_without_signal_score_is_unchanged():
     )
 
     assert backend.telegram_notifier.SIGNAL_SCORE_LABEL not in message
-    assert message.split("\n")[1].startswith("Decision: HOLD")
+    assert message.split("\n")[1].startswith("- 판단: 보유 유지")
