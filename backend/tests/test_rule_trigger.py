@@ -622,7 +622,7 @@ async def test_default_monitor_stocks_never_trigger_the_rule(monkeypatch):
 
     그건 사용자가 고른 종목이 아니라 감시 공백을 메우는 값이다. 거기에 자동 제안을 걸면
     관심을 표한 적도 없는 종목의 확정 버튼이 사용자에게 뜬다 — 수동 /advise에는 없던
-    종류의 사고다. 이 테스트가 잡는 mutation: in_rule_scope 검사를 빼고 감시 대상 전체에
+    종류의 사고다. 이 테스트가 잡는 mutation: build_rule_scope 검사를 빼고 감시 대상 전체에
     룰을 거는 회귀.
     """
     from ..scheduler import monitor_market_task

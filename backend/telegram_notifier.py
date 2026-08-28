@@ -643,6 +643,7 @@ class TelegramNotifier:
             payload=self._send_message_payload(text, reply_markup),
         )
 
+
 # 부수효과가 확정된 뒤의 전송은 update 재시도로 되살릴 수 없다(#247). 대신 그 자리에서
 # 짧게 재시도해 429 같은 일시 장애를 흡수한다 — "전송만 별도로 재시도"에 해당한다.
 #
