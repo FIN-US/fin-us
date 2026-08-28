@@ -22,6 +22,7 @@ from backend.presentation import (
     LEVEL_BEGINNER,
     LEVEL_INTERMEDIATE,
     REASONING_FOOTNOTE_SEPARATOR,
+    SIGNAL_DISAGREEMENT_NOTE,
     TELEGRAM_MESSAGE_LIMIT,
     TERM_FOOTNOTE_MARK,
     TermEntry,
@@ -29,6 +30,7 @@ from backend.presentation import (
     as_list_items,
     decision_label,
     find_terms,
+    format_signal_score_line,
     kind_for_agent,
     normalize_level,
     reasoning_footnote,
@@ -401,6 +403,70 @@ def test_diary_kind_comes_from_routing_not_from_the_text():
     assert kind_for_agent("diary_agent") == KIND_DIARY
     assert kind_for_agent("news_agent") == KIND_ANALYSIS
     assert kind_for_agent(None) == KIND_ANALYSIS
+
+
+# ---- 신호 점수 (#298) ----
+
+
+def test_format_signal_score_line_renders_score_and_reason():
+    line = format_signal_score_line(
+        -2, "주요 고객 이탈 보도", uncertainty_threshold=1.0
+    )
+
+    assert line == "📊 영향도 -2 (주요 고객 이탈 보도)"
+
+
+def test_format_signal_score_line_marks_positive_scores_with_sign():
+    assert format_signal_score_line(3, "대형 수주", uncertainty_threshold=1.0) == (
+        "📊 영향도 +3 (대형 수주)"
+    )
+    # 0은 "+0"이 어색하다. 그리고 0은 "모름"이 아니라 "중립으로 채점됨"이므로 표시한다.
+    assert format_signal_score_line(0, "홍보성 기사", uncertainty_threshold=1.0) == (
+        "📊 영향도 0 (홍보성 기사)"
+    )
+
+
+def test_format_signal_score_line_appends_disagreement_note_when_uncertain():
+    line = format_signal_score_line(
+        1, "평가 갈림", uncertainty=2.5, uncertainty_threshold=1.0
+    )
+
+    assert line == "📊 영향도 +1 (평가 갈림) · ⚠️ 기사 간 평가 엇갈림"
+
+
+def test_format_signal_score_line_omits_note_below_threshold():
+    line = format_signal_score_line(
+        1, "일관된 평가", uncertainty=0.5, uncertainty_threshold=1.0
+    )
+
+    # 점수가 있으므로 줄이 만들어져야 한다. None이면 `not in`이 통과해 버려
+    # "줄 자체가 사라진" 회귀를 이 단언이 놓친다.
+    assert line is not None
+    assert SIGNAL_DISAGREEMENT_NOTE not in line
+
+
+def test_format_signal_score_line_takes_the_threshold_from_the_caller():
+    """어디서부터 "엇갈림"인지는 정책이고, 정책값은 호출부가 넘긴다 (#308).
+
+    출력 계층이 config를 임포트하면 이 모듈이 잎이 아니게 된다 — 기본값을 두지 않은 것이
+    #308에서 이 함수를 이쪽으로 옮긴 조건이다. 같은 불확실도가 임계값에 따라 갈리는 것을
+    고정해 두면, 나중에 누가 기본값을 되살릴 때 이 테스트가 먼저 걸린다.
+    """
+    uncertain = format_signal_score_line(1, uncertainty=1.2, uncertainty_threshold=1.0)
+    same_value_tighter = format_signal_score_line(
+        1, uncertainty=1.2, uncertainty_threshold=2.0
+    )
+
+    assert uncertain is not None and SIGNAL_DISAGREEMENT_NOTE in uncertain
+    assert same_value_tighter is not None
+    assert SIGNAL_DISAGREEMENT_NOTE not in same_value_tighter
+
+
+def test_format_signal_score_line_returns_none_without_score():
+    """채점하지 못했으면 줄 자체가 없어야 한다 — 없는 점수를 0으로 그리지 않는다."""
+    assert format_signal_score_line(None, "근거", uncertainty_threshold=1.0) is None
+    assert format_signal_score_line("2", uncertainty_threshold=1.0) is None
+    assert format_signal_score_line(True, uncertainty_threshold=1.0) is None
 
 
 # ---- 조립 ----
