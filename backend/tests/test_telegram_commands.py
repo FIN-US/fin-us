@@ -999,8 +999,9 @@ async def test_buy_command_includes_current_price_line_when_quote_has_header():
     )
 
     assert "[삼성전자] 현재가 시세" not in notifier.messages[-1]
-    assert "- 현재가: 354,000원" in notifier.messages[-1]
-    assert "- 거래가능금액: 5,546,116원" in notifier.messages[-1]
+    # 원문의 "- " 목록 접두사는 떼고 직접 조립한 줄들과 표기를 맞춘다.
+    assert "\n현재가: 354,000원" in notifier.messages[-1]
+    assert "\n거래가능금액: 5,546,116원" in notifier.messages[-1]
 
 
 @pytest.mark.asyncio

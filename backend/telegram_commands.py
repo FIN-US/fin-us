@@ -1875,14 +1875,17 @@ class TelegramCommandHandler:
         # 어긋남이 생긴다. 하나로 묶어 두면 둘이 함께 사라진다 (PR #323 리뷰).
         current_price = parse_current_price(str(quote_result))
         if current_price is not None:
-            lines.append(f"- 현재가: {current_price:,}원")
+            lines.append(f"현재가: {current_price:,}원")
 
         balance = self._first_line_containing(
             str(balance_result),
             ("거래가능", "주문가능", "예수금", "총자산", "balance"),
         )
         if balance:
-            lines.append(balance)
+            # mcp-trading은 목록 항목을 "- 라벨: 값"으로 낸다. 그 줄을 그대로 붙이면
+            # 직접 조립한 위 줄들(종목코드:, 수량:, 현재가: …)과 표기가 어긋난다.
+            # 접두사만 떼어 제안 경로의 승인 메시지와 같은 표기로 맞춘다 (PR #323 리뷰).
+            lines.append(balance.removeprefix("- "))
 
         # 미해석 에코(name == code)는 이제 주문 준비 단계에서 _is_unresolved_echo가
         # 끊으므로 여기까지 오지 않는다(#151). 마스터에 name == code인 항목이 생기는
