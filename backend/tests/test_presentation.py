@@ -282,6 +282,19 @@ def test_terms_json_ships_a_usable_draft():
     assert "사람 검수" in "".join(raw["_readme"])
 
 
+def test_orderable_cash_is_not_explained_as_the_deposit():
+    """#310 — 주문가능금액과 예수금은 다른 값이다. 별칭으로 묶으면 설명이 사실과 어긋난다.
+
+    /advise가 보여주는 "주문가능금액"에 "예수금: 계좌에 남아 있는 현금이에요" 각주가
+    붙으면, 이 이슈가 갈라놓은 두 값을 각주가 다시 같은 말로 되돌린다.
+    """
+    entries = presentation.load_terms(presentation.TERMS_PATH)
+    by_term = {entry.term: entry for entry in entries}
+
+    assert "주문가능금액" in by_term
+    assert "주문가능금액" not in by_term["예수금"].aliases
+
+
 def test_broken_dictionary_does_not_block_messages(tmp_path, caplog):
     """사전이 깨졌다고 시세나 알림이 막히면 부가 기능이 본 기능을 잡아먹는 것이다."""
     broken = tmp_path / "terms.json"

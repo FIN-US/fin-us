@@ -1135,8 +1135,17 @@ async def run_order_assist(
     #
     #    현금은 잔고(dnca_tot_amt)가 아니라 매수가능조회(ord_psbl_cash)에서 읽는다 (#310).
     #    조회 하나가 늘었지만 셋을 동시에 던지므로 벽시계 시간은 가장 느린 하나로 남는다.
-    #    셋 중 하나라도 실패하면 그대로 거부다 — SELL 제안도 마찬가지다. 이 스냅샷은
-    #    "확인한 계좌 상태" 하나이고, 절반만 확인한 상태 위에서 한도를 판정하지 않는다.
+    #
+    #    SELL 제안일 때도 이 조회를 뺄 수 없다. 한도 판정만 보면 현금은 BUY 전용이 맞지만
+    #    (evaluate_hard_limits의 side == "BUY" 블록), snapshot.cash는 거기서 끝나지 않는다 —
+    #    검증자 페이로드의 "snapshot.cash"와 승인 메시지의 "주문가능금액:" 줄이 side와
+    #    무관하게 이 값을 싣는다. SELL에서 조회를 빼면 사용자가 보는 자리에 숫자가 비거나,
+    #    확인하지 않은 0을 검증자에게 계좌 상태라고 넘기게 된다. 스냅샷은 "확인한 계좌 상태"
+    #    하나이고, 절반만 확인한 상태 위에서 판정하지도 보고하지도 않는다.
+    #
+    #    종목은 ② 에서 확정한 stock_code를 넘긴다. 사용자가 친 원문(stock)을 다시
+    #    해석시키면 같은 흐름 안에서 종목이 두 번 결정되는 길이 생긴다.
+    #    (get_stock_quote가 아직 원문을 쓰는 것은 이 PR 이전부터의 별개 사안이다.)
     #
     #    기준 주문유형·단가를 넘기지 않는 이유: 우리가 쓰는 것은 계좌 단위 값인
     #    ord_psbl_cash 하나뿐이고, 종목별 가능수량은 읽지 않는다. 기본값(시장가 기준)이면
@@ -1145,7 +1154,7 @@ async def run_order_assist(
         quote_text, balance_text, orderable_text = await asyncio.gather(
             mcp_runner(TRADING_MCP_PARAMS, "get_stock_quote", {"stock_name": stock}),
             mcp_runner(TRADING_MCP_PARAMS, "get_balance", {}),
-            mcp_runner(TRADING_MCP_PARAMS, "get_orderable_cash", {"stock_name": stock}),
+            mcp_runner(TRADING_MCP_PARAMS, "get_orderable_cash", {"stock_name": stock_code}),
         )
     except Exception as exc:  # noqa: BLE001
         await cooldown.mark(stock_code, trigger.rule_id)

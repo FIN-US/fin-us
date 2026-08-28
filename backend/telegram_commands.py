@@ -1848,7 +1848,10 @@ class TelegramCommandHandler:
 
         balance = self._first_line_containing(
             str(balance_result),
-            ("거래가능", "주문가능", "예수금", "총자산", "balance"),
+            # get_balance가 실제로 내는 라벨은 "예수금"이다(mcp-trading/balance.js).
+            # 나머지는 다른 잔고 응답이 섞여 들어올 때를 위한 방어선이다 — 이 프롬프트가
+            # 보여주는 것은 주문가능금액이 아니라 예수금이라는 점을 유의한다(#310).
+            ("주문가능", "예수금", "총자산", "balance"),
         )
         if balance:
             lines.append(balance)
