@@ -25,6 +25,12 @@ from .services import (
 from .models import Portfolio
 from .timeutil import KST
 from .watchlist_repo import SqliteWatchlistRepo
+from .presentation import (
+    DEFAULT_TELEGRAM_USER_LEVEL,
+    KIND_ALERT,
+    KIND_BRIEFING,
+    render,
+)
 from .telegram_notifier import telegram_notifier
 from .telegram_notifier import should_send_telegram_alert
 
@@ -450,12 +456,34 @@ async def _collect_catalyst_events(
             logger.error("[%s] 촉매 이벤트 수집 중 오류: %s", stock, e)
 
 
+async def _telegram_user_level(state: Any = None) -> str:
+    """설명 수준을 읽는다. 못 읽으면 기본값(초보) (#297 자가리뷰).
+
+    브리핑·촉매 알림이 이 함수를 쓰지 않고 기본값을 그대로 넘기고 있었다. 그래서 /level
+    중급으로 바꾼 사용자도 매 브리핑마다 용어 각주를 받았다 — 분석 알림만 수준을 읽고
+    나머지는 안 읽는, 사용자 눈에는 설명할 수 없는 차이였다.
+
+    ``state``가 있으면 그걸 쓰고(이미 열린 연결을 한 번 더 열 이유가 없다) 없으면 직접
+    연다. 실패는 삼킨다 — 수준은 다른 메시지의 곁다리 정보이고, 못 읽었다고 브리핑 자체를
+    거르면 부가 기능이 본 기능을 잡아먹는다 (telegram_commands._current_level과 같은 판단).
+    """
+    try:
+        if state is not None:
+            return await state.get_telegram_user_level()
+        async with redis_state() as opened:
+            return await opened.get_telegram_user_level()
+    except Exception as exc:
+        logger.warning("설명 수준을 읽지 못해 기본값을 씁니다: %s", exc)
+        return DEFAULT_TELEGRAM_USER_LEVEL
+
+
 async def _send_due_catalyst_alerts(
     watchlist: list[str],
     catalyst_repo: SqliteCatalystEventRepo,
     *,
     notifier: Any,
     today: date,
+    level: str = DEFAULT_TELEGRAM_USER_LEVEL,
 ) -> None:
     try:
         due_events = await catalyst_repo.list_due_for_notification(watchlist, today=today)
@@ -465,7 +493,9 @@ async def _send_due_catalyst_alerts(
 
     for event in due_events:
         try:
-            sent = await notifier.send_text(_format_catalyst_alert(event))
+            sent = await notifier.send_text(
+                render(_format_catalyst_alert(event), KIND_ALERT, level)
+            )
             if sent is True:
                 await catalyst_repo.mark_notification_sent(
                     event.id,
@@ -482,7 +512,14 @@ async def catalyst_calendar_task(
     notifier: Any = telegram_notifier,
     today_factory: Callable[[], date] | None = None,
     use_redis_lock: bool = True,
+    level: str | None = None,
 ) -> None:
+    """예정 촉매를 모으고 임박한 것을 알린다.
+
+    ``level``은 설명 수준이다. redis 잠금을 쓰는 바깥 호출이 이미 열린 연결로 읽어 안쪽
+    호출에 넘긴다 — "redis를 쓰지 않는다"고 한 경로(use_redis_lock=False)가 수준을 읽으려고
+    redis를 여는 것은 앞뒤가 맞지 않는다. 그 경로는 기본값으로 간다 (#297 자가리뷰).
+    """
     if use_redis_lock:
         try:
             async with redis_state() as state:
@@ -497,6 +534,7 @@ async def catalyst_calendar_task(
                         notifier=notifier,
                         today_factory=today_factory,
                         use_redis_lock=False,
+                        level=await _telegram_user_level(state),
                     )
                 finally:
                     await state.release_lock(
@@ -529,6 +567,7 @@ async def catalyst_calendar_task(
         catalyst_repo,
         notifier=notifier,
         today=today,
+        level=level or DEFAULT_TELEGRAM_USER_LEVEL,
     )
 
 async def monitor_market_task(watchlist_repo: SqliteWatchlistRepo | None = None):
@@ -716,11 +755,14 @@ async def _send_telegram_alert_if_needed(
         alert_mode = await state.get_telegram_alert_mode() if state is not None else "urgent"
         if not should_send_telegram_alert(analysis_data, alert_mode=alert_mode):
             return
+        # 알림 모드와 같은 저장소에서 같은 타이밍에 읽는다 (#297).
+        level = await _telegram_user_level(state)
         await telegram_notifier.send_analysis_alert(
             stock,
             source,
             analysis_data,
             alert_mode=alert_mode,
+            level=level,
         )
     except Exception as e:
         logger.error("[%s:%s] Telegram 알림 처리 중 오류: %s", source, stock, e)
@@ -862,8 +904,19 @@ async def ping_task():
     })
 
 
-async def morning_briefing_task(watchlist_repo: SqliteWatchlistRepo | None = None):
+async def morning_briefing_task(
+    watchlist_repo: SqliteWatchlistRepo | None = None,
+    *,
+    level: str | None = None,
+):
+    """모닝 브리핑. ``level``을 주지 않으면 저장된 설명 수준을 직접 읽는다.
+
+    cron으로 등록될 때는 인자가 없으므로 여기서 읽어야 한다 — 기본값을 그대로 쓰면 /level
+    설정이 브리핑에만 적용되지 않는다 (#297 자가리뷰).
+    """
     try:
+        if level is None:
+            level = await _telegram_user_level()
         if watchlist_repo is None:
             watchlist_repo = SqliteWatchlistRepo(lambda: Session(engine))
         try:
@@ -874,7 +927,7 @@ async def morning_briefing_task(watchlist_repo: SqliteWatchlistRepo | None = Non
 
         briefing = await generate_morning_briefing(watchlist)
         message = telegram_notifier.format_morning_briefing(briefing)
-        await telegram_notifier.send_text(message)
+        await telegram_notifier.send_text(render(message, KIND_BRIEFING, level))
     except Exception as e:
         logger.error("모닝 브리핑 작업 중 오류: %s", e)
 

@@ -6,18 +6,32 @@ from typing import Any
 import httpx
 
 from .config import (
+    SIGNAL_UNCERTAINTY_ALERT_THRESHOLD,
     TELEGRAM_BOT_TOKEN,
     TELEGRAM_CHAT_ID,
-    SIGNAL_UNCERTAINTY_ALERT_THRESHOLD,
     is_placeholder_secret,
+)
+from .presentation import (
+    DEFAULT_TELEGRAM_USER_LEVEL,
+    TELEGRAM_MESSAGE_LIMIT,
+    alert_kind,
+    as_list_items,
+    decision_label,
+    render,
+    source_label,
+    urgency_label,
 )
 
 logger = logging.getLogger(__name__)
 _TELEGRAM_BOT_URL_RE = re.compile(r"(https://api\.telegram\.org/bot)[^/\s\"]+")
 
-# 텔레그램 sendMessage 본문 상한(4096자)보다 여유를 둔 실사용 상한.
-TELEGRAM_MESSAGE_LIMIT = 4000
+# TELEGRAM_MESSAGE_LIMIT은 presentation이 정의하고 이 모듈이 이름만 다시 내보낸다 (#297).
+# 알림도 render를 통과하므로 이 모듈이 presentation을 임포트하고, 그래서 상한의 정의는
+# 반대편(잎)에 있어야 순환이 생기지 않는다. 기존 임포트 경로는 그대로 살아 있다.
 
+# 긴급으로 취급하는 urgency. 배너(🚨 긴급 알림)는 이 집합을 따로 보지 않고
+# should_send_telegram_alert의 판정 결과를 그대로 쓴다 — 판정이 두 곳에 있으면 어긋난다
+# (#297 자가리뷰). presentation.alert_kind 독스트링 참조.
 URGENT_TELEGRAM_LEVELS = {"high", "critical"}
 TELEGRAM_ALERT_MODES = {"urgent", "all", "off"}
 
@@ -351,25 +365,37 @@ class TelegramNotifier:
         )
         summary = analysis_data.get("summary", "")
 
-        confidence_text = f" ({confidence:.2f})" if isinstance(confidence, Real) else ""
-        title = f"[긴급] {stock} / {source}" if is_urgent else f"{stock} / {source}"
-        lines = [
-            title,
-            f"Decision: {decision}{confidence_text}",
-            f"Reason: {reason}",
-            f"Urgency: {urgency} - {urgency_reason}",
+        confidence_text = f" (확신도 {confidence:.2f})" if isinstance(confidence, Real) else ""
+        # 필드명도 값도 한국어다 (#297 검수). decision/urgency는 LLM 자유 텍스트가 아니라
+        # AgentReport의 정해진 값이므로 출력 계층이 결정론적으로 번역할 수 있다 —
+        # 표에 없는 값은 presentation의 라벨 함수가 원문 그대로 통과시킨다.
+        #
+        # 제목에서 "[긴급]"을 뺐다. 긴급 여부는 이제 render가 붙이는 배너(🚨 긴급 알림)가
+        # 알리므로, 두 자리에서 같은 말을 하면 한쪽이 바뀔 때 어긋난다. is_urgent는
+        # urgency_reason의 기본 문구를 고르는 데 계속 쓴다.
+        items = [
+            f"판단: {decision_label(decision)}{confidence_text}",
+            f"이유: {reason}",
+            # 구분자를 하이픈에서 쉼표로 바꿨다. 줄 앞에 나열 표시("- ")가 붙는 마당에
+            # 줄 가운데 또 하이픈이 있으면 그게 항목 경계로 읽힌다 (#297 검수 3차).
+            f"긴급도: {urgency_label(urgency)}, {urgency_reason}",
         ]
         # #298: 이 알림을 촉발한 signal이 몇 점이었는지. 점수가 없으면 줄이 통째로
-        # 빠진다 — 제목 바로 아래에 넣어 Decision보다 먼저 읽히게 한다.
+        # 빠진다 — 제목 바로 아래, 판단보다 먼저 읽히도록 목록 맨 앞에 넣는다. #298은
+        # 제목 뒤 lines에 직접 끼웠지만, #297에서 제목만 목록 밖으로 나가고 나머지 줄은
+        # as_list_items를 거치게 됐다. 같은 자리를 지키려면 items의 0번이어야 한다 —
+        # lines에 끼우면 이 줄만 나열 표시를 못 받는다.
         score_line = format_signal_score_line(
             analysis_data.get("signal_score"),
             analysis_data.get("signal_reason"),
             analysis_data.get("signal_uncertainty"),
         )
         if score_line is not None:
-            lines.insert(1, score_line)
+            items.insert(0, score_line)
         if summary:
-            lines.append(f"Summary: {summary}")
+            items.append(f"요약: {summary}")
+        # 제목은 목록 밖이다. 값이 늘어선 줄만 표시를 받는다.
+        lines = [f"{stock} / {source_label(source)}", *as_list_items(items)]
         return "\n".join(lines)[:TELEGRAM_MESSAGE_LIMIT]
 
     def format_morning_briefing(self, briefing: dict[str, Any]) -> str:
@@ -390,11 +416,14 @@ class TelegramNotifier:
 
     @staticmethod
     def _format_bullets(items: Any) -> list[str]:
+        # 표시는 presentation.LIST_MARKER 하나로 모은다. 여기서 하이픈을 직접 적으면
+        # 표시를 바꿀 때 이 함수만 조용히 옛 기호로 남는다 (#297 검수 3차).
         if not items:
-            return ["- 없음"]
+            return as_list_items(["없음"])
         if isinstance(items, str):
-            return [f"- {items}"]
-        return [f"- {item}" for item in items if str(item).strip()] or ["- 없음"]
+            return as_list_items([items])
+        values = [str(item) for item in items if str(item).strip()]
+        return as_list_items(values or ["없음"])
 
     async def send_analysis_alert(
         self,
@@ -403,18 +432,37 @@ class TelegramNotifier:
         analysis_data: dict[str, Any],
         *,
         alert_mode: str = "urgent",
+        level: str = DEFAULT_TELEGRAM_USER_LEVEL,
     ) -> bool:
+        """분석 알림을 보낸다. 문장 조립은 format_analysis_alert, 마무리는 presentation.render.
+
+        둘을 나눠 둔 이유: format_analysis_alert는 analysis_data를 문장으로 바꾸는 순수
+        함수라 테스트가 그 매핑만 검사할 수 있고, 틀·용어 각주·마크다운 정리는 나가는 모든
+        메시지에 공통이라 한 지점(render)에 있어야 한다. 여기서 합치면 알림만 규칙이
+        갈라진다 (#297).
+
+        ``level``은 호출부(scheduler)가 redis에서 읽어 넘긴다. notifier가 직접 읽지 않는
+        이유는 이 클래스가 저장소를 모르는 채로 남아야 테스트에서 redis 없이 세워지기
+        때문이다 — ``alert_mode``와 같은 방식이다.
+        """
         if not self.enabled:
             return False
         if not should_send_telegram_alert(analysis_data, alert_mode=alert_mode):
             return False
 
+        is_urgent = should_send_telegram_alert(analysis_data, alert_mode="urgent")
         try:
             await self._post_message(
-                self.format_analysis_alert(
-                    stock=stock,
-                    source=source,
-                    analysis_data=analysis_data,
+                render(
+                    self.format_analysis_alert(
+                        stock=stock,
+                        source=source,
+                        analysis_data=analysis_data,
+                    ),
+                    # 배너는 전송 게이트와 같은 판정을 쓴다. "긴급 모드였어도 나갔을
+                    # 알림인가"가 곧 🚨의 뜻이고, 그 판정은 여기 한 번뿐이다.
+                    alert_kind(is_urgent),
+                    level,
                 )
             )
             return True

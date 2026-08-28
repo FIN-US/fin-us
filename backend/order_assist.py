@@ -61,6 +61,10 @@ from .config import (
 # 호출 시점에 늦게 가져오지만(테스트가 주입하는 것이 기본 경로다) short_error는
 # 순수 포매터라 여기서 바로 묶는다.
 from .services import short_error
+# presentation은 의존이 없는 리프 모듈이라 여기서 바로 가져와도 순환하지 않는다.
+# /advise 승인 메시지에는 제안자·검증자가 쓴 문장이 실린다 — 이 봇은 parse_mode를
+# 쓰지 않으므로 마크다운 표기가 남으면 화면에 그대로 별표로 보인다 (#297).
+from .presentation import sanitize_markdown
 from .stock_code import (
     _ORDERABLE_STOCK_CODE_RE,
     _is_unresolved_echo,
@@ -828,7 +832,9 @@ def qualitative_reason(reason: str) -> str:
     수치만 가리면 "현재가 [수치]원 수준에서 단기 과열로 판단되어 보류를 권고합니다"가
     남아 사유가 전달되고, 수치 노출 위험은 없다.
     """
-    text = (reason or "").strip()
+    # 마크다운 표기를 먼저 벗긴다 — 봇이 parse_mode를 쓰지 않으므로 남으면 별표가
+    # 그대로 보인다. 다른 LLM 응답 경로와 같은 정리를 거친다 (#297).
+    text = sanitize_markdown(reason or "").strip()
     if not text:
         return _GENERIC_VERDICT_REASON
     masked = _NUMBER_RUN_RE.sub(_NUMBER_MASK, text)
@@ -874,8 +880,11 @@ def format_approval_message(
             f"확신도: {proposal.confidence:.2f}",
         ]
     )
-    if proposal.rationale:
-        lines.append(f"근거: {proposal.rationale}")
+    # rationale은 제안 에이전트가 쓴 문장이다 — 수치는 그대로 싣지만(도구 강제 게이트를
+    # 지난 값이다) 마크다운 표기는 다른 LLM 응답 경로와 같이 벗긴다 (#297).
+    rationale = sanitize_markdown(proposal.rationale)
+    if rationale:
+        lines.append(f"근거: {rationale}")
     lines.append(f"검증 의견: {qualitative_reason(verdict.reason)}")
 
     expires_at = order.created_at + ORDER_EXPIRES_AFTER

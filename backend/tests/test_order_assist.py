@@ -1552,3 +1552,36 @@ async def test_advise_deletes_the_pending_order_when_the_prompt_never_sends(monk
     await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/advise 삼성전자"}})
 
     assert deleted == ["123"]
+
+
+def test_verdict_reason_strips_markdown_residue():
+    """봇은 parse_mode를 쓰지 않는다 — 표기가 남으면 별표가 그대로 보인다 (#297).
+
+    /advise 승인·거부 메시지는 제안자·검증자가 쓴 문장을 싣는 유일한 주문 프롬프트라,
+    #297이 다른 LLM 응답 경로에 세운 정리를 여기서도 거쳐야 한다.
+    """
+    assert qualitative_reason("**단기 과열**로 보류를 권고합니다.") == (
+        "단기 과열로 보류를 권고합니다."
+    )
+
+
+def test_approval_message_strips_markdown_from_the_rationale():
+    from backend.trading_orders import PendingOrder
+
+    order = PendingOrder(
+        chat_id="123",
+        stock_name="삼성전자",
+        stock_code="005930",
+        side="BUY",
+        quantity=10,
+        price=74_500,
+        created_at=MARKET_OPEN_NOW,
+        order_type="LIMIT",
+        callback_token="tok",
+    )
+    proposal = _proposal(rationale="**분기 실적** 개선과 [수급](http://x) 회복")
+
+    message = format_approval_message(proposal, _snapshot(), order, VerifierVerdict(True, "명확합니다."))
+
+    assert "**" not in message
+    assert "분기 실적 개선과" in message
