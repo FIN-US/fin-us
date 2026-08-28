@@ -293,6 +293,11 @@ function formatTruncationNote(truncated, pages) {
   return `\n\n[안내] ${reason} 조회가 중단되어 일부 보유 종목이 위 목록에서 누락되었을 수 있습니다. 실제 잔고는 별도로 확인하세요.`;
 }
 
+// `dnca_tot_amt`는 예수금총금액이다. 이 자리의 라벨은 원래 "거래가능금액"이었는데,
+// 미수·증거금·미결제 정산이 반영되지 않은 값이라 실제로 낼 수 있는 금액이 아니었다
+// (#310). 같은 필드를 balance-rlz-pl-report.js도 "예수금"이라 부르므로 표기를 그쪽에
+// 맞춘다. 진짜 주문가능현금이 필요하면 get_orderable_cash(inquire-psbl-order의
+// ord_psbl_cash)를 쓴다 — backend/order_assist.py의 하드 한도가 그쪽을 읽는다.
 export function formatBalanceReport(data, { pages, truncated } = {}) {
   const summary = data.output2?.[0] || {};
   const holdings = data.output1 || [];
@@ -315,7 +320,7 @@ export function formatBalanceReport(data, { pages, truncated } = {}) {
 - 총 평가금액: ${formatAmount(summary.tot_evlu_amt)}
 - 순자산금액: ${formatAmount(summary.nass_amt || summary.pchs_amt_smtl_amt)}
 - 총 손익: ${formatAmount(summary.evlu_pfls_smtl_amt)} (수익률: ${formatPercent(accountReturnRate)})
-- 거래가능금액: ${formatAmount(summary.dnca_tot_amt)}
+- 예수금: ${formatAmount(summary.dnca_tot_amt)}
 - 정산중 금액(가수도): ${formatAmount(summary.prvs_rcdl_excc_amt)}
 - 익일 정산예정금액: ${formatAmount(summary.nxdy_excc_amt)}
 - 금일 매수/매도: ${formatAmount(summary.thdt_buy_amt)} / ${formatAmount(summary.thdt_sll_amt)}

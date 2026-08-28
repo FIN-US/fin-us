@@ -126,7 +126,11 @@ class OrderProposal:
 
 @dataclass(frozen=True)
 class AccountSnapshot:
-    """주문 판정에 쓰는 계좌·시세 스냅샷. 전부 KIS에서 직접 조회한 값이다."""
+    """주문 판정에 쓰는 계좌·시세 스냅샷. 전부 KIS에서 직접 조회한 값이다.
+
+    ``cash``는 예수금이 아니라 **주문가능현금**이다 — inquire-psbl-order의
+    ``ord_psbl_cash``이고, 미수·증거금·미결제 정산이 반영된 값이다 (#310).
+    """
 
     current_price: int
     cash: int
@@ -364,19 +368,22 @@ def parse_proposal(raw: str) -> tuple[OrderProposal | None, str]:
 
 # mcp-trading/index.js getStockQuote(): "- 현재가: 74,500원"
 _CURRENT_PRICE_RE = re.compile(r"현재가:\s*([\d,]+)\s*원")
-# mcp-trading/balance.js formatBalanceReport(): "- 거래가능금액: 1,000,000원"
+# mcp-trading/orderable-cash.js formatOrderableCashReport(): "- 주문가능금액: 1,000,000원"
 #
-# 이 값의 출처는 balance.js:292의 summary.dnca_tot_amt, 즉 **예수금총금액**이다. 같은
-# 필드를 balance-rlz-pl-report.js:25는 "예수금"이라고 부른다 — "거래가능금액"이라는
-# 라벨이 붙어 있을 뿐 KIS의 주문가능현금(inquire-psbl-order의 ord_psbl_cash)이 아니다.
-# 미수/증거금/미결제 정산이 반영되지 않으므로 실제 주문가능액과 어긋날 수 있다.
-# 그래서 사용자에게도 "예수금"으로 표기한다(format_approval_message).
-# 정확한 주문가능현금 조회는 후속 이슈다 (#310).
+# 이 값의 출처는 inquire-psbl-order(매수가능조회 v1_국내주식-007)의 `ord_psbl_cash`,
+# 즉 KIS가 계산한 **주문가능현금**이다 (#310).
 #
-# "주문가능금액" 대안은 mcp-trading 어디에도 없는 라벨이라 지금은 아무것도 매치하지
-# 않는다. 방어적으로 남겨 두지만 계약이 아니다 — 라벨이 바뀌면 cash=None으로 떨어져
-# fail-closed로 거부되므로, 이 대안이 없어도 한도가 헐거워지지는 않는다.
-_CASH_RE = re.compile(r"(?:거래가능금액|주문가능금액):\s*([\d,]+)\s*원")
+# 이 정규식은 잔고 응답이 아니라 get_orderable_cash 응답에만 건다. 예전에는
+# get_balance의 "거래가능금액"(= inquire-balance의 dnca_tot_amt, 예수금총금액)을 읽었는데,
+# 그 값은 미수·증거금·미결제 정산이 반영되지 않아 실제 낼 수 있는 금액과 어긋난다.
+# 아래 두 하드 한도가 이 값 위에 서 있으므로(evaluate_hard_limits) 어긋남의 방향이
+# 곧 한도가 헐거워지느냐 조여지느냐가 된다:
+#   - insufficient_cash — 주문금액 > 주문가능금액
+#   - cash_floor — 주문 후 남는 현금이 총 평가금액의 일정 비율 미만
+#
+# 라벨이 바뀌면 cash=None으로 떨어져 fail-closed로 거부된다 — 조용히 헐거워지는 길은
+# 없다. 반대쪽 계약(출력하는 쪽)은 mcp-trading/tests/orderable-cash.test.js가 고정한다.
+_CASH_RE = re.compile(r"주문가능금액:\s*([\d,]+)\s*원")
 # "- 총 평가금액: 1,210,000원"
 _TOTAL_VALUE_RE = re.compile(r"총\s*평가금액:\s*([\d,]+)\s*원")
 
@@ -394,9 +401,18 @@ def _first_amount(pattern: re.Pattern[str], text: str) -> int | None:
 def parse_snapshot(
     quote_text: str,
     balance_text: str,
+    orderable_text: str,
     stock_code: str,
 ) -> tuple[AccountSnapshot | None, str]:
-    """시세·잔고 응답에서 :class:`AccountSnapshot`을 만든다.
+    """시세·잔고·주문가능 응답에서 :class:`AccountSnapshot`을 만든다.
+
+    세 응답이 각각 무엇을 담당하는지가 고정이다 — 겹치지 않는다:
+
+    - ``quote_text`` (get_stock_quote): 현재가
+    - ``balance_text`` (get_balance): 총 평가금액, 보유량
+    - ``orderable_text`` (get_orderable_cash): 주문가능현금 (#310)
+
+    현금을 잔고가 아니라 매수가능조회에서 읽는 이유는 ``_CASH_RE`` 주석에 있다.
 
     한 값이라도 읽지 못하면 ``(None, 사유)``다 — 한도 판정은 이 네 값 위에 서 있으므로,
     빠진 값을 0으로 채우면 한도가 조용히 무력해진다(현금 0은 "현금 없음"이 아니라
@@ -425,9 +441,9 @@ def parse_snapshot(
     if is_balance_truncated(balance_text or ""):
         return None, "계좌 잔고 조회가 중간에 끊겨(일부 종목 누락) 진행하지 않았습니다."
 
-    cash = _first_amount(_CASH_RE, balance_text)
+    cash = _first_amount(_CASH_RE, orderable_text)
     if cash is None:
-        return None, "예수금을 확인하지 못해 진행하지 않았습니다."
+        return None, "주문가능금액을 확인하지 못해 진행하지 않았습니다."
 
     total_value = _first_amount(_TOTAL_VALUE_RE, balance_text)
     if total_value is None or total_value <= 0:
@@ -556,7 +572,7 @@ def evaluate_hard_limits(
             violations.append(
                 LimitViolation(
                     "insufficient_cash",
-                    f"예수금 부족: 주문금액 {amount:,}원 > 예수금 {snapshot.cash:,}원",
+                    f"주문가능금액 부족: 주문금액 {amount:,}원 > 주문가능금액 {snapshot.cash:,}원",
                 )
             )
         else:
@@ -875,7 +891,7 @@ def format_approval_message(
         [
             f"예상 주문금액: {amount:,}원",
             f"현재가: {snapshot.current_price:,}원",
-            f"예수금: {snapshot.cash:,}원",
+            f"주문가능금액: {snapshot.cash:,}원",
             f"보유수량: {snapshot.holding_qty:,}주",
             f"확신도: {proposal.confidence:.2f}",
         ]
@@ -1116,10 +1132,20 @@ async def run_order_assist(
         )
 
     # ⑤ 스냅샷 조회
+    #
+    #    현금은 잔고(dnca_tot_amt)가 아니라 매수가능조회(ord_psbl_cash)에서 읽는다 (#310).
+    #    조회 하나가 늘었지만 셋을 동시에 던지므로 벽시계 시간은 가장 느린 하나로 남는다.
+    #    셋 중 하나라도 실패하면 그대로 거부다 — SELL 제안도 마찬가지다. 이 스냅샷은
+    #    "확인한 계좌 상태" 하나이고, 절반만 확인한 상태 위에서 한도를 판정하지 않는다.
+    #
+    #    기준 주문유형·단가를 넘기지 않는 이유: 우리가 쓰는 것은 계좌 단위 값인
+    #    ord_psbl_cash 하나뿐이고, 종목별 가능수량은 읽지 않는다. 기본값(시장가 기준)이면
+    #    충분하다.
     try:
-        quote_text, balance_text = await asyncio.gather(
+        quote_text, balance_text, orderable_text = await asyncio.gather(
             mcp_runner(TRADING_MCP_PARAMS, "get_stock_quote", {"stock_name": stock}),
             mcp_runner(TRADING_MCP_PARAMS, "get_balance", {}),
+            mcp_runner(TRADING_MCP_PARAMS, "get_orderable_cash", {"stock_name": stock}),
         )
     except Exception as exc:  # noqa: BLE001
         await cooldown.mark(stock_code, trigger.rule_id)
@@ -1129,7 +1155,9 @@ async def run_order_assist(
             proposal=proposal,
         )
 
-    snapshot, snapshot_error = parse_snapshot(str(quote_text), str(balance_text), stock_code)
+    snapshot, snapshot_error = parse_snapshot(
+        str(quote_text), str(balance_text), str(orderable_text), stock_code
+    )
     if snapshot is None:
         await cooldown.mark(stock_code, trigger.rule_id)
         return _rejected(stock, (LimitViolation("snapshot_parse", snapshot_error),), proposal=proposal)
