@@ -51,9 +51,12 @@ from .presentation import (
 from .services import llm_chat, run_mcp_tool, short_error as _short_error
 from .watchlist_repo import SqliteWatchlistRepo
 from .telegram_notifier import (
+    SETTLED_SEND_RETRY_BACKOFF_SECONDS,
+    SETTLED_SEND_TIMEOUT_SECONDS,
     TELEGRAM_ALERT_MODES,
     TelegramNotifier,
     fetch_telegram_api,
+    send_text_settled,
     telegram_notifier,
 )
 from .timeutil import KST
@@ -178,28 +181,16 @@ UPDATE_LABEL_LIMIT = 40
 STATE_STORE_TIMEOUT_SECONDS = 3.0
 
 
-# 부수효과가 확정된 뒤의 전송은 update 재시도로 되살릴 수 없다(#247). 대신 그 자리에서
-# 짧게 재시도해 429 같은 일시 장애를 흡수한다 — "전송만 별도로 재시도"에 해당한다.
+# 확정 전송의 재시도 상수(SETTLED_SEND_*)와 루프(send_text_settled)는 telegram_notifier로
+# 옮겼다 (PR #327 리뷰). 스케줄러의 자동 제안(#314)이 같은 재시도를 써야 하는데, 핸들러
+# 메서드로 두면 그쪽에서 부를 수 없어 한쪽만 단발 전송이 되고 같은 429에 한쪽 메시지만
+# 조용히 버려진다. 이름은 위 import로 여기서 계속 읽을 수 있다.
 #
-# 이 값을 키우면 안 되는 이유가 둘이다.
-#   1. 폴러 루프를 그 시간만큼 붙잡으므로, 같은 배치에서 재시도를 기다리는 다른 update가
-#      시도 없이 예산(일반 실패 60초)만 잃는다. PR #242가 넓힌 예산을 되돌리는 방향이다.
-#   2. /buy 확인 프롬프트는 대기 주문의 60초 만료 창을 나눠 쓴다. 늦게 도착할수록 사용자가
-#      확인 버튼을 누를 시간이 줄어든다.
-#
-# 429의 retry_after를 읽을 수 없어(notifier.send_text가 bool만 돌려준다) 간격은 추측이다.
-# Telegram이 더 긴 ban을 주면 4시도가 모두 그 안에서 소진되고 메시지는 버려진다.
-SETTLED_SEND_RETRY_BACKOFF_SECONDS = (1.0, 3.0, 9.0)
-# 위 백오프 합(13초)은 상한이 아니다. 시도마다 HTTP 왕복이 붙고 telegram_notifier의 httpx
-# 타임아웃이 10초라, Telegram이 429로 즉답하지 않고 무응답이면 4시도 × 10초 + 13초 = 53초까지
-# 늘어난다. 그러면 위 두 대가가 모두 한계까지 간다 — /buy 프롬프트가 60초 만료 창을 거의
-# 다 먹고, 같은 배치의 update는 예산을 통째로 잃는다 (PR #253 리뷰).
-#
-# 그래서 백오프 합이 아니라 벽시계로 상한을 강제한다. 429는 즉답이라 현실 경로는 여전히
-# 백오프 합에 가깝고, 이 상한은 무응답·행 같은 병리적 경우만 잘라낸다.
-# 상한이 있다는 사실과 그 값이 만료 창 안에 든다는 것을 테스트가 고정한다
-# (test_settled_send_retry_is_bounded, test_settled_send_gives_up_at_the_wall_clock_bound).
-SETTLED_SEND_TIMEOUT_SECONDS = 20.0
+# 다만 **여기 있는 이름을 monkeypatch해도 상한은 바뀌지 않는다** — 값을 읽는 것은
+# telegram_notifier 안이고 이쪽은 임포트 시점에 묶인 별개 바인딩이다. 테스트가 상한을
+# 줄이려면 telegram_notifier 쪽을 패치해야 하며, 잘못된 대상을 잡으면
+# test_settled_send_gives_up_at_the_wall_clock_bound의 elapsed 단언이 잡는다.
+
 # getUpdates 배치 크기. 명시하지 않으면 Telegram 기본값이 100이라, 배치 전체가 settled
 # 전송에 닿으면 한 루프의 점유가 100 × SETTLED_SEND_TIMEOUT_SECONDS까지 늘어나 사실상
 # 상한이 없어진다. 배치를 작게 끊으면 최악이 유계가 된다 (PR #253 2차 리뷰).
@@ -715,80 +706,15 @@ class TelegramCommandHandler:
         *,
         reply_markup: dict[str, Any] | None = None,
     ) -> bool:
-        """부수효과가 확정된 뒤의 전송. 실패해도 update를 재시도하지 않는다 (#247).
+        """확정된 부수효과의 결과 전송. 재시도 규칙은 telegram_notifier에 하나뿐이다.
 
-        재시도하면 원래 의도를 달성하지 못하고 다른 메시지로 끝나기 때문이다. /buy는 대기
-        주문이 이미 저장돼 재실행이 "이미 대기 중인 주문이 있습니다"로 끝나 사용자가 확인
-        버튼을 영영 못 받고, /confirm은 claim(GETDEL)으로 주문이 소비돼 재실행이 "확정할
-        대기 주문이 없습니다"로 끝나 체결된 주문을 미체결로 인식하게 만든다.
-
-        대신 전송만 그 자리에서 재시도해 429 같은 일시 장애를 흡수한다. 그래도 실패하면
-        로그만 남긴다 — 사용자에게 말을 걸 수 없는 상태에서 할 수 있는 일이 없다.
-
-        재시도가 폴러 루프를 붙잡는 시간의 상한과 그 대가는 SETTLED_SEND_TIMEOUT_SECONDS
-        주석에 적어 두었다.
-
-        반환값은 전송 성공 여부다. 호출부가 "통지가 나갔는가"로 뒷정리를 갈라야 하는
-        경우가 있다(/buy는 실패 시 대기 주문을 지운다).
+        스케줄러의 자동 제안(#314)이 같은 함수를 부른다 — 한쪽만 단발 전송이면 같은 429에
+        한쪽 메시지만 조용히 버려진다 (PR #327 리뷰). 여기서는 테스트가 대체할 수 있는
+        _sleep을 넘겨 주는 것 말고 하는 일이 없다.
         """
-        attempts = len(SETTLED_SEND_RETRY_BACKOFF_SECONDS) + 1
-        started_at = time.monotonic()
-        try:
-            # 시도 횟수가 아니라 벽시계로 상한을 강제한다. 무응답이면 시도마다 httpx
-            # 타임아웃(10초)이 그대로 붙어 횟수만으로는 상한이 서지 않기 때문이다.
-            # asyncio.timeout은 자기 데드라인이 아닌 외부 취소는 CancelledError로 그대로
-            # 통과시키므로 폴러의 graceful shutdown을 방해하지 않는다.
-            async with asyncio.timeout(SETTLED_SEND_TIMEOUT_SECONDS):
-                for index in range(attempts):
-                    sent = await self.notifier.send_text(text, reply_markup=reply_markup)
-                    if sent is not False:
-                        return True
-                    if index >= len(SETTLED_SEND_RETRY_BACKOFF_SECONDS):
-                        break
-
-                    delay = SETTLED_SEND_RETRY_BACKOFF_SECONDS[index]
-                    # 429의 flood-wait은 흔히 30초 이상이라 (1, 3, 9) 추측으로는 4시도가
-                    # 전부 ban 구간에 소진된다. 게다가 ban 중 재요청은 대기 시간을 늘리는
-                    # 방향으로 작용한다 — 남은 예산 안에 안 풀리면 재시도가 무의미할 뿐
-                    # 아니라 해롭다 (PR #253 2차 리뷰).
-                    #
-                    # last_retry_after_seconds는 notifier에 걸린 공유 가변 상태다. 이 읽기가
-                    # 방금 그 send_text의 결과를 보는 근거는 둘뿐이다: send_text가 성공·실패
-                    # 양쪽에서 값을 갱신해 호출 간 이월이 없다는 것과, 위 send_text 반환과
-                    # 이 줄 사이에 await가 없어 이벤트 루프가 다른 코루틴에 넘어가지 않는다는
-                    # 것. 사이에 await를 하나 넣으면(로깅을 비동기로 바꾸는 정도로도) 다른
-                    # 전송의 flood-wait을 읽게 된다 (PR #253 3차 리뷰).
-                    retry_after = getattr(self.notifier, "last_retry_after_seconds", None)
-                    if retry_after is not None:
-                        remaining = SETTLED_SEND_TIMEOUT_SECONDS - (
-                            time.monotonic() - started_at
-                        )
-                        if retry_after > remaining:
-                            logger.error(
-                                "확정된 부수효과의 결과를 전송하지 못했습니다 "
-                                "(%s자, flood-wait %s초 > 남은 예산 %.1f초 — 재시도 포기)",
-                                len(text),
-                                retry_after,
-                                max(0.0, remaining),
-                            )
-                            return False
-                        delay = max(delay, float(retry_after))
-                    await self._sleep(delay)
-        except TimeoutError:
-            logger.error(
-                "확정된 부수효과의 결과를 전송하지 못했습니다 (%s자, 벽시계 상한 %s초 초과)",
-                len(text),
-                SETTLED_SEND_TIMEOUT_SECONDS,
-            )
-            return False
-        # 본문은 남기지 않는다. 이 경로에는 체결 내역·잔고가 실려 있고, 진단에 필요한 것은
-        # "어느 지점에서 몇 번 만에 포기했는가"이지 사용자에게 보내려던 문장이 아니다.
-        logger.error(
-            "확정된 부수효과의 결과를 전송하지 못했습니다 (%s자, %s시도 후 포기)",
-            len(text),
-            attempts,
+        return await send_text_settled(
+            self.notifier, text, reply_markup=reply_markup, sleep=self._sleep
         )
-        return False
 
     async def _sleep(self, seconds: float) -> None:
         """테스트가 전역 asyncio.sleep 대신 이 인스턴스만 대체할 수 있게 하는 간접층.

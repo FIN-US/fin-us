@@ -16,6 +16,7 @@ from sqlmodel import Session
 from ..order_assist import OrderAssistResult
 from ..order_rules import RULE_ID, OrderAssistRule, RuleMatch
 from ..redis_state import InMemoryPendingOrderStore, RedisSchedulerState
+from ..telegram_notifier import SETTLED_SEND_RETRY_BACKOFF_SECONDS
 from ..timeutil import KST
 from ..trading_orders import ORDER_CONFIRM_CALLBACK, PendingOrder
 from ..watchlist_repo import SqliteWatchlistRepo
@@ -33,17 +34,39 @@ CLOSED = datetime(2026, 8, 27, 20, 0, tzinfo=KST)
 
 
 class FakeNotifier:
-    """send_text만 쓰는 최소 노티파이어. 보낸 것을 그대로 기록한다."""
+    """send_text만 쓰는 최소 노티파이어. 보낸 것을 그대로 기록한다.
 
-    def __init__(self, *, enabled: bool = True, chat_id: str = "123", ok: bool = True):
+    ``results``를 주면 시도마다 그 값을 차례로 돌려주고, 다 쓰면 마지막 값을 유지한다 —
+    확정 전송의 재시도를 검사하는 테스트가 "몇 번째에 성공했는가"를 지정하는 자리다.
+    """
+
+    def __init__(
+        self,
+        *,
+        enabled: bool = True,
+        chat_id: str = "123",
+        ok: bool = True,
+        results: list[bool] | None = None,
+    ):
         self.enabled = enabled
         self.chat_id = chat_id
-        self._ok = ok
+        self._results = list(results) if results is not None else [ok]
+        self.last_retry_after_seconds = None
         self.sent: list[tuple[str, dict | None]] = []
 
     async def send_text(self, text, *, reply_markup=None):
         self.sent.append((text, reply_markup))
-        return self._ok
+        return self._results[min(len(self.sent), len(self._results)) - 1]
+
+
+@pytest.fixture(autouse=True)
+def _no_real_backoff(monkeypatch):
+    """확정 전송의 재시도 백오프(최대 13초)를 벽시계로 기다리지 않는다."""
+
+    async def instant(seconds):
+        _ = seconds
+
+    monkeypatch.setattr("backend.scheduler._sleep", instant)
 
 
 class RecordingPendingOrderStore(InMemoryPendingOrderStore):
@@ -336,23 +359,71 @@ async def test_approval_is_sent_even_in_urgent_mode():
 
 
 @pytest.mark.asyncio
-async def test_undelivered_prompt_clears_the_pending_order():
-    """/advise와 같은 처리다 (#247). 프롬프트가 안 나갔으면 사용자는 슬롯의 존재를 모른다."""
+async def test_approval_send_retries_before_giving_up():
+    """여기까지 온 제안은 제안·검증 왕복과 재제안 냉각을 이미 태운 뒤다 (PR #327 리뷰).
+
+    단발 전송으로 두면 일시적인 429 한 번에 그 전부가 버려지고, 냉각 때문에 같은 종목은
+    기본 60분 동안 다시 시도되지도 않는다. /advise가 쓰는 재시도를 그대로 쓴다.
+    이 테스트가 잡는 mutation: send_text_settled를 notifier.send_text 단발로 되돌리는 회귀.
+    """
     from ..scheduler import run_rule_triggered_proposal
 
     store = RecordingPendingOrderStore()
+    notifier = FakeNotifier(results=[False, False, True])
     await run_rule_triggered_proposal(
         [_MATCH],
         await _state("urgent"),
         pending_orders=store,
-        notifier=FakeNotifier(ok=False),
+        notifier=notifier,
         now_factory=lambda: OPEN,
         assist=_assist_stub(
             OrderAssistResult(status="approved", message="제안 본문", order=_order())
         ),
     )
 
+    assert len(notifier.sent) == 3
+    # 결국 나갔으므로 대기 주문은 그대로 둔다 — 사용자가 확정 버튼을 보고 있다.
+    assert store.deleted == []
+
+
+@pytest.mark.asyncio
+async def test_undelivered_prompt_clears_the_pending_order():
+    """/advise와 같은 처리다 (#247). 프롬프트가 안 나갔으면 사용자는 슬롯의 존재를 모른다."""
+    from ..scheduler import run_rule_triggered_proposal
+
+    store = RecordingPendingOrderStore()
+    notifier = FakeNotifier(ok=False)
+    await run_rule_triggered_proposal(
+        [_MATCH],
+        await _state("urgent"),
+        pending_orders=store,
+        notifier=notifier,
+        now_factory=lambda: OPEN,
+        assist=_assist_stub(
+            OrderAssistResult(status="approved", message="제안 본문", order=_order())
+        ),
+    )
+
+    assert len(notifier.sent) == len(SETTLED_SEND_RETRY_BACKOFF_SECONDS) + 1
     assert store.deleted == ["123"]
+
+
+@pytest.mark.asyncio
+async def test_rejection_notice_does_not_spend_the_retry_budget():
+    """거부·충돌 통지는 부수효과가 남지 않는다. 못 보내면 로그로 남는 것이 전부다."""
+    from ..scheduler import run_rule_triggered_proposal
+
+    notifier = FakeNotifier(ok=False)
+    await run_rule_triggered_proposal(
+        [_MATCH],
+        await _state("all"),
+        pending_orders=RecordingPendingOrderStore(),
+        notifier=notifier,
+        now_factory=lambda: OPEN,
+        assist=_assist_stub(OrderAssistResult(status="rejected", message="거부")),
+    )
+
+    assert len(notifier.sent) == 1
 
 
 @pytest.mark.asyncio

@@ -12,7 +12,7 @@ from ..order_rules import (
     RuleMatch,
     build_trigger_signal,
     format_auto_message,
-    in_rule_scope,
+    build_rule_scope,
     load_rule,
     match_rule,
     most_urgent,
@@ -109,6 +109,23 @@ def test_unreadable_urgency_does_not_trigger(analysis_data):
     )
 
 
+def test_source_is_compared_case_insensitively():
+    """지금은 SIGNAL_SOURCES가 소문자 리터럴이지만, 대문자가 섞인 소스가 하나 추가되는
+    순간 .env로는 영영 켤 수 없게 된다 — 게다가 실패가 "매칭 없음"이라 조용하다.
+    """
+    matched = match_rule(
+        _rule(sources={"news"}),
+        stock="삼성전자",
+        source=" News ",
+        analysis_data={"urgency": "critical"},
+    )
+
+    assert matched is not None
+    # 접은 형태를 싣는다. build_trigger_signal이 이 값으로 지시 문구를 찾기 때문이다.
+    assert matched.source == "news"
+    assert build_trigger_signal(matched.source) != build_trigger_signal("unknown")
+
+
 def test_urgency_is_compared_case_insensitively():
     matched = match_rule(
         _rule(), stock="삼성전자", source="news", analysis_data={"urgency": " CRITICAL "}
@@ -124,10 +141,16 @@ def test_urgency_is_compared_case_insensitively():
 
 
 def test_scope_is_owned_and_watchlist_only():
-    assert in_rule_scope("삼성전자", ["삼성전자"], [])
-    assert in_rule_scope("NAVER", [], ["NAVER"])
+    scope = build_rule_scope(["삼성전자"], ["NAVER"])
+
+    assert "삼성전자" in scope
+    assert "NAVER" in scope
     # 감시 기본 종목(DEFAULT_MONITOR_STOCKS)은 사용자가 고른 종목이 아니다.
-    assert not in_rule_scope("SK하이닉스", [], [])
+    assert "SK하이닉스" not in scope
+
+
+def test_empty_owned_and_watchlist_give_an_empty_scope():
+    assert build_rule_scope([], []) == frozenset()
 
 
 # ---------------------------------------------------------------------------

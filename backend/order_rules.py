@@ -16,7 +16,7 @@
 별도 테이블을 두면 룰 CRUD 명령 표면(추가·삭제·조회)이 따라와야 하는데, 지금 필요한 것은
 "자동 제안을 켤지"와 "어느 신호에서 켤지" 두 가지뿐이다. 종목마다 다른 조건이 필요해지면
 그때 테이블로 옮긴다 — 그 전까지 테이블은 값이 하나뿐인 스키마 마이그레이션 비용이다.
-대상 범위를 관심 종목·보유 종목으로 좁히는 이유는 :func:`in_rule_scope` 주석에 있다.
+대상 범위를 관심 종목·보유 종목으로 좁히는 이유는 :func:`build_rule_scope` 주석에 있다.
 
 **2. 거부·충돌 통지 — ``/alerts`` 모드를 따른다.**
 사용자가 요청한 적 없는 제안이라 거부를 매번 알리면 소음이다. ``all``에서만 보내고
@@ -128,15 +128,18 @@ def load_rule(
     )
 
 
-def in_rule_scope(stock: str, owned: Iterable[str], watchlist: Iterable[str]) -> bool:
-    """이 종목에 자동 제안을 걸어도 되는가.
+def build_rule_scope(owned: Iterable[str], watchlist: Iterable[str]) -> frozenset[str]:
+    """자동 제안을 걸어도 되는 종목 집합.
 
     보유 종목과 관심 종목만 대상이다. 감시 루프는 둘 다 비었을 때
     ``DEFAULT_MONITOR_STOCKS``로 떨어지는데, 그건 사용자가 고른 종목이 아니라 감시 공백을
     메우는 기본값이다. 거기에 자동 제안을 걸면 관심을 표한 적도 없는 종목의 확정 버튼이
     사용자에게 뜬다 — 수동 ``/advise``에는 없던 종류의 사고다.
+
+    종목마다 부르는 술어가 아니라 집합을 한 번 만들어 주는 것은, 호출부가 감시 대상
+    종목 수만큼 이 함수를 부르기 때문이다.
     """
-    return stock in set(owned) or stock in set(watchlist)
+    return frozenset(owned) | frozenset(watchlist)
 
 
 def match_rule(
@@ -152,13 +155,22 @@ def match_rule(
     """
     if rule is None or not analysis_data:
         return None
-    if source not in rule.sources:
+    # 소스도 긴급도와 같은 방식으로 접어서 대조한다. ORDER_RULE_SOURCES가 config에서
+    # 소문자로 접히므로, 여기서 접지 않으면 대문자가 섞인 소스 이름이 SIGNAL_SOURCES에
+    # 하나 추가되는 순간 .env로는 영영 켤 수 없게 된다 — 게다가 실패가 "매칭 없음"이라
+    # 조용하다(PR #327 리뷰).
+    normalized_source = source.strip().lower()
+    if normalized_source not in rule.sources:
         return None
     raw_urgency = analysis_data.get("urgency")
     urgency = raw_urgency.strip().lower() if isinstance(raw_urgency, str) else ""
     if urgency not in rule.urgency_levels:
         return None
-    return RuleMatch(rule_id=rule.rule_id, stock=stock, source=source, urgency=urgency)
+    # 접은 형태를 싣는다. build_trigger_signal이 이 값으로 지시 문구를 찾으므로, 원문을
+    # 그대로 두면 조건은 통과하고 문구만 기본값으로 떨어지는 어긋남이 생긴다.
+    return RuleMatch(
+        rule_id=rule.rule_id, stock=stock, source=normalized_source, urgency=urgency
+    )
 
 
 def most_urgent(matches: Iterable[RuleMatch]) -> RuleMatch | None:
@@ -178,8 +190,12 @@ def most_urgent(matches: Iterable[RuleMatch]) -> RuleMatch | None:
 
 
 def build_trigger_signal(source: str) -> str:
-    """제안 프롬프트에 실을 지시 문구. **수치를 담지 않는다** (모듈 docstring 3번)."""
-    return _TRIGGER_INSTRUCTIONS.get(source, _DEFAULT_TRIGGER_INSTRUCTION)
+    """제안 프롬프트에 실을 지시 문구. **수치를 담지 않는다** (모듈 docstring 3번).
+
+    match_rule이 이미 접은 값을 싣지만 여기서도 접는다 — 이 함수는 RuleMatch를 거치지
+    않고도 부를 수 있고, 알 수 없는 소스는 조용히 기본 문구로 떨어지기 때문이다.
+    """
+    return _TRIGGER_INSTRUCTIONS.get(source.strip().lower(), _DEFAULT_TRIGGER_INSTRUCTION)
 
 
 def should_run(alert_mode: str) -> bool:

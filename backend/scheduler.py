@@ -1,3 +1,4 @@
+import asyncio
 import os
 import logging
 import re
@@ -31,7 +32,7 @@ from .order_rules import (
     RuleMatch,
     build_trigger_signal,
     format_auto_message,
-    in_rule_scope,
+    build_rule_scope,
     load_rule,
     match_rule,
     most_urgent,
@@ -56,7 +57,7 @@ from .presentation import (
     render,
 )
 from .telegram_notifier import telegram_notifier
-from .telegram_notifier import should_send_telegram_alert
+from .telegram_notifier import send_text_settled, should_send_telegram_alert
 
 logger = logging.getLogger(__name__)
 
@@ -155,6 +156,15 @@ def _default_pending_order_store() -> PendingOrderStore:
     if _rule_pending_order_store is None:
         _rule_pending_order_store = RedisPendingOrderStore(create_redis_client())
     return _rule_pending_order_store
+
+
+async def _sleep(seconds: float) -> None:
+    """테스트가 전역 ``asyncio.sleep`` 대신 이 모듈의 이름만 대체할 수 있게 하는 간접층.
+
+    telegram_commands._sleep과 같은 이유다 — 확정 전송의 재시도 백오프(최대 13초)를
+    실제로 기다리는 테스트는 그 시간을 그대로 벽시계로 문다.
+    """
+    await asyncio.sleep(seconds)
 
 
 # "- 종목명 (코드) ..." 형식의 잔고 종목 줄을 검증하는 정규식.
@@ -802,13 +812,14 @@ async def _monitor_market_task(
         # 룰이 꺼져 있으면 rule이 None이라 match_rule이 항상 None을 돌려주고, 아래
         # 리스트는 빈 채로 남는다.
         rule = load_rule()
+        # 룰 대상은 보유 종목 + 관심 종목뿐이다. stocks_to_monitor가
+        # DEFAULT_MONITOR_STOCKS로 떨어진 주기에는 이 집합과 겹치는 종목이 없다.
+        rule_scope = build_rule_scope(owned_stocks, watchlist)
         rule_matches: list[RuleMatch] = []
 
         with Session(engine) as session:
             for stock in stocks_to_monitor:
-                # 룰 대상은 보유 종목 + 관심 종목뿐이다. stocks_to_monitor가
-                # DEFAULT_MONITOR_STOCKS로 떨어진 주기에는 여기가 전부 None이 된다.
-                stock_rule = rule if in_rule_scope(stock, owned_stocks, watchlist) else None
+                stock_rule = rule if stock in rule_scope else None
                 for source in SIGNAL_SOURCES:
                     match = await _monitor_signal(
                         stock, source, session, state, filtered_signal_repo, rule=stock_rule
@@ -1134,9 +1145,16 @@ async def run_rule_triggered_proposal(
     if result.order is not None:
         # 승인은 알림 모드와 무관하게 보낸다. 확정 버튼이 필요할 뿐 아니라, 이 시점에는
         # 이미 대기 주문 슬롯이 잡혀 있어 알리지 않으면 사용자의 다음 /buy가 막힌다.
-        sent = await notifier.send_text(
+        #
+        # /advise와 같은 재시도를 쓴다 (PR #327 리뷰). 여기까지 온 제안은 제안 왕복
+        # (≤120초)·검증 왕복(≤40초)과 재제안 냉각을 이미 소비한 뒤라, 단발 전송으로 두면
+        # 일시적인 429 한 번에 그 전부가 버려지고 같은 종목은 냉각이 풀릴 때까지(기본
+        # 60분) 다시 시도되지도 않는다.
+        sent = await send_text_settled(
+            notifier,
             format_auto_message(result.message),
             reply_markup=order_reply_markup(result.order),
+            sleep=_sleep,
         )
         if not sent:
             # /advise와 같은 처리다 (#247). 프롬프트가 끝내 안 나갔으면 사용자는 대기 주문의
@@ -1148,7 +1166,8 @@ async def run_rule_triggered_proposal(
                 logger.error("자동 제안 프롬프트 미전달 후 대기 주문 정리 실패: %s", e)
         return result
 
-    # 거부·충돌. 사용자가 요청한 적 없는 시도라 all 모드에서만 알린다.
+    # 거부·충돌. 사용자가 요청한 적 없는 시도라 all 모드에서만 알린다. 이쪽은 부수효과가
+    # 남지 않은 통지라 재시도 예산을 쓰지 않는다 — 못 보내면 로그로 남는 것이 전부다.
     if should_report_rejection(alert_mode):
         await notifier.send_text(format_auto_message(result.message))
     else:
