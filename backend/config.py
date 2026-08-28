@@ -15,7 +15,11 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 OPENAI_CHAT_MODEL = os.getenv("OPENAI_CHAT_MODEL", "gpt-5.4-mini")
 ANTHROPIC_CHAT_MODEL = os.getenv("ANTHROPIC_CHAT_MODEL", "claude-sonnet-4-20250514")
 
-NAT_BASE_URL = os.environ.get("NAT_BASE_URL", "http://127.0.0.1:8000").rstrip("/")
+# 호스트에서 백엔드만 띄울 때 쓰이는 기본값이다(#305). finus-nat은 컴포즈가
+# 127.0.0.1:8001에 게시하므로(#285) 8001을 가리킨다 — 8000은 백엔드 자신이 듣는
+# 포트라 기본값이 자기 자신에게 /v1/chat/completions를 부르는 꼴이 된다.
+# 컨테이너 안에서는 docker-compose.yml의 environment가 finus-nat:8000으로 덮는다.
+NAT_BASE_URL = os.environ.get("NAT_BASE_URL", "http://127.0.0.1:8001").rstrip("/")
 NAT_CHAT_MODEL = os.environ.get(
     "NAT_CHAT_MODEL",
     os.environ.get("OPENAI_CHAT_MODEL", "gpt-5.4-mini"),

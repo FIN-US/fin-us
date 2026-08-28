@@ -64,9 +64,9 @@ _HOST_URL_KEYS = {
 
 # `.env`에 키가 없으면 `backend/config.py`의 기본값 리터럴이 호스트 실행의 유일한
 # 경로가 되므로, `.env.example`과 같은 주소를 가리켜야 한다.
-# `NAT_BASE_URL`은 여기서 빠져 있다 — 기본값이 8000이라 백엔드 자기 자신을 가리키는데,
-# 고치는 것은 `services.py`의 분석 호출 경로가 걸린 별건이라 후속 이슈로 남겼다.
-_CONFIG_DEFAULT_KEYS = frozenset({"REDIS_URL"})
+# `NAT_BASE_URL`은 #305에서 기본값을 8001로 옮기며 들어왔다. 그 전에는 8000이라
+# 백엔드 자기 자신을 가리켰고, 어긋난 채로 고정할 수 없어 일부러 빠져 있었다.
+_CONFIG_DEFAULT_KEYS = frozenset({"REDIS_URL", "NAT_BASE_URL"})
 
 
 @pytest.fixture(scope="module")
@@ -117,11 +117,15 @@ def _host_side(mapping):
 
 
 def _config_default(name):
-    """`backend/config.py`의 `os.environ.get(name, <기본값>)` 기본값 리터럴을 읽는다.
+    """`backend/config.py`에서 `.env`가 비었을 때 쓰이는 기본값을 읽는다.
 
     import해서 읽으면 안 된다 — `config.py`는 `load_dotenv()`로 개발자의 실제 `.env`를
     먹으므로, 그 사람 설정이 있으면 기본값이 아니라 그 값을 보게 된다. 고정하려는 것은
-    `.env`가 비었을 때 쓰이는 소스의 리터럴이다.
+    `.env`가 비었을 때 쓰이는 소스의 값이다.
+
+    `os.environ.get(키, 기본값)`을 문자열 메서드로 감싸는 대입이 있어서
+    (`NAT_BASE_URL`의 `.rstrip("/")`), 리터럴만 떼어 오면 실제로 쓰이는 값과 어긋난다.
+    감싼 메서드를 벗겨 낸 뒤 **그대로 적용해서** 돌려준다.
     """
 
     for node in ast.walk(ast.parse(_CONFIG_PATH.read_text(encoding="utf-8"))):
@@ -129,13 +133,49 @@ def _config_default(name):
             continue
         if not any(isinstance(t, ast.Name) and t.id == name for t in node.targets):
             continue
-        call = node.value
-        assert isinstance(call, ast.Call) and len(call.args) == 2, (
-            f"`backend/config.py`의 {name} 대입이 `os.environ.get(키, 기본값)` 모양이 "
-            f"아니다. 모양을 바꿨다면 이 헬퍼를 함께 갱신할 것."
-        )
-        return ast.literal_eval(call.args[1])
+        return _apply_wrappers(*_unwrap_env_get(node.value, name))
     raise AssertionError(f"`backend/config.py`에서 {name} 대입을 찾지 못했다.")
+
+
+def _unwrap_env_get(value, name):
+    """`os.environ.get(...)` 호출과, 그것을 감싼 메서드 호출들을 분리한다.
+
+    감싼 순서의 역순으로 쌓이므로 적용할 때 뒤집는다.
+    """
+
+    wrappers = []
+    while (
+        isinstance(value, ast.Call)
+        and isinstance(value.func, ast.Attribute)
+        and value.func.attr not in {"get", "getenv"}
+    ):
+        wrappers.append(value)
+        value = value.func.value
+
+    assert isinstance(value, ast.Call) and len(value.args) == 2, (
+        f"`backend/config.py`의 {name} 대입에서 `os.environ.get(키, 기본값)`을 찾지 "
+        f"못했다. 모양을 바꿨다면 이 헬퍼를 함께 갱신할 것."
+    )
+    return ast.literal_eval(value.args[1]), list(reversed(wrappers))
+
+
+def _apply_wrappers(default, wrappers):
+    """벗겨 낸 문자열 메서드를 기본값에 그대로 적용한다.
+
+    `str`의 메서드만 허용한다 — 임의의 이름을 `getattr`로 부르면 이 헬퍼가 조용히
+    엉뚱한 것을 실행하게 되고, 애초에 기본값을 다듬는 자리에 그 이상은 필요 없다.
+    """
+
+    for wrapper in wrappers:
+        attr = wrapper.func.attr
+        assert isinstance(getattr(str, attr, None), type(str.strip)), (
+            f"`backend/config.py`의 기본값을 `str`이 아닌 `{attr}`로 감쌌다. "
+            f"이 검사가 실제로 쓰이는 값을 보게 하려면 헬퍼를 함께 갱신할 것."
+        )
+        args = [ast.literal_eval(a) for a in wrapper.args]
+        kwargs = {kw.arg: ast.literal_eval(kw.value) for kw in wrapper.keywords}
+        default = getattr(default, attr)(*args, **kwargs)
+    return default
 
 
 def test_services_outside_the_allowlist_publish_on_loopback_only(compose_services):
@@ -198,8 +238,10 @@ def test_config_default_matches_the_env_example(env_example_values, env_key):
     """`.env`에 키가 없을 때 쓰이는 코드 기본값도 `.env.example`과 같아야 한다.
 
     `.env.example`만 맞춰 두면 그 파일을 거치지 않은 설정에서 기본값이 유일한 경로가
-    되는데, 루프백 게시는 IPv4 전용이라 기본값이 `localhost`로 남아 있으면 이 PR이
-    세운 근거와 정면으로 어긋난다.
+    된다. `setup_env`의 `render_env`는 예제에만 있는 새 키를 채워 주지만, 기존 `.env`를
+    그대로 쓰는 환경은 그 경로를 거치지 않는다(#305). 어긋나는 방향은 둘 다 실제로
+    나왔다 — 호스트 표기(루프백 게시가 IPv4 전용이라 `localhost`가 아니라 `127.0.0.1`)와
+    포트(8000은 백엔드 자신이라 finus-nat이 아니다).
     """
 
     assert _config_default(env_key) == env_example_values[env_key], (
