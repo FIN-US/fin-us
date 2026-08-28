@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from datetime import date
 from fastapi import FastAPI, HTTPException, Query, Depends, Request, WebSocket, WebSocketDisconnect, Body
 from fastapi.middleware.cors import CORSMiddleware
-from sqlmodel import Session, select
+from sqlmodel import Session, col, select
 
 from .config import NEWS_MCP_PARAMS, TRADING_MCP_PARAMS, DART_MCP_PARAMS, ALLOW_ORIGINS
 from .ws_manager import manager
@@ -214,14 +214,14 @@ async def get_db_trades(session: Session = Depends(get_session)):
 @app.get("/api/v1/db/reports", response_model=CommonResponse, tags=["Database"])
 async def get_db_reports(session: Session = Depends(get_session)):
     """저장된 에이전트 리포트 목록을 조회합니다."""
-    reports = session.exec(select(AgentReport).order_by(AgentReport.created_at.desc())).all()
+    reports = session.exec(select(AgentReport).order_by(col(AgentReport.created_at).desc())).all()
     return {"status": "success", "data": reports}
 
 
 @app.get("/api/v1/db/diary", response_model=CommonResponse, tags=["Database"])
 async def get_db_diary(session: Session = Depends(get_session)):
     """저장된 투자 일지 목록을 조회합니다."""
-    diaries = session.exec(select(Diary).order_by(Diary.created_at.desc())).all()
+    diaries = session.exec(select(Diary).order_by(col(Diary.created_at).desc())).all()
     return {"status": "success", "data": diaries}
 
 
@@ -320,9 +320,9 @@ async def get_db_catalysts(
     # event_date만으로는 동일 날짜 이벤트 간 순서가 SQL상 보장되지 않아 limit 절단이
     # 비결정적일 수 있다. event_type, id까지 더해 완전히 결정적으로 정렬한다.
     query = query.order_by(
-        CatalystEvent.event_date,
-        CatalystEvent.event_type,
-        CatalystEvent.id,
+        col(CatalystEvent.event_date),
+        col(CatalystEvent.event_type),
+        col(CatalystEvent.id),
     ).limit(limit + 1)
 
     rows = session.exec(query).all()

@@ -4,7 +4,7 @@ import logging
 import re
 from datetime import date
 from statistics import pstdev
-from typing import Any, Literal, NamedTuple, Optional, Sequence, get_args, overload
+from typing import Any, Literal, NamedTuple, Optional, Sequence, cast, get_args, overload
 from urllib.parse import quote as _url_quote
 from fastapi import HTTPException
 from anthropic import AsyncAnthropic
@@ -22,7 +22,7 @@ from .config import (
     NEWS_MCP_PARAMS, TRADING_MCP_PARAMS,
     SIGNAL_SCORE_MIN, SIGNAL_SCORE_MAX, SIGNAL_SCORE_THRESHOLD,
 )
-from .schemas import TradingSignal, AnalysisReport
+from .schemas import TradingSignal, AnalysisReport, UrgencyLevel
 from .models import AgentReport
 from .stock_code import (
     _STOCK_CODE_EXTRACT_RE,
@@ -42,8 +42,11 @@ _NAT_RESPONSE_LOG_PREVIEW_CHARS = 800
 _DERIVED_PROVENANCE_FIELDS = frozenset({"provider", "provider_supports_tools"})
 
 # schemas.AnalysisReport.urgency의 Literal 값에서 파생 — 스키마와 두 곳이 갈라지는 것을 막는다.
-# AnalysisReport.urgency: Literal["low", "normal", "high", "critical"]
-_URGENCY_LEVELS: frozenset[str] = frozenset(
+# AnalysisReport.urgency: UrgencyLevel = Literal["low", "normal", "high", "critical"]
+# 원소 타입을 str이 아니라 UrgencyLevel로 선언해야 `raw in _URGENCY_LEVELS`가
+# 타입 체커에서도 좁히기로 작동한다 — get_args의 반환은 tuple[Any, ...]이라
+# 선언을 붙이지 않으면 frozenset[str]로 추론돼 아래 urgency가 Literal로 좁혀지지 않는다.
+_URGENCY_LEVELS: frozenset[UrgencyLevel] = frozenset(
     get_args(AnalysisReport.model_fields["urgency"].annotation)
 )
 
@@ -670,8 +673,12 @@ async def score_signal(
     prompt = _build_signal_score_prompt(stock, source, _signal_snippet(signal_content))
 
     try:
-        # 설정된 provider(ollama, openai 등)에 따라 경량 모델 호출
-        raw = await llm_chat(provider, prompt)
+        # 설정된 provider(ollama, openai 등)에 따라 경량 모델 호출.
+        # llm_chat는 provider_key별로 반환 타입이 갈린다 — "nat"만 NatAnswer이고
+        # 나머지는 str이다. 채점은 아래 _parse_signal_score가 문자열을 전제하므로
+        # 이 경로는 문자열을 돌려주는 provider만 지원한다.
+        # 그 밖의 값이 설정되면 런타임에 파싱이 실패하고 아래 except가 fail-open한다.
+        raw = await llm_chat(cast(Literal["openai", "anthropic", "ollama"], provider), prompt)
     except Exception as e:
         logger.error(
             "signal 채점 호출 실패 (%s, %s, %s): %s — 유의미로 통과시킵니다(fail-open)",

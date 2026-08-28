@@ -5,12 +5,17 @@ WebSocket 소비자가 아직 없어(Unity 번들은 폴링만 사용) 아래 �
 """
 
 import json
+from typing import cast
 
 import pytest
+from fastapi import WebSocket
 
 from backend.ws_manager import ConnectionManager
 
 
+# 아래 주입 지점의 cast는 이 대역 때문이다 (#292). 주입 지점의 선언 타입이 구체
+# 클래스라 대역이 그대로는 타입 검사를 통과하지 못한다. 계약을 Protocol로 좁히는
+# 것은 #271의 후속 작업이라, 여기서는 주입 지점에서만 좁혀 둔다.
 class FakeWebSocket:
     """send_text만 갖춘 최소 스텁.
 
@@ -36,7 +41,7 @@ class FakeWebSocket:
 async def test_broadcast_delivers_to_every_connection():
     manager = ConnectionManager()
     a, b = FakeWebSocket("a"), FakeWebSocket("b")
-    manager.active_connections.extend([a, b])
+    manager.active_connections.extend(cast(list[WebSocket], [a, b]))
 
     await manager.broadcast({"type": "SYSTEM_PING", "message": "안녕"})
 
@@ -65,8 +70,8 @@ async def test_broadcast_does_not_skip_when_list_shrinks_mid_iteration():
     b, c = FakeWebSocket("b"), FakeWebSocket("c")
     # a의 전송 중에 a 자신이 목록에서 빠지는 상황 — 실제로는 a의 수신 루프가
     # WebSocketDisconnect를 받아 manager.disconnect(a)를 부르는 경우다.
-    a = FakeWebSocket("a", on_send=lambda: manager.disconnect(a))
-    manager.active_connections.extend([a, b, c])
+    a = FakeWebSocket("a", on_send=lambda: manager.disconnect(cast(WebSocket, a)))
+    manager.active_connections.extend(cast(list[WebSocket], [a, b, c]))
 
     await manager.broadcast({"type": "SYSTEM_PING"})
 
@@ -82,7 +87,7 @@ async def test_broadcast_removes_failed_connection_and_keeps_going():
     a = FakeWebSocket("a")
     dead = FakeWebSocket("dead", fail=True)
     c = FakeWebSocket("c")
-    manager.active_connections.extend([a, dead, c])
+    manager.active_connections.extend(cast(list[WebSocket], [a, dead, c]))
 
     await manager.broadcast({"type": "SYSTEM_PING"})
 
@@ -107,7 +112,7 @@ async def test_broadcast_with_unserializable_payload_keeps_connections():
     """
     manager = ConnectionManager()
     a, b = FakeWebSocket("a"), FakeWebSocket("b")
-    manager.active_connections.extend([a, b])
+    manager.active_connections.extend(cast(list[WebSocket], [a, b]))
 
     await manager.broadcast({"type": "SYSTEM_PING", "bad": object()})
 

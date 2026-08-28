@@ -55,6 +55,38 @@ jobs:
           REDIS_INTEGRATION_URL: redis://localhost:6379/0
         run: uv run --project backend pytest backend/tests/
 
+  # #271이 state_store/pending_order_store의 주입 지점을 Any에서 Protocol로 좁혔지만,
+  # Protocol은 정적 검사 장치인데 CI에는 체커가 없었다(#292). 이름과 인자 모양의 어긋남은
+  # PR #287의 런타임 적합성 테스트가 잡지만, 이름·모양은 맞고 타입만 어긋나는 경우는
+  # 아무 잡도 보지 못했다. 그 어긋남이 프로덕션에 들어가면 폴러의 _persist_state/
+  # _restore_state에 있는 except Exception이 TypeError를 로그 한 줄로 흘려보내고
+  # "영속화 없음"으로 degrade해, #248이 닫은 중복 실행 창이 조용히 다시 열린다.
+  #
+  # 대상·엄격도·제외 목록은 backend/pyproject.toml의 [tool.pyright]에 있다. 그 설정을
+  # 그대로 읽으므로 로컬 에디터와 이 잡이 같은 것을 본다.
+  backend-typecheck:
+    name: Backend 타입 체크 (pyright)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: uv 설치 (자체 캐시 활성화)
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Python 3.13 설치
+        run: uv python install 3.13
+
+      # 서드파티 스텁을 backend/.venv에서 읽는다([tool.pyright]의 venvPath/venv).
+      # 동기화를 건너뛰면 fastapi·sqlmodel이 전부 unresolved가 되어, 정작 잡아야 할
+      # 주입 지점의 타입 어긋남이 import 오류에 묻힌다.
+      - name: backend 의존성 동기화
+        run: uv sync --project backend
+
+      - name: pyright 실행
+        run: uv run --project backend pyright --project backend
+
   nat-test:
     name: finus_nat pytest
     runs-on: ubuntu-latest

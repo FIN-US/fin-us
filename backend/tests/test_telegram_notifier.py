@@ -982,6 +982,9 @@ def test_format_signal_score_line_omits_note_below_threshold():
         1, "일관된 평가", uncertainty=0.5
     )
 
+    # 점수가 있으므로 줄이 만들어져야 한다. None이면 `not in`이 통과해 버려
+    # "줄 자체가 사라진" 회귀를 이 단언이 놓친다.
+    assert line is not None
     assert backend.telegram_notifier.SIGNAL_DISAGREEMENT_NOTE not in line
 
 

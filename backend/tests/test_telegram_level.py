@@ -6,6 +6,7 @@ test_telegram_commands.py에 얹지 않은 이유는 그 파일이 이미 3천 �
 
 from datetime import date
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 
@@ -22,6 +23,7 @@ from backend.telegram_commands import (
     TelegramCommandHandler,
 )
 from backend.services import NatAnswer, NatToolUse
+from backend.telegram_notifier import TelegramNotifier
 
 
 @pytest.fixture(autouse=True)
@@ -33,6 +35,9 @@ def _clear_level_cache():
     telegram_commands.reset_level_cache()
 
 
+# 아래 주입 지점의 cast는 이 대역 때문이다 (#292). 주입 지점의 선언 타입이 구체
+# 클래스라 대역이 그대로는 타입 검사를 통과하지 못한다. 계약을 Protocol로 좁히는
+# 것은 #271의 후속 작업이라, 여기서는 주입 지점에서만 좁혀 둔다.
 class FakeNotifier:
     def __init__(self, chat_id="123"):
         self.chat_id = chat_id
@@ -325,7 +330,7 @@ async def test_catalysts_use_the_shared_list_marker():
             ]
 
     handler = TelegramCommandHandler(
-        notifier=notifier,
+        notifier=cast(TelegramNotifier, notifier),
         catalyst_repo=FakeCatalystRepo(),
         state_factory=lambda: FakeState(LEVEL_INTERMEDIATE),
     )
@@ -366,7 +371,7 @@ async def test_level_lookup_is_not_repeated_for_every_message():
 
     notifier = FakeNotifier()
     handler = TelegramCommandHandler(
-        notifier=notifier,
+        notifier=cast(TelegramNotifier, notifier),
         state_factory=CountingState,
         llm_runner=_nat_runner("답변입니다."),
     )

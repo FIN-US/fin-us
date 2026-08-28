@@ -345,7 +345,7 @@ def _replace_link(match: re.Match[str]) -> str:
     return f"{label} ({url})"
 
 
-def sanitize_markdown(text: str) -> str:
+def sanitize_markdown(text: Any) -> str:
     """평문 채널에 그대로 실을 수 있게 마크다운 표기를 벗긴다 (#297).
 
     지우는 것이 아니라 **옮기는** 것이 원칙이다. 굵게 표기는 알맹이만 남고, 링크는

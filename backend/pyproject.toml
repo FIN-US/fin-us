@@ -22,7 +22,37 @@ dependencies = [
 dev = [
   "pytest>=9.0,<10",
   "pytest-asyncio>=1.3,<2",
+  # 타입 체커 (#292). CI의 "Backend 타입 체크" 잡이 이 핀을 쓴다 — 버전을 고정하지
+  # 않으면 pyright 상류가 새 진단을 켜는 날 관련 없는 PR이 빨간불이 된다.
+  "pyright==1.1.411",
 ]
 
 [tool.uv]
 package = false
+
+# 타입 체크 설정 (#292). CI 잡과 에디터가 같은 것을 보도록 여기 한 곳에 둔다.
+[tool.pyright]
+# basic으로 시작한다. #271이 Protocol로 좁힌 주입 지점을 지키는 데는 이 수준이면 충분하고,
+# standard 이상은 도입 시점에 정리해야 할 오류가 크게 늘어 잡 도입 자체가 막힌다.
+typeCheckingMode = "basic"
+# 위 requires-python과 맞춘다. 어긋나면 로컬과 CI가 다른 문법·스텁을 보게 된다.
+pythonVersion = "3.13"
+# uv sync --project backend가 만드는 backend/.venv. 이게 없으면 fastapi·sqlmodel 같은
+# 서드파티가 전부 unresolved가 되어 오류 수 자체가 무의미해진다.
+venvPath = "."
+venv = ".venv"
+# 테스트와 프로덕션 코드가 모두 `backend.xxx`로 절대 import한다. 설정이 backend/에
+# 있으면 실행 루트도 backend/라 그 이름이 풀리지 않으므로 레포 루트를 검색 경로에 얹는다.
+extraPaths = [".."]
+# 값을 주면 pyright의 기본 exclude가 대체되므로 기본 세 개를 함께 적는다.
+# 그 아래 네 파일은 #292가 남긴 부채다 — 도입 시점 기준 278건이 여기 몰려 있어,
+# 함께 정리하면 "체크 잡을 켠다"는 변경의 범위를 넘는다. 하나씩 비우며 목록을 줄인다.
+exclude = [
+  "**/node_modules",
+  "**/__pycache__",
+  "**/.*",
+  "tests/test_telegram_commands.py",
+  "tests/test_scheduler.py",
+  "tests/test_services.py",
+  "tests/test_config.py",
+]

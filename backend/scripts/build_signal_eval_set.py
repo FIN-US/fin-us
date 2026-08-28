@@ -125,7 +125,9 @@ async def score_articles(articles: list[Article], provider: str) -> list[dict[st
 
 def write_csv(rows: list[dict[str, Any]], output: Path) -> None:
     with output.open("w", encoding=CSV_ENCODING, newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(CSV_HEADER))
+        # CSV_HEADER가 리터럴 튜플이라 명시하지 않으면 DictWriter의 키 타입이
+        # 그 리터럴 여섯 개로 추론돼, rows(dict[str, Any])를 받지 못한다.
+        writer: csv.DictWriter[str] = csv.DictWriter(handle, fieldnames=list(CSV_HEADER))
         writer.writeheader()
         writer.writerows(rows)
 
