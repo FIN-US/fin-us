@@ -10,6 +10,8 @@
 실 KIS·OpenAI 연결 없이 동작한다.
 """
 
+import logging
+
 import pytest
 from contextlib import asynccontextmanager
 from typing import TypedDict
@@ -30,6 +32,9 @@ from nat_finus_nat.agents import (
     MEMORY_PROMPT_PREFIX,
     FinusReasoningTraceAgentConfig,
     FinusSqliteTranscriptAgentConfig,
+    FinusSupervisorAgentConfig,
+    SupervisorBranch,
+    finus_supervisor_agent,
     _run_with_gate,
     _trace_branch_answer,
     _trace_route,
@@ -326,6 +331,68 @@ def test_trace_route_is_noop_without_box():
     """박스가 없으면 조용히 no-op한다 — 각주 부재가 답변 경로를 막지 않는다."""
     assert REASONING_TRACE.get() is None
     _trace_route("news_agent")  # 예외 없이 통과해야 한다
+
+
+# ---------------------------------------------------------------------------
+# supervisor가 실제로 기록하는가 (생산 측)
+#
+# 위 두 테스트는 `_trace_route`/`_trace_branch_answer`를 직접 불러 박스 동작만
+# 고정한다. supervisor가 그것을 **부르는지**는 supervisor를 실제로 구동해야 드러난다
+# — 부르지 않으면 각주는 프로덕션에서만 조용히 사라지고 CI는 초록이다 (#273의 재현).
+# ---------------------------------------------------------------------------
+
+def _llm_choosing(branch_name: str) -> MagicMock:
+    """브랜치명 한 줄만 출력하는 가짜 supervisor LLM."""
+    llm = MagicMock()
+    llm.ainvoke = AsyncMock(return_value=MagicMock(content=branch_name))
+    return llm
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "branch_result,expected",
+    [
+        (ChatResponse.from_string("삼성전자 뉴스입니다.", usage=Usage()), "삼성전자 뉴스입니다."),
+        ("삼성전자 뉴스입니다.", "삼성전자 뉴스입니다."),
+    ],
+    ids=["branch_returns_chat_response", "branch_returns_str"],
+)
+async def test_supervisor_records_the_answer_it_returns(branch_result, expected):
+    """supervisor는 라우팅뿐 아니라 **돌려보내는 본문**도 박스에 남긴다 (#294).
+
+    이 기록이 없으면 `branch_answer`가 영영 None이라 최상위 부착 조건이 항상 거짓이 되고,
+    각주가 프로덕션에서 전부 사라진다. 브랜치가 str을 돌려주는 경로도 함께 고정한다 —
+    supervisor가 ChatResponse로 감싸므로, 기록해야 하는 것은 감싼 뒤의 본문이다.
+    """
+    config = FinusSupervisorAgentConfig(
+        llm_name="router_llm",
+        branches=[
+            SupervisorBranch(
+                name="news_agent", function_name="news_react_agent", description="뉴스 조회"
+            )
+        ],
+    )
+    async def branch_fn(_request):
+        return branch_result
+
+    builder = MagicMock()
+    builder.get_llm = AsyncMock(return_value=_llm_choosing("news_agent"))
+    builder.get_function = AsyncMock(return_value=_as_function(branch_fn))
+
+    trace = ReasoningTrace()
+    token = REASONING_TRACE.set(trace)
+    try:
+        async with finus_supervisor_agent(config, builder) as info:
+            result = await info.single_fn(
+                ChatRequestOrMessage(messages=[{"role": "user", "content": "삼성전자 뉴스"}])
+            )
+    finally:
+        REASONING_TRACE.reset(token)
+
+    assert trace.routed_agent == "news_agent"
+    assert trace.branch_answer == expected
+    # 기록한 본문과 실제로 돌려보낸 본문이 같아야 부착 조건이 성립한다.
+    assert chat_response_plain_text(result) == expected
 
 
 # ---------------------------------------------------------------------------
@@ -707,7 +774,7 @@ async def test_memory_mode_omits_footnote_when_the_branch_raises(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_memory_mode_omits_footnote_when_memory_write_fails_after_success(tmp_path):
+async def test_memory_mode_omits_footnote_when_memory_write_fails_after_success(tmp_path, caplog):
     """변종 2: 브랜치는 성공하고, 그 뒤 `capture_ai_response`의 Mem0 쓰기가 터진다.
 
     변종 1보다 나쁘다 — 브랜치가 실제로 성공했으므로 박스에 `routed_agent`와
@@ -720,9 +787,10 @@ async def test_memory_mode_omits_footnote_when_memory_write_fails_after_success(
         _branch_recording("news_agent", "finus_market_news", answer="삼성전자 뉴스입니다."),
         capture_error=RuntimeError("Mem0 연결이 거부되었습니다"),
     ) as response_fn:
-        result = await response_fn(
-            ChatRequestOrMessage(messages=[{"role": "user", "content": "삼성전자 뉴스"}])
-        )
+        with caplog.at_level(logging.WARNING, logger="nat_finus_nat.agents"):
+            result = await response_fn(
+                ChatRequestOrMessage(messages=[{"role": "user", "content": "삼성전자 뉴스"}])
+            )
     dumped = result.model_dump()
 
     body = dumped["choices"][0]["message"]["content"]
@@ -730,6 +798,14 @@ async def test_memory_mode_omits_footnote_when_memory_write_fails_after_success(
     assert body != "삼성전자 뉴스입니다.", "본문이 브랜치 답변이면 이 테스트는 변종을 재현하지 못한 것이다"
     assert "routed_agent" not in dumped
     assert "tools_used" not in dumped
+    # 생략을 조용히 하지 않는 것이 이 PR의 계약이다 — #273은 각주가 로그도 예외도 없이
+    # 사라져서 아무도 몰랐던 사고였다.
+    omitted = [
+        record for record in caplog.records
+        if record.levelno == logging.WARNING and "footnote omitted" in record.getMessage()
+    ]
+    assert len(omitted) == 1, "각주를 생략했으면 경고를 정확히 한 번 남긴다"
+    assert "routed_agent=news_agent" in omitted[0].getMessage()
 
 
 @pytest.mark.asyncio

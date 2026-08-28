@@ -168,16 +168,24 @@ class ReasoningTrace:
     def record_branch_answer(self, text: str) -> None:
         """supervisor가 브랜치에서 받아 돌려보내는 답변 본문을 기록한다 (#294).
 
-        각주를 붙일지 판정하는 기준이다. ``routed_agent``/``tools_used``는
-        브랜치를 **부르기 전후**로 채워지므로, 그 값이 있다는 사실만으로는 지금
-        돌려보내는 텍스트가 그 브랜치가 만든 답변이라는 보장이 되지 않는다.
-        vendor ``auto_memory_agent``는 예외를 삼키고 ``str(ex)``를 답변으로
-        돌려주므로(``router.yml``이 ``verbose: true``), 박스가 채워진 채 본문만
-        오류 문자열로 바뀐 응답이 최상위까지 올라올 수 있다.
+        **각주 부착 조건의 정본이다** — 이 판정의 근거 설명은 여기 한 곳에 둔다.
+        (:func:`~nat_finus_nat.agents._trace_branch_answer`,
+        :func:`~nat_finus_nat.agents.with_reasoning_trace`가 이 설명을 참조한다.)
 
-        본문을 함께 기록해 두면 최상위가 "이 텍스트가 브랜치가 만든 답변인가"를
-        직접 물어볼 수 있다 — vendor의 실패 문자열 형태를 알 필요가 없으므로
-        #273이 없애려던 vendor 결합이 되살아나지 않는다.
+        ``routed_agent``/``tools_used``는 브랜치를 **부르기 전후**로 채워지므로, 그
+        값이 있다는 사실만으로는 지금 돌려보내는 텍스트가 그 브랜치가 만든 답변이라는
+        보장이 되지 않는다. vendor ``auto_memory_agent``는 예외를 삼키고 ``str(ex)``를
+        답변으로 돌려주므로(``router.yml``이 ``verbose: true``), 박스가 채워진 채 본문만
+        오류 문자열로 바뀐 응답이 최상위까지 올라온다.
+
+        판정 기준이 "브랜치가 성공했는가"가 아닌 이유는 두 번째 변종 때문이다:
+        vendor 그래프는 ``inner_agent`` → ``capture_ai_response`` 순서라, 브랜치가
+        성공한 **뒤** 도는 기억 저장이 터지면 ``tools_used``까지 가득 찬 채로 본문만
+        오류 문자열이 된다. 브랜치는 실제로 성공했으므로 성공 여부로는 걸러지지 않는다.
+
+        본문을 함께 기록해 두면 최상위가 "이 텍스트가 브랜치가 만든 답변인가"를 직접
+        물어볼 수 있다 — vendor의 실패 문자열 형태를 알 필요가 없으므로 #273이
+        없애려던 vendor 결합이 되살아나지 않는다.
         """
         self.branch_answer = text
 
