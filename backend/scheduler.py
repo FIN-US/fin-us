@@ -1,3 +1,4 @@
+import asyncio
 import os
 import logging
 import re
@@ -17,7 +18,28 @@ from .config import (
     FILTERED_SIGNAL_RETENTION_DAYS,
     SIGNAL_SCORE_THRESHOLD,
 )
-from .redis_state import RedisSchedulerState, signal_hash, redis_state
+from .redis_state import (
+    PendingOrderStore,
+    RedisPendingOrderStore,
+    RedisSchedulerState,
+    create_redis_client,
+    signal_hash,
+    redis_state,
+)
+from .order_assist import OrderAssistResult, ProposalTrigger, run_order_assist
+from .order_rules import (
+    OrderAssistRule,
+    RuleMatch,
+    build_trigger_signal,
+    format_auto_message,
+    build_rule_scope,
+    load_rule,
+    match_rule,
+    most_urgent,
+    should_report_rejection,
+    should_run,
+)
+from .trading_orders import is_korean_market_open, order_reply_markup
 from .services import (
     SignalScore,
     perform_stock_analysis,
@@ -35,7 +57,7 @@ from .presentation import (
     render,
 )
 from .telegram_notifier import telegram_notifier
-from .telegram_notifier import should_send_telegram_alert
+from .telegram_notifier import send_text_settled, should_send_telegram_alert
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +139,32 @@ def _default_catalyst_repo() -> SqliteCatalystEventRepo:
 
 def _default_filtered_signal_repo() -> SqliteFilteredSignalRepo:
     return SqliteFilteredSignalRepo(lambda: Session(engine))
+
+
+# 자동 제안(#314)이 쓰는 대기 주문 저장소. 텔레그램 폴러가 만드는 것과 같은 클래스이고
+# 같은 redis 키(RedisKeys.pending_order)를 보므로, 여기서 저장한 대기 주문을 기존
+# _handle_confirm이 그대로 소비한다 — 확정 버튼 경로가 수동 /advise와 완전히 같다.
+#
+# 프로세스당 하나만 만든다. RedisPendingOrderStore는 클라이언트 하나를 쥐고 그 커넥션
+# 풀을 재사용하는데, 트리거마다 새로 만들면 풀이 쌓인다(telegram_commands의
+# _create_pending_order_store가 핸들러당 한 번만 불리는 것과 같은 이유다).
+_rule_pending_order_store: PendingOrderStore | None = None
+
+
+def _default_pending_order_store() -> PendingOrderStore:
+    global _rule_pending_order_store
+    if _rule_pending_order_store is None:
+        _rule_pending_order_store = RedisPendingOrderStore(create_redis_client())
+    return _rule_pending_order_store
+
+
+async def _sleep(seconds: float) -> None:
+    """테스트가 전역 ``asyncio.sleep`` 대신 이 모듈의 이름만 대체할 수 있게 하는 간접층.
+
+    telegram_commands._sleep과 같은 이유다 — 확정 전송의 재시도 백오프(최대 13초)를
+    실제로 기다리는 테스트는 그 시간을 그대로 벽시계로 문다.
+    """
+    await asyncio.sleep(seconds)
 
 
 # "- 종목명 (코드) ..." 형식의 잔고 종목 줄을 검증하는 정규식.
@@ -759,13 +807,28 @@ async def _monitor_market_task(
             logger.info("보유 종목 및 관심 종목이 없습니다. 기본 종목을 감시합니다.")
             stocks_to_monitor = DEFAULT_MONITOR_STOCKS
 
+        # 자동 제안(#314)은 감시가 끝난 뒤 한 번만 돈다. 감시 루프 안에서 바로 부르면
+        # 제안 왕복(기본 120초) + 검증 왕복이 나머지 종목의 감시를 그만큼 늦춘다.
+        # 룰이 꺼져 있으면 rule이 None이라 match_rule이 항상 None을 돌려주고, 아래
+        # 리스트는 빈 채로 남는다.
+        rule = load_rule()
+        # 룰 대상은 보유 종목 + 관심 종목뿐이다. stocks_to_monitor가
+        # DEFAULT_MONITOR_STOCKS로 떨어진 주기에는 이 집합과 겹치는 종목이 없다.
+        rule_scope = build_rule_scope(owned_stocks, watchlist)
+        rule_matches: list[RuleMatch] = []
+
         with Session(engine) as session:
             for stock in stocks_to_monitor:
+                stock_rule = rule if stock in rule_scope else None
                 for source in SIGNAL_SOURCES:
-                    await _monitor_signal(
-                        stock, source, session, state, filtered_signal_repo
+                    match = await _monitor_signal(
+                        stock, source, session, state, filtered_signal_repo, rule=stock_rule
                     )
-                    
+                    if match is not None:
+                        rule_matches.append(match)
+
+        await run_rule_triggered_proposal(rule_matches, state)
+
     except Exception as e:
         logger.error(f"모니터링 태스크 시작 중 오류: {e}")
 
@@ -866,7 +929,15 @@ async def _monitor_signal(
     session: Session,
     state: RedisSchedulerState | None,
     filtered_signal_repo: SqliteFilteredSignalRepo | None = None,
-):
+    *,
+    rule: OrderAssistRule | None = None,
+) -> RuleMatch | None:
+    """이 종목·소스를 한 번 감시한다.
+
+    ``rule``이 주어지고 분석 결과가 그 조건을 만족하면 :class:`RuleMatch`를 돌려준다 (#314).
+    **여기서 제안을 만들지는 않는다** — 판정만 하고 호출부가 주기 끝에 한 건만 태운다.
+    분석까지 가지 못한 모든 경로(동일 신호, cooldown, 유의미하지 않음, 예외)는 ``None``이다.
+    """
     analysis_token = None
     try:
         # 1. 최신 signal 수집
@@ -963,6 +1034,19 @@ async def _monitor_signal(
         })
         logger.info(f"[{source.name}:{stock}] 분석 결과 브로드캐스트 완료")
 
+        # 룰 판정은 감시가 할 일을 전부 마친 뒤에 한다. 앞의 알림·브로드캐스트는 이
+        # 판정 결과와 무관하게 나가야 하고, 판정은 순수 함수라 실패할 자리도 없다.
+        match = match_rule(rule, stock=stock, source=source.name, analysis_data=analysis_data)
+        if match is not None:
+            logger.info(
+                "[%s:%s] 자동 제안 룰 충족 (rule=%s, urgency=%s)",
+                source.name,
+                stock,
+                match.rule_id,
+                match.urgency,
+            )
+        return match
+
     except Exception as e:
         if state is not None and analysis_token is not None:
             await state.set_cooldown(source.name, stock, type(e).__name__)
@@ -973,6 +1057,128 @@ async def _monitor_signal(
                 await state.release_lock(state.keys.analysis_lock(source.name, stock), analysis_token)
             except Exception as e:
                 logger.error(f"[{source.name}:{stock}] Redis analysis lock 해제 중 오류: {e}")
+
+
+async def run_rule_triggered_proposal(
+    matches: list[RuleMatch],
+    state: RedisSchedulerState | None,
+    *,
+    pending_orders: PendingOrderStore | None = None,
+    notifier: Any = None,
+    now_factory: Callable[[], datetime] | None = None,
+    assist: Callable[..., Any] | None = None,
+) -> OrderAssistResult | None:
+    """룰을 만족한 신호 중 한 건으로 주문 제안을 만든다 (#314).
+
+    이 함수가 하는 일은 문턱 검사, 호출, 결과 전달이 전부다. 제안·한도 판정·검증·대기 주문
+    저장은 전부 order_assist.run_order_assist 안에 있다 — telegram_commands._handle_advise가
+    같은 이유로 그렇게 쓴다. 규칙이 두 파일에 나뉘면 "어느 쪽이 최종 판정인가"가 흐려진다.
+
+    **주문은 나가지 않는다.** 승인 결과로 만들어지는 것은 60초 확정 버튼이 달린 대기 주문
+    하나이고, 그 버튼을 소비하는 것은 기존 _handle_confirm이다. 자동 트리거라도 예외가 없다.
+
+    돌려주는 값은 실행한 :class:`OrderAssistResult`이고, 문턱에서 막혔으면 ``None``이다.
+    """
+    if not matches:
+        return None
+
+    notifier = notifier if notifier is not None else telegram_notifier
+    now_factory = now_factory or (lambda: datetime.now(KST))
+    assist = assist or run_order_assist
+
+    # ① 전달 경로 — 승인 결과를 보낼 수 없으면 제안을 만들지 않는다. 보내지 못할 대기
+    #    주문을 저장하면 슬롯만 잡히고, 그 슬롯을 공유하는 사용자의 /buy가 영문 모를
+    #    충돌로 막힌다.
+    chat_id = str(getattr(notifier, "chat_id", "") or "").strip()
+    if not getattr(notifier, "enabled", False) or not chat_id:
+        logger.info("Telegram 전달 경로가 없어 자동 제안을 건너뜁니다.")
+        return None
+
+    # ② 장 운영 시간 — run_order_assist도 같은 검사를 하지만 거기서 걸리면 '거부'가 되고,
+    #    감시는 24시간 도므로 사용자가 요청한 적도 없는 거부가 밤새 쌓인다. 자동 트리거는
+    #    장 밖에서 아예 돌지 않는다.
+    if not is_korean_market_open(now_factory()):
+        logger.debug("장 운영 시간이 아니어서 자동 제안을 건너뜁니다.")
+        return None
+
+    # ③ 알림 모드 — off면 트리거 자체를 돌리지 않는다(order_rules.should_run 참고).
+    #    모드를 읽지 못하면 진행하지 않는다. 확인하지 못한 상태를 '허용'으로 읽지 않는다.
+    try:
+        alert_mode = await state.get_telegram_alert_mode() if state is not None else "urgent"
+    except Exception as e:  # noqa: BLE001 — fail-closed
+        logger.error("알림 모드를 확인하지 못해 자동 제안을 건너뜁니다: %s", e)
+        return None
+    if not should_run(alert_mode):
+        logger.info("알림이 꺼져 있어 자동 제안을 건너뜁니다 (mode=%s).", alert_mode)
+        return None
+
+    match = most_urgent(matches)
+    if match is None:
+        return None
+    if len(matches) > 1:
+        # 나머지를 버렸다는 사실을 남긴다. 대기 주문 슬롯이 하나라 두 번째부터는 어차피
+        # conflict로 끝나지만, 로그가 없으면 "왜 저 종목은 제안이 안 왔지"에 답할 수 없다.
+        logger.info(
+            "이번 주기에 자동 제안 룰을 만족한 신호가 %d건이라 가장 긴급한 한 건만 진행합니다 "
+            "(선택=%s/%s, 나머지=%s).",
+            len(matches),
+            match.stock,
+            match.source,
+            [f"{m.stock}/{m.source}" for m in matches if m is not match],
+        )
+
+    trigger = ProposalTrigger(
+        source="scheduler_rule",
+        stock=match.stock,
+        chat_id=chat_id,
+        rule_id=match.rule_id,
+        # 수치가 아니라 "무엇을 확인하라"는 지시 문구다 (order_rules 모듈 docstring 3번).
+        trigger_signal=build_trigger_signal(match.source),
+    )
+    store = pending_orders if pending_orders is not None else _default_pending_order_store()
+    try:
+        result = await assist(trigger, pending_orders=store, now_factory=now_factory)
+    except Exception as e:  # noqa: BLE001 — 감시 주기를 여기서 끝내지 않는다.
+        logger.error("자동 제안 실행 중 오류 (stock=%s): %s", match.stock, e, exc_info=True)
+        return None
+
+    if result.order is not None:
+        # 승인은 알림 모드와 무관하게 보낸다. 확정 버튼이 필요할 뿐 아니라, 이 시점에는
+        # 이미 대기 주문 슬롯이 잡혀 있어 알리지 않으면 사용자의 다음 /buy가 막힌다.
+        #
+        # /advise와 같은 재시도를 쓴다 (PR #327 리뷰). 여기까지 온 제안은 제안 왕복
+        # (≤120초)·검증 왕복(≤40초)과 재제안 냉각을 이미 소비한 뒤라, 단발 전송으로 두면
+        # 일시적인 429 한 번에 그 전부가 버려지고 같은 종목은 냉각이 풀릴 때까지(기본
+        # 60분) 다시 시도되지도 않는다.
+        sent = await send_text_settled(
+            notifier,
+            format_auto_message(result.message),
+            reply_markup=order_reply_markup(result.order),
+            sleep=_sleep,
+        )
+        if not sent:
+            # /advise와 같은 처리다 (#247). 프롬프트가 끝내 안 나갔으면 사용자는 대기 주문의
+            # 존재를 모르고, 60초 안의 다음 명령이 영문 모를 충돌로 막힌다.
+            logger.error("자동 제안 프롬프트를 보내지 못해 대기 주문을 정리합니다 (stock=%s).", match.stock)
+            try:
+                await store.delete(chat_id)
+            except Exception as e:  # noqa: BLE001
+                logger.error("자동 제안 프롬프트 미전달 후 대기 주문 정리 실패: %s", e)
+        return result
+
+    # 거부·충돌. 사용자가 요청한 적 없는 시도라 all 모드에서만 알린다. 이쪽은 부수효과가
+    # 남지 않은 통지라 재시도 예산을 쓰지 않는다 — 못 보내면 로그로 남는 것이 전부다.
+    if should_report_rejection(alert_mode):
+        await notifier.send_text(format_auto_message(result.message))
+    else:
+        logger.info(
+            "자동 제안이 %s로 끝났습니다 (stock=%s, mode=%s). 사용자에게 보내지 않습니다: %s",
+            result.status,
+            match.stock,
+            alert_mode,
+            result.message,
+        )
+    return result
 
 
 async def _set_last_signal_state(

@@ -3,6 +3,7 @@ import asyncio
 import logging
 import socket
 import textwrap
+import time
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -16,6 +17,7 @@ from fastapi import HTTPException
 import backend.config as backend_config
 import backend.redis_state as redis_state_module
 import backend.telegram_commands as telegram_commands
+import backend.telegram_notifier as telegram_notifier_module
 from backend.config import DART_MCP_PARAMS, NEWS_MCP_PARAMS, TRADING_MCP_PARAMS
 from backend.telegram_commands import (
     BUY_COMMAND_HELP,
@@ -3876,14 +3878,21 @@ async def test_settled_send_gives_up_at_the_wall_clock_bound(monkeypatch, caplog
 
     notifier = HangingNotifier()
     handler = TelegramCommandHandler(notifier=notifier)
-    monkeypatch.setattr(telegram_commands, "SETTLED_SEND_TIMEOUT_SECONDS", 0.05)
+    # 상한을 읽는 곳은 telegram_notifier다 (PR #327 리뷰). telegram_commands는 그 이름을
+    # 다시 내보내기만 하므로, 여기를 패치하면 상한은 실제 20초로 남고 테스트는 통과한 채
+    # 20초를 벽시계로 문다 — 아래 elapsed 단언이 그 어긋남을 실패로 만든다.
+    monkeypatch.setattr(telegram_notifier_module, "SETTLED_SEND_TIMEOUT_SECONDS", 0.05)
 
+    started_at = time.monotonic()
     with caplog.at_level(logging.ERROR):
         # 예외를 던지지 않는다는 것이 요지다 — settled 전송은 update를 재시도시키지 않는다.
         await handler._send_text_settled("확정된 결과")
+    elapsed = time.monotonic() - started_at
 
     assert hung == 1
     assert "벽시계 상한" in caplog.text
+    # 패치한 상한(0.05초)이 실제로 걸렸는지 본다. 패치 대상이 어긋나면 여기서 걸린다.
+    assert elapsed < 5.0
 
 
 @pytest.mark.asyncio

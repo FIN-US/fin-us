@@ -39,6 +39,33 @@ class PendingOrder:
     callback_token: str = ""
 
 
+# 확정·취소 콜백 데이터 접두사와 그 버튼을 만드는 함수. ORDER_EXPIRES_AFTER와 같은 이유로
+# 여기 있다 — telegram_commands가 재수출하고(기존 import 경로 유지), 스케줄러의 자동
+# 제안(#314)도 여기서 직접 읽는다. 이 함수가 telegram_commands의 메서드로만 있으면 자동
+# 제안이 버튼을 직접 조립하게 되고, 그 순간 "확정 버튼은 한 곳에서만 만든다"가 깨진다.
+# 콜백 문자열이 갈리면 _handle_callback_query가 못 알아보는 버튼이 사용자에게 나간다.
+ORDER_CONFIRM_CALLBACK = "order:confirm"
+ORDER_CANCEL_CALLBACK = "order:cancel"
+
+
+def order_reply_markup(order: PendingOrder) -> dict[str, Any]:
+    """대기 주문의 확정/취소 인라인 키보드. 수동·자동 제안이 같은 것을 쓴다."""
+    return {
+        "inline_keyboard": [
+            [
+                {
+                    "text": "✅ 확정",
+                    "callback_data": f"{ORDER_CONFIRM_CALLBACK}:{order.callback_token}",
+                },
+                {
+                    "text": "❌ 취소",
+                    "callback_data": f"{ORDER_CANCEL_CALLBACK}:{order.callback_token}",
+                },
+            ]
+        ]
+    }
+
+
 @dataclass(frozen=True)
 class OrderExecutionResult:
     stock_code: str
