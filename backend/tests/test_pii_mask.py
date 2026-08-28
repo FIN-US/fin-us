@@ -8,7 +8,7 @@ import pathlib
 import re
 import time
 
-from backend.pii_mask import mask_pii, unmask_pii
+from backend.pii_mask import _AMOUNT_UNIT_RE, mask_pii, unmask_pii
 
 _FIXTURE_PATH = (
     pathlib.Path(__file__).parent.parent.parent
@@ -32,6 +32,20 @@ def _norm(text):
 
 def _norm_mapping(mapping):
     return {_norm(key): value for key, value in mapping.items()}
+
+
+# 부정 lookbehind의 문자 클래스 내용물을 뽑는다. 컴파일된 .pattern에서 읽으므로
+# _HANGUL_DIGIT 같은 상수 보간은 이미 전개된 뒤이고, lookbehind를 여러 개로 쪼개
+# 쓰더라도(예: (?<![\d,])(?<![천백십…])) 합집합으로 같은 결과가 나온다.
+_NEGATIVE_LOOKBEHIND_CLASS_RE = re.compile(r"\(\?<!\[([^\]]*)\]\)")
+
+
+def _negative_lookbehind_chars(pattern):
+    """패턴에 있는 모든 부정 lookbehind 문자 클래스의 문자 합집합."""
+    chars = set()
+    for body in _NEGATIVE_LOOKBEHIND_CLASS_RE.findall(pattern):
+        chars.update(body)
+    return chars
 
 
 class TestPlaceholderScope:
@@ -241,7 +255,7 @@ class TestAmountRecognizer:
             assert unmask_pii(masked, mapping) == text
 
     def test_korean_numeral_run_does_not_blow_up(self):
-        """수사만 길게 이어진 입력에서 마스킹이 2차 함수적으로 느려지면 안 된다.
+        r"""수사만 길게 이어진 입력에서 마스킹이 2차 함수적으로 느려지면 안 된다.
 
         수사 체인 단독 갈래는 선행 숫자를 요구하지 않으므로, lookbehind가 콤마만 막으면
         수사 런의 모든 위치에서 매치 시작이 허용된다. 각 시작이 런 전체를 소비했다가
@@ -251,13 +265,51 @@ class TestAmountRecognizer:
         봇에 접근 가능한 누구나 발동시킬 수 있다.
 
         이 테스트가 잡는 mutation: _AMOUNT_UNIT_RE의 lookbehind에서 수사·한글 수사를
-        빼고 (?<![\d,])로 되돌리는 변경.
+        빼는 모든 변경 — 전부 제거((?<![\d,]))든, 한글 수사만 빠뜨리는 부분 제거
+        ((?<![\d,천백십]))든, 12자 중 한 글자만 빠뜨리는 것이든.
 
-        상한은 넉넉하게 잡는다. 실측으로 수정 후 8192자는 4 ms대, 수정 전은 3.5 초대라
-        약 900배 벌어져 있어, 느린 CI에서도 0.5 초 상한이 오탐을 내지 않으면서 회귀는
-        확실히 잡는다. 절대 시간을 단언하는 테스트라 머신 편차에 취약한 것이 사실이지만,
-        이 결함은 결과가 아니라 소요 시간에만 나타나므로 값 단언으로는 잡을 수 없다.
+        단언을 둘 두는 이유는 시간 단언만으로는 **부분** 제거를 잡지 못하기 때문이다.
+        이 머신에서 8192자 mask_pii 실측(시간 단언 단독 판정):
+
+            원본                              1.55 ms   PASS (상한의 1/322)
+            M1  (?<![\d,])                 2184.66 ms   RED  (상한의 4.4배)
+            M2  (?<![\d,천백십])              541.18 ms   RED  (상한의 1.08배 — 아슬아슬)
+            M3  (?<![\d,일이삼사오육칠팔구])    1654.80 ms   RED
+            M4  12자 중 "일"만 제거              2.00 ms   **GREEN — 놓친다**
+            M5  12자 중 "십"만 제거            551.07 ms   RED  (상한의 1.10배 — 아슬아슬)
+
+        M4가 결정적이다. 한 글자만 빠뜨린 mutation은 이 입력("오천백십" 반복)에 "일"이
+        없어 부하가 전혀 늘지 않으므로 시간 단언이 통과시킨다. M2·M5도 상한을 8~10 %만
+        넘겨 이 머신보다 조금 빠른 러너에서는 통과한다 — 입력이 [천백십]만으로도 시작
+        위치 대부분을 차단당해 부하가 크게 줄기 때문이다. 주석이 경고한 "단위를 추가할 때
+        이 문자 집합에도 함께 넣어야 한다"는 실수가 정확히 이 구멍에 해당한다. 반대로
+        패턴 단언만으로는 성능 특성 자체를 보증하지 못한다(문자 집합은 맞는데 다른
+        수정으로 느려지는 회귀를 놓친다). 그래서 둘을 함께 둔다. 위 6종 전부에 대해
+        두 단언을 합친 이 테스트가 red인 것을 실측으로 확인했다.
+
+        패턴 단언은 문자열 하드코딩이 아니라 _AMOUNT_UNIT_RE.pattern에서 부정 lookbehind
+        문자 클래스를 뽑아 **집합**으로 비교한다. 하드코딩하면 클래스 안 문자 순서를
+        바꾸거나 lookbehind를 여러 개로 쪼개는 등 표현 방식만 달라져도 거짓 실패가 난다.
+        집합 비교는 그런 재배열에는 반응하지 않고 12자 중 한 글자라도 실제로 빠질 때만
+        red가 된다.
+
+        시간 상한은 넉넉하게 잡는다. 정상 경로 1.55 ms 대 상한 0.5 초 = 322배 여유이고,
+        수정 전(M1)은 상한의 4.4배라 느린 CI에서도 오탐 없이 회귀만 잡는다. 절대 시간을
+        단언하는 테스트라 머신 편차에 취약한 것이 사실이지만, 이 결함은 결과가 아니라
+        소요 시간에만 나타나므로 값 단언으로는 잡을 수 없다 — 편차에 취약한 구간
+        (M2·M4·M5 같은 부분 제거)은 위 패턴 단언이 대신 막는다.
+
+        패턴 단언을 먼저 두어, 명백한 mutation은 2 초짜리 측정을 기다리지 않고 즉시
+        원인을 지목하며 실패한다.
         """
+        required = set("천백십일이삼사오육칠팔구")
+        actual = _negative_lookbehind_chars(_AMOUNT_UNIT_RE.pattern)
+        assert required <= actual, (
+            f"_AMOUNT_UNIT_RE의 부정 lookbehind에서 수사 {sorted(required - actual)}가 "
+            "빠졌다 — 수사 런 중간에서 매치 시작이 허용되어 O(n²) 백트래킹이 되살아난다. "
+            "단위를 추가할 때는 이 문자 집합에도 함께 넣어야 한다."
+        )
+
         hostile = "오천백십" * 2048  # 8192자
         started = time.perf_counter()
         masked, mapping = mask_pii(hostile)
