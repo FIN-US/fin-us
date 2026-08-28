@@ -4,7 +4,7 @@ import logging
 import re
 from datetime import date
 from statistics import pstdev
-from typing import Any, Literal, NamedTuple, Optional, Sequence, cast, get_args, overload
+from typing import Any, Literal, NamedTuple, Optional, Sequence, get_args, overload
 from urllib.parse import quote as _url_quote
 from fastapi import HTTPException
 from anthropic import AsyncAnthropic
@@ -49,6 +49,14 @@ _DERIVED_PROVENANCE_FIELDS = frozenset({"provider", "provider_supports_tools"})
 _URGENCY_LEVELS: frozenset[UrgencyLevel] = frozenset(
     get_args(AnalysisReport.model_fields["urgency"].annotation)
 )
+
+# score_signal이 쓸 수 있는 provider — llm_chat의 str 반환 오버로드와 같은 집합이다.
+# "nat"은 여기 없다. NAT는 멀티에이전트 왕복이라 1차 필터의 전제(경량·저비용)를
+# 깨고, 반환값 NatAnswer가 str 서브클래스여서 파싱은 그대로 통과해 버린다 —
+# 즉 잘못 라우팅돼도 증상이 남지 않는다.
+_ScoringProvider = Literal["openai", "anthropic", "ollama"]
+_SCORING_PROVIDERS: frozenset[_ScoringProvider] = frozenset(get_args(_ScoringProvider))
+_DEFAULT_SCORING_PROVIDER: _ScoringProvider = "ollama"
 
 # _STOCK_CODE_EXTRACT_RE, _has_code_digit, _looks_like_stock_code → backend/stock_code.py (#140)
 
@@ -661,6 +669,11 @@ async def score_signal(
     로컬 초경량 모델(예: gemma4) 또는 경량 API 모델(예: gpt-5.4-mini)을 1차
     필터로 사용해 비용과 정확도의 균형을 맞춘다.
 
+    ``provider``는 ``_SCORING_PROVIDERS``의 값이어야 한다. 그 밖의 값은 경고를
+    남기고 기본값으로 되돌린다 — llm_chat은 매칭되지 않는 provider_key를 전부
+    NAT로 보내므로, 그대로 넘기면 오타 하나가 채점을 멀티에이전트 왕복으로
+    바꿔 놓는다.
+
     호출·파싱에 실패하면 예외를 올리지 않고 fail-open한다 — 유의미로 통과시키되
     점수는 null로 남긴다 (REQ-04 놓침 방지).
     """
@@ -672,13 +685,25 @@ async def score_signal(
 
     prompt = _build_signal_score_prompt(stock, source, _signal_snippet(signal_content))
 
+    # provider의 출처는 환경변수(scheduler.FILTER_PROVIDER)라 검증된 적이 없다.
+    # llm_chat의 마지막 줄은 catch-all이므로 매칭되지 않는 값은 전부 NAT로 떨어진다
+    # — 아래 fail-open은 호출이 실패했을 때의 장치이지 오라우팅을 막지 못한다.
+    # 계약 밖의 값은 여기서 기본값으로 되돌리고 로그를 남긴다.
+    if provider in _SCORING_PROVIDERS:
+        scoring_provider = provider
+    else:
+        logger.warning(
+            "signal 채점 provider=%r는 지원 목록 %s 밖입니다 — %r로 되돌립니다. "
+            "NEWS_FILTER_PROVIDER 설정을 확인하세요.",
+            provider,
+            sorted(_SCORING_PROVIDERS),
+            _DEFAULT_SCORING_PROVIDER,
+        )
+        scoring_provider = _DEFAULT_SCORING_PROVIDER
+
     try:
-        # 설정된 provider(ollama, openai 등)에 따라 경량 모델 호출.
-        # llm_chat는 provider_key별로 반환 타입이 갈린다 — "nat"만 NatAnswer이고
-        # 나머지는 str이다. 채점은 아래 _parse_signal_score가 문자열을 전제하므로
-        # 이 경로는 문자열을 돌려주는 provider만 지원한다.
-        # 그 밖의 값이 설정되면 런타임에 파싱이 실패하고 아래 except가 fail-open한다.
-        raw = await llm_chat(cast(Literal["openai", "anthropic", "ollama"], provider), prompt)
+        # 설정된 provider(ollama, openai 등)에 따라 경량 모델 호출
+        raw = await llm_chat(scoring_provider, prompt)
     except Exception as e:
         logger.error(
             "signal 채점 호출 실패 (%s, %s, %s): %s — 유의미로 통과시킵니다(fail-open)",
