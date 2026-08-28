@@ -1,4 +1,3 @@
-import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
@@ -31,6 +30,7 @@ import {
   formatOrderableCashReport,
 } from "./orderable-cash.js";
 import { resolveStock } from "./stock-master.js";
+import { KisTokenCache } from "./token-cache.js";
 
 // Redirect console.log to console.error to prevent breaking MCP JSON-RPC on stdout
 console.log = console.error;
@@ -88,7 +88,6 @@ const KIS_PSBL_ORDER_TR_ID = (() => {
   if (override) return override;
   return KIS_URL?.includes("openapivts") ? "VTTC8908R" : "TTTC8908R";
 })();
-const TOKEN_TTL_MARGIN_MS = 60_000;
 const TOKEN_CACHE_PATH = process.env.KIS_TOKEN_CACHE_PATH || path.join(
   os.tmpdir(),
   `finus-kis-token-${crypto
@@ -97,7 +96,23 @@ const TOKEN_CACHE_PATH = process.env.KIS_TOKEN_CACHE_PATH || path.join(
     .digest("hex")
     .slice(0, 16)}.json`,
 );
-let tokenCache = null;
+// 캐시 읽기·쓰기·발급 직렬화는 전부 이 객체가 맡는다(#324). MCP 호출마다 이
+// 프로세스가 새로 뜨므로, 캐시는 프로세스 안이 아니라 프로세스 사이에서 동작한다.
+const tokenCache = new KisTokenCache({ filePath: TOKEN_CACHE_PATH });
+// 주문 경로에서만 쓰는 토큰 락 대기 상한. 조회 경로의 기본값(DEFAULT_LOCK_WAIT_MS,
+// 10초)을 그대로 쓰면 상위 시간 예산을 넘긴다 — place_order는 토큰 확보 뒤에도
+// hashkey POST와 주문 POST를 각각 치므로(kis-client.js의 kisOrderPost) kisAxios
+// 타임아웃 8초짜리 요청이 조회 경로보다 하나 더 붙는다. run_mcp_tool의 상한 30초
+// (backend/services.py)에서 기동 ~2초와 그 두 요청 16초를 빼면 토큰 확보에 남는 몫은
+// 12초이고, 대기 뒤 자기 발급(최대 8초)까지 감안하면 대기는 4초 이하여야 한다.
+// 1초 여유를 더 두어 3초로 잡는다.
+//
+// 대신 주문 경로는 대기가 짧은 만큼 발급이 겹칠 여지가 남는다. 그 최악은 발급 유량
+// 제한에 걸린 주문이 제출 전에 끊기는 것인데(kisOrderPost의 pre-flight,
+// kisOrderNotSubmitted), 주문이 제출되지 않았음이 확실한 실패라 중복 주문으로는
+// 번지지 않는다. 예산을 넘겨 주문 POST 도중에 잘리는 쪽(제출 여부가 불확실해지는
+// kisOrderSubmittedMaybe)이 훨씬 비싸다.
+const ORDER_TOKEN_LOCK_WAIT_MS = 3_000;
 
 const server = new McpServer({ name: "trading-tool", version: "1.0.0" });
 // KIS API 호출용 axios 인스턴스 — 8초 타임아웃으로 무기한 블로킹 방지
@@ -118,64 +133,31 @@ function requireKisCredentials({ accountRequired = false } = {}) {
   }
 }
 
-function readTokenCache(now) {
-  if (tokenCache && tokenCache.expiresAt > now + TOKEN_TTL_MARGIN_MS) {
-    return tokenCache.token;
-  }
-
-  try {
-    const text = fs.readFileSync(TOKEN_CACHE_PATH, "utf8");
-    const cached = JSON.parse(text);
-    if (
-      cached &&
-      typeof cached.token === "string" &&
-      Number(cached.expiresAt) > now + TOKEN_TTL_MARGIN_MS
-    ) {
-      tokenCache = cached;
-      return cached.token;
-    }
-  } catch (error) {
-    if (error.code !== "ENOENT") {
-      console.error(`KIS token cache read failed: ${error.message}`);
-    }
-  }
-
-  return null;
-}
-
-function writeTokenCache(cache) {
-  tokenCache = cache;
-  try {
-    fs.writeFileSync(TOKEN_CACHE_PATH, JSON.stringify(cache), { mode: 0o600 });
-  } catch (error) {
-    console.error(`KIS token cache write failed: ${error.message}`);
-  }
-}
-
-async function getAccessToken() {
+// lockWaitMs는 주문 경로가 좁혀 주입한다(ORDER_TOKEN_LOCK_WAIT_MS). 넘기지 않으면
+// token-cache.js의 기본값(10초)을 쓴다.
+async function getAccessToken({ lockWaitMs } = {}) {
   requireKisCredentials();
 
-  const now = Date.now();
-  const cachedToken = readTokenCache(now);
-  if (cachedToken) return cachedToken;
+  return tokenCache.getOrIssue(async () => {
+    // 만료 시각은 요청 "전" 시각에서 센다. 응답이 늦게 오면 그만큼 캐시 수명을
+    // 짧게 잡는 쪽이 안전하다.
+    const now = Date.now();
+    try {
+      const response = await kisAxios.post(`${KIS_URL}/oauth2/tokenP`, {
+        grant_type: "client_credentials",
+        appkey: KIS_API_KEY,
+        appsecret: KIS_API_SECRET,
+      });
 
-  try {
-    const response = await kisAxios.post(`${KIS_URL}/oauth2/tokenP`, {
-      grant_type: "client_credentials",
-      appkey: KIS_API_KEY,
-      appsecret: KIS_API_SECRET,
-    });
-
-    const expiresIn = Number(response.data.expires_in || 86_400);
-    const cache = {
-      token: response.data.access_token,
-      expiresAt: now + expiresIn * 1000,
-    };
-    writeTokenCache(cache);
-    return cache.token;
-  } catch (error) {
-    throw new Error(`Access Token 발급 실패: ${error.response?.data?.msg1 || error.message}`);
-  }
+      const expiresIn = Number(response.data.expires_in || 86_400);
+      return {
+        token: response.data.access_token,
+        expiresAt: now + expiresIn * 1000,
+      };
+    } catch (error) {
+      throw new Error(`Access Token 발급 실패: ${error.response?.data?.msg1 || error.message}`);
+    }
+  }, { lockWaitMs });
 }
 
 async function kisApiGet(pathname, trId, params, { trCont = "" } = {}) {
@@ -391,7 +373,7 @@ async function placeOrder(args) {
       trId: request.trId,
       body: request.body,
       useHashKey: true,
-      getAccessToken,
+      getAccessToken: () => getAccessToken({ lockWaitMs: ORDER_TOKEN_LOCK_WAIT_MS }),
     }),
   });
   return formatOrderResult({

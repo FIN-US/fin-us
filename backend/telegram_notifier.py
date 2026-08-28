@@ -18,10 +18,12 @@ from .presentation import (
     TELEGRAM_MESSAGE_LIMIT,
     alert_kind,
     as_list_items,
+    clamp,
     decision_label,
     format_signal_score_line,
     render,
     source_label,
+    split_for_telegram,
     urgency_label,
 )
 
@@ -31,6 +33,10 @@ _TELEGRAM_BOT_URL_RE = re.compile(r"(https://api\.telegram\.org/bot)[^/\s\"]+")
 # TELEGRAM_MESSAGE_LIMIT은 presentation이 정의하고 이 모듈이 이름만 다시 내보낸다 (#297).
 # 알림도 render를 통과하므로 이 모듈이 presentation을 임포트하고, 그래서 상한의 정의는
 # 반대편(잎)에 있어야 순환이 생기지 않는다. 기존 임포트 경로는 그대로 살아 있다.
+#
+# 이 모듈은 상한을 **자르는 데 쓰지 않는다** (#313). 상한을 넘는 본문은 split_for_telegram이
+# 여러 통으로 나누고, 나눌 수 없는 조작(editMessageText, 나중에 지울 메시지)만 clamp로
+# 자른다 — 그쪽도 생짜 슬라이스가 아니라 말줄임 접미사가 붙어 잘렸다는 사실이 보인다.
 
 # 긴급으로 취급하는 urgency. 배너(🚨 긴급 알림)는 이 집합을 따로 보지 않고
 # should_send_telegram_alert의 판정 결과를 그대로 쓴다 — 판정이 두 곳에 있으면 어긋난다
@@ -355,7 +361,9 @@ class TelegramNotifier:
             items.append(f"요약: {summary}")
         # 제목은 목록 밖이다. 값이 늘어선 줄만 표시를 받는다.
         lines = [f"{stock} / {source_label(source)}", *as_list_items(items)]
-        return "\n".join(lines)[:TELEGRAM_MESSAGE_LIMIT]
+        # 여기서 자르지 않는다. 상한 맞추기는 전송 직전 한 곳(split_for_telegram)이 하고,
+        # 이 함수는 analysis_data를 문장으로 바꾸는 순수 함수로 남는다 (#313).
+        return "\n".join(lines)
 
     def format_morning_briefing(self, briefing: dict[str, Any]) -> str:
         lines = [
@@ -371,7 +379,9 @@ class TelegramNotifier:
             "⚡ 주요 촉매 이벤트",
             *self._format_bullets(briefing.get("catalysts")),
         ]
-        return "\n".join(lines)[:TELEGRAM_MESSAGE_LIMIT]
+        # format_analysis_alert와 같은 이유로 자르지 않는다 (#313). 브리핑은 네 묶음이
+        # 빈 줄로 갈라져 있어, 나뉘더라도 조각 경계가 묶음 사이에 떨어진다.
+        return "\n".join(lines)
 
     @staticmethod
     def _format_bullets(items: Any) -> list[str]:
@@ -411,7 +421,7 @@ class TelegramNotifier:
 
         is_urgent = should_send_telegram_alert(analysis_data, alert_mode="urgent")
         try:
-            await self._post_message(
+            await self._post_parts(
                 render(
                     self.format_analysis_alert(
                         stock=stock,
@@ -435,11 +445,34 @@ class TelegramNotifier:
         *,
         reply_markup: dict[str, Any] | None = None,
     ) -> bool:
+        """상한을 넘으면 잘라내지 않고 나눠 보낸다 (#313).
+
+        조각이 하나뿐이면 이전과 똑같이 한 번 호출한다 — 짧은 메시지의 경로는 달라지지
+        않는다. 이미 조각인 문자열을 다시 넘겨도 상한 안이라 그대로 한 통으로 나간다.
+        telegram_commands._send_text_settled가 이 멱등성에 기대 조각 단위로 재시도한다.
+
+        도중에 실패하면 남은 조각을 보내지 않고 False를 돌려준다. 앞이 빠진 채 뒤만
+        도착하면 사용자는 빠진 자리를 알 수 없는데, 조각마다 붙는 머리표("📄 2/3")가
+        여기서 값을 한다 — 받은 번호가 끊기면 무엇이 오지 않았는지 보인다.
+        """
         if not self.enabled:
             return False
 
+        parts: list[str] = []
+        delivered = 0
         try:
-            await self._post_message(text[:TELEGRAM_MESSAGE_LIMIT], reply_markup=reply_markup)
+            # 분할도 try 안이다. 예전의 text[:LIMIT]은 예외가 불가능했지만 분할은
+            # 그렇지 않으므로(이 자리를 벗어나면 "전송 실패는 False"라는 계약이
+            # 깨지고 예외가 폴러까지 올라간다), 계약의 경계를 여기로 맞춘다 (PR #328 리뷰).
+            parts = split_for_telegram(text)
+            for position, part in enumerate(parts, 1):
+                # 버튼은 마지막 조각에만 단다. 앞 조각에 달면 본문이 끝나기 전에 답을
+                # 고르라고 재촉하는 꼴이고, 조각마다 달면 같은 버튼이 여러 벌 남는다.
+                await self._post_message(
+                    part,
+                    reply_markup=reply_markup if position == len(parts) else None,
+                )
+                delivered = position
             self.last_retry_after_seconds = None
             return True
         except Exception as exc:
@@ -448,14 +481,19 @@ class TelegramNotifier:
             # telegram_commands._send_text_settled가 이 값으로 "남은 예산 안에 풀리는
             # ban인가"를 판단한다 — 없으면 재시도 간격이 순전히 추측이 된다 (PR #253 리뷰).
             self.last_retry_after_seconds = retry_after
+            # 나뉜 메시지는 "몇 조각까지 갔는가"가 진단의 핵심이다. 한 조각짜리 메시지의
+            # 로그 문구는 건드리지 않는다 — 대부분의 전송이 그쪽이고, 조각 수가 늘 붙으면
+            # 원래 있던 429 진단이 잡음에 묻힌다.
+            progress = f" ({delivered}/{len(parts)} parts delivered)" if len(parts) > 1 else ""
             if retry_after is None:
-                logger.error("Telegram message send failed: %s", exc)
+                logger.error("Telegram message send failed%s: %s", progress, exc)
             else:
                 # 호출부(telegram_commands._send_text_settled)의 재시도 간격은 이 값을
                 # 볼 수 없어 고정 추측값이다. 실제 ban 길이가 그 가정과 맞는지 판단할
                 # 근거를 남긴다 — 어긋나면 간격을 조정하거나 값을 전달하도록 바꿔야 한다.
                 logger.error(
-                    "Telegram message send failed (429, retry_after=%ss): %s",
+                    "Telegram message send failed%s (429, retry_after=%ss): %s",
+                    progress,
                     retry_after,
                     exc,
                 )
@@ -471,13 +509,19 @@ class TelegramNotifier:
 
         진행 메시지처럼 나중에 지우거나 고칠 메시지에 쓴다. 성공/실패 bool을 주는
         :meth:`send_text`와 달리 후속 조작에 필요한 식별자를 준다.
+
+        여기서는 나누지 않고 자른다 (#313). 이 함수의 계약이 "식별자 하나로 다시 손댈 수
+        있는 메시지 하나"라서, 나누는 순간 그 계약이 깨진다 — 앞 조각들의 식별자를 잃고
+        진행 메시지가 지워지지 않은 채 남는다. 대신 생짜 슬라이스가 아니라 clamp를 써서
+        잘렸다는 사실이 말줄임으로 보이게 한다. 실제로는 이 경로에 들어오는 문장이
+        진행 안내 상수뿐이라 잘릴 일이 없다.
         """
         if not self.enabled:
             return None
 
         try:
             body = await self._post_message_returning_body(
-                text[:TELEGRAM_MESSAGE_LIMIT], reply_markup=reply_markup
+                clamp(text), reply_markup=reply_markup
             )
         except Exception as exc:
             logger.error("Telegram message send failed: %s", exc)
@@ -513,6 +557,10 @@ class TelegramNotifier:
         최종 답변을 내보내는 용도로는 쓰지 않는다 — 텔레그램은 편집에 대해 푸시 알림을
         보내지 않는다. 진행 메시지 삭제가 실패했을 때 "분석 중"이 영원히 남지 않도록
         종료 표시로 바꾸는 폴백 경로에 쓴다.
+
+        :meth:`send_text_returning_id`와 같은 이유로 나누지 않고 clamp한다 (#313).
+        editMessageText는 이미 존재하는 메시지 **하나**를 고치는 조작이라 여러 통으로
+        늘릴 방법이 아예 없다.
         """
         if not self.enabled:
             return False
@@ -524,7 +572,7 @@ class TelegramNotifier:
                 payload={
                     "chat_id": self.chat_id,
                     "message_id": message_id,
-                    "text": text[:TELEGRAM_MESSAGE_LIMIT],
+                    "text": clamp(text),
                     "disable_web_page_preview": True,
                 },
             )
@@ -630,6 +678,16 @@ class TelegramNotifier:
             payload=self._send_message_payload(text, reply_markup),
         )
 
+    async def _post_parts(self, text: str) -> None:
+        """상한을 넘으면 나눠 보낸다. 실패는 그대로 올린다 (#313).
+
+        :meth:`send_text`가 예외를 삼키고 bool로 바꾸는 것과 달리, 이쪽은 호출부가 이미
+        자기 try 안에서 처리하는 경로(:meth:`send_analysis_alert`)를 위한 것이다. 버튼을
+        받지 않는 것도 그 경로의 모양이다 — 알림에는 버튼이 붙지 않는다.
+        """
+        for part in split_for_telegram(text):
+            await self._post_message(part)
+
     async def _post_message_returning_body(
         self,
         text: str,
@@ -698,65 +756,141 @@ async def send_text_settled(
 
     반환값은 전송 성공 여부다. 호출부가 "통지가 나갔는가"로 뒷정리를 갈라야 하는 경우가
     있다(/buy·자동 제안은 실패 시 대기 주문을 지운다).
+
+    **상한을 넘는 메시지는 조각으로 나눠 순서대로 보낸다** (#313). 재시도의 단위도 메시지
+    전체가 아니라 조각이다 — 3조각 중 2조각이 나간 뒤 실패했을 때 처음부터 다시 보내면 이미
+    도착한 두 조각이 한 벌 더 쌓이고, 체결 통지가 두 번 온 것처럼 읽힌다. 재실행할 수 없어서
+    이 경로가 존재하는 마당에 중복을 새로 만들 이유가 없다.
+
+    끝내 실패하면 남은 조각을 포기하고 False를 돌려준다. 부분 전달은 조각마다 붙는
+    머리표("📄 2/3")로 사용자에게 드러난다 — 뒤가 사라진 것을 아무도 모르는 상태가 이 이슈가
+    없애려는 것이라, 나누기가 그 문제를 되살리게 두면 안 된다.
+
+    재시도 횟수는 조각마다 새로 세지만 벽시계 상한은 메시지 전체가 나눠 쓴다. 조각 수에
+    비례해 폴러를 붙잡는 시간이 늘면 SETTLED_SEND_TIMEOUT_SECONDS가 근거로 삼은 계산(대기
+    주문의 60초 만료 창)이 무너지기 때문이다.
     """
-    attempts = len(SETTLED_SEND_RETRY_BACKOFF_SECONDS) + 1
     started_at = time.monotonic()
+    parts: list[str] = []
+    delivered = 0
     try:
+        # 분할을 try 안에 둔다. 이 함수의 계약은 "실패해도 예외를 올리지 않는다"인데
+        # (호출부는 부수효과가 확정된 뒤라 재실행할 수 없다), 분할에서 예외가 나면
+        # 그 계약이 조립 단계에서 깨진다 — 예전의 슬라이스는 던질 수 없었다
+        # (PR #328 리뷰).
+        #
         # 시도 횟수가 아니라 벽시계로 상한을 강제한다. 무응답이면 시도마다 httpx
         # 타임아웃(10초)이 그대로 붙어 횟수만으로는 상한이 서지 않기 때문이다.
         # asyncio.timeout은 자기 데드라인이 아닌 외부 취소는 CancelledError로 그대로
         # 통과시키므로 폴러의 graceful shutdown을 방해하지 않는다.
         async with asyncio.timeout(SETTLED_SEND_TIMEOUT_SECONDS):
-            for index in range(attempts):
-                sent = await notifier.send_text(text, reply_markup=reply_markup)
-                if sent is not False:
-                    return True
-                if index >= len(SETTLED_SEND_RETRY_BACKOFF_SECONDS):
-                    break
-
-                delay = SETTLED_SEND_RETRY_BACKOFF_SECONDS[index]
-                # 429의 flood-wait은 흔히 30초 이상이라 (1, 3, 9) 추측으로는 4시도가
-                # 전부 ban 구간에 소진된다. 게다가 ban 중 재요청은 대기 시간을 늘리는
-                # 방향으로 작용한다 — 남은 예산 안에 안 풀리면 재시도가 무의미할 뿐
-                # 아니라 해롭다 (PR #253 2차 리뷰).
-                #
-                # last_retry_after_seconds는 notifier에 걸린 공유 가변 상태다. 이 읽기가
-                # 방금 그 send_text의 결과를 보는 근거는 둘뿐이다: send_text가 성공·실패
-                # 양쪽에서 값을 갱신해 호출 간 이월이 없다는 것과, 위 send_text 반환과
-                # 이 줄 사이에 await가 없어 이벤트 루프가 다른 코루틴에 넘어가지 않는다는
-                # 것. 사이에 await를 하나 넣으면(로깅을 비동기로 바꾸는 정도로도) 다른
-                # 전송의 flood-wait을 읽게 된다 (PR #253 3차 리뷰).
-                retry_after = getattr(notifier, "last_retry_after_seconds", None)
-                if retry_after is not None:
-                    remaining = SETTLED_SEND_TIMEOUT_SECONDS - (
-                        time.monotonic() - started_at
-                    )
-                    if retry_after > remaining:
-                        logger.error(
-                            "확정된 부수효과의 결과를 전송하지 못했습니다 "
-                            "(%s자, flood-wait %s초 > 남은 예산 %.1f초 — 재시도 포기)",
-                            len(text),
-                            retry_after,
-                            max(0.0, remaining),
-                        )
-                        return False
-                    delay = max(delay, float(retry_after))
-                await sleep(delay)
+            parts = split_for_telegram(text)
+            for position, part in enumerate(parts, 1):
+                sent = await _send_part_settled(
+                    notifier,
+                    part,
+                    # 버튼은 마지막 조각에만. notifier.send_text와 같은 규칙이다.
+                    reply_markup if position == len(parts) else None,
+                    started_at=started_at,
+                    position=position,
+                    total=len(parts),
+                    sleep=sleep,
+                )
+                if not sent:
+                    return False
+                delivered = position
+        return True
     except TimeoutError:
         logger.error(
-            "확정된 부수효과의 결과를 전송하지 못했습니다 (%s자, 벽시계 상한 %s초 초과)",
+            "확정된 부수효과의 결과를 전송하지 못했습니다 "
+            "(%s자, %s/%s조각 전달, 벽시계 상한 %s초 초과)",
             len(text),
+            delivered,
+            len(parts),
             SETTLED_SEND_TIMEOUT_SECONDS,
         )
         return False
+    except Exception as exc:
+        # 조립이든 전송이든, 예외를 여기서 멈춘다. 이 경로가 존재하는 이유가 "부수효과가
+        # 확정돼 update를 재실행할 수 없다"이므로(#247), 예외를 폴러까지 올리면 폴러가
+        # 하지 말아야 할 재실행을 한다 — 전송 실패보다 나쁜 결과다. 전송 자체의 실패는
+        # _send_part_settled가 이미 bool로 접어 오므로 여기 걸리는 것은 조립 단계의
+        # 예외뿐이다 (PR #328 리뷰).
+        #
+        # CancelledError는 BaseException이라 이 절을 지나간다. 폴러의 graceful
+        # shutdown이 막히지 않는다.
+        logger.error(
+            "확정된 부수효과의 결과를 전송하지 못했습니다 (%s/%s조각 전달, %s)",
+            delivered,
+            len(parts),
+            exc,
+        )
+        return False
+
+
+async def _send_part_settled(
+    notifier: TelegramNotifier,
+    part: str,
+    reply_markup: dict[str, Any] | None,
+    *,
+    started_at: float,
+    position: int,
+    total: int,
+    sleep: Callable[[float], Awaitable[None]],
+) -> bool:
+    """조각 하나를 재시도까지 포함해 보낸다. :func:`send_text_settled`의 속살이다.
+
+    ``started_at``은 메시지 전체의 시작 시각이다. 조각별로 다시 재면 flood-wait
+    판정이 "이 조각에 남은 시간"을 보게 되는데, 실제로 남은 것은 메시지 전체의
+    예산이라 조각 수만큼 과대평가된다.
+    """
+    attempts = len(SETTLED_SEND_RETRY_BACKOFF_SECONDS) + 1
+    for index in range(attempts):
+        sent = await notifier.send_text(part, reply_markup=reply_markup)
+        if sent is not False:
+            return True
+        if index >= len(SETTLED_SEND_RETRY_BACKOFF_SECONDS):
+            break
+
+        delay = SETTLED_SEND_RETRY_BACKOFF_SECONDS[index]
+        # 429의 flood-wait은 흔히 30초 이상이라 (1, 3, 9) 추측으로는 4시도가
+        # 전부 ban 구간에 소진된다. 게다가 ban 중 재요청은 대기 시간을 늘리는
+        # 방향으로 작용한다 — 남은 예산 안에 안 풀리면 재시도가 무의미할 뿐
+        # 아니라 해롭다 (PR #253 2차 리뷰).
+        #
+        # last_retry_after_seconds는 notifier에 걸린 공유 가변 상태다. 이 읽기가
+        # 방금 그 send_text의 결과를 보는 근거는 둘뿐이다: send_text가 성공·실패
+        # 양쪽에서 값을 갱신해 호출 간 이월이 없다는 것과, 위 send_text 반환과
+        # 이 줄 사이에 await가 없어 이벤트 루프가 다른 코루틴에 넘어가지 않는다는
+        # 것. 사이에 await를 하나 넣으면(로깅을 비동기로 바꾸는 정도로도) 다른
+        # 전송의 flood-wait을 읽게 된다 (PR #253 3차 리뷰).
+        retry_after = getattr(notifier, "last_retry_after_seconds", None)
+        if retry_after is not None:
+            remaining = SETTLED_SEND_TIMEOUT_SECONDS - (time.monotonic() - started_at)
+            if retry_after > remaining:
+                logger.error(
+                    "확정된 부수효과의 결과를 전송하지 못했습니다 "
+                    "(%s자, %s/%s조각째, flood-wait %s초 > 남은 예산 %.1f초 — 재시도 포기)",
+                    len(part),
+                    position,
+                    total,
+                    retry_after,
+                    max(0.0, remaining),
+                )
+                return False
+            delay = max(delay, float(retry_after))
+        await sleep(delay)
     # 본문은 남기지 않는다. 이 경로에는 체결 내역·잔고가 실려 있고, 진단에 필요한 것은
     # "어느 지점에서 몇 번 만에 포기했는가"이지 사용자에게 보내려던 문장이 아니다.
     logger.error(
-        "확정된 부수효과의 결과를 전송하지 못했습니다 (%s자, %s시도 후 포기)",
-        len(text),
+        "확정된 부수효과의 결과를 전송하지 못했습니다 (%s자, %s/%s조각째, %s시도 후 포기)",
+        len(part),
+        position,
+        total,
         attempts,
     )
     return False
+
 
 
 telegram_notifier = TelegramNotifier()

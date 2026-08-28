@@ -47,6 +47,7 @@ from .presentation import (
     level_label,
     normalize_level,
     render,
+    split_for_telegram,
 )
 from .services import llm_chat, run_mcp_tool, short_error as _short_error
 from .watchlist_repo import SqliteWatchlistRepo
@@ -323,9 +324,11 @@ def _nat_answer_message(
     속성이 없는 값(구버전 경로, 문자열만 주는 대역)이면 각주 없이 본문만 보낸다.
 
     #297에서 조립을 presentation.render에 위임했다. 마크다운 정리와 용어 각주가 함께
-    붙지만 추론 각주의 모양과 길이 예산 규칙은 그대로다 — 각주 자리를 먼저 확보한 뒤 본문을
-    나머지에 맞춘다. 틀은 라우팅된 에이전트로 정한다(매매일지 답변은 일지 틀). 본문을 파싱해
-    추측하지 않는 것이 #260 각주와 같은 원칙이다.
+    붙지만 추론 각주의 모양은 그대로다. 틀은 라우팅된 에이전트로 정한다(매매일지 답변은
+    일지 틀). 본문을 파싱해 추측하지 않는 것이 #260 각주와 같은 원칙이다.
+
+    길이는 여기서 맞추지 않는다 (#313). 상한을 넘으면 전송 계층이 나눠 보내고, 각주는
+    마지막 조각에 남는다 — 자리 다툼이 없어졌으므로 예산 규칙도 없어졌다.
     """
     routed_agent = getattr(result, "routed_agent", None)
     return render(
@@ -695,6 +698,12 @@ class TelegramCommandHandler:
         이 호출이 든 try 블록은 TelegramSendError를 반드시 재던져야 한다. 전송 실패를
         사용자 메시지로 변환하면 무의미한 중복 메시지가 한 번 더 나간다.
         test_every_try_containing_a_retryable_send_reraises_it이 이를 강제한다 (#249).
+
+        메시지가 나뉘어(#313) 앞 조각만 나간 뒤 실패하면, update 재실행은 첫 조각부터
+        다시 보낸다. 이미 도착한 조각이 한 벌 더 보이는 대신 빠진 뒷부분이 채워진다 —
+        이 경로의 계약이 "다시 실행해도 같은 결과"이므로 재실행 지점을 조각 단위로
+        기억할 자리가 없고, 있더라도 중복보다 누락이 나쁘다. 부수효과가 확정돼 재실행할
+        수 없는 경로는 _send_text_settled가 조각 단위로 이어 보낸다.
         """
         sent = await self.notifier.send_text(text, reply_markup=reply_markup)
         if sent is False:
@@ -709,8 +718,11 @@ class TelegramCommandHandler:
         """확정된 부수효과의 결과 전송. 재시도 규칙은 telegram_notifier에 하나뿐이다.
 
         스케줄러의 자동 제안(#314)이 같은 함수를 부른다 — 한쪽만 단발 전송이면 같은 429에
-        한쪽 메시지만 조용히 버려진다 (PR #327 리뷰). 여기서는 테스트가 대체할 수 있는
-        _sleep을 넘겨 주는 것 말고 하는 일이 없다.
+        한쪽 메시지만 조용히 버려진다 (PR #327 리뷰). 조각 나누기와 조각 단위 재시도(#313)도
+        그쪽으로 함께 옮겨 갔다. 자동 제안의 승인 프롬프트는 제안 근거와 검증 의견을 함께
+        실어 상한을 넘길 수 있으므로, 나누기가 이 경로에만 있으면 안 된다.
+
+        여기서는 테스트가 대체할 수 있는 _sleep을 넘겨 주는 것 말고 하는 일이 없다.
         """
         return await send_text_settled(
             self.notifier, text, reply_markup=reply_markup, sleep=self._sleep
@@ -2092,8 +2104,9 @@ class TelegramCommandHandler:
         # LLM 호출이 끝난 뒤다. 재실행은 같은 conversation_id로 NAT를 다시 호출해 대화
         # 이력을 오염시키고 예산만큼 재과금된다 — 전송 실패 예산으로는 최대 10회다 (#247).
         await self._clear_progress_message(progress_message_id)
-        # _nat_answer_message(→ presentation.render)가 각주 자리를 확보한 뒤 본문을 길이
-        # 한도에 맞춘다 (#260, #297).
+        # _nat_answer_message(→ presentation.render)는 길이를 보지 않고 전체 문장을
+        # 조립하고, _send_text_settled가 상한에 맞춰 나눠 보낸다 (#260, #297, #313).
+        # 각주는 마지막 조각에 통째로 실린다 — render 독스트링 참조.
         await self._send_text_settled(_nat_answer_message(result, level, text))
 
     @asynccontextmanager

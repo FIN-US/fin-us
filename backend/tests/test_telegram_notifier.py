@@ -1,12 +1,13 @@
 import inspect
 import logging
 from pathlib import Path
+from typing import cast
 
 import httpx
 import pytest
 
 import backend.telegram_notifier
-from backend.presentation import SIGNAL_SCORE_LABEL
+from backend.presentation import SIGNAL_SCORE_LABEL, TELEGRAM_TRUNCATION_SUFFIX
 from backend.telegram_notifier import (
     TELEGRAM_MESSAGE_LIMIT,
     TelegramApiError,
@@ -446,7 +447,14 @@ def _api_error(status_code, body, *, method="sendMessage"):
 # ── #260: 진행 메시지 전송(message_id 확보) · 편집 ──────────────────────────
 
 
-def _fake_client_factory(calls, response):
+def _fake_client_factory(calls, response, *rest):
+    """응답을 순서대로 돌려준다. 마지막 응답은 이후 호출에서 계속 재사용된다.
+
+    응답이 하나면 예전과 똑같이 매 호출 같은 응답이다. 여럿 주면 분할 전송(#313)의
+    "n번째 조각에서 실패" 같은 순서 있는 시나리오를 세울 수 있다.
+    """
+    responses = [response, *rest]
+
     class FakeAsyncClient:
         def __init__(self, *, timeout):
             self.timeout = timeout
@@ -459,7 +467,7 @@ def _fake_client_factory(calls, response):
 
         async def post(self, url, *, json):
             calls.append((url, json))
-            return response
+            return responses[min(len(calls) - 1, len(responses) - 1)]
 
     return FakeAsyncClient
 
@@ -559,8 +567,8 @@ async def test_edit_message_text_posts_edit_payload(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_edit_message_text_truncates_to_the_telegram_limit(monkeypatch):
-    """공개 API이므로 한도를 넘는 본문이 들어와도 잘라 보낸다 (PR #263 리뷰 — 뮤테이션 생존).
+async def test_edit_message_text_clamps_to_the_telegram_limit(monkeypatch):
+    """편집은 메시지 하나를 고치는 조작이라 나눌 수 없다 — 대신 잘림이 보이게 자른다 (#313).
 
     현재 호출부는 짧은 종료 표시 하나뿐이라 절단이 발동하지 않지만, 넘겨 보내면
     텔레그램이 400으로 거부하고 진행 메시지가 '분석 중'인 채로 남는다.
@@ -574,11 +582,28 @@ async def test_edit_message_text_truncates_to_the_telegram_limit(monkeypatch):
 
     assert await notifier.edit_message_text(4242, "가" * (TELEGRAM_MESSAGE_LIMIT + 500)) is True
     assert len(calls[0][1]["text"]) == TELEGRAM_MESSAGE_LIMIT
+    assert calls[0][1]["text"].endswith(TELEGRAM_TRUNCATION_SUFFIX)
 
 
 @pytest.mark.asyncio
-async def test_send_text_truncates_to_the_telegram_limit(monkeypatch):
-    """sendMessage도 같은 한도로 자른다 — 각주 계산이 이 상수를 전제로 한다."""
+async def test_send_text_returning_id_clamps_to_the_telegram_limit(monkeypatch):
+    """식별자 하나로 다시 손댈 메시지 하나가 계약이라 나누지 않는다. 잘림은 보인다 (#313)."""
+    calls = []
+    monkeypatch.setattr(
+        "backend.telegram_notifier.httpx.AsyncClient",
+        _fake_client_factory(calls, _FakeResponse({"ok": True, "result": {"message_id": 7}})),
+    )
+    notifier = TelegramNotifier("token", "123")
+
+    assert await notifier.send_text_returning_id("다" * (TELEGRAM_MESSAGE_LIMIT + 500)) == 7
+    assert len(calls) == 1
+    assert len(calls[0][1]["text"]) == TELEGRAM_MESSAGE_LIMIT
+    assert calls[0][1]["text"].endswith(TELEGRAM_TRUNCATION_SUFFIX)
+
+
+@pytest.mark.asyncio
+async def test_send_text_splits_instead_of_truncating(monkeypatch):
+    """sendMessage는 자르지 않고 나눈다 — 잘려 사라지던 뒷부분이 다음 통으로 간다 (#313)."""
     calls = []
     monkeypatch.setattr(
         "backend.telegram_notifier.httpx.AsyncClient",
@@ -586,8 +611,106 @@ async def test_send_text_truncates_to_the_telegram_limit(monkeypatch):
     )
     notifier = TelegramNotifier("token", "123")
 
-    assert await notifier.send_text("나" * (TELEGRAM_MESSAGE_LIMIT + 500)) is True
-    assert len(calls[0][1]["text"]) == TELEGRAM_MESSAGE_LIMIT
+    body = "나" * (TELEGRAM_MESSAGE_LIMIT + 500)
+    assert await notifier.send_text(body) is True
+
+    texts = [call[1]["text"] for call in calls]
+    assert len(texts) > 1
+    assert all(len(text) <= TELEGRAM_MESSAGE_LIMIT for text in texts)
+    assert TELEGRAM_TRUNCATION_SUFFIX not in "".join(texts)
+    # 머리표 줄을 걷어내면 원문 그대로다.
+    assert "".join(text.split(chr(10), 1)[1] for text in texts) == body
+
+
+@pytest.mark.asyncio
+async def test_send_text_keeps_the_keyboard_on_the_last_part_only(monkeypatch):
+    """앞 조각에 버튼을 달면 본문이 끝나기 전에 답을 고르라고 재촉하는 꼴이 된다 (#313)."""
+    calls = []
+    monkeypatch.setattr(
+        "backend.telegram_notifier.httpx.AsyncClient",
+        _fake_client_factory(calls, _FakeResponse({"ok": True, "result": {"message_id": 1}})),
+    )
+    notifier = TelegramNotifier("token", "123")
+    markup = {"inline_keyboard": [[{"text": "상세", "callback_data": "x"}]]}
+
+    assert await notifier.send_text("라" * (TELEGRAM_MESSAGE_LIMIT + 500), reply_markup=markup) is True
+
+    markups = [call[1].get("reply_markup") for call in calls]
+    assert len(markups) > 1
+    assert markups[-1] == markup
+    assert all(value is None for value in markups[:-1])
+
+
+@pytest.mark.asyncio
+async def test_send_text_stops_at_the_failed_part(monkeypatch):
+    """도중에 실패하면 남은 조각을 보내지 않는다. 앞이 빠진 채 뒤만 도착하는 것보다 낫다 (#313)."""
+    calls = []
+    monkeypatch.setattr(
+        "backend.telegram_notifier.httpx.AsyncClient",
+        _fake_client_factory(
+            calls,
+            _FakeResponse({"ok": True, "result": {"message_id": 1}}),
+            _FakeResponse(error=httpx.HTTPError("boom")),
+        ),
+    )
+    notifier = TelegramNotifier("token", "123")
+
+    assert await notifier.send_text("마" * (TELEGRAM_MESSAGE_LIMIT * 2 + 10)) is False
+    # 첫 조각은 나갔고, 둘째에서 막힌 뒤 셋째는 시도하지 않는다.
+    assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_send_text_returns_false_when_splitting_itself_raises(monkeypatch):
+    """조립 단계의 예외도 False로 접는다 (PR #328 리뷰).
+
+    예전의 text[:LIMIT]은 던질 수 없어 "전송 실패는 False"라는 계약이 저절로 지켜졌다.
+    분할은 그렇지 않으므로 호출을 try 안에 두어 계약의 경계를 맞춘다 — 새 나가면
+    _send_text_or_raise가 아닌 지점에서 예외가 폴러까지 올라간다.
+    """
+    class Unprintable:
+        def __str__(self):
+            raise ValueError("cannot render")
+
+    calls = []
+    monkeypatch.setattr(
+        "backend.telegram_notifier.httpx.AsyncClient",
+        _fake_client_factory(calls, _FakeResponse({"ok": True, "result": {"message_id": 1}})),
+    )
+    notifier = TelegramNotifier("token", "123")
+
+    # cast: 타입상 불가능한 입력을 일부러 넣는 테스트다. 계약을 지키는 것은 타입 검사가
+    # 아니라 런타임이어야 한다 — 전송 계층은 서명을 신뢰할 수 없는 자리에 있다.
+    assert await notifier.send_text(cast(str, Unprintable())) is False
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_long_analysis_alert_is_split_not_truncated(monkeypatch):
+    """알림도 같은 분할 경로를 지난다 — format_analysis_alert는 더 이상 자르지 않는다 (#313)."""
+    calls = []
+    monkeypatch.setattr(
+        "backend.telegram_notifier.httpx.AsyncClient",
+        _fake_client_factory(calls, _FakeResponse({"ok": True, "result": {"message_id": 1}})),
+    )
+    notifier = TelegramNotifier("token", "123")
+    reason = "바" * (TELEGRAM_MESSAGE_LIMIT + 500)
+
+    sent = await notifier.send_analysis_alert(
+        "삼성전자",
+        "news",
+        {
+            "telegram_alert": True,
+            "urgency": "critical",
+            "details": {"decision": "BUY", "reason": reason},
+        },
+    )
+
+    assert sent is True
+    texts = [call[1]["text"] for call in calls]
+    assert len(texts) > 1
+    assert all(len(text) <= TELEGRAM_MESSAGE_LIMIT for text in texts)
+    assert reason in "".join(text.split(chr(10), 1)[1] for text in texts)
 
 
 @pytest.mark.asyncio
