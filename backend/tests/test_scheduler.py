@@ -2476,7 +2476,14 @@ async def test_monitor_signal_continues_when_recording_fails(monkeypatch):
     이 값은 사후 분석용이다. 여기서 예외가 올라오면 DB 문제 하나가 그 주기의 감시를
     통째로 멈춘다 — 놓침 방지(REQ-04)와 정면으로 충돌한다.
     """
+    from .. import scheduler as scheduler_module
     from ..scheduler import SignalSource, monitor_market_task
+
+    # 이 테스트는 기록을 실패시키므로 연속 실패 카운터를 올린다. monkeypatch로 깔아 두면
+    # 종료 시 원래 값으로 되돌아가, 뒤에 도는 억제·복구 테스트가 이 테스트의 잔재를
+    # 물려받지 않는다 (실행 순서에 의존하는 상태를 남기지 않는다).
+    monkeypatch.setattr(scheduler_module, "_filtered_signal_failure_streak", 0)
+    monkeypatch.setattr(scheduler_module, "_last_filtered_signal_error", None)
 
     state = RedisSchedulerState(FakeRedis())
 
