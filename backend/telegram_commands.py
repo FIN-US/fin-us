@@ -58,6 +58,8 @@ from .telegram_notifier import (
 )
 from .timeutil import KST
 from .trading_orders import (
+    ORDER_CANCEL_CALLBACK,
+    ORDER_CONFIRM_CALLBACK,
     ORDER_EXPIRES_AFTER,
     McpTradingOrderGateway,
     OrderSide,
@@ -65,6 +67,7 @@ from .trading_orders import (
     PendingOrder,
     TradeRecorder,
     is_korean_market_open,
+    order_reply_markup,
 )
 from .stock_code import (
     _ORDERABLE_STOCK_CODE_RE,
@@ -102,8 +105,8 @@ UNRESOLVED_STOCK_WARNING = (
     "⚠️ 종목명을 확인하지 못했습니다. 입력한 코드가 맞는지 다시 확인하세요."
 )
 # _STOCK_CODE_EXTRACT_RE, _ORDERABLE_STOCK_CODE_RE → backend/stock_code.py (#140)
-ORDER_CONFIRM_CALLBACK = "order:confirm"
-ORDER_CANCEL_CALLBACK = "order:cancel"
+# ORDER_CONFIRM_CALLBACK, ORDER_CANCEL_CALLBACK, order_reply_markup → trading_orders.py (#314).
+# 스케줄러의 자동 제안도 같은 버튼을 써야 해서 옮겼다. 이름은 여기서 계속 읽을 수 있다.
 ORDER_STALE_CALLBACK_TEXT = "이전 주문 버튼입니다. 최신 주문 메시지에서 다시 선택하세요."
 ALERT_CALLBACK_PREFIX = "alerts:"
 LEVEL_CALLBACK_PREFIX = "level:"
@@ -1822,24 +1825,9 @@ class TelegramCommandHandler:
         }
 
     def _order_reply_markup(self, order: PendingOrder) -> dict[str, Any]:
-        return {
-            "inline_keyboard": [
-                [
-                    {
-                        "text": "✅ 확정",
-                        "callback_data": (
-                            f"{ORDER_CONFIRM_CALLBACK}:{order.callback_token}"
-                        ),
-                    },
-                    {
-                        "text": "❌ 취소",
-                        "callback_data": (
-                            f"{ORDER_CANCEL_CALLBACK}:{order.callback_token}"
-                        ),
-                    },
-                ]
-            ]
-        }
+        # 실제 조립은 trading_orders.order_reply_markup 하나뿐이다 (#314). 스케줄러의
+        # 자동 제안이 같은 버튼을 써야 해서 옮겼고, 여기서는 호출부 이름만 유지한다.
+        return order_reply_markup(order)
 
     def _format_order_prompt(
         self,

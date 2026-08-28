@@ -266,6 +266,43 @@ ORDER_PROPOSE_TIMEOUT_SECONDS = _float_env("ORDER_PROPOSE_TIMEOUT_SECONDS", 120.
 ORDER_VERIFY_TIMEOUT_SECONDS = _float_env("ORDER_VERIFY_TIMEOUT_SECONDS", 40.0)
 
 
+# ──────────────────────────────────────────────────────────────────────────
+# 스케줄러 룰 트리거(#314) — 감시 신호가 자동 제안을 부르는 조건
+# ──────────────────────────────────────────────────────────────────────────
+# 위의 하드 한도가 "제안을 어디까지 받아들일 것인가"라면, 이쪽은 "제안을 언제 만들 것인가"다.
+# 판정은 여전히 order_assist가 하고, 여기 값은 그 함수를 부를지 말지만 정한다.
+#
+# 기본값이 "꺼짐"인 것은 위 한도들의 "보수적 기본값"과 같은 원칙의 다른 적용이다. 한도는
+# 미설정 시 좁게 걸리는 쪽이 안전하고, 자동 제안은 미설정 시 아예 돌지 않는 쪽이 안전하다 —
+# 사용자가 켠 적 없는데 확정 버튼이 뜨는 것은 어떤 한도로도 되돌릴 수 없다.
+
+# 자동 제안 켜기. _is_truthy_flag는 정확히 "true"만 인정한다 — 오타·다른 철자(1/yes/TRUE)가
+# 자동 주문 제안을 켜는 방향으로 해석되지 않게 하려는 것이고, 여기서는 그 엄격함이 그대로
+# 안전한 방향이다.
+ORDER_RULE_TRIGGER_ENABLED = _is_truthy_flag(
+    os.environ.get("ORDER_RULE_TRIGGER_ENABLED", "")
+)
+
+# 자동 제안을 부르는 신호 소스(쉼표 구분). scheduler.SIGNAL_SOURCES의 name과 같은 값이다.
+# 알 수 없는 이름을 적으면 그 이름은 어떤 신호와도 매칭되지 않아 조용히 무시된다 —
+# 매칭 실패는 "제안하지 않음"이므로 fail-closed 방향이다.
+ORDER_RULE_SOURCES = frozenset(
+    name.strip().lower()
+    for name in os.environ.get("ORDER_RULE_SOURCES", "news,disclosure").split(",")
+    if name.strip()
+)
+
+# 자동 제안을 부르는 긴급도(쉼표 구분). schemas.UrgencyLevel의 값이다.
+# 기본은 critical 하나뿐이다. 텔레그램 긴급 알림 기준(high 이상)보다 좁게 잡는 이유는
+# 알림과 주문 제안의 대가가 다르기 때문이다 — 알림은 읽고 넘기면 되지만 제안은 확정 버튼과
+# 대기 주문 슬롯을 차지하고, 그 슬롯은 사용자가 직접 치는 /buy와 공유된다.
+ORDER_RULE_URGENCY_LEVELS = frozenset(
+    level.strip().lower()
+    for level in os.environ.get("ORDER_RULE_URGENCY_LEVELS", "critical").split(",")
+    if level.strip()
+)
+
+
 def is_placeholder_secret(value: str | None) -> bool:
     if not value:
         return True
