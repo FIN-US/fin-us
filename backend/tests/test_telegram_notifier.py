@@ -983,6 +983,36 @@ def test_format_analysis_alert_includes_signal_score_line():
     assert lines[2].startswith("- 판단: 매도")
 
 
+def test_format_analysis_alert_passes_the_configured_threshold(monkeypatch):
+    """알림이 넘기는 임계값이 설정값 그 자체인지 본다 (#308 리뷰).
+
+    위 테스트는 불확실도 1.5가 기본 임계값 1.0을 넘는지만 보므로, 호출부가 엉뚱한 상수를
+    넘겨도(0.5여도 1.5는 넘는다) 통과한다. 설정을 움직였을 때 같은 입력의 결과가 따라
+    움직이는지를 봐야 "설정값을 넘긴다"가 검증된다.
+    """
+    notifier = TelegramNotifier(bot_token="token", chat_id="chat")
+    monkeypatch.setattr(
+        backend.telegram_notifier, "SIGNAL_UNCERTAINTY_ALERT_THRESHOLD", 2.0
+    )
+
+    message = notifier.format_analysis_alert(
+        stock="삼성전자",
+        source="news",
+        analysis_data={
+            "summary": "요약",
+            "details": {"decision": "SELL", "confidence_score": 0.8, "reason": "고객 이탈"},
+            "urgency": "high",
+            "telegram_alert": True,
+            "signal_score": -2,
+            "signal_reason": "주요 고객 이탈 보도",
+            "signal_uncertainty": 1.5,
+        },
+    )
+
+    # 점수 줄은 그대로 있고 엇갈림 표시만 빠져야 한다 — 줄째로 사라지면 이 단언이 놓친다.
+    assert message.split("\n")[1] == "- 📊 영향도 -2 (주요 고객 이탈 보도)"
+
+
 def test_format_analysis_alert_without_signal_score_is_unchanged():
     """점수가 없는 알림(수동 분석, fail-open)은 기존 형식 그대로여야 한다."""
     notifier = TelegramNotifier(bot_token="token", chat_id="chat")
