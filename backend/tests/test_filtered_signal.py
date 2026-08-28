@@ -1,7 +1,7 @@
 """걸러진 신호 채점 기록의 저장·정리·집계 (#304)."""
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import get_args
+from typing import Any, Callable, get_args, cast
 
 import pytest
 from fastapi.testclient import TestClient
@@ -38,13 +38,16 @@ def repo_fixture(session: Session):
     """
 
     class _KeepOpenSession:
-        def __enter__(inner):
+        def __enter__(self):
             return session
 
-        def __exit__(inner, *exc):
+        def __exit__(self, *exc):
             return False
 
-    return SqliteFilteredSignalRepo(lambda: _KeepOpenSession())
+    # 아래 cast는 이 대역 때문이다. 주입 지점의 선언 타입이 구체 클래스(Session)라
+    # 대역이 그대로는 타입 검사를 통과하지 못한다. Protocol로 좁혀 cast를 걷어내는
+    # 것은 #319가 추적한다.
+    return SqliteFilteredSignalRepo(cast(Callable[[], Session], lambda: _KeepOpenSession()))
 
 
 @pytest.fixture(name="client")
@@ -56,7 +59,11 @@ def client_fixture(session: Session):
 
 
 def _add(session: Session, **kwargs) -> FilteredSignal:
-    defaults = dict(stock_name="삼성전자", source="news", score=1, threshold=2)
+    # 값 타입이 섞여 있어 선언이 없으면 dict[str, str | int]로 추론되고, 그러면
+    # **defaults 전개가 FilteredSignal의 필드 타입을 하나도 만족하지 못한다.
+    defaults: dict[str, Any] = dict(
+        stock_name="삼성전자", source="news", score=1, threshold=2
+    )
     defaults.update(kwargs)
     row = FilteredSignal(**defaults)
     session.add(row)
