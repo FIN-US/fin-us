@@ -1139,6 +1139,8 @@ class _Notifier:
         return True
 
 
+# 아래 cast는 대역 때문이다 (#292). 주입 지점의 선언 타입이 구체 클래스라 대역이
+# 그대로는 타입 검사를 통과하지 못한다. Protocol로 좁혀 cast를 걷어내는 것은 #319다.
 def _advise_handler(monkeypatch, result, *, captured=None):
     notifier = _Notifier()
     handler = TelegramCommandHandler(

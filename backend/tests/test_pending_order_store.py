@@ -344,8 +344,9 @@ def test_memory_store_sync_eq_with_empty_dict():
 # ---------------------------------------------------------------------------
 
 # 아래 주입 지점의 cast는 이 대역 때문이다 (#292). 주입 지점의 선언 타입이 구체
-# 클래스라 대역이 그대로는 타입 검사를 통과하지 못한다. 계약을 Protocol로 좁히는
-# 것은 #271의 후속 작업이라, 여기서는 주입 지점에서만 좁혀 둔다.
+# 클래스라 대역이 그대로는 타입 검사를 통과하지 못한다. 이 주입 지점을 Protocol로
+# 좁히고 아래 cast를 걷어내는 것은 #319가 추적한다(#271이 좁힌 것은 state_store와
+# pending_order_store 둘뿐이다). 그때까지는 주입 지점에서만 좁혀 둔다.
 class FakeNotifier:
     def __init__(self, chat_id="123"):
         self.chat_id = chat_id
