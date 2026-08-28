@@ -16,6 +16,7 @@ Fin-Us는 **MCP (Model Context Protocol)** 아키텍처와 **멀티 에이전트
   - [3. 시스템 가동](#run)
 - [Docker로 한번에 설치하기](#docker) — 권장 실행 경로
   - [주문 멱등 원장 영속화](#order-dedup)
+  - [KIS 토큰 캐시와 발급 직렬화](#token-cache)
 - [에이전트별 보유 스킬 (MCP Tools)](#skills) — MCP 도구 목록
 - [Telegram 봇](#telegram) — 알림과 명령
   - [명령어 목록](#commands)
@@ -236,6 +237,24 @@ Docker Compose에서는 `KIS_ORDER_DEDUP_PATH` 기본값에 따라 원장이 호
 > 2. **쓰기 불가** — 그 파일에 쓸 수 없는 경우입니다. `#writeLedger`는 원장과 같은 디렉터리에 임시 파일을 쓰고 `fsync`한 뒤 `rename`으로 경로를 갈아치우는 원자적 쓰기입니다(#128) — `rename`은 대상 **파일**이 아니라 그 파일이 있는 **디렉터리**의 쓰기 권한을 요구하므로, 예전에는 통과하던 "디렉터리는 순회만 되고 쓰기는 안 되지만 그 안의 원장 파일 자체는 쓰기 가능한" 조합도 이제는 모든 주문을 막습니다(Linux에서 실측 확인). 컨테이너가 root로 도는 오늘은 도달하지 않지만 `backend/Dockerfile`에 `USER` 지시자가 추가되는 순간 실전이 될 수 있으니 유의하세요. `rename`이 `EPERM`·`EBUSY`(Windows는 `EACCES`도 포함)로 실패하면 외부 보유자로 인한 일시적 실패로 보고 몇 차례 자동 재시도합니다 — POSIX의 `EACCES`는 대상 디렉터리 권한 문제로 결정론적이라 재시도하지 않고 즉시 차단합니다. **`KIS_ORDER_DEDUP_PATH`를 바인드 마운트된 `/app` 아래의 쓰기 가능한 경로로 지정하면 임시로 우회할 수 있습니다.**
 >
 > `mcp-trading/index.js`는 `orderDedupStore.reserve(...)`를 KIS 호출용 `try` 블록 바깥에서 실행하므로 위 두 경우 모두 즉시 주문을 차단합니다. 이는 버그가 아니라 방어선이 깨진 상태에서 주문을 조용히 허용하지 않기 위한 fail-closed 설계입니다. `ls -la ./.state/`와 `docker compose logs backend`로 원인을 확인하세요. 이 원장은 단일 writer를 전제로 설계되었습니다 — `docker compose up --scale backend=2`처럼 같은 바인드 마운트 파일에 두 프로세스가 동시에 쓰는 배포는 지원 대상이 아니며, 이 불변식은 코드가 아니라 배포 구성이 지켜야 합니다.
+
+<a id="token-cache"></a>
+
+### KIS 토큰 캐시와 발급 직렬화
+
+KIS OAuth 토큰은 `mcp-trading/token-cache.js`가 파일에 캐시합니다. MCP 호출 하나마다 `mcp-trading` 프로세스가 새로 뜨기 때문에(`backend/services.py`의 `run_mcp_tool`), 이 캐시는 프로세스 안이 아니라 프로세스 **사이**에서 동작해야 합니다.
+
+경로는 `KIS_TOKEN_CACHE_PATH`이고, 미설정 시 `os.tmpdir()`에 `KIS_URL`·API 키 해시별 파일(`finus-kis-token-<해시>.json`)을 만듭니다. 같은 디렉터리에 `<캐시 경로>.lock` 락 파일이 함께 생겼다 사라집니다.
+
+캐시가 비었거나 만료 직후에 여러 프로세스가 동시에 뜨면, 락을 잡은 하나만 `/oauth2/tokenP`를 치고 나머지는 대기하다 캐시가 채워지는 즉시 통과합니다(#324). 락이 없던 예전에는 동시에 뜬 프로세스가 각자 발급을 쳐서 KIS의 발급 유량 제한에 걸렸고, 걸린 쪽은 `Access Token 발급 실패`로 끝났습니다 — `/advise`에서는 그것이 `snapshot_failed` 거부와 함께 해당 종목 재제안 냉각(기본 60분)까지 불렀습니다.
+
+주문 멱등 원장과 달리 이 캐시는 **fail-open**입니다. 캐시 파일이 손상됐거나 락을 만들 수 없는 환경이면 조용히 발급을 한 번 더 할 뿐, 조회나 주문을 막지 않습니다. 최악의 결과가 "발급 한 번 더"뿐이라 막을 이유가 없기 때문입니다. 같은 이유로 캐시 파일은 **언제든 지워도 안전합니다**(다음 호출이 새로 발급합니다).
+
+- 락 보유자가 SIGKILL·OOM으로 죽어 락 파일이 남으면, 15초(`DEFAULT_LOCK_STALE_MS`)가 지난 뒤 다음 프로세스가 걷어내고 진행합니다.
+- 락을 10초(`DEFAULT_LOCK_WAIT_MS`) 안에 잡지 못하면 락 없이 발급합니다. 락 때문에 토큰 발급 자체가 막히는 쪽이 더 나쁘기 때문입니다.
+- 캐시 쓰기는 임시 파일에 쓰고 `rename`으로 갈아치우므로, 다른 프로세스가 잘린 JSON을 읽는 경로가 없습니다.
+
+캐시 파일에는 KIS 액세스 토큰이 평문으로 들어 있습니다. 생성 시 파일 권한을 `0600`으로 지정하지만 이는 Linux 호스트에서만 의미가 있습니다.
 
 <a id="skills" name="skills"></a>
 
