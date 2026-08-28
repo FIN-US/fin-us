@@ -116,7 +116,7 @@ def _host_side(mapping):
     return ":".join(fields[:2])
 
 
-def _config_resolution(name):
+def _config_resolution(name, source=None):
     """`backend/config.py`가 *name*을 푸는 방식을 기본값과 정규화로 갈라 돌려준다.
 
     import해서 읽으면 안 된다 — `config.py`는 `load_dotenv()`로 개발자의 실제 `.env`를
@@ -127,9 +127,15 @@ def _config_resolution(name):
     메서드로 감싸는 대입이 있는데(`NAT_BASE_URL`의 `.rstrip("/")`), 이 래퍼는 기본값과
     `.env` 값 **양쪽에** 똑같이 걸린다. 기본값에만 적용하고 비교하면 검사가 런타임과
     다른 것을 보게 되므로, 같은 래퍼를 `.env.example` 쪽에도 먹일 수 있게 함께 준다.
+
+    *source*는 이 헬퍼 자신을 검사할 때만 쓴다. 실제 키로 검사하면 그 키의 래퍼가
+    바뀌는 날 깨진 것이 없는데도 실패하므로, 합성 소스를 넣을 자리를 열어 둔다.
     """
 
-    for node in ast.walk(ast.parse(_CONFIG_PATH.read_text(encoding="utf-8"))):
+    if source is None:
+        source = _CONFIG_PATH.read_text(encoding="utf-8")
+
+    for node in ast.walk(ast.parse(source)):
         if not isinstance(node, ast.Assign):
             continue
         if not any(isinstance(t, ast.Name) and t.id == name for t in node.targets):
@@ -238,14 +244,26 @@ def test_apply_wrappers_rejects_a_method_that_is_not_a_string_method():
 def test_config_resolution_normalizes_the_env_side_the_same_way():
     """정규화 함수가 `.env` 쪽 값에도 같은 래퍼를 먹이는지 본다(#305 리뷰).
 
-    `NAT_BASE_URL`은 `.rstrip("/")`로 감싸여 있으므로, 슬래시가 붙은 표기도 기본값과
-    같은 값으로 풀려야 한다 — 런타임이 실제로 그렇게 동작한다.
+    합성 소스를 쓴다. 실제 키를 붙잡으면 `config.py`에서 그 키의 `.rstrip("/")`를 떼는
+    날 깨진 것이 없는데도 이 테스트가 실패한다. 실제 키에 대한 배선은 위의
+    `test_config_default_matches_the_env_example`이 이미 `normalize`를 불러 덮는다.
     """
 
-    default, normalize = _config_resolution("NAT_BASE_URL")
+    default, normalize = _config_resolution(
+        "X", source='X = os.environ.get("X", "http://127.0.0.1:9/").rstrip("/")'
+    )
 
-    assert normalize(f"{default}/") == default
-    assert normalize(default) == default
+    # 기본값 자신도 래퍼를 거친다 — 리터럴의 슬래시가 떨어져 있어야 한다.
+    assert default == "http://127.0.0.1:9"
+    assert normalize("http://127.0.0.1:9/") == default
+    assert normalize("http://127.0.0.1:9") == default
+
+
+def test_config_resolution_reports_a_key_it_cannot_find():
+    """찾지 못한 키를 조용히 넘기지 않는지 본다."""
+
+    with pytest.raises(AssertionError, match="대입을 찾지 못했다"):
+        _config_resolution("X", source='Y = os.environ.get("Y", "v")')
 
 
 def test_services_outside_the_allowlist_publish_on_loopback_only(compose_services):
