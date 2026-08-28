@@ -1072,6 +1072,24 @@ async def run_mcp_tool(
         ) from exc
 
 
+def short_error(exc: BaseException) -> str:
+    """예외를 사용자 메시지에 넣을 수 있는 짧은 한 줄로 만든다.
+
+    ``run_mcp_tool``이 올리는 HTTPException은 사유가 ``detail``에 들어 있고, 그 값은
+    MCP 서브프로세스의 stderr까지 실려 수천 자가 되기도 한다. 그대로 사용자 메시지에
+    박으면 텔레그램 4096자 한도에 걸려 **거부 메시지 자체가 전송되지 않는다** — 가장
+    알려야 할 순간에 아무 말도 못 하게 되는 것이라 300자에서 자른다.
+
+    telegram_commands(주문·조회 명령)와 order_assist(주문 보조)가 함께 쓴다. 두 곳이
+    각자 자르면 한도가 갈라지므로 예외를 실제로 만들어 올리는 이 모듈에 둔다.
+    """
+    raw = getattr(exc, "detail", str(exc))
+    text = str(raw or "").strip()
+    if not text:
+        text = exc.__class__.__name__
+    return text[:300]
+
+
 def analysis_from_nat_text(raw: str, stock: str) -> dict[str, Any]:
     """Map NAT assistant output to AnalysisReport JSON for the reference React UI."""
     text = (raw or "").strip()

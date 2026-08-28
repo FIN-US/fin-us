@@ -1,4 +1,8 @@
-base: agents/diary_agent.yml
+base: agents/verifier_agent.yml
+# base 사슬: verifier_agent.yml -> diary_agent.yml -> ... -> common.yml (#299).
+# 검증자 config를 diary와 라우터 사이에 끼워, 라우터가 로드하는 설정에
+# 주문 보조용 엔드포인트 2개와 order_verifier가 함께 들어오게 한다.
+# supervisor의 브랜치 6개는 불변이다 — 검증자는 브랜치가 아니며 채팅으로 도달할 수 없다.
 # src/nat_finus_nat/supervisor.py 의 router_supervisor_agent 설정을 확장합니다(common.yml 상속).
 # Mem0(self-hosted) + auto_memory_agent 조합. 실행: ./scripts/run.sh --memory 또는 FINUS_NAT_CONFIG_FILE 로 이 파일 지정.
 # 기본 ./scripts/run.sh 는 router_nomemory.yml 입니다(Mem0 없음).

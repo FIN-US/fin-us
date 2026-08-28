@@ -12,6 +12,7 @@ if _FINUS_NAT_ENV.is_file():
 #  NAT에 함수/도구 등록을 트리거
 from nat_finus_nat import agents
 from nat_finus_nat import finus_api
+from nat_finus_nat import verifier  # noqa: F401 - finus_order_verifier 등록 (#299)
 
 
 def _build_vendor_patch_status() -> dict[str, str]:
