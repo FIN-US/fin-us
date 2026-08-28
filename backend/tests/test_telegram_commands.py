@@ -999,8 +999,9 @@ async def test_buy_command_includes_current_price_line_when_quote_has_header():
     )
 
     assert "[삼성전자] 현재가 시세" not in notifier.messages[-1]
-    assert "- 현재가: 354,000원" in notifier.messages[-1]
-    assert "- 예수금: 5,546,116원" in notifier.messages[-1]
+    # 원문의 "- " 목록 접두사는 떼고 직접 조립한 줄들과 표기를 맞춘다.
+    assert "\n현재가: 354,000원" in notifier.messages[-1]
+    assert "\n예수금: 5,546,116원" in notifier.messages[-1]
 
 
 @pytest.mark.asyncio
@@ -1036,15 +1037,84 @@ async def test_buy_command_without_price_creates_market_order_and_prompts_confir
     assert "삼성전자 매수 주문 확인" in notifier.messages[-1]
     assert "주문유형: 시장가" in notifier.messages[-1]
     assert "지정가:" not in notifier.messages[-1]
-    assert "주문금액:" not in notifier.messages[-1]
+    # 체결가가 아니라 주문 시점 현재가 기준이므로 "예상"이다 (#309).
+    assert "예상 주문금액: 745,000원" in notifier.messages[-1]
     assert "/confirm" in notifier.messages[-1]
     assert "/cancel" in notifier.messages[-1]
     assert _orders(handler)["123"].stock_name == "삼성전자"
     assert _orders(handler)["123"].stock_code == "005930"
     assert _orders(handler)["123"].side == "BUY"
     assert _orders(handler)["123"].quantity == 10
+    # 지정가가 아니라 주문 시점 현재가다 — 표시·기록용이며 주문 조건이 아니다 (#309).
+    assert _orders(handler)["123"].price == 74500
+    assert _orders(handler)["123"].order_type == "MARKET"
+
+
+@pytest.mark.asyncio
+async def test_market_order_proceeds_without_reference_price_when_quote_is_unreadable(caplog):
+    """참고단가를 못 읽어도 주문은 막지 않는다 — 대신 단가 0이 그대로 남는다 (#309).
+
+    사용자가 명시적으로 낸 주문을 기록 사정으로 되돌리지는 않는다. 대가는
+    load_daily_usage가 그날 집계를 포기해 /advise가 막히는 것이고, 한도가 조용히
+    넓어지는 것보다 그쪽이 낫다는 것이 #309의 결론이다.
+    """
+
+    async def mcp_runner(server_params, tool_name, arguments):
+        if tool_name == "resolve_stock_code":
+            return "삼성전자 (005930, KOSPI)"
+        if tool_name == "get_stock_quote":
+            # 라벨이 바뀌어 현재가를 읽지 못하는 상황
+            return "시세 조회 중 에러 발생: upstream timeout"
+        if tool_name == "get_balance":
+            return "주문가능금액: 1,000,000원"
+        raise AssertionError(f"unexpected tool: {tool_name}")
+
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        mcp_runner=mcp_runner,
+        now_factory=lambda: datetime(2026, 5, 20, 10, 0, tzinfo=KST),
+    )
+
+    with caplog.at_level("WARNING"):
+        await handler.handle_update(
+            {"message": {"chat": {"id": 123}, "text": "/buy 삼성전자 10"}}
+        )
+
+    assert "삼성전자 매수 주문 확인" in notifier.messages[-1]
+    assert "예상 주문금액" not in notifier.messages[-1]
     assert _orders(handler)["123"].price == 0
     assert _orders(handler)["123"].order_type == "MARKET"
+    # 조용히 0으로 떨어지지 않는다 — 운영자가 알아야 그날 /advise가 막히는 이유를 안다.
+    assert "시장가 참고단가를 읽지 못했다" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_limit_order_keeps_the_typed_price_even_when_it_differs_from_the_quote():
+    """참고단가 주입은 시장가 전용이다 — 지정가를 현재가로 덮으면 주문 조건이 바뀐다."""
+
+    async def mcp_runner(server_params, tool_name, arguments):
+        if tool_name == "resolve_stock_code":
+            return "삼성전자 (005930, KOSPI)"
+        if tool_name == "get_stock_quote":
+            return "현재가: 74,500원"
+        if tool_name == "get_balance":
+            return "주문가능금액: 1,000,000원"
+        raise AssertionError(f"unexpected tool: {tool_name}")
+
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        mcp_runner=mcp_runner,
+        now_factory=lambda: datetime(2026, 5, 20, 10, 0, tzinfo=KST),
+    )
+
+    await handler.handle_update(
+        {"message": {"chat": {"id": 123}, "text": "/buy 삼성전자 10 70000"}}
+    )
+
+    assert _orders(handler)["123"].price == 70000
+    assert _orders(handler)["123"].order_type == "LIMIT"
 
 
 @pytest.mark.asyncio
@@ -1107,7 +1177,7 @@ async def test_natural_language_market_buy_creates_pending_order_without_nat():
     assert _orders(handler)["123"].stock_name == "삼성전자"
     assert _orders(handler)["123"].side == "BUY"
     assert _orders(handler)["123"].quantity == 1
-    assert _orders(handler)["123"].price == 0
+    assert _orders(handler)["123"].price == 74500
     assert _orders(handler)["123"].order_type == "MARKET"
 
 

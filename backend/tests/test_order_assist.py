@@ -1366,9 +1366,12 @@ def _usage_session(rows):
 def test_daily_usage_refuses_to_total_unpriced_trades():
     """단가 0인 행은 "0원짜리 거래"가 아니라 "금액을 모르는 거래"다.
 
-    /buy에서 지정가를 생략하면 price=0, MARKET으로 파싱되고 그 0이 TradeHistory까지
-    내려간다. 0으로 더하면 일 거래대금 한도가 시장가 이력에 대해 있는 척만 하는
-    한도가 된다 — 집계를 포기하고 상위 경로가 fail-closed로 거부하게 한다.
+    0으로 더하면 일 거래대금 한도가 시장가 이력에 대해 있는 척만 하는 한도가 된다 —
+    집계를 포기하고 상위 경로가 fail-closed로 거부하게 한다.
+
+    #309에서 두 주문 경로 모두 시장가에 주문 시점 현재가를 참고단가로 싣게 되어,
+    이 가드는 이제 최후 방어선이다: 현재가마저 읽지 못한 주문과 #309 이전에 쌓인
+    단가 0 행만 여기에 닿는다. 닿았을 때의 자세는 그대로다.
     """
     rows = [SimpleNamespace(quantity=2, price=1000.0), SimpleNamespace(quantity=10, price=0.0)]
 
@@ -1386,7 +1389,10 @@ def test_daily_usage_totals_normally_when_every_trade_has_a_price():
 
 @pytest.mark.asyncio
 async def test_unpriced_trade_history_blocks_the_flow_before_the_verifier():
-    """집계 실패는 거부다 — 한도를 모른 채 검증자에게 넘기지 않는다."""
+    """집계 실패는 거부다 — 한도를 모른 채 검증자에게 넘기지 않는다.
+
+    한도가 조용히 넓어지는 것보다 /advise가 막히는 쪽이 낫다는 것이 #309의 결론이다.
+    """
     rows = [SimpleNamespace(quantity=10, price=0.0)]
 
     result, verify_calls = await _run(session_factory=_usage_session(rows))

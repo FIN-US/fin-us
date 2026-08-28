@@ -398,6 +398,22 @@ def _first_amount(pattern: re.Pattern[str], text: str) -> int | None:
         return None
 
 
+def parse_current_price(quote_text: str) -> int | None:
+    """``get_stock_quote`` 응답에서 현재가를 읽는다. 읽지 못하면 ``None``.
+
+    :func:`parse_snapshot`만 쓰던 것을 따로 뺐다. /buy의 시장가 경로도 같은 값을
+    같은 계약으로 읽어야 하기 때문이다(#309) — 정규식을 그쪽에 한 벌 더 두면
+    mcp-trading의 출력 라벨이 바뀔 때 한쪽만 고쳐지고 다른 쪽은 조용히 None으로
+    떨어진다.
+
+    0 이하는 ``None``과 같이 취급한다. 현재가 0은 "공짜"가 아니라 "못 읽었다"다.
+    """
+    price = _first_amount(_CURRENT_PRICE_RE, quote_text)
+    if price is None or price <= 0:
+        return None
+    return price
+
+
 def parse_snapshot(
     quote_text: str,
     balance_text: str,
@@ -423,8 +439,8 @@ def parse_snapshot(
     """
     from .scheduler import _BALANCE_HOLDINGS_MARKER, _parse_balance_holdings, is_balance_truncated
 
-    current_price = _first_amount(_CURRENT_PRICE_RE, quote_text)
-    if current_price is None or current_price <= 0:
+    current_price = parse_current_price(quote_text)
+    if current_price is None:
         return None, "현재가를 확인하지 못해 진행하지 않았습니다."
 
     if _BALANCE_HOLDINGS_MARKER not in (balance_text or ""):
@@ -631,17 +647,26 @@ def load_daily_usage(session_factory: Callable[[], Any], now: datetime) -> Daily
             close()
 
     # 단가가 0 이하인 행은 "0원짜리 거래"가 아니라 **금액을 모르는 거래**다.
+    # 그 행을 0원으로 더하면 일 거래대금 한도가 시장가 이력에 대해 **있는 척만 하는
+    # 한도**가 된다. 그래서 더하지 않고 집계를 포기한다 — 이 모듈의 규칙("확인하지
+    # 못했다"가 "괜찮다"로 바뀌는 지점을 남기지 않는다)이 여기에도 걸린다.
     #
-    # /buy에서 지정가를 생략하면 price=0, order_type="MARKET"으로 파싱되고, 그 0이
-    # OrderExecutionResult → TradeHistory.price까지 그대로 내려간다(체결가를 되받아
-    # 기록하는 경로가 아직 없다 — #309). 그 행을 0원으로 더하면 일 거래대금
-    # 한도가 시장가 이력에 대해 **있는 척만 하는 한도**가 된다.
+    # #309에서 이 가드를 걷어낼지 검토했고, 걷어내지 않기로 했다. 대신 0이 여기까지
+    # 오지 않게 기록 쪽을 고쳤다:
+    #   - KIS 현금주문 응답(order-cash)에는 체결가가 없다. output은 KRX_FWDG_ORD_ORGNO·
+    #     ODNO·ORD_TMD뿐이라(mcp-trading/order.js formatOrderResult) "체결가를 되받는"
+    #     경로 자체가 존재하지 않는다.
+    #   - 그래서 두 주문 경로 모두 시장가에 **주문 시점 현재가**를 기록용 참고단가로
+    #     싣는다(telegram_commands._handle_order_command, run_order_assist).
+    #   - 그 현재가마저 읽지 못하면 참고단가 없이 주문이 나가고 여기에 0이 남는다.
+    #     그때는 이 가드가 그대로 작동해 /advise가 usage_failed로 막힌다. 한도가
+    #     조용히 넓어지는 것보다 /advise가 막히는 쪽이 낫다는 판단이다(#309).
     #
-    # 그래서 더하지 않고 집계를 포기한다. 이 모듈의 규칙("확인하지 못했다"가
-    # "괜찮다"로 바뀌는 지점을 남기지 않는다)이 여기에도 그대로 걸린다. 대가는
-    # 분명하다 — 오늘 시장가 주문이 한 건이라도 있으면 /advise가 그날은 막힌다.
-    # 그 대가를 없애는 방법은 한도를 헐겁게 만드는 것이 아니라 TradeHistory가
-    # 체결가를 기록하게 하는 것이다.
+    # 정상 운영에서 이 raise는 이제 닿지 않는다. 닿는 경우는 둘뿐이다 — 위의 현재가
+    # 파싱 실패, 그리고 #309 이전에 쌓인 단가 0 행이 오늘 자로 남아 있는 경우(과거 행은
+    # 지우지 않기로 했고, 이 집계는 오늘 KST 행만 보므로 배포 당일 하루만 해당된다).
+    # 판정과 합산을 같은 축(int)으로 둔다 — 한쪽만 float면 0 < price < 1인 행이
+    # 가드는 통과하고 합계에는 0을 보태는 틈이 생긴다.
     unpriced = [row for row in rows if int(row.price) <= 0]
     if unpriced:
         raise ValueError(

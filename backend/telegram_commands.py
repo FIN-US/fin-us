@@ -72,7 +72,7 @@ from .stock_code import (
     _is_unresolved_echo,
     extract_stock_name,
 )
-from .order_assist import ProposalTrigger, run_order_assist
+from .order_assist import ProposalTrigger, parse_current_price, run_order_assist
 
 logger = logging.getLogger(__name__)
 
@@ -1415,12 +1415,36 @@ class TelegramCommandHandler:
             await self._send_text_or_raise(f"주문 준비 실패: {_short_error(exc)}")
             return
 
+        if order_type == "MARKET":
+            # 시장가에는 지정가가 없지만, 단가를 모르는 채로 두면 그 0이 체결 기록
+            # (TradeHistory.price)까지 그대로 내려가 일 거래대금 한도를 무력화한다(#309).
+            # KIS 현금주문 응답에는 체결가가 없으므로(order-cash output은 ODNO·ORD_TMD뿐)
+            # 방금 프롬프트용으로 받아 둔 현재가를 기록용 참고단가로 쓴다. /advise는 이미
+            # 같은 값을 같은 자리에 넣는다(order_assist.run_order_assist).
+            #
+            # 읽지 못해도 주문은 막지 않는다 — 사용자가 명시적으로 낸 주문을 기록 사정으로
+            # 되돌리는 것이기 때문이다. 대신 0이 그대로 남고, load_daily_usage의 가드가
+            # 그날 /advise를 usage_failed로 막는다. 한도가 조용히 넓어지는 것보다 그쪽이
+            # 낫다는 것이 #309의 결론이다.
+            reference_price = parse_current_price(str(quote_result))
+            if reference_price is None:
+                logger.warning(
+                    "시장가 참고단가를 읽지 못했다 (stock=%s) — 이 주문이 확정되면 단가 "
+                    "없이 기록되고, 그때부터 오늘 /advise가 일 거래대금 집계 실패로 "
+                    "막힌다 (#309)",
+                    stock_code,
+                )
+            else:
+                price = reference_price
+
         order = PendingOrder(
             chat_id=chat_id,
             stock_name=resolved_name,
             stock_code=stock_code,
             side=side,
             quantity=quantity,
+            # MARKET이면 표시·기록용 참고단가(주문 시점 현재가)다. 주문 자체에는 쓰이지
+            # 않는다 — McpTradingOrderGateway가 시장가에는 price=0을 보낸다.
             price=price,
             # now(명령 수신 시각)가 아니라 저장 직전 시각으로 스탬프한다. 위 MCP 조회는
             # run_mcp_tool의 wait_for(30초)를 두 구간(resolve, gather) 쓰므로 최대 60초가
@@ -1838,13 +1862,20 @@ class TelegramCommandHandler:
                     f"주문금액: {amount:,}원",
                 ]
             )
+        elif order.price > 0:
+            # 시장가에도 참고단가가 잡히면서 금액을 셀 수 있게 됐다(#309). 돈이 나가는
+            # 확인 단계에서 금액만 빠져 있을 이유가 없다 — 일 거래대금 한도에 가산될
+            # 값도 이것이다. 체결가가 아니라 주문 시점 현재가 기준이므로 "예상"이고,
+            # 제안 경로의 승인 메시지도 같은 라벨을 쓴다 (PR #323 리뷰).
+            lines.append(f"예상 주문금액: {order.quantity * order.price:,}원")
 
-        current_price = self._first_line_containing(
-            str(quote_result),
-            ("현재가:", "price:", "Price:"),
-        )
-        if current_price:
-            lines.append(current_price)
+        # 기록용 참고단가와 **같은 파서**로 읽는다. 원문 줄을 그대로 집어 오면 표시와
+        # 기록이 서로 다른 라벨 집합을 보게 되고("price:"는 여기서만 매치된다), 라벨이
+        # 바뀌는 날 사용자는 확인 화면에서 현재가를 보는데 기록은 0("금액 모름")이 되는
+        # 어긋남이 생긴다. 하나로 묶어 두면 둘이 함께 사라진다 (PR #323 리뷰).
+        current_price = parse_current_price(str(quote_result))
+        if current_price is not None:
+            lines.append(f"현재가: {current_price:,}원")
 
         balance = self._first_line_containing(
             str(balance_result),
@@ -1854,7 +1885,10 @@ class TelegramCommandHandler:
             ("주문가능", "예수금", "총자산", "balance"),
         )
         if balance:
-            lines.append(balance)
+            # mcp-trading은 목록 항목을 "- 라벨: 값"으로 낸다. 그 줄을 그대로 붙이면
+            # 직접 조립한 위 줄들(종목코드:, 수량:, 현재가: …)과 표기가 어긋난다.
+            # 접두사만 떼어 제안 경로의 승인 메시지와 같은 표기로 맞춘다 (PR #323 리뷰).
+            lines.append(balance.removeprefix("- "))
 
         # 미해석 에코(name == code)는 이제 주문 준비 단계에서 _is_unresolved_echo가
         # 끊으므로 여기까지 오지 않는다(#151). 마스터에 name == code인 항목이 생기는
