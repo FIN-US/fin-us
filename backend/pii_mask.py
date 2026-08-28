@@ -49,6 +49,7 @@ from __future__ import annotations
 import logging
 import re
 import secrets
+from typing import overload
 
 logger = logging.getLogger(__name__)
 
@@ -396,7 +397,21 @@ class _Counter:
         return f"<{kind}_{self.scope}_{self.values[kind]}>"
 
 
-def mask_pii(text: str) -> tuple[str, dict[str, str]]:
+@overload
+def mask_pii(text: str) -> tuple[str, dict[str, str]]: ...
+
+
+@overload
+def mask_pii(text: None) -> tuple[None, dict[str, str]]: ...
+
+
+# 아래 docstring이 명시하듯 None도 받는다(빈 입력 가드). 구현부만 `str`로 적으면
+# 그 계약이 타입에서 사라져 backend/tests/test_pii_mask.py의 빈 입력 테스트가
+# 타입 오류가 된다. 반대로 구현부만 `str | None`으로 넓히면 이번엔 반환값도
+# `str | None`이 되어, user_msg가 항상 str인 services.llm_chat 호출부가
+# _llm_openai_chat 등에 `str | None`을 넘기는 오류로 번진다. 오버로드는 그
+# "들어온 것과 같은 것이 나간다"를 그대로 표현해 양쪽을 모두 만족시킨다.
+def mask_pii(text: str | None) -> tuple[str | None, dict[str, str]]:
     """계좌번호·원화 금액·보유 수량을 자리표시자로 치환한다.
 
     반환된 mapping은 이 호출 전용이다 — 호출자(services.llm_chat)가 요청 스코프
@@ -463,7 +478,18 @@ def mask_pii(text: str) -> tuple[str, dict[str, str]]:
     return masked, mapping
 
 
-def unmask_pii(text: str, mapping: dict[str, str]) -> str:
+@overload
+def unmask_pii(text: str, mapping: dict[str, str]) -> str: ...
+
+
+@overload
+def unmask_pii(text: None, mapping: dict[str, str]) -> None: ...
+
+
+# mask_pii와 같은 이유로 오버로드다. 빈 입력 가드가 None을 그대로 돌려주는 것이
+# 계약이고, services.llm_chat의 `return unmask_pii(raw, mapping)`은 `-> str`을
+# 유지해야 한다.
+def unmask_pii(text: str | None, mapping: dict[str, str]) -> str | None:
     """자리표시자를 원값으로 역치환한다.
 
     LLM 응답에서 자리표시자가 변형되거나(예: <AMOUNT_9f2a1c_1> -> <AMOUNT1>) 존재하지
