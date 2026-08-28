@@ -17,6 +17,7 @@ from .presentation import (
     alert_kind,
     as_list_items,
     decision_label,
+    format_signal_score_line,
     render,
     source_label,
     urgency_label,
@@ -34,12 +35,6 @@ _TELEGRAM_BOT_URL_RE = re.compile(r"(https://api\.telegram\.org/bot)[^/\s\"]+")
 # (#297 자가리뷰). presentation.alert_kind 독스트링 참조.
 URGENT_TELEGRAM_LEVELS = {"high", "critical"}
 TELEGRAM_ALERT_MODES = {"urgent", "all", "off"}
-
-# #298 신호 점수 표시 문자열. 상수로 분리해 둔 것은 출력 계층 작업(#7)이 이 조각을
-# 그대로 감싸거나 다른 채널(웹, 음성)로 옮길 때 문구를 다시 찾아 헤매지 않게 하기
-# 위함이다. 문구를 바꿀 일이 생기면 여기 한 곳만 고친다.
-SIGNAL_SCORE_LABEL = "📊 영향도"
-SIGNAL_DISAGREEMENT_NOTE = "⚠️ 기사 간 평가 엇갈림"
 
 
 def _redact_telegram_bot_token(value: str) -> str:
@@ -269,53 +264,6 @@ def should_send_telegram_alert(
     )
 
 
-def format_signal_score_line(
-    score: Any,
-    reason: Any = None,
-    uncertainty: Any = None,
-    *,
-    uncertainty_threshold: float = SIGNAL_UNCERTAINTY_ALERT_THRESHOLD,
-) -> str | None:
-    """신호 점수 한 줄을 만든다. 점수가 없으면 None (#298).
-
-    ``📊 영향도 -2 (주요 고객 이탈 보도)`` 형태이고, 기사별 점수가 크게 흩어졌으면
-    뒤에 ``⚠️ 기사 간 평가 엇갈림``을 붙인다.
-
-    score가 None이면 줄 자체를 만들지 않는다. "미측정"을 항상 붙이면 필터를 거치지
-    않는 수동 분석 알림까지 오염되는데, analysis_data만 봐서는 "채점 실패(fail-open)"
-    와 "애초에 채점 경로가 아님"을 구분할 수 없다. 둘의 구분이 필요하면 DB의
-    AgentReport.signal_score(null)와 로그를 본다.
-
-    이 함수는 메서드가 아니라 모듈 함수다 — 알림 이외의 출력 계층도 TelegramNotifier
-    인스턴스 없이 같은 문구를 쓸 수 있어야 한다.
-    """
-    if isinstance(score, bool) or not isinstance(score, Real):
-        return None
-
-    # numbers.Real이 타입 계약으로 보장하는 변환은 __float__뿐이다(int()도, float와의
-    # 대소 비교도 계약 밖이라 체커가 막는다). 점수는 -3~+3 정수라 float 경유가
-    # 값을 바꾸지 않는다.
-    score_value = float(score)
-
-    # +2/-2로 부호를 명시한다. 0은 "+0"이 어색하므로 그대로 0.
-    score_text = "0" if score_value == 0 else f"{int(score_value):+d}"
-    line = f"{SIGNAL_SCORE_LABEL} {score_text}"
-
-    if isinstance(reason, str) and reason.strip():
-        line = f"{line} ({' '.join(reason.split())})"
-
-    # 비교도 위 score_value와 같은 이유로 float를 경유한다 — Real과 float의 대소
-    # 비교는 런타임에는 되지만 numbers.Real의 타입 계약에는 없다.
-    if (
-        isinstance(uncertainty, Real)
-        and not isinstance(uncertainty, bool)
-        and float(uncertainty) >= uncertainty_threshold
-    ):
-        line = f"{line} · {SIGNAL_DISAGREEMENT_NOTE}"
-
-    return line
-
-
 def _message_id_from_send_body(body: Any) -> int | None:
     """sendMessage 응답 본문에서 ``message_id``를 뽑는다 (#260).
 
@@ -392,10 +340,12 @@ class TelegramNotifier:
         # 제목 뒤 lines에 직접 끼웠지만, #297에서 제목만 목록 밖으로 나가고 나머지 줄은
         # as_list_items를 거치게 됐다. 같은 자리를 지키려면 items의 0번이어야 한다 —
         # lines에 끼우면 이 줄만 나열 표시를 못 받는다.
+        # 임계값은 문구가 아니라 정책이라 출력 계층이 아니라 이쪽이 넘긴다 (#308).
         score_line = format_signal_score_line(
             analysis_data.get("signal_score"),
             analysis_data.get("signal_reason"),
             analysis_data.get("signal_uncertainty"),
+            uncertainty_threshold=SIGNAL_UNCERTAINTY_ALERT_THRESHOLD,
         )
         if score_line is not None:
             items.insert(0, score_line)

@@ -6,6 +6,7 @@ import httpx
 import pytest
 
 import backend.telegram_notifier
+from backend.presentation import SIGNAL_SCORE_LABEL
 from backend.telegram_notifier import (
     TELEGRAM_MESSAGE_LIMIT,
     TelegramApiError,
@@ -950,49 +951,10 @@ async def test_send_text_publishes_and_clears_retry_after(monkeypatch):
     assert notifier.last_retry_after_seconds is None
 
 
-# --- #298: 신호 점수 표시 ---------------------------------------------------
-
-
-def test_format_signal_score_line_renders_score_and_reason():
-    line = backend.telegram_notifier.format_signal_score_line(-2, "주요 고객 이탈 보도")
-
-    assert line == "📊 영향도 -2 (주요 고객 이탈 보도)"
-
-
-def test_format_signal_score_line_marks_positive_scores_with_sign():
-    assert backend.telegram_notifier.format_signal_score_line(3, "대형 수주") == (
-        "📊 영향도 +3 (대형 수주)"
-    )
-    # 0은 "+0"이 어색하다. 그리고 0은 "모름"이 아니라 "중립으로 채점됨"이므로 표시한다.
-    assert backend.telegram_notifier.format_signal_score_line(0, "홍보성 기사") == (
-        "📊 영향도 0 (홍보성 기사)"
-    )
-
-
-def test_format_signal_score_line_appends_disagreement_note_when_uncertain():
-    line = backend.telegram_notifier.format_signal_score_line(
-        1, "평가 갈림", uncertainty=2.5
-    )
-
-    assert line == "📊 영향도 +1 (평가 갈림) · ⚠️ 기사 간 평가 엇갈림"
-
-
-def test_format_signal_score_line_omits_note_below_threshold():
-    line = backend.telegram_notifier.format_signal_score_line(
-        1, "일관된 평가", uncertainty=0.5
-    )
-
-    # 점수가 있으므로 줄이 만들어져야 한다. None이면 `not in`이 통과해 버려
-    # "줄 자체가 사라진" 회귀를 이 단언이 놓친다.
-    assert line is not None
-    assert backend.telegram_notifier.SIGNAL_DISAGREEMENT_NOTE not in line
-
-
-def test_format_signal_score_line_returns_none_without_score():
-    """채점하지 못했으면 줄 자체가 없어야 한다 — 없는 점수를 0으로 그리지 않는다."""
-    assert backend.telegram_notifier.format_signal_score_line(None, "근거") is None
-    assert backend.telegram_notifier.format_signal_score_line("2") is None
-    assert backend.telegram_notifier.format_signal_score_line(True) is None
+# --- #298: 알림에 들어가는 신호 점수 줄 ---------------------------------------
+# 줄 자체를 만드는 format_signal_score_line은 출력 계층으로 옮겨졌다 (#308).
+# 문구 테스트는 test_presentation.py에 있고, 여기에는 그 줄이 알림의 어느 자리에
+# 놓이는지만 남긴다.
 
 
 def test_format_analysis_alert_includes_signal_score_line():
@@ -1021,6 +983,36 @@ def test_format_analysis_alert_includes_signal_score_line():
     assert lines[2].startswith("- 판단: 매도")
 
 
+def test_format_analysis_alert_passes_the_configured_threshold(monkeypatch):
+    """알림이 넘기는 임계값이 설정값 그 자체인지 본다 (#308 리뷰).
+
+    위 테스트는 불확실도 1.5가 기본 임계값 1.0을 넘는지만 보므로, 호출부가 엉뚱한 상수를
+    넘겨도(0.5여도 1.5는 넘는다) 통과한다. 설정을 움직였을 때 같은 입력의 결과가 따라
+    움직이는지를 봐야 "설정값을 넘긴다"가 검증된다.
+    """
+    notifier = TelegramNotifier(bot_token="token", chat_id="chat")
+    monkeypatch.setattr(
+        backend.telegram_notifier, "SIGNAL_UNCERTAINTY_ALERT_THRESHOLD", 2.0
+    )
+
+    message = notifier.format_analysis_alert(
+        stock="삼성전자",
+        source="news",
+        analysis_data={
+            "summary": "요약",
+            "details": {"decision": "SELL", "confidence_score": 0.8, "reason": "고객 이탈"},
+            "urgency": "high",
+            "telegram_alert": True,
+            "signal_score": -2,
+            "signal_reason": "주요 고객 이탈 보도",
+            "signal_uncertainty": 1.5,
+        },
+    )
+
+    # 점수 줄은 그대로 있고 엇갈림 표시만 빠져야 한다 — 줄째로 사라지면 이 단언이 놓친다.
+    assert message.split("\n")[1] == "- 📊 영향도 -2 (주요 고객 이탈 보도)"
+
+
 def test_format_analysis_alert_without_signal_score_is_unchanged():
     """점수가 없는 알림(수동 분석, fail-open)은 기존 형식 그대로여야 한다."""
     notifier = TelegramNotifier(bot_token="token", chat_id="chat")
@@ -1034,5 +1026,5 @@ def test_format_analysis_alert_without_signal_score_is_unchanged():
         stock="삼성전자", source="news", analysis_data=analysis_data
     )
 
-    assert backend.telegram_notifier.SIGNAL_SCORE_LABEL not in message
+    assert SIGNAL_SCORE_LABEL not in message
     assert message.split("\n")[1].startswith("- 판단: 보유 유지")
