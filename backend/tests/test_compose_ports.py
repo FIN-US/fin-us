@@ -116,16 +116,17 @@ def _host_side(mapping):
     return ":".join(fields[:2])
 
 
-def _config_default(name):
-    """`backend/config.py`에서 `.env`가 비었을 때 쓰이는 기본값을 읽는다.
+def _config_resolution(name):
+    """`backend/config.py`가 *name*을 푸는 방식을 기본값과 정규화로 갈라 돌려준다.
 
     import해서 읽으면 안 된다 — `config.py`는 `load_dotenv()`로 개발자의 실제 `.env`를
     먹으므로, 그 사람 설정이 있으면 기본값이 아니라 그 값을 보게 된다. 고정하려는 것은
     `.env`가 비었을 때 쓰이는 소스의 값이다.
 
-    `os.environ.get(키, 기본값)`을 문자열 메서드로 감싸는 대입이 있어서
-    (`NAT_BASE_URL`의 `.rstrip("/")`), 리터럴만 떼어 오면 실제로 쓰이는 값과 어긋난다.
-    감싼 메서드를 벗겨 낸 뒤 **그대로 적용해서** 돌려준다.
+    돌려주는 것은 `(기본값, 정규화 함수)` 두 개다. `os.environ.get(키, 기본값)`을 문자열
+    메서드로 감싸는 대입이 있는데(`NAT_BASE_URL`의 `.rstrip("/")`), 이 래퍼는 기본값과
+    `.env` 값 **양쪽에** 똑같이 걸린다. 기본값에만 적용하고 비교하면 검사가 런타임과
+    다른 것을 보게 되므로, 같은 래퍼를 `.env.example` 쪽에도 먹일 수 있게 함께 준다.
     """
 
     for node in ast.walk(ast.parse(_CONFIG_PATH.read_text(encoding="utf-8"))):
@@ -133,14 +134,15 @@ def _config_default(name):
             continue
         if not any(isinstance(t, ast.Name) and t.id == name for t in node.targets):
             continue
-        return _apply_wrappers(*_unwrap_env_get(node.value, name))
+        default, wrappers = _unwrap_env_get(node.value, name)
+        return _apply_wrappers(default, wrappers), lambda v: _apply_wrappers(v, wrappers)
     raise AssertionError(f"`backend/config.py`에서 {name} 대입을 찾지 못했다.")
 
 
 def _unwrap_env_get(value, name):
     """`os.environ.get(...)` 호출과, 그것을 감싼 메서드 호출들을 분리한다.
 
-    감싼 순서의 역순으로 쌓이므로 적용할 때 뒤집는다.
+    벗겨 내는 순서는 바깥쪽부터이므로, 적용할 순서(소스에 적힌 순서)로 뒤집어 준다.
     """
 
     wrappers = []
@@ -155,6 +157,14 @@ def _unwrap_env_get(value, name):
     assert isinstance(value, ast.Call) and len(value.args) == 2, (
         f"`backend/config.py`의 {name} 대입에서 `os.environ.get(키, 기본값)`을 찾지 "
         f"못했다. 모양을 바꿨다면 이 헬퍼를 함께 갱신할 것."
+    )
+    # 기본값 자리에 폴백이 중첩된 대입이 실제로 있다(`NAT_CONVERSATION_ID`의
+    # `os.environ.get(키, os.environ.get(...))`). 그대로 `literal_eval`에 넘기면
+    # `ValueError`로 죽어서, 바로 위 assert가 주는 "헬퍼를 갱신하라"는 안내를 이 경로만
+    # 못 받는다. 같은 문구로 멈추도록 리터럴인지 먼저 본다.
+    assert isinstance(value.args[1], ast.Constant), (
+        f"`backend/config.py`의 {name} 기본값이 리터럴이 아니다(중첩된 폴백 등). "
+        f"모양을 바꿨다면 이 헬퍼를 함께 갱신할 것."
     )
     return ast.literal_eval(value.args[1]), list(reversed(wrappers))
 
@@ -176,6 +186,66 @@ def _apply_wrappers(default, wrappers):
         kwargs = {kw.arg: ast.literal_eval(kw.value) for kw in wrapper.keywords}
         default = getattr(default, attr)(*args, **kwargs)
     return default
+
+
+def _assign_value(source):
+    """단위 테스트용 — 한 줄짜리 대입에서 우변 노드를 꺼낸다."""
+
+    return ast.parse(source).body[0].value
+
+
+def test_unwrap_env_get_orders_wrappers_the_way_the_source_applies_them():
+    """벗겨 낸 래퍼가 소스에 적힌 순서로 돌아오는지 본다.
+
+    순서가 뒤집히면 결과가 달라지는 값을 일부러 골랐다. `.strip()`이 먼저면 `"a/"`가
+    되어 `.rstrip("/")`가 슬래시를 떼지만, 거꾸로면 끝이 공백이라 `.rstrip("/")`가
+    아무것도 못 떼고 `"a/"`가 남는다. 같은 값으로 검사하면 순서 버그가 통과한다.
+    """
+
+    value = _assign_value('X = os.environ.get("X", "  a/ ").strip().rstrip("/")')
+
+    default, wrappers = _unwrap_env_get(value, "X")
+
+    assert default == "  a/ "
+    assert [w.func.attr for w in wrappers] == ["strip", "rstrip"]
+    assert _apply_wrappers(default, wrappers) == "a"
+
+
+def test_unwrap_env_get_stops_with_guidance_on_a_nested_default():
+    """기본값 자리에 폴백이 중첩된 대입에서도 안내를 남기고 멈춰야 한다.
+
+    `config.py`의 `NAT_CONVERSATION_ID`가 이 모양이다. `literal_eval`이 `ValueError`로
+    죽으면 "헬퍼를 갱신하라"는 안내가 사라지므로, 그 경로를 여기서 막아 둔다.
+    """
+
+    value = _assign_value('X = os.environ.get("X", os.environ.get("Y", "z")).strip()')
+
+    with pytest.raises(AssertionError, match="헬퍼를 함께 갱신할 것"):
+        _unwrap_env_get(value, "X")
+
+
+def test_apply_wrappers_rejects_a_method_that_is_not_a_string_method():
+    """`getattr`가 `str` 밖의 이름을 실행하지 않는지 본다."""
+
+    default, wrappers = _unwrap_env_get(
+        _assign_value('X = os.environ.get("X", "v").bit_length()'), "X"
+    )
+
+    with pytest.raises(AssertionError, match="`str`이 아닌"):
+        _apply_wrappers(default, wrappers)
+
+
+def test_config_resolution_normalizes_the_env_side_the_same_way():
+    """정규화 함수가 `.env` 쪽 값에도 같은 래퍼를 먹이는지 본다(#305 리뷰).
+
+    `NAT_BASE_URL`은 `.rstrip("/")`로 감싸여 있으므로, 슬래시가 붙은 표기도 기본값과
+    같은 값으로 풀려야 한다 — 런타임이 실제로 그렇게 동작한다.
+    """
+
+    default, normalize = _config_resolution("NAT_BASE_URL")
+
+    assert normalize(f"{default}/") == default
+    assert normalize(default) == default
 
 
 def test_services_outside_the_allowlist_publish_on_loopback_only(compose_services):
@@ -242,9 +312,15 @@ def test_config_default_matches_the_env_example(env_example_values, env_key):
     그대로 쓰는 환경은 그 경로를 거치지 않는다(#305). 어긋나는 방향은 둘 다 실제로
     나왔다 — 호스트 표기(루프백 게시가 IPv4 전용이라 `localhost`가 아니라 `127.0.0.1`)와
     포트(8000은 백엔드 자신이라 finus-nat이 아니다).
+
+    비교하려는 것은 리터럴이 아니라 **런타임에 풀리는 값**이므로, `config.py`가 씌우는
+    정규화를 `.env.example` 쪽에도 똑같이 먹인다. 한쪽에만 적용하면 예제에 `.../`처럼
+    `.rstrip("/")`가 흡수할 표기를 써도 런타임은 같은데 이 검사만 실패한다.
     """
 
-    assert _config_default(env_key) == env_example_values[env_key], (
+    default, normalize = _config_resolution(env_key)
+
+    assert default == normalize(env_example_values[env_key]), (
         f"`backend/config.py`의 {env_key} 기본값이 `.env.example`과 어긋난다. "
         f"`.env.example`은 compose 게시와 맞물려 있으므로 기본값도 같이 옮길 것."
     )
