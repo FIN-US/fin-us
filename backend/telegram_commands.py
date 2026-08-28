@@ -750,15 +750,21 @@ class TelegramCommandHandler:
         조각 수에 비례해 폴러를 붙잡는 시간이 늘면 SETTLED_SEND_TIMEOUT_SECONDS가 근거로
         삼은 계산(대기 주문의 60초 만료 창)이 무너지기 때문이다.
         """
-        parts = split_for_telegram(text)
         started_at = time.monotonic()
+        parts: list[str] = []
         delivered = 0
         try:
+            # 분할을 try 안에 둔다. 이 함수의 계약은 "실패해도 예외를 올리지 않는다"인데
+            # (호출부는 부수효과가 확정된 뒤라 재실행할 수 없다), 분할에서 예외가 나면
+            # 그 계약이 조립 단계에서 깨진다 — 예전의 슬라이스는 던질 수 없었다
+            # (PR #328 리뷰).
+            #
             # 시도 횟수가 아니라 벽시계로 상한을 강제한다. 무응답이면 시도마다 httpx
             # 타임아웃(10초)이 그대로 붙어 횟수만으로는 상한이 서지 않기 때문이다.
             # asyncio.timeout은 자기 데드라인이 아닌 외부 취소는 CancelledError로 그대로
             # 통과시키므로 폴러의 graceful shutdown을 방해하지 않는다.
             async with asyncio.timeout(SETTLED_SEND_TIMEOUT_SECONDS):
+                parts = split_for_telegram(text)
                 for position, part in enumerate(parts, 1):
                     sent = await self._send_part_settled(
                         part,
@@ -780,6 +786,22 @@ class TelegramCommandHandler:
                 delivered,
                 len(parts),
                 SETTLED_SEND_TIMEOUT_SECONDS,
+            )
+            return False
+        except Exception as exc:
+            # 조립이든 전송이든, 예외를 여기서 멈춘다. 이 경로가 존재하는 이유가 "부수효과가
+            # 확정돼 update를 재실행할 수 없다"이므로(#247), 예외를 폴러까지 올리면 폴러가
+            # 하지 말아야 할 재실행을 한다 — 전송 실패보다 나쁜 결과다. 전송 자체의 실패는
+            # _send_part_settled가 이미 bool로 접어 오므로 여기 걸리는 것은 조립 단계의
+            # 예외뿐이다 (PR #328 리뷰).
+            #
+            # CancelledError는 BaseException이라 이 절을 지나간다. 폴러의 graceful
+            # shutdown이 막히지 않는다.
+            logger.error(
+                "확정된 부수효과의 결과를 전송하지 못했습니다 (%s/%s조각 전달, %s)",
+                delivered,
+                len(parts),
+                exc,
             )
             return False
 

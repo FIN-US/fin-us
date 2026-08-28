@@ -456,9 +456,13 @@ class TelegramNotifier:
         if not self.enabled:
             return False
 
-        parts = split_for_telegram(text)
+        parts: list[str] = []
         delivered = 0
         try:
+            # 분할도 try 안이다. 예전의 text[:LIMIT]은 예외가 불가능했지만 분할은
+            # 그렇지 않으므로(이 자리를 벗어나면 "전송 실패는 False"라는 계약이
+            # 깨지고 예외가 폴러까지 올라간다), 계약의 경계를 여기로 맞춘다 (PR #328 리뷰).
+            parts = split_for_telegram(text)
             for position, part in enumerate(parts, 1):
                 # 버튼은 마지막 조각에만 단다. 앞 조각에 달면 본문이 끝나기 전에 답을
                 # 고르라고 재촉하는 꼴이고, 조각마다 달면 같은 버튼이 여러 벌 남는다.

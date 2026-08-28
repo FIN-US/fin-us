@@ -682,3 +682,30 @@ def test_a_paragraph_that_fits_is_never_split_across_parts():
         for paragraph in part.split("\n", 1)[1].split("\n\n")
     ]
     assert restored == [paragraph.strip() for paragraph in paragraphs]
+
+
+def test_a_whitespace_only_line_over_the_limit_does_not_crash():
+    """공백만으로 된 긴 줄은 아래 겹의 분할이 채울 것을 못 찾아 빈 목록을 돌려줬다.
+
+    그대로 두면 IndexError로 죽는데, 그 예외는 전송 계층의 try 바깥에서 터져
+    "전송 실패는 False"라는 계약을 깬다 (PR #328 리뷰).
+    """
+    parts = split_for_telegram("A\n" + " " * (TELEGRAM_MESSAGE_LIMIT + 100) + "\nB")
+
+    assert all(len(part) <= TELEGRAM_MESSAGE_LIMIT for part in parts)
+    # 내용이 있는 두 줄은 살아남는다. 공백 줄은 조각을 strip하는 과정에서 사라진다.
+    restored = "".join(part.split("\n", 1)[-1] for part in parts)
+    assert "A" in restored
+    assert "B" in restored
+
+
+def test_a_paragraph_of_only_whitespace_does_not_crash():
+    """문단 겹에서도 같은 일이 난다 — 빈 목록이 한 겹 위로 올라온다."""
+    parts = split_for_telegram(
+        "머리말\n\n" + " " * (TELEGRAM_MESSAGE_LIMIT + 100) + "\n\n꼬리말"
+    )
+
+    assert all(len(part) <= TELEGRAM_MESSAGE_LIMIT for part in parts)
+    restored = "".join(part.split("\n", 1)[-1] for part in parts)
+    assert "머리말" in restored
+    assert "꼬리말" in restored

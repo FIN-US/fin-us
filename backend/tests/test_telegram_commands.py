@@ -3785,6 +3785,24 @@ async def test_settled_send_resumes_at_the_part_that_failed(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_settled_send_returns_false_when_splitting_itself_raises():
+    """조립 단계의 예외가 폴러까지 올라가면 안 된다 (PR #328 리뷰).
+
+    이 경로는 부수효과가 확정된 뒤라 update를 재실행할 수 없다(#247). 예외가 새 나가면
+    폴러가 바로 그 재실행을 하므로, 전송 실패보다 나쁜 결과가 된다.
+    """
+    class Unprintable:
+        def __str__(self):
+            raise ValueError("cannot render")
+
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(notifier=notifier)
+
+    assert await handler._send_text_settled(Unprintable()) is False
+    assert notifier.messages == []
+
+
+@pytest.mark.asyncio
 async def test_settled_send_stops_at_the_part_it_could_not_deliver(monkeypatch):
     """끝내 실패하면 남은 조각을 포기한다. 앞이 빠진 채 뒤만 도착하는 편이 더 나쁘다 (#313)."""
     notifier = ProgressFakeNotifier()

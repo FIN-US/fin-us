@@ -1,6 +1,7 @@
 import inspect
 import logging
 from pathlib import Path
+from typing import cast
 
 import httpx
 import pytest
@@ -657,6 +658,31 @@ async def test_send_text_stops_at_the_failed_part(monkeypatch):
     assert await notifier.send_text("마" * (TELEGRAM_MESSAGE_LIMIT * 2 + 10)) is False
     # 첫 조각은 나갔고, 둘째에서 막힌 뒤 셋째는 시도하지 않는다.
     assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_send_text_returns_false_when_splitting_itself_raises(monkeypatch):
+    """조립 단계의 예외도 False로 접는다 (PR #328 리뷰).
+
+    예전의 text[:LIMIT]은 던질 수 없어 "전송 실패는 False"라는 계약이 저절로 지켜졌다.
+    분할은 그렇지 않으므로 호출을 try 안에 두어 계약의 경계를 맞춘다 — 새 나가면
+    _send_text_or_raise가 아닌 지점에서 예외가 폴러까지 올라간다.
+    """
+    class Unprintable:
+        def __str__(self):
+            raise ValueError("cannot render")
+
+    calls = []
+    monkeypatch.setattr(
+        "backend.telegram_notifier.httpx.AsyncClient",
+        _fake_client_factory(calls, _FakeResponse({"ok": True, "result": {"message_id": 1}})),
+    )
+    notifier = TelegramNotifier("token", "123")
+
+    # cast: 타입상 불가능한 입력을 일부러 넣는 테스트다. 계약을 지키는 것은 타입 검사가
+    # 아니라 런타임이어야 한다 — 전송 계층은 서명을 신뢰할 수 없는 자리에 있다.
+    assert await notifier.send_text(cast(str, Unprintable())) is False
+    assert calls == []
 
 
 @pytest.mark.asyncio
