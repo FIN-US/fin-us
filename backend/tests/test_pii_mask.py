@@ -6,6 +6,7 @@ recognizer 3종(계좌번호/원화 금액/보유 수량) 각각과 복합 케�
 import json
 import pathlib
 import re
+import time
 
 from backend.pii_mask import mask_pii, unmask_pii
 
@@ -238,6 +239,39 @@ class TestAmountRecognizer:
                 f"한글 수사 금액이 유출됐다: {text!r} -> {masked!r}"
             )
             assert unmask_pii(masked, mapping) == text
+
+    def test_korean_numeral_run_does_not_blow_up(self):
+        """수사만 길게 이어진 입력에서 마스킹이 2차 함수적으로 느려지면 안 된다.
+
+        수사 체인 단독 갈래는 선행 숫자를 요구하지 않으므로, lookbehind가 콤마만 막으면
+        수사 런의 모든 위치에서 매치 시작이 허용된다. 각 시작이 런 전체를 소비했다가
+        \s?원에서 실패하고 +를 되감으므로 O(n) 시작 x O(n) 되감기 = O(n²)가 된다.
+        mask_pii는 async llm_chat 안의 동기 CPU 작업이라 그동안 이벤트 루프 전체가
+        멈추고, _handle_chat_fallback은 텔레그램 원문(최대 4096자)을 가공 없이 넘기므로
+        봇에 접근 가능한 누구나 발동시킬 수 있다.
+
+        이 테스트가 잡는 mutation: _AMOUNT_UNIT_RE의 lookbehind에서 수사·한글 수사를
+        빼고 (?<![\d,])로 되돌리는 변경.
+
+        상한은 넉넉하게 잡는다. 실측으로 수정 후 8192자는 4 ms대, 수정 전은 3.5 초대라
+        약 900배 벌어져 있어, 느린 CI에서도 0.5 초 상한이 오탐을 내지 않으면서 회귀는
+        확실히 잡는다. 절대 시간을 단언하는 테스트라 머신 편차에 취약한 것이 사실이지만,
+        이 결함은 결과가 아니라 소요 시간에만 나타나므로 값 단언으로는 잡을 수 없다.
+        """
+        hostile = "오천백십" * 2048  # 8192자
+        started = time.perf_counter()
+        masked, mapping = mask_pii(hostile)
+        elapsed = time.perf_counter() - started
+
+        assert elapsed < 0.5, (
+            f"수사 런 {len(hostile)}자 마스킹에 {elapsed * 1000:.0f} ms가 걸렸다 — "
+            "_AMOUNT_UNIT_RE의 lookbehind가 수사 런 중간 시작을 막지 못해 "
+            "O(n²)로 되돌아간 것으로 보인다."
+        )
+        # "원"이 없으므로 마스킹 대상이 아니다 — 느려지지만 않으면 되는 것이 아니라
+        # 동작도 종전과 같아야 한다.
+        assert masked == hostile
+        assert mapping == {}
 
     def test_does_not_mask_won_syllable_without_numeral_chain(self):
         """수사 체인 갈래를 넣더라도 "원"으로 시작하는 일반 어휘를 삼키면 안 된다.
