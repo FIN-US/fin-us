@@ -78,7 +78,9 @@ class TestPlaceholderScope:
         for _ in range(20):
             _, mapping = mask_pii("평가금액 1,234원")
             (key,) = mapping
-            scopes.add(_SCOPED_PLACEHOLDER_RE.fullmatch(key).group(0))
+            scoped = _SCOPED_PLACEHOLDER_RE.fullmatch(key)
+            assert scoped is not None, f"자리표시자가 scope 형식이 아니다: {key}"
+            scopes.add(scoped.group(0))
         assert len(scopes) > 1, "호출마다 같은 scope가 나왔다 — nonce가 고정값이다"
 
     def test_placeholder_from_other_call_returns_neutral_phrase(self):
@@ -867,7 +869,11 @@ class _TaggedStr(str):
     않는 httpx 의존을 끌어오지 않기 위함이다.
     """
 
-    def __new__(cls, value, tag=None):
+    # 클래스 수준 선언이 필요하다. __new__ 안의 `obj.tag = ...`는 self가 아니라
+    # 지역 변수에 대한 대입이라 타입 체커가 멤버로 인정하지 않는다.
+    tag: str | None
+
+    def __new__(cls, value: str, tag: str | None = None) -> "_TaggedStr":
         obj = super().__new__(cls, value)
         obj.tag = tag
         return obj
@@ -876,7 +882,9 @@ class _TaggedStr(str):
 class _StrictStr(str):
     """생성자가 추가 인자를 강제하는 str 서브클래스."""
 
-    def __new__(cls, value, required):
+    required: str
+
+    def __new__(cls, value: str, required: str) -> "_StrictStr":
         obj = super().__new__(cls, value)
         obj.required = required
         return obj
