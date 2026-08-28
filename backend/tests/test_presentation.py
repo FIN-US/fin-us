@@ -4,7 +4,8 @@
   1. 평문 채널로 나가는 문장에 마크다운 표기가 남지 않는다 (parse_mode를 쓰지 않으므로
      남으면 그대로 화면에 뜬다).
   2. 용어 각주는 사전에 있는 말만, 첫 등장만, 최대 2개만 설명한다.
-  3. #260의 추론 각주는 모양도 길이 예산 규칙도 그대로다.
+  3. #260의 추론 각주는 모양이 그대로다.
+  4. 상한을 넘는 메시지는 잘리지 않고 조각으로 나뉜다 (#313).
 """
 
 import json
@@ -24,6 +25,7 @@ from backend.presentation import (
     REASONING_FOOTNOTE_SEPARATOR,
     SIGNAL_DISAGREEMENT_NOTE,
     TELEGRAM_MESSAGE_LIMIT,
+    TELEGRAM_TRUNCATION_SUFFIX,
     TERM_FOOTNOTE_MARK,
     TermEntry,
     alert_kind,
@@ -33,9 +35,11 @@ from backend.presentation import (
     format_signal_score_line,
     kind_for_agent,
     normalize_level,
+    part_marker,
     reasoning_footnote,
     render,
     sanitize_markdown,
+    split_for_telegram,
     term_footnote,
     urgency_label,
 )
@@ -537,7 +541,8 @@ def test_intermediate_level_keeps_the_reasoning_footnote(fake_terms):
     assert message.endswith(reasoning)
 
 
-def test_long_body_is_truncated_but_both_footnotes_survive(fake_terms):
+def test_long_body_keeps_its_tail_and_both_footnotes(fake_terms):
+    """길이 예산이 사라졌다 — 본문은 잘리지 않고 각주도 그대로 붙는다 (#313)."""
     fake_terms([DEPOSIT])
     reasoning = reasoning_footnote("trading_agent", (FakeTool("finus_account_balance"),))
 
@@ -548,9 +553,34 @@ def test_long_body_is_truncated_but_both_footnotes_survive(fake_terms):
         reasoning=reasoning,
     )
 
-    assert len(message) <= TELEGRAM_MESSAGE_LIMIT
+    assert len(message) > TELEGRAM_MESSAGE_LIMIT
+    assert "가" * 8000 in message
+    assert TELEGRAM_TRUNCATION_SUFFIX not in message
     assert message.endswith(reasoning)
     assert TERM_FOOTNOTE_MARK in message
+
+
+def test_long_render_output_splits_with_both_footnotes_in_the_last_part(fake_terms):
+    """#260의 계약(각주는 살아남는다)을 예산이 아니라 분할이 지킨다 (#313)."""
+    fake_terms([DEPOSIT])
+    reasoning = reasoning_footnote("trading_agent", (FakeTool("finus_account_balance"),))
+
+    parts = split_for_telegram(
+        render(
+            "예수금 " + "가" * 8000,
+            KIND_ANALYSIS,
+            LEVEL_BEGINNER,
+            reasoning=reasoning,
+        )
+    )
+
+    assert len(parts) > 1
+    assert all(len(part) <= TELEGRAM_MESSAGE_LIMIT for part in parts)
+    assert parts[-1].endswith(reasoning)
+    # 용어 각주도 마지막 조각에 통째로 남는다. 두 각주가 각각 한 문단이므로 분할이
+    # 문단을 쪼개지 않는 성질만으로 자리가 정해진다.
+    assert TERM_FOOTNOTE_MARK in parts[-1]
+    assert sum(TERM_FOOTNOTE_MARK in part for part in parts) == 1
 
 
 def test_markdown_is_cleaned_before_terms_are_matched(fake_terms):
@@ -565,3 +595,117 @@ def test_markdown_is_cleaned_before_terms_are_matched(fake_terms):
 
     assert message.startswith("예수금은 충분합니다")
     assert TERM_FOOTNOTE_MARK in message
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# 분할 전송 (#313)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_short_message_passes_through_untouched():
+    """짧은 메시지가 이 함수를 지나도 달라지는 것이 없어야 전송 계층이 전부 통과시킨다."""
+    assert split_for_telegram("짧은 메시지") == ["짧은 메시지"]
+    assert split_for_telegram("가" * TELEGRAM_MESSAGE_LIMIT) == [
+        "가" * TELEGRAM_MESSAGE_LIMIT
+    ]
+
+
+def test_long_message_is_split_instead_of_truncated():
+    body = "\n".join(f"- 항목 {index}" for index in range(2000))
+
+    parts = split_for_telegram(body)
+
+    assert len(parts) > 1
+    assert all(len(part) <= TELEGRAM_MESSAGE_LIMIT for part in parts)
+    # 잘린 내용이 없다. 머리표 줄만 걷어내면 원문의 모든 줄이 순서대로 남는다.
+    restored = [
+        line
+        for part in parts
+        for line in part.split("\n")[1:]
+    ]
+    assert restored == body.split("\n")
+
+
+def test_parts_are_numbered_so_a_missing_one_is_visible():
+    """전송이 도중에 실패해 일부만 도착해도 사용자가 알 수 있어야 한다."""
+    parts = split_for_telegram("가" * (TELEGRAM_MESSAGE_LIMIT * 2 + 10))
+
+    total = len(parts)
+    assert total > 1
+    for index, part in enumerate(parts, 1):
+        assert part.startswith(f"{part_marker(index, total)}\n")
+
+
+def test_split_does_not_cut_in_the_middle_of_a_line():
+    """줄 가운데가 끊기면 다음 조각의 첫 줄이 나열 표시 없이 시작해 잘린 문장으로 보인다."""
+    lines = [f"- 종목 {index}: 현재가 92,600원 / 등락 +1.2%" for index in range(400)]
+
+    parts = split_for_telegram("\n".join(lines), limit=500)
+
+    for part in parts:
+        for line in part.split("\n")[1:]:
+            assert line in lines
+
+
+def test_a_line_longer_than_the_limit_is_cut_at_a_word_boundary():
+    """한 줄이 상한을 넘으면 그 안에서 낱말 경계를 찾는다 — 낱말 가운데는 마지막 수단이다."""
+    line = " ".join(f"낱말{index}" for index in range(300))
+
+    parts = split_for_telegram(line, limit=200)
+
+    assert len(parts) > 1
+    words = line.split(" ")
+    for part in parts:
+        for word in part.split("\n")[1].split(" "):
+            assert word in words
+
+
+def test_a_single_word_longer_than_the_limit_is_cut_inside():
+    """낱말 하나가 상한을 넘으면 가를 수밖에 없다. 그래도 글자를 잃지는 않는다."""
+    word = "가" * 900
+
+    parts = split_for_telegram(word, limit=200)
+
+    assert len(parts) > 1
+    assert "".join(part.split("\n", 1)[1] for part in parts) == word
+
+
+def test_a_paragraph_that_fits_is_never_split_across_parts():
+    """각주가 마지막 조각에 통째로 남는 근거. 상한 안의 문단은 경계를 넘지 않는다."""
+    paragraphs = [f"문단 {index}. " + "내용 " * 29 + "끝." for index in range(40)]
+
+    parts = split_for_telegram("\n\n".join(paragraphs), limit=1000)
+
+    restored = [
+        paragraph
+        for part in parts
+        for paragraph in part.split("\n", 1)[1].split("\n\n")
+    ]
+    assert restored == [paragraph.strip() for paragraph in paragraphs]
+
+
+def test_a_whitespace_only_line_over_the_limit_does_not_crash():
+    """공백만으로 된 긴 줄은 아래 겹의 분할이 채울 것을 못 찾아 빈 목록을 돌려줬다.
+
+    그대로 두면 IndexError로 죽는데, 그 예외는 전송 계층의 try 바깥에서 터져
+    "전송 실패는 False"라는 계약을 깬다 (PR #328 리뷰).
+    """
+    parts = split_for_telegram("A\n" + " " * (TELEGRAM_MESSAGE_LIMIT + 100) + "\nB")
+
+    assert all(len(part) <= TELEGRAM_MESSAGE_LIMIT for part in parts)
+    # 내용이 있는 두 줄은 살아남는다. 공백 줄은 조각을 strip하는 과정에서 사라진다.
+    restored = "".join(part.split("\n", 1)[-1] for part in parts)
+    assert "A" in restored
+    assert "B" in restored
+
+
+def test_a_paragraph_of_only_whitespace_does_not_crash():
+    """문단 겹에서도 같은 일이 난다 — 빈 목록이 한 겹 위로 올라온다."""
+    parts = split_for_telegram(
+        "머리말\n\n" + " " * (TELEGRAM_MESSAGE_LIMIT + 100) + "\n\n꼬리말"
+    )
+
+    assert all(len(part) <= TELEGRAM_MESSAGE_LIMIT for part in parts)
+    restored = "".join(part.split("\n", 1)[-1] for part in parts)
+    assert "머리말" in restored
+    assert "꼬리말" in restored

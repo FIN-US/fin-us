@@ -1950,7 +1950,14 @@ async def test_mcp_failure_replies_with_short_failure_message():
 
 
 @pytest.mark.asyncio
-async def test_mcp_result_is_truncated_for_telegram_limit():
+async def test_a_long_mcp_result_reaches_the_send_layer_whole():
+    """조회 결과를 여기서 자르지 않는다. 상한 맞추기는 전송 계층의 분할이 한다 (#313).
+
+    재시도 가능한 경로(_send_text_or_raise)는 notifier.send_text에 통째로 넘기고,
+    나누는 일은 그 안에서 일어난다 — 이 테스트의 FakeNotifier는 나누지 않으므로
+    "잘리지 않은 채 전송 계층까지 갔다"까지가 여기서 볼 수 있는 것이다. 실제 분할은
+    test_telegram_notifier.py의 test_send_text_splits_instead_of_truncating이 고정한다.
+    """
     async def mcp_runner(server_params, tool_name, arguments):
         return "a" * (TELEGRAM_MESSAGE_LIMIT + 100)
 
@@ -1960,8 +1967,8 @@ async def test_mcp_result_is_truncated_for_telegram_limit():
     await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/balance"}})
 
     message = notifier.messages[-1]
-    assert len(message) == TELEGRAM_MESSAGE_LIMIT
-    assert message.endswith(TELEGRAM_TRUNCATION_SUFFIX)
+    assert len(message) == TELEGRAM_MESSAGE_LIMIT + 100
+    assert TELEGRAM_TRUNCATION_SUFFIX not in message
 
 
 @pytest.mark.asyncio
@@ -1978,18 +1985,23 @@ async def test_nat_failure_replies_with_short_failure_message():
 
 
 @pytest.mark.asyncio
-async def test_nat_response_is_truncated_for_telegram_limit():
+async def test_a_long_nat_response_is_split_instead_of_truncated():
+    """답변이 상한을 넘으면 뒤를 버리지 않고 여러 통으로 나눠 보낸다 (#313)."""
+    body = "나" * (TELEGRAM_MESSAGE_LIMIT + 100)
+
     async def fake_llm_runner(provider, text, *, conversation_id=None):
-        return "나" * (TELEGRAM_MESSAGE_LIMIT + 100)
+        return body
 
     notifier = FakeNotifier()
     handler = TelegramCommandHandler(notifier=notifier, llm_runner=fake_llm_runner)
 
     await handler.handle_update({"message": {"chat": {"id": 123}, "text": "긴 답변 줘"}})
 
-    message = notifier.messages[-1]
-    assert len(message) == TELEGRAM_MESSAGE_LIMIT
-    assert message.endswith(TELEGRAM_TRUNCATION_SUFFIX)
+    parts = [message for message in notifier.messages if message != NAT_PROGRESS_MESSAGE]
+    assert len(parts) > 1
+    assert all(len(part) <= TELEGRAM_MESSAGE_LIMIT for part in parts)
+    assert TELEGRAM_TRUNCATION_SUFFIX not in "".join(parts)
+    assert "".join(part.split(chr(10), 1)[1] for part in parts) == body
 
 
 @pytest.mark.asyncio
@@ -3688,14 +3700,15 @@ def test_reasoning_footnote_length_is_capped():
 
 
 @pytest.mark.asyncio
-async def test_footnote_survives_truncation_of_a_long_answer():
-    """긴 답변이 잘려도 각주는 남는다 — 각주 자리를 먼저 확보한 뒤 본문을 자른다."""
+async def test_a_long_answer_keeps_its_body_and_its_footnote():
+    """#260의 계약을 예산이 아니라 분할이 지킨다 — 본문도 각주도 잃지 않는다 (#313)."""
+    body = "가" * (TELEGRAM_MESSAGE_LIMIT * 2)
     notifier = ProgressFakeNotifier()
     handler = TelegramCommandHandler(
         notifier=notifier,
         llm_runner=_nat_runner(
             NatAnswer(
-                "가" * (TELEGRAM_MESSAGE_LIMIT * 2),
+                body,
                 routed_agent="news_agent",
                 tools_used=(NatToolUse("finus_market_news", ok=True),),
             )
@@ -3704,15 +3717,20 @@ async def test_footnote_survives_truncation_of_a_long_answer():
 
     await _ask(handler)
 
-    final_text = notifier.messages[-1]
-    assert len(final_text) <= TELEGRAM_MESSAGE_LIMIT
-    assert TELEGRAM_TRUNCATION_SUFFIX in final_text
-    assert final_text.endswith("🤖 뉴스 에이전트 · 📚 확인한 자료: 뉴스 검색")
+    parts = [message for message in notifier.messages if message != NAT_PROGRESS_MESSAGE]
+    assert len(parts) > 1
+    assert all(len(part) <= TELEGRAM_MESSAGE_LIMIT for part in parts)
+    assert TELEGRAM_TRUNCATION_SUFFIX not in "".join(parts)
+    assert body in "".join(part.split(chr(10), 1)[1] for part in parts)
+    assert parts[-1].endswith("🤖 뉴스 에이전트 · 📚 확인한 자료: 뉴스 검색")
 
 
 @pytest.mark.asyncio
-async def test_answer_stays_within_the_limit_even_with_a_maximal_footnote():
-    """각주가 상한까지 길어져도 본문이 통째로 사라지지 않는다."""
+async def test_a_maximal_footnote_rides_along_in_the_last_part():
+    """각주가 자체 상한까지 길어져도 마지막 조각에 통째로 실린다 (#260, #313).
+
+    각주가 본문 자리를 빼앗던 구조가 사라졌으므로 본문 첫머리도 그대로 남는다.
+    """
     notifier = ProgressFakeNotifier()
     handler = TelegramCommandHandler(
         notifier=notifier,
@@ -3729,9 +3747,85 @@ async def test_answer_stays_within_the_limit_even_with_a_maximal_footnote():
 
     await _ask(handler)
 
-    final_text = notifier.messages[-1]
-    assert len(final_text) <= TELEGRAM_MESSAGE_LIMIT
-    assert final_text.startswith("나" * 100)
+    parts = [message for message in notifier.messages if message != NAT_PROGRESS_MESSAGE]
+    assert all(len(part) <= TELEGRAM_MESSAGE_LIMIT for part in parts)
+    assert parts[0].split(chr(10), 1)[1].startswith("나" * 100)
+    assert REASONING_FOOTNOTE_SEPARATOR in parts[-1]
+    assert sum(REASONING_FOOTNOTE_SEPARATOR in part for part in parts) == 1
+
+
+@pytest.mark.asyncio
+async def test_settled_send_resumes_at_the_part_that_failed(monkeypatch):
+    """조각 단위로 재시도한다. 처음부터 다시 보내면 이미 도착한 조각이 한 벌 더 쌓인다 (#313)."""
+    notifier = ProgressFakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        llm_runner=_nat_runner(NatAnswer("다" * (TELEGRAM_MESSAGE_LIMIT * 2))),
+    )
+    _capture_settled_sleeps(monkeypatch, handler)
+
+    sent: list[str] = []
+    failures = {"left": 1}
+
+    async def flaky_send_text(text, *, reply_markup=None):
+        # 둘째 조각의 첫 시도만 실패시킨다.
+        if len(sent) == 1 and failures["left"] > 0:
+            failures["left"] -= 1
+            return False
+        sent.append(text)
+        return True
+
+    notifier.send_text = flaky_send_text
+
+    await _ask(handler)
+
+    assert len(sent) > 1
+    # 재시도가 첫 조각을 다시 보내지 않았다 — 조각 번호가 한 번씩만 나온다.
+    assert len(set(sent)) == len(sent)
+
+
+@pytest.mark.asyncio
+async def test_settled_send_returns_false_when_splitting_itself_raises():
+    """조립 단계의 예외가 폴러까지 올라가면 안 된다 (PR #328 리뷰).
+
+    이 경로는 부수효과가 확정된 뒤라 update를 재실행할 수 없다(#247). 예외가 새 나가면
+    폴러가 바로 그 재실행을 하므로, 전송 실패보다 나쁜 결과가 된다.
+    """
+    class Unprintable:
+        def __str__(self):
+            raise ValueError("cannot render")
+
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(notifier=notifier)
+
+    assert await handler._send_text_settled(Unprintable()) is False
+    assert notifier.messages == []
+
+
+@pytest.mark.asyncio
+async def test_settled_send_stops_at_the_part_it_could_not_deliver(monkeypatch):
+    """끝내 실패하면 남은 조각을 포기한다. 앞이 빠진 채 뒤만 도착하는 편이 더 나쁘다 (#313)."""
+    notifier = ProgressFakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        llm_runner=_nat_runner(NatAnswer("라" * (TELEGRAM_MESSAGE_LIMIT * 2))),
+    )
+    _capture_settled_sleeps(monkeypatch, handler)
+
+    attempts: list[str] = []
+
+    async def failing_after_the_first_part(text, *, reply_markup=None):
+        attempts.append(text)
+        return len(set(attempts)) == 1
+
+    notifier.send_text = failing_after_the_first_part
+
+    await _ask(handler)
+
+    delivered = [text for text in attempts if text == attempts[0]]
+    # 첫 조각은 한 번에 나갔고, 둘째 조각에서 재시도를 소진한 뒤 셋째는 시도조차 하지 않는다.
+    assert len(delivered) == 1
+    assert len(set(attempts)) == 2
 
 # ──────────────────────────────────────────────────────────────────────────
 # 부수효과 확정 뒤의 전송 실패 (#247) / 변환 경로의 전송 실패 삼킴 (#249)

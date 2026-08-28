@@ -22,7 +22,11 @@
    번역을 LLM에게 시키면 매번 다른 말이 나오고 그중 일부는 뜻이 어긋난다 — 표로 하면
    한 번 정한 말이 계속 같은 말로 나간다. 표에 없는 값은 감추지 않고 원문 그대로 통과시킨다.
 
-5. **길이 예산.** 각주 자리를 먼저 확보하고 본문을 자른다 (#260에서 온 규칙).
+5. **분할.** 상한을 넘는 메시지는 자르지 않고 조각으로 나눈다 (#313). 예전에는 각주 자리를
+   먼저 확보하고 본문을 잘랐는데(#260), 각주는 살아도 본문 뒤가 조용히 사라졌다. 텔레그램은
+   여러 통으로 보낼 수 있으므로 자를 이유가 없다 — ``render``는 길이를 모른 채 조립하고
+   ``split_for_telegram``이 전송 직전에 나눈다. 각주가 마지막 조각에 남는 #260의 계약은
+   "상한 안에 들어가는 문단은 쪼개지지 않는다"는 분할 규칙이 대신 지킨다.
 
 **폭을 재려 하지 않는다 — 기준은 "접혔을 때 읽히는가"다.**
 
@@ -36,6 +40,10 @@
 - 긴 줄은 텔레그램이 접게 둔다. 우리가 접는 지점을 고르지 않는다.
 - 대신 **접힌 뒤에도 구조가 남게** 만든다. 나열 항목은 전부 LIST_MARKER로 시작하므로,
   표시 없는 줄은 앞 줄의 계속이라는 뜻이 된다. 접힌 조각이 새 항목으로 오독되지 않는다.
+- 메시지 경계는 다르다. 줄이 어디서 접히는지는 고르지 않지만, 4000자 상한을 넘을 때
+  **어느 통에서 끊을지는 골라야 한다** — 텔레그램이 대신 해 주지 않기 때문이다. 그
+  경계는 줄 가운데를 가르지 않는 쪽으로 잡는다(split_for_telegram). 위 나열 표시 규칙이
+  조각 사이에서도 유지돼야 하기 때문이다.
 - 정렬(들여쓰기·열 맞춤)에 기대는 배치는 쓰지 않는다. 평문 비례폭 글꼴에서는 애초에
   맞지 않고, 맞더라도 읽는 쪽 설정 하나에 무너진다. 가로 표가 특히 그렇다 — 한 행이
   접히는 순간 뒷조각이 아무 열에나 떨어져 표 전체가 무의미해진다. 표가 필요한 데이터는
@@ -65,7 +73,7 @@ import re
 from dataclasses import dataclass
 from numbers import Real
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -634,13 +642,157 @@ def humanize_tool_names(text: str) -> str:
 
 
 def clamp(text: str, limit: int = TELEGRAM_MESSAGE_LIMIT) -> str:
-    """앞뒤 공백을 털고 상한에 맞춰 자른다. 자르면 말줄임 접미사를 붙인다."""
+    """앞뒤 공백을 털고 상한에 맞춰 자른다. 자르면 말줄임 접미사를 붙인다.
+
+    한 통에 담아야 하는 문장에만 쓴다 — 각주 자체의 상한(REASONING_FOOTNOTE_MAX_CHARS),
+    그리고 여러 통으로 나눌 수 없는 텔레그램 조작(editMessageText, 나중에 지울 메시지)이
+    그것이다. 사용자에게 나가는 본문은 자르지 않고 :func:`split_for_telegram`으로 나눈다
+    (#313).
+    """
     stripped = text.strip()
     if len(stripped) <= limit:
         return stripped
     # max(0, ...): limit이 말줄임 접미사보다 짧아도 음수 인덱스로 뒤집히지 않게 한다.
     keep = max(0, limit - len(TELEGRAM_TRUNCATION_SUFFIX))
     return f"{stripped[:keep]}{TELEGRAM_TRUNCATION_SUFFIX}"
+
+
+# ---- 분할 전송 (#313) ----
+
+# 조각 머리표. "📄 2/3"처럼 조각마다 첫 줄에 붙는다.
+#
+# 표시가 필요한 이유는 두 가지다. 나눠 보내면 둘째 조각부터는 배너(🔔 알림)도 제목 줄도
+# 없어서 앞 메시지의 계속인지 새 알림인지 구분이 안 된다. 그리고 전송이 도중에 실패하면
+# 일부만 도착하는데(#247 경로), 번호가 없으면 그 사실이 다시 조용해진다 — 잘림을 없애려는
+# 이 변경이 같은 자리에 같은 문제를 만든다. 1/3과 3/3만 받은 사용자는 무엇이 빠졌는지 안다.
+MESSAGE_PART_MARK = "📄"
+# 머리표 자리를 확보하려면 조각 수를 알아야 하고, 조각 수는 확보한 자리에 따라 달라진다.
+# 몇 번 돌리면 고정점에 닿는다 — 자릿수가 늘 때(9→10)만 한 번 더 돈다.
+_PART_MARKER_FIT_ROUNDS = 5
+_PARAGRAPH_SPLIT_RE = re.compile(r"\n{2,}")
+
+
+def part_marker(index: int, total: int) -> str:
+    return f"{MESSAGE_PART_MARK} {index}/{total}"
+
+
+def _pack(
+    units: list[str],
+    separator: str,
+    limit: int,
+    split_unit: Callable[[str], list[str]],
+) -> list[str]:
+    """단위를 순서대로 채워 넣되 상한을 넘기지 않는다. 단위 하나가 상한을 넘으면 쪼갠다.
+
+    "단위"는 호출부가 정한다 — 문단, 줄, 낱말 순으로 같은 규칙이 한 겹씩 내려간다.
+    핵심 성질은 **상한 안에 들어가는 단위는 절대 쪼개지지 않는다**는 것이고, 그래서
+    문단 단위로 부르면 상한보다 짧은 문단은 조각 경계를 넘지 않는다. 각주가 마지막
+    조각에 통째로 남는 근거가 이 성질이다 (:func:`render` 독스트링 참조).
+    """
+    parts: list[str] = []
+    current = ""
+    for unit in units:
+        candidate = f"{current}{separator}{unit}" if current else unit
+        if len(candidate) <= limit:
+            current = candidate
+            continue
+        if current:
+            parts.append(current)
+            current = ""
+        if len(unit) <= limit:
+            current = unit
+            continue
+        # 한 겹 아래로 내려간 분할이 빈 목록을 돌려줄 수 있다. 공백만으로 된 긴 줄이
+        # 그렇다 — line.split(" ")가 전부 빈 문자열이라 아래 겹이 채울 것을 못 찾는다.
+        # 그대로 두면 pieces[-1]이 IndexError로 죽고, 그 예외는 send_text의 try 바깥에서
+        # 터져 "전송 실패는 False"라는 전송 계층의 계약을 깬다 (PR #328 리뷰).
+        # 낱말 단위 통짜 분할은 unit이 상한보다 길다는 이 자리의 전제만으로 항상 비지 않는다.
+        pieces = split_unit(unit) or _split_word(unit, limit)
+        parts.extend(pieces[:-1])
+        current = pieces[-1]
+    if current:
+        parts.append(current)
+    return parts
+
+
+def _split_word(word: str, limit: int) -> list[str]:
+    """낱말 하나가 상한을 넘는 경우. 여기서는 낱말 가운데를 자르는 수밖에 없다."""
+    return [word[index : index + limit] for index in range(0, len(word), limit)]
+
+
+def _split_line(line: str, limit: int) -> list[str]:
+    return _pack(line.split(" "), " ", limit, lambda word: _split_word(word, limit))
+
+
+def _split_paragraph(paragraph: str, limit: int) -> list[str]:
+    return _pack(paragraph.split("\n"), "\n", limit, lambda line: _split_line(line, limit))
+
+
+def _split_chunks(text: str, limit: int) -> list[str]:
+    """머리표를 빼고 본문만 조각으로 나눈다. 경계는 문단 → 줄 → 낱말 순으로 양보한다.
+
+    줄 가운데를 가르지 않는 것이 이 순서의 목적이다. 이 봇은 ``parse_mode``를 쓰지
+    않으므로 조각 경계가 깨뜨릴 마크다운 서식은 애초에 없다 — 대신 깨질 수 있는 것은
+    이 레포가 평문에서 구조를 지키는 유일한 장치, 즉 나열 표시다. LIST_MARKER 규칙은
+    "표시 없는 줄은 앞 줄의 계속"인데(모듈 독스트링), 줄 가운데에서 조각이 끊기면 다음
+    조각의 첫 줄이 표시 없이 시작해 앞 조각을 못 본 눈에는 그냥 잘린 문장으로 보인다.
+    한 줄이 상한보다 길 때만 그 안에서 낱말 경계를 찾고, 그마저 없으면 낱말을 가른다.
+
+    문단을 ``\\n{2,}``로 갈라 ``\\n\\n``로 다시 붙이므로 빈 줄이 셋 이상 연속된 자리는
+    두 줄로 정규화된다. 나뉠 때만 일어나는 정규화라 같은 내용이 길이에 따라 다르게
+    보일 수 있지만(PR #328 리뷰 nitpick), 상한 안의 메시지까지 정규화하면 자를 필요도
+    나눌 필요도 없는 메시지의 내용을 이 함수가 바꾸게 된다. render를 지나온 문장은
+    sanitize_markdown이 이미 빈 줄을 둘로 접어 두므로 실제로 갈리는 경로는
+    MCP 원문을 그대로 싣는 경우뿐이다.
+    """
+    chunks = _pack(
+        _PARAGRAPH_SPLIT_RE.split(text),
+        "\n\n",
+        limit,
+        lambda paragraph: _split_paragraph(paragraph, limit),
+    )
+    return [stripped for stripped in (chunk.strip() for chunk in chunks) if stripped]
+
+
+def split_for_telegram(
+    text: Any, limit: int = TELEGRAM_MESSAGE_LIMIT
+) -> list[str]:
+    """상한을 넘는 메시지를 잘라내지 않고 조각으로 나눈다 (#313).
+
+    상한 안에 들어가면 원문 한 개짜리 목록을 그대로 돌려준다 — 짧은 메시지는 이 함수가
+    지나가도 달라지는 것이 없어야, 전송 계층이 모든 메시지를 여기로 통과시킬 수 있다.
+
+    나뉘었을 때만 조각마다 머리표("📄 2/3")가 붙는다. 머리표는 상한 안에서 자리를
+    확보하므로 조각은 여전히 상한을 넘지 않는다. 확보량 계산이 고정점에 닿지 못하는
+    극단(조각 수의 자릿수가 계속 늘어나는 경우)에서는 조각이 머리표 길이만큼 상한을
+    넘을 수 있는데, 이 상한(4000)은 텔레그램의 실제 상한(4096)보다 96자 낮게 잡혀 있어
+    전송이 거부되지는 않는다.
+    """
+    body = (text if isinstance(text, str) else str(text)).strip()
+    # 0 이하의 상한은 쪼갤 단위 자체를 정의하지 못한다(낱말을 0자씩 자를 수 없다).
+    # 호출부가 그런 값을 줄 일은 없지만, 여기서 막지 않으면 ValueError로 터진다.
+    limit = max(1, limit)
+    if len(body) <= limit:
+        return [body]
+
+    reserve = 0
+    chunks = _split_chunks(body, limit)
+    for _ in range(_PART_MARKER_FIT_ROUNDS):
+        # 머리표는 조각마다 폭이 같다(총 개수의 자릿수가 최대). 최댓값으로 재면 된다.
+        needed = len(part_marker(len(chunks), len(chunks))) + len("\n")
+        if needed <= reserve:
+            break
+        reserve = needed
+        chunks = _split_chunks(body, max(1, limit - reserve))
+
+    if not chunks:
+        return [body]
+    if len(chunks) == 1:
+        return chunks
+    return [
+        f"{part_marker(index, len(chunks))}\n{chunk}"
+        for index, chunk in enumerate(chunks, 1)
+    ]
 
 
 def reasoning_footnote(routed_agent: Any, tools_used: Any) -> str:
@@ -773,38 +925,41 @@ def render(
     *,
     reasoning: str = "",
     question: str = "",
-    limit: int = TELEGRAM_MESSAGE_LIMIT,
 ) -> str:
     """텔레그램으로 나가기 직전의 단일 통과 지점 (#297).
 
-    순서: 마크다운 정리 → 도구명 한국어화 → 틀 적용 → 용어 각주 → 추론 각주 → 길이 예산.
+    순서: 마크다운 정리 → 도구명 한국어화 → 틀 적용 → 용어 각주 → 추론 각주.
 
     ``question``은 이 메시지를 부른 사용자 입력이다. 거기 이미 나온 용어는 설명하지
     않는다(term_footnote 참조). 봇이 먼저 거는 메시지는 그냥 비워 둔다.
 
-    길이 예산은 뒤에서부터 확보한다. 추론 각주(근거) 자리를 먼저 잡고, 그다음 용어 각주,
-    남은 자리에 본문을 맞춘다 — 합친 뒤에 자르면 긴 답변에서만 각주가 통째로 사라져,
-    정작 근거와 설명이 필요한 메시지에서만 근거와 설명이 없어진다 (#260에서 온 규칙).
-
     용어 스캔 대상은 본문뿐이다. 추론 각주에는 도구 라벨("KIS 시세·계좌 조회")이 들어
     있어 함께 스캔하면 사용자가 쓰지도 않은 말에 설명이 붙는다.
 
-    ``reasoning``이 비어 있고 걸린 용어가 없으면 결과는 ``clamp(본문)``과 정확히 같다 —
-    #260 이전 경로의 동작이 그대로 유지된다.
+    **길이 예산이 없다** (#313). #260부터 이 함수는 각주 자리를 뒤에서부터 확보하고
+    남은 자리에 본문을 잘라 넣었다. 각주를 살리는 데는 성공했지만 대가로 본문 뒤가
+    사라졌고, 그 손실은 사용자에게 보이지 않았다. 텔레그램은 여러 통으로 보낼 수
+    있으므로 자를 이유가 없다 — 이제 이 함수는 상한을 모른 채 전체 문장을 조립하고,
+    상한에 맞추는 일은 전송 직전의 :func:`split_for_telegram`이 한다.
+
+    각주가 마지막 조각에 남는다는 #260의 계약은 예산이 아니라 **조립 순서와 분할 규칙**이
+    함께 지킨다. 각주는 본문 뒤에 빈 줄로 떨어진 별도 문단이고, 분할은 상한 안에 들어가는
+    문단을 쪼개지 않는다(:func:`_pack`). 각주가 본문보다 **뒤**라는 것은 이 함수가
+    보장하지만, 각주 한 덩이가 **통째로** 실린다는 것은 그 덩이가 상한보다 짧을 때만
+    성립한다. 추론 각주는 clamp로 REASONING_FOOTNOTE_MAX_CHARS에 묶여 항상 짧다.
+    용어 각주는 줄 수만 TERM_FOOTNOTE_MAX_ENTRIES로 묶이고 설명 길이는
+    ``terms.json``에 달려 있다 — 현재 최댓값은 59자라 여유가 크지만, 그 파일은 검수
+    대기 중인 LLM 초안이므로 코드가 강제하는 상한은 아니다 (PR #328 리뷰). 설명이
+    상한을 넘길 만큼 길어지면 용어 각주가 두 조각에 걸치고 추론 각주는 여전히
+    맨 뒤에 남는다. 여기에 clamp를 걸지 않는 것은 #313이 없애려던 "보이지 않는
+    잘림"을 각주에 다시 들이는 일이기 때문이다 — 상한을 걸어야 한다면 설명을
+    자르는 것이 아니라 사전 쪽에 길이 규칙을 두는 것이 맞다.
+
+    용어 각주를 본문보다 먼저 포기하던 규칙도 함께 없앴다. 자리를 다투지 않으니
+    포기시킬 이유가 없다.
     """
     body = template_for(kind).apply(
         humanize_tool_names(sanitize_markdown(str(text)))
     )
-
-    reasoning_block = f"\n\n{reasoning}" if reasoning else ""
-    budget = limit - len(reasoning_block)
-
-    terms = term_footnote(body, level=level, question=question)
-    term_block = f"\n\n{terms}" if terms else ""
-    # 용어 각주는 근거가 아니라 편의다. 자리가 모자라면 본문보다 먼저 포기한다 —
-    # 본문 예산을 절반 아래로 밀어내면서까지 설명을 남길 이유가 없다.
-    if len(term_block) > budget // 2:
-        term_block = ""
-    budget -= len(term_block)
-
-    return f"{clamp(body, budget)}{term_block}{reasoning_block}"
+    blocks = [body, term_footnote(body, level=level, question=question), reasoning]
+    return "\n\n".join(block for block in blocks if block)
