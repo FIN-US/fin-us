@@ -2,6 +2,7 @@ import ast
 import asyncio
 import inspect
 import logging
+import os
 import pathlib
 import re
 import typing
@@ -1966,12 +1967,24 @@ async def test_llm_chat_nat_answer_preserves_metadata_through_masking(monkeypatc
 
 
 def test_no_bypass_of_llm_chat_masking_layer():
-    """provider별 구현(_llm_openai_chat 등)은 llm_chat() 밖에서 직접 호출되면 안 된다.
+    """마스킹 계층을 우회하는 새 호출 경로가 backend/ 안에 생기면 이 테스트가 실패한다.
 
-    _llm_openai_chat/_llm_anthropic_chat/_llm_ollama_chat/_llm_nat_chat은 마스킹되지
-    않은 원문을 그대로 외부로 보낸다 - llm_chat()만이 mask_pii를 거친 뒤 이 함수들을
-    호출해야 한다. AST로 backend/services.py 전체를 스캔해, 이 함수들이 llm_chat 함수
-    본문 밖에서 쓰이면(=마스킹 계층을 우회하는 새 경로) 이 테스트가 실패한다.
+    두 가지를 함께 못 박는다.
+
+    1) provider별 구현(_llm_openai_chat/_llm_anthropic_chat/_llm_ollama_chat/
+       _llm_nat_chat)은 마스킹되지 않은 원문을 그대로 외부로 보낸다. 이 넷은
+       services.py의 llm_chat() 안에서만 참조돼야 한다.
+    2) 외부 LLM SDK 클라이언트 생성자(AsyncOpenAI/AsyncAnthropic)는 위 provider
+       함수들 안에서만 만들어져야 한다. 이 단언이 없으면 (1)의 하드코딩된 이름
+       목록을 그대로 빠져나가는 우회 경로 두 개가 열려 있다 — "새 provider 함수
+       (_llm_gemini_chat 등)를 추가한다"와 "다른 모듈에서 AsyncOpenAI(...)를 직접
+       만들어 부른다".
+
+       2026-08 시점 실제 위치(직접 grep으로 확인): services.py:758 AsyncOpenAI(
+       -> _llm_openai_chat, 752-767행), 774 AsyncAnthropic(-> _llm_anthropic_chat,
+       768-786행), 788 AsyncOpenAI(-> _llm_ollama_chat, 787-811행). 10·11행의
+       `from openai import AsyncOpenAI` 같은 import 문은 ast.Name이 아니라 alias
+       노드라 참조로 집계되지 않는다.
 
     호출(ast.Call)뿐 아니라 **이름 참조(ast.Name)** 를 검사하므로 다음 우회 경로까지
     잡는다:
@@ -1984,8 +1997,28 @@ def test_no_bypass_of_llm_chat_masking_layer():
     ast.Attribute 분기(`services._llm_openai_chat()`처럼 속성 접근으로 부르는 형태)는
     visit_Name으로 잡히지 않으므로 visit_Call에 남겨 둔다.
 
-    스캔 범위: backend/*.py (tests/ 제외). _llm_*_chat은 services.py 전용 구현이므로
-    다른 backend 파일에서 참조되는 순간 곧바로 마스킹 우회가 된다.
+    스코프는 `파일경로::함수명`으로 기록한다. 파일을 붙이지 않으면 다른 모듈에
+    llm_chat이라는 동명 함수를 만들어 그 안에서 provider를 부르는 우회가 통과한다.
+
+    스캔 범위: backend/ 이하 모든 .py를 **재귀** 스캔하되 아래 규칙으로 배제한다.
+    배제는 파일 하드코딩 나열이 아니라 "디렉터리 종류"에 대한 규칙이므로, 새로
+    생기는 디렉터리(backend/scripts/처럼)는 별도 조치 없이 자동으로 스캔에 들어온다:
+    - 점으로 시작하는 디렉터리(.venv/.pytest_cache): 서드파티 설치본과 캐시다.
+      스캔하면 수천 개 파일을 파싱하느라 테스트가 몇 분씩 걸리고 무관한 코드에서
+      오탐이 난다.
+    - __pycache__: 소스가 아니다.
+    - tests/: 테스트는 provider 함수를 의도적으로 monkeypatch·참조한다(이 테스트
+      자신과 형제 테스트를 포함해). 배제하지 않으면 자기 자신 때문에 실패한다.
+    배제 디렉터리는 os.walk에서 **내려가기 전에 가지치기**하므로 .venv 안의 파일은
+    열거조차 하지 않는다(속도). 배제된 디렉터리 이름 집합과 스캔 앵커 파일을 아래에서
+    단언해, 규칙이 망가지거나 새 디렉터리가 조용히 배제되면 red가 되게 한다.
+
+    넓힌 뒤에도 남는 사각지대(이 테스트가 잡지 못하는 것):
+    - backend/ 밖(예: mcp-trading/)에서의 참조
+    - import 시 이름을 바꾸는 경우: `from openai import AsyncOpenAI as _OAI`
+    - SDK를 쓰지 않고 httpx 등으로 provider HTTP API를 직접 때리는 코드
+      (감시 대상 이름이 소스에 나타나지 않는다)
+    - 동적 참조: `getattr(services, "_llm_openai_chat")`, importlib
     """
     backend_dir = pathlib.Path(inspect.getfile(services)).parent
     provider_fns = {
@@ -1994,10 +2027,40 @@ def test_no_bypass_of_llm_chat_masking_layer():
         "_llm_ollama_chat",
         "_llm_nat_chat",
     }
-    callers: dict[str, set[str]] = {fn: set() for fn in provider_fns}
+    sdk_ctors = {"AsyncOpenAI", "AsyncAnthropic"}
+    watched = provider_fns | sdk_ctors
+    refs: dict[str, set[str]] = {name: set() for name in watched}
 
-    class _CallerVisitor(ast.NodeVisitor):
+    def _is_excluded_dir(name: str) -> bool:
+        """스캔에서 뺄 디렉터리 규칙. 여기 해당하지 않으면 전부 스캔한다."""
+        return name.startswith(".") or name in {"__pycache__", "tests"}
+
+    py_files: list[pathlib.Path] = []
+    excluded_dirs: set[str] = set()
+    for root, dirnames, filenames in os.walk(backend_dir):
+        for name in list(dirnames):
+            if _is_excluded_dir(name):
+                excluded_dirs.add(name)
+                dirnames.remove(name)  # 배제 디렉터리 안으로는 내려가지 않는다
+        py_files.extend(pathlib.Path(root, name) for name in filenames if name.endswith(".py"))
+
+    known_excluded = {".venv", ".pytest_cache", "__pycache__", "tests"}
+    assert excluded_dirs <= known_excluded, (
+        f"배제 규칙에 새 디렉터리 {sorted(excluded_dirs - known_excluded)}가 조용히 걸렸습니다. "
+        "의도한 배제라면 known_excluded에 추가하고, 아니라면 규칙을 고쳐 스캔 범위에 넣으세요."
+    )
+
+    scanned = {path.relative_to(backend_dir).as_posix() for path in py_files}
+    # 재귀 스캔이 깨지면(예: rglob -> glob 회귀) 조용히 통과하지 않도록 앵커를 못 박는다.
+    # scripts/는 과거 비재귀 glob("*.py") 시절의 실제 사각지대였다.
+    for anchor in ("services.py", "scripts/build_signal_eval_set.py"):
+        assert anchor in scanned, (
+            f"{anchor}이 스캔 범위에서 빠졌습니다 — backend/ 재귀 스캔이 깨졌습니다."
+        )
+
+    class _RefVisitor(ast.NodeVisitor):
         def __init__(self):
+            self.rel = ""
             self.func_stack: list[str] = []
 
         def _enter(self, node):
@@ -2012,8 +2075,9 @@ def test_no_bypass_of_llm_chat_masking_layer():
             self._enter(node)
 
         def _record(self, name):
-            if name in provider_fns:
-                callers[name].add(self.func_stack[-1] if self.func_stack else "<module>")
+            if name in watched:
+                scope = self.func_stack[-1] if self.func_stack else "<module>"
+                refs[name].add(f"{self.rel}::{scope}")
 
         def visit_Name(self, node):
             # 호출이 아닌 참조(별칭 대입·콜백 전달)도 우회 경로가 될 수 있다.
@@ -2028,18 +2092,31 @@ def test_no_bypass_of_llm_chat_masking_layer():
                 self._record(node.func.attr)
             self.generic_visit(node)
 
-    visitor = _CallerVisitor()
-    for py_file in sorted(backend_dir.glob("*.py")):
-        source = py_file.read_text(encoding="utf-8")
-        tree = ast.parse(source, filename=str(py_file))
-        visitor.visit(tree)
+    visitor = _RefVisitor()
+    for py_file in sorted(py_files):
+        visitor.rel = py_file.relative_to(backend_dir).as_posix()
+        visitor.visit(ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file)))
 
-    for fn_name, caller_set in callers.items():
-        assert caller_set == {"llm_chat"}, (
-            f"{fn_name}이 llm_chat() 밖({caller_set})에서도 참조/호출됩니다. "
-            "마스킹 계층(mask_pii/unmask_pii)을 우회하는 새 호출 경로가 생긴 것으로 보입니다 — "
-            "PII가 마스킹되지 않은 채 외부 LLM provider로 나갈 수 있습니다."
+    for fn_name in sorted(provider_fns):
+        assert refs[fn_name] == {"services.py::llm_chat"}, (
+            f"{fn_name}이 services.py의 llm_chat() 밖({sorted(refs[fn_name])})에서도 "
+            "참조/호출됩니다. 마스킹 계층(mask_pii/unmask_pii)을 우회하는 새 호출 경로가 "
+            "생긴 것으로 보입니다 — PII가 마스킹되지 않은 채 외부 LLM provider로 나갈 수 있습니다."
         )
+
+    allowed_sdk_scopes = {f"services.py::{fn}" for fn in provider_fns}
+    for ctor in sorted(sdk_ctors):
+        assert refs[ctor], (
+            f"{ctor} 참조가 backend/ 어디에도 없습니다. SDK를 교체했다면 sdk_ctors를 "
+            "갱신하세요 — 그대로 두면 이 가드가 아무것도 검사하지 않습니다."
+        )
+        assert refs[ctor] <= allowed_sdk_scopes, (
+            f"{ctor}가 provider 함수 밖({sorted(refs[ctor] - allowed_sdk_scopes)})에서 "
+            "생성됩니다. llm_chat()의 마스킹을 거치지 않고 외부 LLM에 직접 붙는 경로입니다 — "
+            "새 provider는 llm_chat() 안에서 분기하도록 만들고 provider_fns에 등록하세요."
+        )
+
+
 # --- #298: 신호 유의성 점수화 -----------------------------------------------
 
 
