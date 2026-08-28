@@ -984,7 +984,7 @@ async def test_buy_command_includes_current_price_line_when_quote_has_header():
         if tool_name == "get_stock_quote":
             return "[삼성전자] 현재가 시세\n- 현재가: 354,000원\n- 전일 대비: +1,000 (0.28%)"
         if tool_name == "get_balance":
-            return "[계좌 잔고 현황]\n- 거래가능금액: 5,546,116원"
+            return "[계좌 잔고 현황]\n- 예수금: 5,546,116원"
         raise AssertionError(f"unexpected tool: {tool_name}")
 
     notifier = FakeNotifier()
@@ -1000,7 +1000,7 @@ async def test_buy_command_includes_current_price_line_when_quote_has_header():
 
     assert "[삼성전자] 현재가 시세" not in notifier.messages[-1]
     assert "- 현재가: 354,000원" in notifier.messages[-1]
-    assert "- 거래가능금액: 5,546,116원" in notifier.messages[-1]
+    assert "- 예수금: 5,546,116원" in notifier.messages[-1]
 
 
 @pytest.mark.asyncio

@@ -26,6 +26,10 @@ import {
   formatOrderResult,
 } from "./order.js";
 import { submitOrder } from "./order-submit.js";
+import {
+  buildOrderableCashParams,
+  formatOrderableCashReport,
+} from "./orderable-cash.js";
 import { resolveStock } from "./stock-master.js";
 
 // Redirect console.log to console.error to prevent breaking MCP JSON-RPC on stdout
@@ -74,6 +78,16 @@ const BALANCE_RLZ_PL_MAX_PAGES = 50;
 const BALANCE_RLZ_PL_TIME_BUDGET_MS = 90_000;
 // 이슈 #210: DAILY_CCLD_PAGE_DELAY_MS와 같은 이유로 0. 실측 전까지 비워둔다.
 const BALANCE_RLZ_PL_PAGE_DELAY_MS = 0;
+const PSBL_ORDER_PATH = "/uapi/domestic-stock/v1/trading/inquire-psbl-order";
+// 매수가능조회 TR ID. 연속조회가 없는 단건 조회라 페이지 상한·시간 예산이 없다.
+// 오버라이드 이름은 KIS_TR_ID_DAILY_CCLD / KIS_TR_ID_BALANCE_RLZ_PL과 같은 관례를 따른다
+// (finus_nat의 _MCP_ENV_ALLOWED_PREFIXES가 "KIS_" 접두사를 통째로 통과시키므로 NAT
+// 경로에도 그대로 전달된다 — finus_nat/tests/test_env_whitelist.py).
+const KIS_PSBL_ORDER_TR_ID = (() => {
+  const override = (process.env.KIS_TR_ID_PSBL_ORDER || process.env.FINUS_KIS_TR_ID_PSBL_ORDER || "").trim();
+  if (override) return override;
+  return KIS_URL?.includes("openapivts") ? "VTTC8908R" : "TTTC8908R";
+})();
 const TOKEN_TTL_MARGIN_MS = 60_000;
 const TOKEN_CACHE_PATH = process.env.KIS_TOKEN_CACHE_PATH || path.join(
   os.tmpdir(),
@@ -288,6 +302,44 @@ async function getBalance() {
     { output1: rows, output2: summary ? [summary] : [] },
     { pages, truncated },
   );
+}
+
+async function getOrderableCash(args = {}) {
+  requireKisCredentials({ accountRequired: true });
+
+  const stock = resolveStock(args?.stock_name);
+  const orderType = String(args?.order_type ?? "MARKET").trim().toUpperCase();
+  if (!["LIMIT", "MARKET"].includes(orderType)) {
+    throw new Error("order_type은 LIMIT 또는 MARKET 중 하나여야 합니다.");
+  }
+
+  // 지정가 기준일 때만 단가가 의미를 갖는다. 시장가 기준이면 KIS가 ORD_UNPR을 무시하므로
+  // 여기서도 0으로 눕힌다 — 사용자가 넘긴 값을 리포트의 "기준 주문유형"에 시장가라고
+  // 적어 놓고 계산에는 쓰는 어긋남을 만들지 않는다.
+  const rawPrice = args?.price ?? 0;
+  const price = Number(rawPrice);
+  if (!Number.isInteger(price) || price < 0) {
+    throw new Error("price는 0 이상의 정수여야 합니다.");
+  }
+  const basisPrice = orderType === "LIMIT" ? price : 0;
+
+  const data = await kisGet(
+    PSBL_ORDER_PATH,
+    KIS_PSBL_ORDER_TR_ID,
+    buildOrderableCashParams(KIS_ACCOUNT_NO, {
+      stockCode: stock.code,
+      price: basisPrice,
+      orderType,
+    }),
+  );
+
+  return formatOrderableCashReport({
+    output: data.output,
+    stock,
+    trId: KIS_PSBL_ORDER_TR_ID,
+    orderType,
+    price: basisPrice,
+  });
 }
 
 async function placeOrder(args) {
@@ -546,6 +598,11 @@ const todayOrdersSchema = z.object({
   ccld_dvsn: z.enum(["00", "01", "02"]).optional().describe("00: 전체, 01: 체결, 02: 미체결"),
   sll_buy_dvsn: z.enum(["00", "01", "02"]).optional().describe("00: 전체, 01: 매도, 02: 매수"),
 });
+const orderableCashSchema = z.object({
+  stock_name: z.string().describe("주식 종목명 또는 6자리 종목코드"),
+  order_type: z.enum(["LIMIT", "MARKET"]).optional().describe("가능수량 계산 기준. 기본 MARKET"),
+  price: z.number().int().min(0).optional().describe("지정가. order_type이 LIMIT일 때만 사용"),
+});
 const placeOrderSchema = z.object({
   stock_name: z.string().optional().describe("주식 종목명 또는 6자리 종목코드"),
   stock_code: z.string().describe("KIS API용 종목코드"),
@@ -587,6 +644,10 @@ async function callTradingTool(name, args = {}) {
 
     if (name === "get_balance_rlz_pl") {
       return { content: [{ type: "text", text: await getBalanceRlzPl(args) }] };
+    }
+
+    if (name === "get_orderable_cash") {
+      return { content: [{ type: "text", text: await getOrderableCash(args) }] };
     }
   } catch (error) {
     const prefix = name === "get_balance" ? "잔고 조회 중" : `${name} 실행 중`;
@@ -662,6 +723,17 @@ server.registerTool(
     inputSchema: optionalStockNameSchema,
   },
   async (args) => callTradingTool("get_balance_rlz_pl", args),
+);
+
+server.registerTool(
+  "get_orderable_cash",
+  {
+    description:
+      "매수가능조회(v1_국내주식-007)로 주문가능현금(ord_psbl_cash)과 최대매수금액·수량을 조회합니다. "
+      + "get_balance의 예수금(dnca_tot_amt)과 달리 미수·증거금·미결제 정산이 반영된 값입니다.",
+    inputSchema: orderableCashSchema,
+  },
+  async (args) => callTradingTool("get_orderable_cash", args),
 );
 
 const transport = new StdioServerTransport();

@@ -77,7 +77,7 @@ def _snapshot(**overrides) -> AccountSnapshot:
 BALANCE_TEXT = """[계좌 잔고 현황]
 - 총 평가금액: 20,000,000원
 - 순자산금액: 20,000,000원
-- 거래가능금액: 5,000,000원
+- 예수금: 6,000,000원
 
 [보유 종목 리스트]
 - 삼성전자 (005930) · 3주
@@ -89,6 +89,18 @@ QUOTE_TEXT = """[삼성전자] 현재가 시세
 - 종목코드: 005930
 - 현재가: 74,500원
 - 전일 대비: +1,000 (1.36%)
+"""
+
+# mcp-trading/orderable-cash.js formatOrderableCashReport(). 예수금(BALANCE_TEXT의
+# 6,000,000원)과 일부러 다른 값을 넣는다 — cash가 잔고가 아니라 이 응답에서 온다는 것을
+# 값 자체로 고정하기 위해서다 (#310).
+ORDERABLE_TEXT = """[주문가능조회] 삼성전자 (005930)
+- 조회 TR: TTTC8908R (매수가능조회 v1_국내주식-007, inquire-psbl-order)
+- 기준 주문유형: 시장가
+- 주문가능금액: 5,000,000원
+- 미수없는매수금액: 5,000,000원 | 미수없는매수수량: 67주
+- 최대매수금액: 5,000,000원 | 최대매수수량: 67주
+- 주문가능대용: 0원 | 재사용가능금액: 0원
 """
 
 # mcp-trading/balance.js formatTruncationNote()가 잘림 시 덧붙이는 안내다. 사유 부분만
@@ -347,12 +359,34 @@ def test_parse_proposal_fails_closed(raw: str, expected: str):
 
 
 def test_parse_snapshot_reads_all_four_values():
-    snapshot, error = parse_snapshot(QUOTE_TEXT, BALANCE_TEXT, "005930")
+    snapshot, error = parse_snapshot(QUOTE_TEXT, BALANCE_TEXT, ORDERABLE_TEXT, "005930")
 
     assert error == ""
     assert snapshot == AccountSnapshot(
         current_price=74_500, cash=5_000_000, total_value=20_000_000, holding_qty=3
     )
+
+
+def test_parse_snapshot_takes_cash_from_the_orderable_response_not_the_balance():
+    """#310 — 예수금(dnca_tot_amt)이 아니라 주문가능현금(ord_psbl_cash)을 읽는다.
+
+    두 응답에 서로 다른 값이 들어 있을 때 어느 쪽이 한도 판정에 실리는지가 이 이슈의
+    전부다. 잔고 쪽 6,000,000원을 집으면 두 하드 한도(insufficient_cash, cash_floor)가
+    실제보다 100만원만큼 헐거워진다.
+    """
+    snapshot, error = parse_snapshot(QUOTE_TEXT, BALANCE_TEXT, ORDERABLE_TEXT, "005930")
+
+    assert error == ""
+    assert snapshot is not None
+    assert snapshot.cash == 5_000_000
+
+
+def test_parse_snapshot_fails_closed_when_only_the_balance_has_a_cash_line():
+    """주문가능 응답을 못 읽었는데 잔고의 예수금으로 대신 채우는 길이 없어야 한다."""
+    snapshot, error = parse_snapshot(QUOTE_TEXT, BALANCE_TEXT, "주문가능조회 실패", "005930")
+
+    assert snapshot is None
+    assert "주문가능금액" in error
 
 
 def test_parse_snapshot_rejects_a_truncated_balance():
@@ -365,7 +399,7 @@ def test_parse_snapshot_rejects_a_truncated_balance():
     """
     truncated = BALANCE_TEXT + TRUNCATION_NOTE
 
-    snapshot, error = parse_snapshot(QUOTE_TEXT, truncated, "005930")
+    snapshot, error = parse_snapshot(QUOTE_TEXT, truncated, ORDERABLE_TEXT, "005930")
 
     assert snapshot is None
     assert "끊겨" in error
@@ -385,7 +419,7 @@ async def test_truncated_balance_stops_the_flow_before_the_verifier():
 
 def test_parse_snapshot_reports_zero_holdings_for_an_unheld_stock():
     """보유 섹션은 읽혔는데 그 종목이 없으면 관측된 0주다."""
-    snapshot, error = parse_snapshot(QUOTE_TEXT, BALANCE_TEXT, "035420")
+    snapshot, error = parse_snapshot(QUOTE_TEXT, BALANCE_TEXT, ORDERABLE_TEXT, "035420")
 
     assert error == ""
     assert snapshot is not None
@@ -393,18 +427,18 @@ def test_parse_snapshot_reports_zero_holdings_for_an_unheld_stock():
 
 
 @pytest.mark.parametrize(
-    "quote,balance,expected",
+    "quote,balance,orderable,expected",
     [
-        ("현재가 없음", BALANCE_TEXT, "현재가"),
-        (QUOTE_TEXT, "잔고를 읽지 못했습니다", "계좌 잔고"),
-        (QUOTE_TEXT, "[보유 종목 리스트]\n- 총 평가금액: 100원", "예수금"),
-        (QUOTE_TEXT, "[보유 종목 리스트]\n- 거래가능금액: 100원", "총 평가금액"),
+        ("현재가 없음", BALANCE_TEXT, ORDERABLE_TEXT, "현재가"),
+        (QUOTE_TEXT, "잔고를 읽지 못했습니다", ORDERABLE_TEXT, "계좌 잔고"),
+        (QUOTE_TEXT, BALANCE_TEXT, "주문가능조회에 실패했습니다", "주문가능금액"),
+        (QUOTE_TEXT, "[보유 종목 리스트]\n- 순자산금액: 100원", ORDERABLE_TEXT, "총 평가금액"),
     ],
     ids=["no_price", "no_marker", "no_cash", "no_total"],
 )
-def test_parse_snapshot_fails_closed_on_missing_values(quote, balance, expected):
+def test_parse_snapshot_fails_closed_on_missing_values(quote, balance, orderable, expected):
     """빠진 값을 0으로 채우면 한도가 조용히 무력해진다 — 실패로 끊는다."""
-    snapshot, error = parse_snapshot(quote, balance, "005930")
+    snapshot, error = parse_snapshot(quote, balance, orderable, "005930")
 
     assert snapshot is None
     assert expected in error
@@ -625,7 +659,13 @@ class FakeCooldown:
         self.marked.append((stock_code, rule_id))
 
 
-def _mcp_runner(*, quote=QUOTE_TEXT, balance=BALANCE_TEXT, resolved="삼성전자 (005930, KOSPI)"):
+def _mcp_runner(
+    *,
+    quote=QUOTE_TEXT,
+    balance=BALANCE_TEXT,
+    orderable=ORDERABLE_TEXT,
+    resolved="삼성전자 (005930, KOSPI)",
+):
     calls = []
 
     async def runner(server_params, tool_name, arguments):
@@ -636,6 +676,8 @@ def _mcp_runner(*, quote=QUOTE_TEXT, balance=BALANCE_TEXT, resolved="삼성전�
             return quote
         if tool_name == "get_balance":
             return balance
+        if tool_name == "get_orderable_cash":
+            return orderable
         raise AssertionError(f"unexpected tool: {tool_name}")
 
     runner.calls = calls
@@ -982,6 +1024,49 @@ async def test_snapshot_parse_failure_is_rejected():
 
     assert result.status == "rejected"
     assert [v.code for v in result.violations] == ["snapshot_parse"]
+    assert verify_calls == []
+
+
+@pytest.mark.asyncio
+async def test_snapshot_queries_orderable_cash_alongside_quote_and_balance():
+    """#310 — 스냅샷은 세 조회로 만들어진다. 현금은 잔고가 아니라 매수가능조회에서 온다."""
+    mcp = _mcp_runner()
+
+    result, _ = await _run(mcp=mcp)
+
+    assert result.status == "approved"
+    assert sorted(mcp.calls) == [
+        "get_balance",
+        "get_orderable_cash",
+        "get_stock_quote",
+        "resolve_stock_code",
+    ]
+    assert result.snapshot is not None
+    assert result.snapshot.cash == 5_000_000
+
+
+@pytest.mark.asyncio
+async def test_orderable_cash_query_failure_is_fail_closed():
+    """매수가능조회가 죽으면 예수금으로 갈아타지 않고 거부한다.
+
+    갈아타는 순간 #310이 되돌아온다 — 한도가 확인되지 않은 여유 위에 서게 된다.
+    """
+
+    async def mcp(server_params, tool_name, arguments):
+        if tool_name == "resolve_stock_code":
+            return "삼성전자 (005930, KOSPI)"
+        if tool_name == "get_stock_quote":
+            return QUOTE_TEXT
+        if tool_name == "get_balance":
+            return BALANCE_TEXT
+        if tool_name == "get_orderable_cash":
+            raise RuntimeError("KIS API 오류: 조회할 수 없습니다")
+        raise AssertionError(f"unexpected tool: {tool_name}")
+
+    result, verify_calls = await _run(mcp=mcp)
+
+    assert result.status == "rejected"
+    assert [v.code for v in result.violations] == ["snapshot_failed"]
     assert verify_calls == []
 
 

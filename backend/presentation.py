@@ -286,6 +286,7 @@ MCP_TOOL_LABELS: dict[str, str] = {
     "get_investor_trading": "수급 조회",
     "get_balance": "계좌 잔고 조회",
     "get_balance_rlz_pl": "실현손익 조회",
+    "get_orderable_cash": "주문가능금액 조회",
     "get_today_daily_orders": "당일 주문·체결 조회",
     "get_disclosure_signal": "지분공시 조회",
     "get_earnings_report": "DART 실적 조회",
