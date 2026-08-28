@@ -7,10 +7,10 @@
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Callable, Optional, Sequence
+from typing import Any, Callable, Optional, Sequence, cast
 
-from sqlalchemy import delete, func
-from sqlmodel import Session, select
+from sqlalchemy import CursorResult, delete, func
+from sqlmodel import Session, col, select
 
 from .models import FilteredSignal
 
@@ -117,16 +117,18 @@ class SqliteFilteredSignalRepo:
         )
         with self._session_factory() as session:
             result = session.execute(
-                delete(FilteredSignal).where(FilteredSignal.created_at < cutoff),
+                delete(FilteredSignal).where(col(FilteredSignal.created_at) < cutoff),
                 # 세션에 이미 올라온 객체를 파이썬으로 재평가하지 않는다. 이 세션은
                 # 삭제 직후 버려지므로 동기화할 상태가 없고, 기본 전략("evaluate")은
                 # 조건을 파이썬에서 다시 계산하다 타입 차이로 죽을 수 있다.
                 execution_options={"synchronize_session": False},
             )
             session.commit()
+            # DML의 실행 결과는 CursorResult이지만 Session.execute의 선언 반환형은
+            # 그 상위인 Result라 rowcount가 보이지 않는다.
             # rowcount는 방언에 따라 -1("모름")일 수 있다. 로그 문구가 "-1건 삭제"가
             # 되지 않도록 0으로 눕힌다 — 삭제 자체는 이미 커밋됐다.
-            return max(result.rowcount or 0, 0)
+            return max(cast(CursorResult[Any], result).rowcount or 0, 0)
 
 
 def score_histogram(
@@ -141,24 +143,26 @@ def score_histogram(
     ``since``는 UTC 기준으로 넘긴다. created_at을 UTC로 저장하므로(models 참고)
     다른 시간대의 값을 그대로 넘기면 구간이 어긋난다.
     """
+    # 조건도 정렬도 col()로 컬럼을 명시한다. 모델 필드를 그대로 쓰면 체커에는
+    # 파이썬 값의 비교(bool)로 보여 SQL 표현식 자리에 들어가지 못한다.
     filters = []
     if source is not None:
-        filters.append(FilteredSignal.source == source)
+        filters.append(col(FilteredSignal.source) == source)
     if stock_name is not None:
-        filters.append(FilteredSignal.stock_name == stock_name)
+        filters.append(col(FilteredSignal.stock_name) == stock_name)
     if since is not None:
-        filters.append(FilteredSignal.created_at >= _as_utc_naive(since))
+        filters.append(col(FilteredSignal.created_at) >= _as_utc_naive(since))
 
     bucket_query = select(FilteredSignal.score, func.count()).group_by(
-        FilteredSignal.score
-    ).order_by(FilteredSignal.score)
+        col(FilteredSignal.score)
+    ).order_by(col(FilteredSignal.score))
     summary_query = select(
         func.count(),
         func.min(FilteredSignal.created_at),
         func.max(FilteredSignal.created_at),
     )
     threshold_query = select(FilteredSignal.threshold).distinct().order_by(
-        FilteredSignal.threshold
+        col(FilteredSignal.threshold)
     )
     for condition in filters:
         bucket_query = bucket_query.where(condition)
