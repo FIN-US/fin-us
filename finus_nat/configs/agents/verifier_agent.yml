@@ -31,7 +31,7 @@ general:
       # {"input_message": <제안 프롬프트>} 하나가 곧 transcript 전체다. 즉 프롬프트 본문에
       # 실린 수치는 도구 호출 없이도 게이트를 통과한다. 지금은 build_proposal_prompt가
       # 종목명만 넣어 실질 차이가 없지만, ProposalTrigger.trigger_signal에 수치를 실으면
-      # 그만큼 화이트리스트가 넓어진다 — 스케줄러 룰 트리거(후속 작업)를 붙일 때
+      # 그만큼 화이트리스트가 넓어진다 — 스케줄러 룰 트리거(#314)를 붙일 때
       # trigger_signal은 수치가 아니라 "무엇을 확인하라"는 지시 문구로 넣어야 한다.
       #
       # fe_branch는 ChatRequestOrMessage를 받고 str을 반환하므로
