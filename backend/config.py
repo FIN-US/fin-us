@@ -1,4 +1,5 @@
 import logging
+import math
 import os
 from pathlib import Path
 from dotenv import load_dotenv
@@ -81,8 +82,109 @@ _MCP_ENV_ALLOWED_PREFIXES = ("FIN_US_", "FINUS_KIS_", "KIS_")
 DATABASE_URL = os.environ.get("DATABASE_URL") or f"sqlite:///{_FIN_US_ROOT}/backend/finus.db"
 DB_ECHO = os.getenv("DB_ECHO", "false").lower() == "true"
 
+# 신호 유의성 점수화 (#298).
+# 2차 필터(services.score_signal)가 YES/NO 대신 -3~+3 정수를 받는다.
+# 레인지를 좁게 잡은 것은 의도다 — 경량 모델은 0~100 같은 넓은 축에서 재현성이 없다.
+SIGNAL_SCORE_MIN = -3
+SIGNAL_SCORE_MAX = 3
+
+
+def _warn_bad_env(name: str, raw: str, default: object) -> None:
+    """설정 env를 해석하지 못해 기본값으로 되돌아간 사실을 경고로 남긴다.
+
+    '기본값 복귀'는 앱이 죽지 않게 하지만, 되돌아갔다는 사실 자체가 조용하면 안 된다.
+    한도(#299)에서는 **기본값이 곧 가장 넓은 값**이라 특히 그렇다 —
+    ``ORDER_MAX_ORDER_AMOUNT=500,000``처럼 쉼표를 넣으면 ``int()``가 실패해 기본값
+    100만원, 즉 의도한 한도의 두 배가 걸린다. 임계값(#298)에서는 반대로 감시가
+    조용히 침묵하는 쪽으로 샌다. 같은 레포의 다른 fail-open 지점(stock_code의 마스터
+    로드, scheduler의 잔고 동기화)이 모두 경고를 남기는 것과 같은 이유다.
+    """
+    logger.warning(
+        "%s 값을 해석하지 못해 기본값 %s를 사용합니다 (입력=%r). 의도한 설정이 "
+        "적용되지 않으니 값을 확인하세요.",
+        name,
+        default,
+        raw,
+    )
+
+
+def _int_env_in_range(name: str, default: int, low: int, high: int) -> int:
+    """정수 env를 [low, high]로 강제한다. 값이 없거나 이상하면 default로 되돌린다.
+
+    범위를 벗어난 임계값은 조용히 파이프라인을 망가뜨린다 — 0이면 모든 signal이
+    유의미해져 필터가 사라지고, 4 이상이면 어떤 점수도 통과하지 못해 감시가
+    영구히 침묵한다. 둘 다 "놓침 방지"(REQ-04) 관점에서 사고이므로 받아들이지 않는다.
+    """
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        _warn_bad_env(name, raw, default)
+        return default
+    if not low <= value <= high:
+        _warn_bad_env(name, raw, default)
+        return default
+    return value
+
+
+# |score| >= 이 값이면 유의미로 판정한다. 1이면 약한 호재/악재까지 상세 분석을 태우고,
+# 3이면 대형 이벤트만 통과한다. 기본 2 = "방향이 분명한" 신호부터.
+SIGNAL_SCORE_THRESHOLD = _int_env_in_range("SIGNAL_SCORE_THRESHOLD", 2, 1, SIGNAL_SCORE_MAX)
+
+
+def _int_env(name: str, default: int) -> int:
+    """정수 env를 읽되, 값이 비었거나 정수가 아니면 기본값으로 되돌린다.
+
+    오타 하나로 한도가 0이 되거나(모든 주문 거부) 예외로 앱이 죽는 대신
+    '기본값 복귀'로 고정하되, 되돌아간 사실은 경고로 남긴다.
+    """
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        _warn_bad_env(name, raw, default)
+        return default
+
+
+def _float_env(name: str, default: float) -> float:
+    """실수 env를 읽되, 해석 불가·비유한·음수면 기본값으로 되돌린다.
+
+    #298(임계값)과 #299(한도)가 **같은 함수 하나**를 쓴다. 병합 과정에서 두 벌이
+    생겼다가 뒤엣것이 앞엣것을 가리는 상태가 됐는데, 그때 ORDER_* 실수 설정들만
+    isfinite·음수 가드를 잃었다. 비중·비율 한도에 ``inf``나 음수가 들어가면 그 한도가
+    사실상 사라지므로, 두 쓰임 모두에 같은 가드가 필요하다.
+    """
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        _warn_bad_env(name, raw, default)
+        return default
+    # isfinite로 inf/nan을 함께 막는다. inf를 통과시키면 "기사 간 평가 엇갈림"이
+    # 영구히 침묵하고(#298), 비율 한도에서는 그 한도가 없는 것과 같아진다(#299).
+    # 설정이 조용히 기능 하나를 끄는 것 — _int_env_in_range가 배격한 것과 같은 유형이다.
+    if not math.isfinite(value) or value < 0:
+        _warn_bad_env(name, raw, default)
+        return default
+    return value
+
+
+# 기사별 점수의 표준편차가 이 값 이상이면 "기사 간 평가 엇갈림"을 알림에 표시한다.
+# 기본 1.0 = 7단계 축에서 기사들이 한 칸 넘게 흩어졌다는 뜻.
+SIGNAL_UNCERTAINTY_ALERT_THRESHOLD = _float_env("SIGNAL_UNCERTAINTY_ALERT_THRESHOLD", 1.0)
+
+
 # Redis cache/lock settings for scheduler state.
-REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
+# 기본값이 `localhost`가 아닌 것은 compose의 redis 게시가 루프백 IPv4 전용이기
+# 때문이다(#285). `localhost`가 `::1`로 먼저 풀리는 호스트에서 주소 폴백에 기대지
+# 않는다. `.env.example`과 어긋나면 test_compose_ports.py가 잡는다.
+REDIS_URL = os.environ.get("REDIS_URL", "redis://127.0.0.1:6379/0")
 
 # Telegram urgent alert settings.
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -111,51 +213,10 @@ KIS_REAL_ORDER_ENABLED = _is_truthy_flag(os.environ.get("KIS_REAL_ORDER_ENABLED"
 # 함께 전달되지만, 위반 여부를 판정하는 것은 backend/order_assist.py의 순수 함수다.
 # 전부 env로 덮어쓸 수 있게 두되 기본값은 보수적으로 잡는다 — 미설정 환경에서
 # 한도가 사라지는 것이 아니라 좁은 한도가 걸리는 쪽이 안전하다.
-
-
-def _warn_bad_limit_env(name: str, raw: str, default: object) -> None:
-    """한도 env 파싱 실패를 경고로 남긴다.
-
-    '기본값 복귀'는 앱이 죽지 않게 하지만, 한도에서는 **기본값이 곧 가장 넓은 값**이다
-    (#299 2차 리뷰). ``ORDER_MAX_ORDER_AMOUNT=500,000``처럼 쉼표를 넣으면 ``int()``가
-    실패해 기본값 100만원, 즉 의도한 한도의 두 배가 조용히 걸린다. 같은 레포의 다른
-    fail-open 지점(stock_code의 마스터 로드, scheduler의 잔고 동기화)이 모두 경고를
-    남기는 것과 같은 이유로 여기서도 흔적을 남긴다.
-    """
-    logger.warning(
-        "%s 값을 해석하지 못해 기본값 %s를 사용합니다 (입력=%r). 한도가 의도보다 "
-        "넓어질 수 있으니 값을 확인하세요.",
-        name,
-        default,
-        raw,
-    )
-
-
-def _int_env(name: str, default: int) -> int:
-    """정수 env를 읽되, 값이 비었거나 정수가 아니면 기본값으로 되돌린다.
-
-    오타 하나로 한도가 0이 되거나(모든 주문 거부) 예외로 앱이 죽는 대신
-    '기본값 복귀'로 고정하되, 되돌아간 사실은 경고로 남긴다.
-    """
-    raw = os.environ.get(name, "").strip()
-    if not raw:
-        return default
-    try:
-        return int(raw)
-    except ValueError:
-        _warn_bad_limit_env(name, raw, default)
-        return default
-
-
-def _float_env(name: str, default: float) -> float:
-    raw = os.environ.get(name, "").strip()
-    if not raw:
-        return default
-    try:
-        return float(raw)
-    except ValueError:
-        _warn_bad_limit_env(name, raw, default)
-        return default
+#
+# 읽는 함수(_int_env / _float_env / _warn_bad_env)는 이 파일 위쪽, #298의
+# 임계값 설정과 같은 자리에 있다. 같은 이름의 함수를 여기 한 벌 더 두면 뒤엣것이
+# 앞엣것을 가려 어느 쪽 가드가 걸리는지가 정의 순서에 좌우된다.
 
 
 # 1회 주문 금액 상한(원).

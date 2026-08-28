@@ -5,7 +5,12 @@ from typing import Any
 
 import httpx
 
-from .config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, is_placeholder_secret
+from .config import (
+    TELEGRAM_BOT_TOKEN,
+    TELEGRAM_CHAT_ID,
+    SIGNAL_UNCERTAINTY_ALERT_THRESHOLD,
+    is_placeholder_secret,
+)
 
 logger = logging.getLogger(__name__)
 _TELEGRAM_BOT_URL_RE = re.compile(r"(https://api\.telegram\.org/bot)[^/\s\"]+")
@@ -15,6 +20,12 @@ TELEGRAM_MESSAGE_LIMIT = 4000
 
 URGENT_TELEGRAM_LEVELS = {"high", "critical"}
 TELEGRAM_ALERT_MODES = {"urgent", "all", "off"}
+
+# #298 신호 점수 표시 문자열. 상수로 분리해 둔 것은 출력 계층 작업(#7)이 이 조각을
+# 그대로 감싸거나 다른 채널(웹, 음성)로 옮길 때 문구를 다시 찾아 헤매지 않게 하기
+# 위함이다. 문구를 바꿀 일이 생기면 여기 한 곳만 고친다.
+SIGNAL_SCORE_LABEL = "📊 영향도"
+SIGNAL_DISAGREEMENT_NOTE = "⚠️ 기사 간 평가 엇갈림"
 
 
 def _redact_telegram_bot_token(value: str) -> str:
@@ -244,6 +255,46 @@ def should_send_telegram_alert(
     )
 
 
+def format_signal_score_line(
+    score: Any,
+    reason: Any = None,
+    uncertainty: Any = None,
+    *,
+    uncertainty_threshold: float = SIGNAL_UNCERTAINTY_ALERT_THRESHOLD,
+) -> str | None:
+    """신호 점수 한 줄을 만든다. 점수가 없으면 None (#298).
+
+    ``📊 영향도 -2 (주요 고객 이탈 보도)`` 형태이고, 기사별 점수가 크게 흩어졌으면
+    뒤에 ``⚠️ 기사 간 평가 엇갈림``을 붙인다.
+
+    score가 None이면 줄 자체를 만들지 않는다. "미측정"을 항상 붙이면 필터를 거치지
+    않는 수동 분석 알림까지 오염되는데, analysis_data만 봐서는 "채점 실패(fail-open)"
+    와 "애초에 채점 경로가 아님"을 구분할 수 없다. 둘의 구분이 필요하면 DB의
+    AgentReport.signal_score(null)와 로그를 본다.
+
+    이 함수는 메서드가 아니라 모듈 함수다 — 알림 이외의 출력 계층도 TelegramNotifier
+    인스턴스 없이 같은 문구를 쓸 수 있어야 한다.
+    """
+    if isinstance(score, bool) or not isinstance(score, Real):
+        return None
+
+    # +2/-2로 부호를 명시한다. 0은 "+0"이 어색하므로 그대로 0.
+    score_text = "0" if score == 0 else f"{int(score):+d}"
+    line = f"{SIGNAL_SCORE_LABEL} {score_text}"
+
+    if isinstance(reason, str) and reason.strip():
+        line = f"{line} ({' '.join(reason.split())})"
+
+    if (
+        isinstance(uncertainty, Real)
+        and not isinstance(uncertainty, bool)
+        and uncertainty >= uncertainty_threshold
+    ):
+        line = f"{line} · {SIGNAL_DISAGREEMENT_NOTE}"
+
+    return line
+
+
 def _message_id_from_send_body(body: Any) -> int | None:
     """sendMessage 응답 본문에서 ``message_id``를 뽑는다 (#260).
 
@@ -308,6 +359,15 @@ class TelegramNotifier:
             f"Reason: {reason}",
             f"Urgency: {urgency} - {urgency_reason}",
         ]
+        # #298: 이 알림을 촉발한 signal이 몇 점이었는지. 점수가 없으면 줄이 통째로
+        # 빠진다 — 제목 바로 아래에 넣어 Decision보다 먼저 읽히게 한다.
+        score_line = format_signal_score_line(
+            analysis_data.get("signal_score"),
+            analysis_data.get("signal_reason"),
+            analysis_data.get("signal_uncertainty"),
+        )
+        if score_line is not None:
+            lines.insert(1, score_line)
         if summary:
             lines.append(f"Summary: {summary}")
         return "\n".join(lines)[:TELEGRAM_MESSAGE_LIMIT]

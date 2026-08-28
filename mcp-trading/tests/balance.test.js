@@ -88,6 +88,40 @@ test("fetchAllBalance concatenates holdings across multiple continuation pages",
   assert.deepEqual(calls[1], { ctxAreaFk100: "FK1", ctxAreaNk100: "NK1", trCont: "N" });
 });
 
+// 이슈 #210: fetchAllPaged에 pageDelayMs 옵션이 생겼지만 fetchAllBalance는 이를 넘기지
+// 않는다(기본값 0 유지) — PR #200의 수용 기준("fetchAllBalance의 관측 가능한 동작이
+// 전부 불변일 것")을 이어받는 이 작업의 핵심 조건. fetchAllBalance는 pageDelayMs/sleep을
+// 주입받을 방법이 없으므로 직접 스파이할 수 없고, 대신 여러 페이지를 지연 없이
+// 실행했을 때 실제 벽시계 시간이 거의 걸리지 않는지로 회귀를 방어한다 — 만약 나중에
+// 누군가 실수로 fetchAllBalance에 pageDelayMs를 하드코딩해 넣으면 이 테스트가 느려져 실패한다.
+test("fetchAllBalance runs across multiple pages with no page-to-page delay (regression guard for issue #210)", async () => {
+  const totalPages = 5;
+  let calls = 0;
+  const fetchPage = async () => {
+    calls += 1;
+    return {
+      body: {
+        output1: [{ prdt_name: `종목${calls}`, pdno: String(calls).padStart(6, "0") }],
+        output2: calls === 1 ? [{ tot_evlu_amt: "1" }] : [],
+        ctx_area_fk100: calls < totalPages ? `FK${calls}` : "",
+        ctx_area_nk100: calls < totalPages ? `NK${calls}` : "",
+      },
+      trCont: "F",
+    };
+  };
+
+  const startedAt = Date.now();
+  const result = await fetchAllBalance(fetchPage, { maxPages: 20, timeBudgetMs: 60_000 });
+  const elapsedMs = Date.now() - startedAt;
+
+  assert.equal(calls, totalPages);
+  assert.equal(result.pages, totalPages);
+  assert.equal(result.truncated, "no_cursor");
+  // 페이지 간 지연이 없다면 5페이지 모두 수 ms 안에 끝난다. 지연이 하나라도 붙으면
+  // (예: 실수로 pageDelayMs를 하드코딩) 이 여유(500ms)를 넘긴다.
+  assert.ok(elapsedMs < 500, `elapsedMs(${elapsedMs})가 500ms 미만이어야 함 — 페이지 간 지연이 없어야 한다`);
+});
+
 test("fetchAllBalance stops and reports truncation when the page cap is hit", async () => {
   let calls = 0;
   const fetchPage = async () => {
