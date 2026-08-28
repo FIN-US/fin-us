@@ -27,6 +27,7 @@ from backend.presentation import (  # noqa: E402
     KIND_QUOTE,
     LEVEL_BEGINNER,
     LEVEL_INTERMEDIATE,
+    load_terms,
     reasoning_footnote,
     render,
 )
@@ -281,7 +282,9 @@ lines = [
     "",
     "## 아직 사람이 정해야 하는 것",
     "",
-    "- `terms.json`의 설명 48개는 LLM 초안이다. 제도 수치와 표현을 검수해야 한다",
+    # 개수를 사전에서 직접 센다. 손으로 적어 두면 표제어가 늘 때마다 낡는다 — 이 스크립트가
+    # 없애려던 "낡은 표제어 서술"(위 모듈 docstring)이 정확히 이 자리에서 다시 났다 (#310).
+    f"- `terms.json`의 설명 {len(load_terms())}개는 LLM 초안이다. 제도 수치와 표현을 검수해야 한다",
     "  (파일 맨 위 `_readme`에 기준이 있다).",
     "- 8번처럼 4000자를 넘는 답변은 지금 잘린다. 분할 전송으로 바꾸는 건 후속 과제다.",
     "",
