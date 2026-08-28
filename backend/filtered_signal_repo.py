@@ -4,6 +4,7 @@
 클래스가 맡고, 집계는 요청 세션 위에서 도는 API가 쓰므로 세션을 인자로 받는 함수로
 둔다 — /api/v1/db/* 라우트들이 이미 요청 세션에 직접 질의하는 방식과 맞춘다.
 """
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Optional, Sequence
@@ -12,6 +13,8 @@ from sqlalchemy import delete, func
 from sqlmodel import Session, select
 
 from .models import FilteredSignal
+
+logger = logging.getLogger(__name__)
 
 
 def _as_utc_naive(value: datetime) -> datetime:
@@ -72,7 +75,7 @@ class SqliteFilteredSignalRepo:
         threshold: int,
         reason: Optional[str] = None,
         uncertainty: Optional[float] = None,
-    ) -> Optional[FilteredSignal]:
+    ) -> None:
         """걸러진 신호 한 건의 채점 결과를 남긴다. ``score``가 None이면 남기지 않는다.
 
         점수 없이 걸러지는 경로가 실제로 있다 — 본문이 비었거나 직전과 같은 signal은
@@ -82,7 +85,7 @@ class SqliteFilteredSignalRepo:
         행은 전부 "모델이 실제로 채점했고 그 점수가 임계값에 못 미쳤다"는 뜻이다.
         """
         if score is None:
-            return None
+            return
 
         with self._session_factory() as session:
             row = FilteredSignal(
@@ -95,8 +98,6 @@ class SqliteFilteredSignalRepo:
             )
             session.add(row)
             session.commit()
-            session.refresh(row)
-            return row
 
     async def purge_expired(
         self,
@@ -187,7 +188,21 @@ def fill_score_axis(
 
     집계 자체는 본 적 없는 점수를 지어내지 않는다. 축이 필요한 표시 계층만 이 함수를
     거친다.
+
+    축 밖의 점수는 표시할 자리가 없어 버려지는데, 그러면 응답의 total과 buckets의 합이
+    어긋난다. 지금은 채점이 -3~+3으로 clamp되어(services._coerce_signal_score) 도달할
+    수 없는 상태지만, 그 clamp가 사라지면 무증상으로 깨지므로 버릴 때 로그를 남긴다.
     """
+    out_of_axis = [bucket for bucket in buckets if not low <= bucket.score <= high]
+    if out_of_axis:
+        logger.warning(
+            "점수 축(%d~%d) 밖의 집계 %d건을 표시에서 제외했습니다 — total과 buckets의 합이 "
+            "어긋납니다: %s",
+            low,
+            high,
+            len(out_of_axis),
+            [(bucket.score, bucket.count) for bucket in out_of_axis],
+        )
     counts = {bucket.score: bucket.count for bucket in buckets}
     return tuple(
         ScoreBucket(score=score, count=counts.get(score, 0))

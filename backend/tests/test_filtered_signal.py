@@ -1,5 +1,7 @@
 """걸러진 신호 채점 기록의 저장·정리·집계 (#304)."""
+import logging
 from datetime import datetime, timedelta, timezone
+from typing import get_args
 
 import pytest
 from fastapi.testclient import TestClient
@@ -70,7 +72,7 @@ async def test_record_persists_score_and_threshold(repo, session: Session):
     임계값을 남기지 않으면 나중에 설정을 바꾼 뒤 과거 행이 왜 걸러졌는지 설명할 수
     없다 — 같은 1점이 임계값 2에서는 걸러진 신호이고 1에서는 통과한 신호다.
     """
-    saved = await repo.record(
+    await repo.record(
         stock_name="SK하이닉스",
         source="disclosure",
         score=-1,
@@ -79,7 +81,6 @@ async def test_record_persists_score_and_threshold(repo, session: Session):
         uncertainty=0.5,
     )
 
-    assert saved is not None
     rows = session.exec(select(FilteredSignal)).all()
     assert len(rows) == 1
     assert rows[0].stock_name == "SK하이닉스"
@@ -97,11 +98,8 @@ async def test_record_skips_unscored_signal(repo, session: Session):
     점수가 없는 행은 분포에 보탤 정보가 0인데, 감시 루프가 종목·소스마다 10분 주기로
     도는 탓에 그런 행만으로 테이블이 가득 찬다.
     """
-    saved = await repo.record(
-        stock_name="삼성전자", source="news", score=None, threshold=2
-    )
+    await repo.record(stock_name="삼성전자", source="news", score=None, threshold=2)
 
-    assert saved is None
     assert session.exec(select(FilteredSignal)).all() == []
 
 
@@ -260,3 +258,36 @@ def test_histogram_endpoint_rejects_out_of_range_days(client: TestClient):
         ).status_code
         == 422
     )
+
+
+def test_fill_score_axis_warns_when_dropping_out_of_axis_buckets(caplog):
+    """축 밖 점수를 버리면 total과 buckets의 합이 어긋난다 — 조용히 버리지 않는다.
+
+    지금은 채점이 -3~+3으로 clamp되어 도달할 수 없지만, 그 clamp가 사라지면
+    무증상으로 깨지는 자리다.
+    """
+    with caplog.at_level(logging.WARNING, logger="backend.filtered_signal_repo"):
+        filled = fill_score_axis(
+            (ScoreBucket(score=1, count=3), ScoreBucket(score=7, count=2)), -3, 3
+        )
+
+    assert [bucket.count for bucket in filled] == [0, 0, 0, 0, 3, 0, 0]
+    assert len(caplog.records) == 1
+    assert "7" in caplog.records[0].getMessage()
+
+
+def test_source_filter_matches_signal_sources():
+    """조회 필터가 받는 값이 실제 감시 출처와 어긋나면 조회가 조용히 빈다."""
+    from ..main import SignalSourceName
+    from ..scheduler import SIGNAL_SOURCES
+
+    assert set(get_args(SignalSourceName)) == {source.name for source in SIGNAL_SOURCES}
+
+
+def test_histogram_endpoint_rejects_unknown_source(client: TestClient):
+    """오타 난 출처는 "걸러진 게 없다"(total 0)가 아니라 422로 돌아와야 한다."""
+    response = client.get(
+        "/api/v1/db/filtered-signals/histogram", params={"source": "newz"}
+    )
+
+    assert response.status_code == 422

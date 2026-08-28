@@ -2,6 +2,7 @@ import os
 import logging
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta, timezone
+from typing import Literal
 from fastapi import FastAPI, HTTPException, Query, Depends, Request, WebSocket, WebSocketDisconnect, Body
 from fastapi.middleware.cors import CORSMiddleware
 from sqlmodel import Session, select
@@ -344,14 +345,24 @@ async def get_db_catalysts(
     }
 
 
+# 걸러진 신호 조회의 출처 필터가 받는 값. scheduler.SIGNAL_SOURCES의 name과 같아야
+# 하며, 어긋나면 test_filtered_signal.py의 드리프트 테스트가 깨진다. 자유 문자열로 두면
+# 오타가 422가 아니라 "total: 0"인 정상 응답으로 돌아와, 임계값 조정 근거를 읽는 쪽에서
+# "걸러진 게 없다"와 "필터를 잘못 썼다"가 구분되지 않는다.
+#
+# 저장 컬럼(FilteredSignal.source)은 좁히지 않는다. 출처 목록이 나중에 바뀌어도 이미
+# 쌓인 행은 그대로 남아야 하고, 그 행들을 읽는 것은 필터 없는 전체 조회로 가능하다.
+SignalSourceName = Literal["news", "disclosure"]
+
+
 @app.get(
     "/api/v1/db/filtered-signals/histogram",
     response_model=CommonResponse,
     tags=["Database"],
 )
 async def get_filtered_signal_histogram(
-    source: str | None = Query(
-        None, min_length=1, description="신호 출처 정확 일치 필터 (news | disclosure). 생략 시 전체."
+    source: SignalSourceName | None = Query(
+        None, description="신호 출처 필터 (news | disclosure). 생략 시 전체."
     ),
     stock_name: str | None = Query(
         None, min_length=1, description="종목명 정확 일치 필터. 생략 시 전체 종목."

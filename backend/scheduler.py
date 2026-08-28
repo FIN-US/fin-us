@@ -95,6 +95,17 @@ CATALYST_EVENT_LABELS = {
 _balance_failure_streak = 0
 _last_balance_error: str | None = None
 
+# 걸러진 신호 기록(#304)의 연속 실패 횟수. 위 잔고 카운터와 같은 문제를 같은 방식으로
+# 막는다 — 다만 이쪽이 더 시끄럽다. 잔고는 한 주기에 한 번 실패하지만 기록은
+# (종목 × 소스)마다 시도하므로, 억제가 없으면 DB 장애 한 번에 한 주기당 수십 건의
+# 동일한 error가 쌓인다. 주기(6회)로 세면 여전히 주기마다 여러 번 남으므로 20회로
+# 잡는다 — 종목 10개·소스 2개 기준으로 대략 한 주기에 한 번꼴이다.
+# 카운터는 프로세스마다 별개이고 정확도가 로그 억제에만 쓰이므로 동기화가 필요 없다.
+_filtered_signal_failure_streak = 0
+_last_filtered_signal_error: str | None = None
+# 첫 실패·원인 변경 이후로는 이 횟수마다 한 번만 error로 올린다.
+_FILTERED_SIGNAL_ERROR_LOG_PERIOD = 20
+
 
 def _default_watchlist_repo() -> SqliteWatchlistRepo:
     return SqliteWatchlistRepo(lambda: Session(engine))
@@ -794,6 +805,8 @@ async def _record_filtered_signal(
     실패했다고 감시 루프를 멈추지는 않는다 — 이 값은 사후 분석용이고, 여기서 예외를
     올리면 DB 문제 하나가 다음 종목·소스의 감시까지 통째로 건너뛰게 만든다.
     """
+    global _filtered_signal_failure_streak, _last_filtered_signal_error
+
     if signal_score.score is None:
         # 채점 자체가 없었던 경로(빈 본문·직전과 동일). repo.record도 같은 조건에서
         # 걸러 내지만, 여기서 먼저 끊어 세션을 열지도 않는다.
@@ -808,13 +821,43 @@ async def _record_filtered_signal(
             uncertainty=signal_score.uncertainty,
         )
     except Exception as e:
-        logger.error(
-            "[%s:%s] 걸러진 신호 점수 기록 실패(score=%s): %s",
-            source,
-            stock,
-            signal_score.score,
-            e,
+        signature = f"{type(e).__name__}:{e}"
+        _filtered_signal_failure_streak += 1
+        if (
+            _filtered_signal_failure_streak == 1
+            or signature != _last_filtered_signal_error
+            or _filtered_signal_failure_streak % _FILTERED_SIGNAL_ERROR_LOG_PERIOD == 0
+        ):
+            logger.error(
+                "[%s:%s] 걸러진 신호 점수 기록 실패(score=%s, %d건 연속): %s",
+                source,
+                stock,
+                signal_score.score,
+                _filtered_signal_failure_streak,
+                e,
+            )
+        else:
+            # 같은 원인의 반복 실패는 debug로 내린다. 기록이 비는 구간 자체는 위의
+            # error와 아래 복구 로그의 집계로 드러난다.
+            logger.debug(
+                "[%s:%s] 걸러진 신호 점수 기록 실패가 %d건 연속됩니다: %s",
+                source,
+                stock,
+                _filtered_signal_failure_streak,
+                e,
+            )
+        _last_filtered_signal_error = signature
+        return
+
+    if _filtered_signal_failure_streak:
+        # 복구 보고. 놓친 건수를 남기지 않으면 분포에 구멍이 뚫린 구간을 나중에
+        # 알아볼 방법이 없다 — 기록되지 않은 신호는 어디에도 흔적이 없기 때문이다.
+        logger.warning(
+            "걸러진 신호 점수 기록이 복구되었습니다. 직전까지 %d건을 기록하지 못했습니다.",
+            _filtered_signal_failure_streak,
         )
+        _filtered_signal_failure_streak = 0
+        _last_filtered_signal_error = None
 
 
 async def _monitor_signal(

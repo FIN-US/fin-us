@@ -2300,10 +2300,11 @@ class FakeFilteredSignalRepo:
         self._fail = fail
 
     async def record(self, **kwargs):
+        # 진짜 repo와 같이 아무것도 돌려주지 않는다 — 반환값에 기대는 호출부가
+        # 생기면 fake만 통과하고 프로덕션에서 None이 되는 차이가 난다.
         if self._fail:
             raise RuntimeError("filtered signal db unavailable")
         self.recorded.append(kwargs)
-        return kwargs
 
     async def purge_expired(self, retention_days, *, now=None):
         if self._fail:
@@ -2557,3 +2558,130 @@ def test_start_scheduler_registers_purge_job(monkeypatch):
     scheduler_module.start_scheduler()
 
     assert "purge_filtered_signals" in registered
+
+
+@pytest.mark.asyncio
+async def test_monitor_signal_records_through_real_repo(monkeypatch):
+    """덕타이핑 fake가 아니라 실제 repo에 넣어 행이 실제로 생기는지 본다 (#304 리뷰).
+
+    _record_filtered_signal은 기록 실패를 삼키고 로그만 남긴다. 그래서 호출 계약이
+    어긋나면(키워드 이름 하나만 달라져도 TypeError다) fake만 쓰는 테스트는 초록인 채
+    프로덕션만 조용히 무기록이 된다. 이 테스트만 그 간극을 덮는다.
+    """
+    from sqlmodel import SQLModel, Session, create_engine, select
+    from sqlmodel.pool import StaticPool
+
+    from ..config import SIGNAL_SCORE_THRESHOLD
+    from ..filtered_signal_repo import SqliteFilteredSignalRepo
+    from ..models import FilteredSignal
+    from ..scheduler import SignalSource, monitor_market_task
+
+    engine = create_engine(
+        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
+    )
+    SQLModel.metadata.create_all(engine)
+    repo = SqliteFilteredSignalRepo(lambda: Session(engine))
+
+    state = RedisSchedulerState(FakeRedis())
+
+    @asynccontextmanager
+    async def fake_redis_state():
+        yield state
+
+    async def mock_run_mcp_tool(params, name, args):
+        if name == "get_balance":
+            return "[보유 종목 리스트]\n- 삼성전자 (005930): 10주"
+        return "삼성전자 관련 뉴스"
+
+    async def mock_score_signal(stock, current, last, *, source, provider):
+        return _filtered_scored(1, reason="단순 시황 나열", uncertainty=0.5)
+
+    monkeypatch.setattr("backend.scheduler.redis_state", fake_redis_state)
+    monkeypatch.setattr(
+        "backend.scheduler.SIGNAL_SOURCES",
+        [SignalSource(name="news", mcp_params=object(), tool_name="get_market_news")],
+    )
+    monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
+    monkeypatch.setattr("backend.scheduler.score_signal", mock_score_signal)
+    monkeypatch.setattr("backend.scheduler.manager.broadcast", _resolved_broadcast_mock())
+    monkeypatch.setattr(
+        "backend.scheduler._sync_portfolio_from_balance",
+        lambda balance_text, session, **kwargs: None,
+    )
+
+    await monitor_market_task(
+        watchlist_repo=FakeWatchlistRepo(), filtered_signal_repo=repo
+    )
+
+    with Session(engine) as session:
+        rows = session.exec(select(FilteredSignal)).all()
+    assert len(rows) == 1
+    assert rows[0].stock_name == "삼성전자"
+    assert rows[0].source == "news"
+    assert rows[0].score == 1
+    assert rows[0].threshold == SIGNAL_SCORE_THRESHOLD
+    assert rows[0].reason == "단순 시황 나열"
+    assert rows[0].uncertainty == 0.5
+
+
+@pytest.mark.asyncio
+async def test_repeated_recording_failures_are_logged_once_per_period(monkeypatch, caplog):
+    """같은 원인의 기록 실패는 첫 건과 주기마다만 error로 남는다 (#304 리뷰).
+
+    기록은 (종목 × 소스)마다 시도하므로, 억제가 없으면 DB 장애 하나가 한 주기에
+    수십 건의 동일한 error를 쌓아 정작 중요한 장애를 묻는다 — 잔고 조회 실패(#185)가
+    이미 같은 이유로 카운터를 두고 있다.
+    """
+    import logging
+
+    from .. import scheduler as scheduler_module
+    from ..scheduler import _record_filtered_signal
+
+    monkeypatch.setattr(scheduler_module, "_filtered_signal_failure_streak", 0)
+    monkeypatch.setattr(scheduler_module, "_last_filtered_signal_error", None)
+
+    repo = FakeFilteredSignalRepo(fail=True)
+    scored = _filtered_scored(1, reason="중립")
+
+    with caplog.at_level(logging.DEBUG, logger="backend.scheduler"):
+        for _ in range(scheduler_module._FILTERED_SIGNAL_ERROR_LOG_PERIOD):
+            await _record_filtered_signal(repo, "삼성전자", "news", scored)
+
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    # 첫 실패 1건 + 주기(20회)째 1건.
+    assert len(errors) == 2
+    assert scheduler_module._filtered_signal_failure_streak == (
+        scheduler_module._FILTERED_SIGNAL_ERROR_LOG_PERIOD
+    )
+
+
+@pytest.mark.asyncio
+async def test_recording_recovery_reports_missed_count(monkeypatch, caplog):
+    """복구되면 그동안 몇 건을 놓쳤는지 남긴다.
+
+    기록되지 않은 신호는 어디에도 흔적이 없다. 놓친 건수를 남기지 않으면 나중에
+    분포에 구멍이 뚫린 구간을 알아볼 방법이 없다.
+    """
+    import logging
+
+    from .. import scheduler as scheduler_module
+    from ..scheduler import _record_filtered_signal
+
+    monkeypatch.setattr(scheduler_module, "_filtered_signal_failure_streak", 0)
+    monkeypatch.setattr(scheduler_module, "_last_filtered_signal_error", None)
+
+    scored = _filtered_scored(1, reason="중립")
+    for _ in range(3):
+        await _record_filtered_signal(
+            FakeFilteredSignalRepo(fail=True), "삼성전자", "news", scored
+        )
+
+    with caplog.at_level(logging.WARNING, logger="backend.scheduler"):
+        await _record_filtered_signal(
+            FakeFilteredSignalRepo(), "삼성전자", "news", scored
+        )
+
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "3건" in warnings[0].getMessage()
+    assert scheduler_module._filtered_signal_failure_streak == 0
