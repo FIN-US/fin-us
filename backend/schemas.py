@@ -1,6 +1,11 @@
 from typing import Any, Literal
 from pydantic import BaseModel, Field
 
+# AnalysisReport.urgency의 허용값. services._URGENCY_LEVELS가 이 별칭에서
+# 파생하므로(get_args) 별칭 하나만 고치면 검증 집합도 함께 따라온다.
+UrgencyLevel = Literal["low", "normal", "high", "critical"]
+
+
 class TradingSignal(BaseModel):
     decision: str = Field(..., description="BUY, SELL, 또는 HOLD")
     confidence_score: float = Field(..., ge=0, le=1)
@@ -16,7 +21,7 @@ class AnalysisReport(BaseModel):
     source_news: list[str]
     source_signals: list[str] | None = None
     trading_trend: str | None = None
-    urgency: Literal["low", "normal", "high", "critical"] = "normal"
+    urgency: UrgencyLevel = "normal"
     urgency_reason: str | None = None
     telegram_alert: bool = False
     # #162: LLM 원문 JSON에는 없는 필드. services.perform_stock_analysis가

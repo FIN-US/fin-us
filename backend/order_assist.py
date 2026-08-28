@@ -993,8 +993,12 @@ async def run_order_assist(
     if session_factory is None:
         from .database import engine
 
-        def session_factory() -> Session:  # type: ignore[misc]
+        # 파라미터와 같은 이름으로 def를 쓰면 선언이 가려져(체커가 잡는다) 어느 쪽이
+        # 유효한지 읽는 사람도 헷갈린다. 다른 이름으로 만들고 대입한다.
+        def _default_session_factory() -> Session:
             return Session(engine)
+
+        session_factory = _default_session_factory
 
     now_factory = now_factory or (lambda: datetime.now(KST))
     limits = limits or OrderLimits()

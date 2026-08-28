@@ -1,6 +1,6 @@
 from typing import Callable
 
-from sqlmodel import Session, select
+from sqlmodel import Session, col, select
 
 from .models import WatchlistItem
 
@@ -11,7 +11,11 @@ class SqliteWatchlistRepo:
 
     async def get_watchlist(self) -> list[str]:
         with self._session_factory() as session:
-            items = session.exec(select(WatchlistItem).order_by(WatchlistItem.stock_name)).all()
+            # str 필드는 order_by가 SQL 라벨 문자열로도 받아 주지만, 그러면 체커의
+            # 보호가 없다. 같은 str인 CatalystEvent.event_type과 기준을 맞춘다.
+            items = session.exec(
+                select(WatchlistItem).order_by(col(WatchlistItem.stock_name))
+            ).all()
             return [item.stock_name for item in items]
 
     async def add_to_watchlist(self, stock: str) -> None:

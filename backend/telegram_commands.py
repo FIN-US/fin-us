@@ -60,6 +60,7 @@ from .timeutil import KST
 from .trading_orders import (
     ORDER_EXPIRES_AFTER,
     McpTradingOrderGateway,
+    OrderSide,
     OrderType,
     PendingOrder,
     TradeRecorder,
@@ -982,7 +983,9 @@ class TelegramCommandHandler:
         # 토큰 소비는 되돌릴 수 있는 부수효과라 확정시킬 이유가 없다 — 전송이 성공한 뒤에
         # 소비해 재시도 경계를 전송 뒤로 옮긴다 (PR #253 2차 리뷰).
         context = self.market_callbacks.get(token) if token else None
-        if context is None:
+        # token이 falsy면 context는 반드시 None이므로 판정 결과는 그대로다.
+        # token을 함께 보면 아래 pop(token)에서 str | None이 str로 좁혀진다.
+        if token is None or context is None:
             await self._answer_callback_query(
                 callback_query_id,
                 text=MARKET_STALE_CALLBACK_TEXT,
@@ -1320,7 +1323,9 @@ class TelegramCommandHandler:
             except Exception as exc:
                 logger.error("제안 프롬프트 미전달 후 대기 주문 정리 실패: %s", exc)
 
-    async def _handle_order_command(self, side: str, argument: str, chat_id: str) -> None:
+    async def _handle_order_command(
+        self, side: OrderSide, argument: str, chat_id: str
+    ) -> None:
         usage = BUY_COMMAND_HELP if side == "BUY" else SELL_COMMAND_HELP
         parsed = self._parse_order_argument(argument)
         if parsed is None:
@@ -1573,12 +1578,12 @@ class TelegramCommandHandler:
             and re.search(r"\d[\d,]*\s*주", text) is not None
         )
 
-    def _parse_natural_order_text(self, text: str) -> tuple[str, str] | None:
+    def _parse_natural_order_text(self, text: str) -> tuple[OrderSide, str] | None:
         buy_count = text.count("매수")
         sell_count = text.count("매도")
         if buy_count + sell_count != 1:
             return None
-        side = "BUY" if buy_count == 1 else "SELL"
+        side: OrderSide = "BUY" if buy_count == 1 else "SELL"
 
         quantity_match = re.search(r"(?P<quantity>\d[\d,]*)\s*주", text)
         if quantity_match is None:
@@ -2066,7 +2071,12 @@ class TelegramCommandHandler:
         못 받는다 — 그래서 주입된 구현이 무엇이든 여기서 한 겹 감싼다.
         """
         try:
-            send_returning_id = getattr(self.notifier, "send_text_returning_id", None)
+            # notifier는 주입 가능하고 이 능력은 선택 사항이라, 선언 타입이 아니라
+            # 런타임 존재 여부로 판정한다. 선언 타입에 없는 속성이라 getattr의 결과는
+            # object로 추론되는데, 그러면 callable() 통과 뒤에도 await가 막힌다.
+            send_returning_id: Callable[..., Any] | None = getattr(
+                self.notifier, "send_text_returning_id", None
+            )
             if callable(send_returning_id):
                 return await send_returning_id(text)
             await self.notifier.send_text(text)
@@ -2090,11 +2100,18 @@ class TelegramCommandHandler:
         if message_id is None:
             return
 
-        delete_message = getattr(self.notifier, "delete_message", None)
+        # notifier는 주입 가능하고 이 능력은 선택 사항이라, 선언 타입이 아니라
+        # 런타임 존재 여부로 판정한다. 선언 타입에 없는 속성이라 getattr의 결과는
+        # object로 추론되는데, 그러면 callable() 통과 뒤에도 await가 막힌다.
+        delete_message: Callable[..., Any] | None = getattr(
+            self.notifier, "delete_message", None
+        )
         if callable(delete_message) and await delete_message(message_id):
             return
 
-        edit_message_text = getattr(self.notifier, "edit_message_text", None)
+        edit_message_text: Callable[..., Any] | None = getattr(
+            self.notifier, "edit_message_text", None
+        )
         if callable(edit_message_text) and await edit_message_text(message_id, PROGRESS_DONE_MESSAGE):
             return
 
@@ -2513,14 +2530,21 @@ class TelegramCommandPoller:
         return time.monotonic()
 
     async def _setup_bot_profile(self) -> None:
-        load_bot_username = getattr(self.notifier, "load_bot_username", None)
+        # notifier는 주입 가능하고 이 능력은 선택 사항이라, 선언 타입이 아니라
+        # 런타임 존재 여부로 판정한다. 선언 타입에 없는 속성이라 getattr의 결과는
+        # object로 추론되는데, 그러면 callable() 통과 뒤에도 await가 막힌다.
+        load_bot_username: Callable[..., Any] | None = getattr(
+            self.notifier, "load_bot_username", None
+        )
         if callable(load_bot_username):
             try:
                 await load_bot_username()
             except Exception as exc:
                 logger.error("Telegram bot username setup failed: %s", exc)
 
-        set_bot_commands = getattr(self.notifier, "set_bot_commands", None)
+        set_bot_commands: Callable[..., Any] | None = getattr(
+            self.notifier, "set_bot_commands", None
+        )
         if callable(set_bot_commands):
             try:
                 await set_bot_commands(TELEGRAM_BOT_COMMANDS)

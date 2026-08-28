@@ -69,8 +69,12 @@ CUSTOM_FEATURE_FLAG=enabled
         timestamp="20260701T120000",
     )
 
-    assert result.backup_path == tmp_path / ".env.backup.20260701T120000"
-    assert result.backup_path.read_text(encoding="utf-8") == """OPENAI_API_KEY=sk-existing
+    backup_path = result.backup_path
+    # 백업 경로는 Optional이다 — 없으면 아래 read_text가 AttributeError로 죽으며
+    # "백업을 안 만들었다"는 실패가 엉뚱한 예외로 보고된다. 먼저 존재를 고정한다.
+    assert backup_path is not None
+    assert backup_path == tmp_path / ".env.backup.20260701T120000"
+    assert backup_path.read_text(encoding="utf-8") == """OPENAI_API_KEY=sk-existing
 KIS_ACCOUNT_NO=1111222201
 CUSTOM_FEATURE_FLAG=enabled
 """

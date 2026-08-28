@@ -188,7 +188,10 @@ def _is_known_master_code(code: str) -> bool:
     이전의 지름길 동작(검증 없이 통과)을 유지합니다.
     """
     codes = _load_master_codes()
-    if codes is _MASTER_LOAD_FAILED:
+    # _load_master_codes의 반환값은 frozenset 아니면 _MASTER_LOAD_FAILED뿐이라
+    # 이 판정은 `is _MASTER_LOAD_FAILED`와 대상 집합이 같다. 캐시 변수가 object로
+    # 선언돼 있어 센티널 비교로는 타입이 좁혀지지 않으므로 isinstance로 판정한다.
+    if not isinstance(codes, frozenset):
         return True
     return code in codes
 

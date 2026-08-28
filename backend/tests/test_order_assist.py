@@ -11,6 +11,7 @@
 
 from datetime import datetime, timedelta
 from types import SimpleNamespace
+from typing import Any, cast
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -26,6 +27,7 @@ from backend.order_assist import (
     DailyUsage,
     OrderLimits,
     OrderProposal,
+    ProposalCooldown,
     ProposalTrigger,
     VerifierVerdict,
     check_orderable_code,
@@ -40,6 +42,7 @@ from backend.order_assist import (
 )
 from backend.redis_state import InMemoryPendingOrderStore, RedisKeys
 from backend.telegram_commands import ADVISE_COMMAND_HELP, TelegramCommandHandler
+from backend.telegram_notifier import TelegramNotifier
 from backend.trading_orders import ORDER_EXPIRES_AFTER
 
 KST = ZoneInfo("Asia/Seoul")
@@ -49,7 +52,9 @@ MARKET_OPEN_NOW = datetime(2026, 5, 20, 10, 0, tzinfo=KST)
 
 
 def _proposal(**overrides) -> OrderProposal:
-    base = dict(
+    # 값 타입이 섞여 있어 선언이 없으면 dict[str, str | int | float]로 추론되고,
+    # 그러면 **base 전개가 OrderProposal의 필드 타입을 하나도 만족하지 못한다.
+    base: dict[str, Any] = dict(
         stock_name="삼성전자",
         stock_code="005930",
         side="BUY",
@@ -684,7 +689,7 @@ async def _run(
         mcp_runner=mcp if mcp is not None else _mcp_runner(),
         now_factory=now_factory or (lambda: now),
         limits=limits or OrderLimits(),
-        cooldown=cooldown or FakeCooldown(),
+        cooldown=cast(ProposalCooldown, cooldown or FakeCooldown()),
         session_factory=session_factory or (lambda: _EmptySession()),
         propose=propose,
         verify=verify,
@@ -703,6 +708,7 @@ async def test_approved_flow_stores_a_pending_order_for_the_existing_confirm_pat
     assert len(verify_calls) == 1
     # 기존 경로에 그대로 합류한다 — 저장된 대기 주문이 /confirm이 소비하는 그 객체다.
     stored = await store.get("123")
+    assert stored is not None
     assert stored == result.order
     assert stored.callback_token  # 확정/취소 버튼이 붙을 토큰
     assert stored.created_at == MARKET_OPEN_NOW
@@ -1133,9 +1139,13 @@ class _Notifier:
         return True
 
 
+# 아래 cast는 대역 때문이다 (#292). 주입 지점의 선언 타입이 구체 클래스라 대역이
+# 그대로는 타입 검사를 통과하지 못한다. Protocol로 좁혀 cast를 걷어내는 것은 #319다.
 def _advise_handler(monkeypatch, result, *, captured=None):
     notifier = _Notifier()
-    handler = TelegramCommandHandler(notifier=notifier, now_factory=lambda: MARKET_OPEN_NOW)
+    handler = TelegramCommandHandler(
+        notifier=cast(TelegramNotifier, notifier), now_factory=lambda: MARKET_OPEN_NOW
+    )
 
     async def fake_run(trigger, **kwargs):
         if captured is not None:
@@ -1326,6 +1336,7 @@ async def test_stock_name_with_parentheses_survives_resolution():
     result, _ = await _run(mcp=mcp, proposal_text=proposal)
 
     assert result.status == "approved"
+    assert result.order is not None
     assert result.order.stock_name == "KODEX 골드선물(H)"
 
 

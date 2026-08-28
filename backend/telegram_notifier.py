@@ -292,17 +292,24 @@ def format_signal_score_line(
     if isinstance(score, bool) or not isinstance(score, Real):
         return None
 
+    # numbers.Real이 타입 계약으로 보장하는 변환은 __float__뿐이다(int()도, float와의
+    # 대소 비교도 계약 밖이라 체커가 막는다). 점수는 -3~+3 정수라 float 경유가
+    # 값을 바꾸지 않는다.
+    score_value = float(score)
+
     # +2/-2로 부호를 명시한다. 0은 "+0"이 어색하므로 그대로 0.
-    score_text = "0" if score == 0 else f"{int(score):+d}"
+    score_text = "0" if score_value == 0 else f"{int(score_value):+d}"
     line = f"{SIGNAL_SCORE_LABEL} {score_text}"
 
     if isinstance(reason, str) and reason.strip():
         line = f"{line} ({' '.join(reason.split())})"
 
+    # 비교도 위 score_value와 같은 이유로 float를 경유한다 — Real과 float의 대소
+    # 비교는 런타임에는 되지만 numbers.Real의 타입 계약에는 없다.
     if (
         isinstance(uncertainty, Real)
         and not isinstance(uncertainty, bool)
-        and uncertainty >= uncertainty_threshold
+        and float(uncertainty) >= uncertainty_threshold
     ):
         line = f"{line} · {SIGNAL_DISAGREEMENT_NOTE}"
 
