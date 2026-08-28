@@ -47,8 +47,14 @@
 
 임포트 방향: 이 모듈은 backend의 어떤 모듈도 임포트하지 않는다. 반대로 telegram_notifier·
 telegram_commands·redis_state가 이쪽을 임포트한다. 텔레그램 전송 계층이 출력 계층을 쓰는데
-출력 계층이 전송 계층의 상수를 되받아 오면 순환이 되므로, 길이 상한과 말줄임 규칙의 정의를
-이쪽으로 옮기고 telegram_notifier는 재수출만 한다.
+출력 계층이 전송 계층의 상수를 되받아 오면 순환이 되므로, 정의는 이쪽에 둔다. 옮길 때 기존
+임포트 경로를 어떻게 하는지는 두 가지다 — 길이 상한(#297)은 telegram_notifier가 같은
+이름으로 재수출하고, 신호 점수 문구(#308)는 재수출 없이 호출부를 이쪽으로 옮겼다. 새로
+옮기는 것은 뒤쪽을 따른다. 재수출은 기존 임포트를 깨지 않으려는 과도기 장치이지 규약이
+아니다.
+
+같은 이유로 설정값도 이 모듈이 끌어오지 않는다 — 임계값처럼 정책에 속하는 값은 인자로
+받는다 (#308).
 """
 
 from __future__ import annotations
@@ -57,6 +63,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass
+from numbers import Real
 from pathlib import Path
 from typing import Any
 
@@ -692,6 +699,67 @@ def kind_for_agent(routed_agent: Any) -> str:
     if not isinstance(routed_agent, str):
         return KIND_ANALYSIS
     return AGENT_KINDS.get(routed_agent.strip(), KIND_ANALYSIS)
+
+
+# ---- 신호 점수 (#298에서 이관) ----
+
+# 신호 점수 표시 문자열. 상수로 분리해 둔 것은 다른 채널(웹, 음성)이 같은 조각을 감쌀 때
+# 문구를 다시 찾아 헤매지 않게 하기 위함이다. 문구를 바꿀 일이 생기면 여기 한 곳만 고친다.
+SIGNAL_SCORE_LABEL = "📊 영향도"
+SIGNAL_DISAGREEMENT_NOTE = "⚠️ 기사 간 평가 엇갈림"
+
+
+def format_signal_score_line(
+    score: Any,
+    reason: Any = None,
+    uncertainty: Any = None,
+    *,
+    uncertainty_threshold: float,
+) -> str | None:
+    """신호 점수 한 줄을 만든다. 점수가 없으면 None (#298).
+
+    ``📊 영향도 -2 (주요 고객 이탈 보도)`` 형태이고, 기사별 점수가 크게 흩어졌으면
+    뒤에 ``⚠️ 기사 간 평가 엇갈림``을 붙인다.
+
+    score가 None이면 줄 자체를 만들지 않는다. "미측정"을 항상 붙이면 필터를 거치지
+    않는 수동 분석 알림까지 오염되는데, analysis_data만 봐서는 "채점 실패(fail-open)"
+    와 "애초에 채점 경로가 아님"을 구분할 수 없다. 둘의 구분이 필요하면 DB의
+    AgentReport.signal_score(null)와 로그를 본다.
+
+    #308에서 telegram_notifier로부터 이쪽으로 옮겼다. 사용자에게 나가는 문장을 조립하는
+    지점이 하나여야 한다는 #297의 전제를 이 조각만 벗어나 있었다.
+
+    ``uncertainty_threshold``에 기본값이 없는 것이 그 이관의 조건이다. 기본값을
+    ``SIGNAL_UNCERTAINTY_ALERT_THRESHOLD``로 두면 이 모듈이 config를 임포트하게 되는데,
+    출력 계층은 backend의 어떤 모듈도 임포트하지 않는 잎이어야 한다(모듈 독스트링의
+    임포트 방향). 문구의 모양은 출력 계층이 알고, 어디서부터 "엇갈림"인지는 정책이므로
+    정책을 아는 호출부가 넘긴다.
+    """
+    if isinstance(score, bool) or not isinstance(score, Real):
+        return None
+
+    # numbers.Real이 타입 계약으로 보장하는 변환은 __float__뿐이다(int()도, float와의
+    # 대소 비교도 계약 밖이라 체커가 막는다). 점수는 -3~+3 정수라 float 경유가
+    # 값을 바꾸지 않는다.
+    score_value = float(score)
+
+    # +2/-2로 부호를 명시한다. 0은 "+0"이 어색하므로 그대로 0.
+    score_text = "0" if score_value == 0 else f"{int(score_value):+d}"
+    line = f"{SIGNAL_SCORE_LABEL} {score_text}"
+
+    if isinstance(reason, str) and reason.strip():
+        line = f"{line} ({' '.join(reason.split())})"
+
+    # 비교도 위 score_value와 같은 이유로 float를 경유한다 — Real과 float의 대소
+    # 비교는 런타임에는 되지만 numbers.Real의 타입 계약에는 없다.
+    if (
+        isinstance(uncertainty, Real)
+        and not isinstance(uncertainty, bool)
+        and float(uncertainty) >= uncertainty_threshold
+    ):
+        line = f"{line} · {SIGNAL_DISAGREEMENT_NOTE}"
+
+    return line
 
 
 # ---- 조립 ----
