@@ -68,8 +68,9 @@ services:
     ports:
       # 무인증 `/v1/chat/completions`를 그대로 받는 LLM 호출 경로라 127.0.0.1에만
       # 바인딩한다(#285). 전 인터페이스에 열어 두면 `/api/v1/analyze`의 레이트리밋
-      # (#266 1단계, frontend/nginx.conf)을 8001 직접 호출로 우회할 수 있다. 컴포즈 내부에서는 backend가
-      # `NAT_BASE_URL: http://finus-nat:8000` 네트워크 별칭으로 부르므로 영향이 없다.
+      # (#266 1단계, frontend/nginx.conf)을 8001 직접 호출로 우회할 수 있다. 컴포즈
+      # 내부에서는 backend가 `NAT_BASE_URL: http://finus-nat:8000` 네트워크 별칭으로
+      # 부르므로 영향이 없다.
       # 게시를 남겨 두는 것은 수동 디버깅과, 호스트에서 백엔드만 띄울 때 쓰는
       # `.env.example`의 `NAT_BASE_URL=http://127.0.0.1:8001`을 위해서다.
       - "127.0.0.1:8001:8000"

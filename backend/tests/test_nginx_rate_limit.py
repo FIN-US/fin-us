@@ -31,6 +31,19 @@ _NGINX_CONF_PATH = _REPO_ROOT / "frontend" / "nginx.conf"
 # frontend healthcheck용이라(#252 리뷰) 제한에 걸리면 감시가 스스로를 죽인다.
 _UNLIMITED_LOCATIONS = frozenset({"/", "~ \\.wasm$", "= /nginx-health"})
 
+# (제한 지시어 접두사, 내부 상태 코드, 응답을 만드는 named location).
+#
+# 두 거절은 성질이 다르다. limit_req는 잠깐 기다리면 풀리지만, limit_conn은 진행 중인
+# 분석이 끝나야 풀리고 그건 `proxy_read_timeout 300s`까지 갈 수 있다. 같은 안내를 내면
+# conn 쪽에서 거짓말이 되므로(PR #349 리뷰) 내부 코드를 갈라 다른 본문으로 보낸다.
+# 430은 IANA 미할당이고 `error_page`가 가로채므로 클라이언트에게는 둘 다 429로 나간다.
+_REJECTION_ROUTES = frozenset(
+    {
+        ("limit_req", "429", "@too_many_requests"),
+        ("limit_conn", "430", "@analysis_in_flight"),
+    }
+)
+
 
 def _strip_comments(text):
     """`#` 주석을 지운다 — 단 따옴표 안의 `#`은 건드리지 않는다.
@@ -145,14 +158,25 @@ def server_body(conf):
     return servers[0]
 
 
+def _collect_locations(body, found):
+    """*body* 아래의 location을 **중첩까지** 모은다.
+
+    nginx는 location 안에 location을 허용한다. 최상위만 훑으면 중첩 블록에 넣은
+    `proxy_pass`가 아래 "프록시 경로는 전부 제한 대상" 검사에서 조용히 빠진다.
+    """
+
+    for header, nested in _blocks(body):
+        if header.startswith("location "):
+            spec = header[len("location ") :].strip()
+            assert spec not in found, f"location 스펙이 중복된다({spec})."
+            found[spec] = _directives(nested)
+        _collect_locations(nested, found)
+    return found
+
+
 @pytest.fixture(scope="module")
 def locations(server_body):
-    found = {}
-    for header, body in _blocks(server_body):
-        if not header.startswith("location "):
-            continue
-        found[header[len("location ") :].strip()] = _directives(body)
-    return found
+    return _collect_locations(server_body, {})
 
 
 @pytest.fixture(scope="module")
@@ -207,6 +231,21 @@ def _limited_zones(directives):
         for field in directive.split()
         if field.startswith("zone=")
     }
+
+
+def test_collect_locations_reaches_a_nested_location():
+    """중첩 location을 놓치면 "프록시 경로를 전부 훑는다"가 거짓이 된다(PR #349 리뷰).
+
+    nginx는 location 안의 location을 허용하므로, 최상위만 보는 구현에서는 중첩 블록에
+    넣은 `proxy_pass`가 제한 없이 통과한다.
+    """
+
+    body = "location /outer { proxy_pass http://a; location /outer/inner { proxy_pass http://b; } }"
+
+    found = _collect_locations(body, {})
+
+    assert set(found) == {"/outer", "/outer/inner"}
+    assert found["/outer"] == ["proxy_pass http://a"]
 
 
 def test_analyze_has_its_own_stricter_zone(locations, zone_rates):
@@ -291,34 +330,58 @@ def test_no_limit_sits_at_server_level(server_body):
     assert limits == [], f"server 레벨에 제한이 걸려 있다: {limits}."
 
 
-def test_over_limit_status_is_429_not_the_default_503(server_body):
-    """기본값 503은 "서버가 잠깐 죽었다"와 구분되지 않아 재시도 정책을 세울 수 없다."""
+@pytest.mark.parametrize(("kind", "status", "handler"), sorted(_REJECTION_ROUTES))
+def test_each_rejection_kind_is_wired_to_its_own_handler(
+    server_body, locations, kind, status, handler
+):
+    """거절 종류마다 상태 코드와 그것을 받는 named location이 짝지어져 있어야 한다.
+
+    기본값 503은 "서버가 잠깐 죽었다"와 구분되지 않아 재시도 정책을 세울 수 없다.
+    그리고 **`error_page` 줄이 이 검사의 핵심이다** — 그 한 줄만 지우면 named location은
+    그대로 남은 채 아무 데서도 참조되지 않게 되고, 응답은 nginx 기본 HTML로 조용히
+    돌아간다(PR #349 리뷰). 블록 본문만 보는 검사로는 잡히지 않아 여기서 배선을 본다.
+    """
 
     directives = _directives(server_body)
-    assert "limit_req_status 429" in directives
-    assert "limit_conn_status 429" in directives
+
+    assert f"{kind}_status {status}" in directives, (
+        f"{kind} 거절의 상태 코드가 {status}가 아니다. 종류별로 코드가 갈려 있어야 "
+        f"error_page가 서로 다른 본문으로 보낼 수 있다."
+    )
+    assert f"error_page {status} = {handler}" in directives, (
+        f"{status}를 {handler}로 보내는 error_page가 없다. 이 줄이 없으면 "
+        f"{handler} 블록이 남아 있어도 응답은 nginx 기본 HTML이다."
+    )
 
 
-def test_over_limit_body_carries_detail_for_the_unity_banner(locations):
-    """429 본문이 `{"detail": ...}`여야 Unity 배너에 읽히는 문구가 나간다.
+@pytest.mark.parametrize("handler", sorted(h for _, _, h in _REJECTION_ROUTES))
+def test_every_rejection_handler_answers_429_with_a_detail_body(locations, handler):
+    """본문이 `{"detail": ...}`여야 Unity 배너에 읽히는 문구가 나간다.
 
     `ApiClient.ExtractErrorMessage`는 실패 응답을 `ErrorDetailResponse`로 파싱해 그
     문자열을 그대로 싣고, 실패하면 "분석 실패: ... status=429" 같은 기계적인 문구로
     떨어진다. nginx 기본 HTML 에러 페이지가 그 경우다. 번들을 다시 굽지 않고 안내를
     바꿀 수 있는 자리가 여기뿐이므로 함께 고정한다.
+
+    내부 코드(430)가 클라이언트에게 새 나가지 않는 것도 여기서 본다 — 핸들러가 실제로
+    내보내는 코드는 둘 다 429다.
     """
 
-    body = " ".join(locations["@too_many_requests"])
+    body = " ".join(locations[handler])
 
     assert "default_type application/json" in body
+    assert "return 429 " in body, (
+        f"{handler}가 429로 응답하지 않는다. 내부 코드를 그대로 내보내면 클라이언트가 "
+        f"모르는 상태 코드를 받는다."
+    )
     assert '"detail"' in body, (
-        "429 본문에 detail 키가 없다. Unity 쪽은 이 키만 읽으므로, 본문 모양을 바꾸려면 "
+        "본문에 detail 키가 없다. Unity 쪽은 이 키만 읽으므로, 본문 모양을 바꾸려면 "
         "`ApiClient.ExtractErrorMessage`와 함께 볼 것(번들 재빌드가 따라온다)."
     )
 
 
 def test_retry_after_matches_the_strictest_zone_interval(locations, zone_rates):
-    """`Retry-After`는 가장 빡빡한 zone의 간격과 같아야 한다.
+    """레이트 초과의 `Retry-After`는 가장 빡빡한 zone의 간격과 같아야 한다.
 
     한쪽만 바뀌면 클라이언트에게 틀린 대기 시간을 알려 준다 — 너무 짧으면 곧바로 다시
     막히고, 너무 길면 쓸 수 있는데도 기다린다.
@@ -335,19 +398,44 @@ def test_retry_after_matches_the_strictest_zone_interval(locations, zone_rates):
     )
 
 
-def test_the_over_limit_location_restates_the_security_headers(locations, server_body):
+def test_the_concurrency_rejection_does_not_guess_a_retry_after(locations):
+    """동시 실행 거절에는 `Retry-After`를 붙이지 않는다(PR #349 리뷰).
+
+    언제 풀릴지는 진행 중인 분석의 남은 시간에 달렸는데 서버가 그걸 모른다. zone의
+    레이트에서 따온 값을 그대로 쓰면 그 시각에 다시 429이고(레이트가 아니라 슬롯이
+    빈 자리다), 상한인 `proxy_read_timeout 300s`를 적으면 대개 필요 이상으로
+    기다리게 한다. 모르는 값을 지어내느니 선택 헤더를 빼는 쪽이 맞다.
+
+    이 검사가 없으면 위 레이트 쪽 값을 복사해 넣는 "정리"가 조용히 통과한다.
+    """
+
+    guessed = [
+        d
+        for d in locations["@analysis_in_flight"]
+        if d.startswith("add_header Retry-After ")
+    ]
+    assert guessed == [], (
+        f"동시 실행 거절에 Retry-After가 붙어 있다({guessed}). 서버가 알 수 없는 값이다."
+    )
+
+
+@pytest.mark.parametrize("handler", sorted(h for _, _, h in _REJECTION_ROUTES))
+def test_the_rejection_handlers_restate_the_security_headers(
+    locations, server_body, handler
+):
     """`add_header`를 하나라도 둔 location은 server 레벨 헤더 집합을 상속하지 않는다.
 
-    429 응답에만 보안 헤더가 빠지는 것을 눈으로 잡기는 어렵다(설정 파일에는 아무
+    거절 응답에만 보안 헤더가 빠지는 것을 눈으로 잡기는 어렵다(설정 파일에는 아무
     표시도 나지 않는다). 그래서 server 레벨 목록을 읽어 그대로 대조한다.
     """
 
     inherited = {
-        d for d in _directives(server_body) if d.startswith("add_header X-") or d.startswith("add_header Referrer-Policy")
+        d
+        for d in _directives(server_body)
+        if d.startswith("add_header X-") or d.startswith("add_header Referrer-Policy")
     }
-    over_limit = set(locations["@too_many_requests"])
 
-    missing = inherited - over_limit
+    missing = inherited - set(locations[handler])
     assert missing == set(), (
-        f"429 location에 다시 적지 않은 server 레벨 보안 헤더가 있다: {sorted(missing)}."
+        f"{handler}에 다시 적지 않은 server 레벨 보안 헤더가 있다: {sorted(missing)}."
     )

@@ -169,10 +169,26 @@ backend를 기다리지 않아도 됩니다. backend가 없는 동안에는 `/ap
 `proxy_read_timeout 300s`가 허용하는 만큼 살아 있을 수 있어서, 간격을 지키며 천천히 밀어
 넣어도 진행 중인 LLM 호출은 계속 쌓이기 때문입니다.
 
-초과 응답은 **429 + `Retry-After: 10`**이고, 본문은 nginx 기본 HTML이 아니라 FastAPI와 같은
-모양의 `{"detail": "..."}` JSON입니다. `ApiClient.ExtractErrorMessage`가 그 키를 읽어 배너에
-그대로 싣기 때문에, **번들을 다시 굽지 않고도** 사용자에게 읽히는 안내가 나갑니다. 문구를
-바꾸려면 `nginx.conf`의 `@too_many_requests` 블록만 고치면 됩니다.
+초과 응답은 **429**이고, 본문은 nginx 기본 HTML이 아니라 FastAPI와 같은 모양의
+`{"detail": "..."}` JSON입니다. `ApiClient.ExtractErrorMessage`가 그 키를 읽어 배너에 그대로
+싣기 때문에, **번들을 다시 굽지 않고도** 사용자에게 읽히는 안내가 나갑니다.
+
+두 거절은 성질이 달라 본문을 갈라 뒀습니다. 레이트 초과는 잠깐 기다리면 풀리지만, 동시 실행
+초과는 진행 중인 분석이 끝나야 풀리고 그건 `proxy_read_timeout 300s`까지 갈 수 있습니다.
+
+| 거절 | 클라이언트가 보는 코드 | `Retry-After` | 배너 문구 |
+| --- | --- | --- | --- |
+| `limit_req` | 429 | `10` | 요청이 너무 잦습니다… |
+| `limit_conn` | 429 | **없음** | 이미 진행 중인 분석이 있습니다… |
+
+`limit_conn` 쪽에 `Retry-After`를 붙이지 않은 것은 의도입니다 — 언제 풀릴지는 진행 중인
+분석의 남은 시간에 달렸는데 서버가 그걸 모릅니다. 레이트 쪽 값(10초)을 복사해 넣으면 그
+시각에 다시 429이고, 상한인 300초를 적으면 대개 필요 이상으로 기다리게 합니다.
+
+`error_page`는 상태 코드로만 갈라낼 수 있어서 `limit_conn_status`를 **내부적으로만** 430으로
+둡니다. IANA 미할당 코드이고 `error_page`가 가로채므로 클라이언트에게는 나가지 않습니다
+(실측 확인). 문구를 바꾸려면 `nginx.conf`의 `@too_many_requests`·`@analysis_in_flight`
+블록만 고치면 됩니다.
 
 **스케줄러의 자동 분석은 이 제한에 걸리지 않습니다.** `backend/scheduler.py`가
 `perform_stock_analysis`를 같은 프로세스에서 직접 부르고 HTTP를 타지 않기 때문입니다.
