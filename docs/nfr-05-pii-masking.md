@@ -48,6 +48,9 @@ LLM이 판단할 수 있어 유지되지만, **절대 금액 기반 판단**("�
 (b) 비율·구간 변환(예: "포트폴리오 대비 12%")을 별도 이슈로 검토해야 한다 — 변환 규칙·구간
 경계 설계 비용이 #230 범위를 넘어 이번에는 채택하지 않았다.
 
+> (b) 방식은 이후 주문 검증자 경로에서 실제로 채택했다. 이 채팅 경로에는 여전히 (a)를 쓴다 —
+> 두 경로가 왜 갈리는지는 아래 "주문 검증자 — (b) 비율·구간 변환 (#336)" 절에 적었다.
+
 **역치환 fail-open**: LLM이 자리표시자를 변형하거나(`<AMOUNT_9f2a1c_1>` → `<AMOUNT1>`) 존재하지
 않는 자리표시자를 지어내거나(`<AMOUNT_9f2a1c_9>`) 다른 대화 턴의 자리표시자를 인용하면,
 `unmask_pii()`는 예외를 던지지 않고 해당 부분을 `_FALLBACK_LABEL`의 짧은 명사(계좌/금액/수량)에
@@ -604,13 +607,8 @@ backend `POST /api/v1/db/diary`는 `{"status": "success", "data": <Diary 전체>
 
 ### 이 절이 닫지 못한 것
 
-- **주문 검증자(`/v1/verify-order`, #299)** — backend가 계좌 스냅샷(`cash`,
-  `total_value`, `holding_qty`)을 JSON으로 직접 실어 보내고 `verifier.py`가 그대로
-  LLM에 넘긴다. `llm_chat`도 이 도구 경로도 지나지 않아 두 계층 **모두**의 사정거리
-  밖이다. 계좌번호는 실리지 않고 금액·수량만 실린다. 이 경로에 (a) 방식을 적용하면
-  "주문금액이 예수금 대비 과도한가"라는 검증자의 판정 자체가 성립하지 않으므로
-  (자리표시자는 대소 비교가 되지 않는다), 자리표시자가 아니라 비율·구간 변환((b) 방식)이
-  필요하다. 설계 비용이 이 이슈의 범위를 넘어 **#336으로 분리했다.**
+- **주문 검증자(`/v1/verify-order`, #299)** — **해소됨. 아래 "주문 검증자 —
+  (b) 비율·구간 변환" 절 참고 (#336).**
 - **도구 인자 방향에는 역치환이 없다 (#338)** — 마스킹은 도구 **결과**에만 걸리고,
   `restore_for_internal`을 타는 곳은 `finus_save_diary` 하나뿐이다. `finus_account_balance`는
   주문 권한이 있는 pass-through이므로(`configs/common.yml`), 에이전트가 마스킹된 잔고에서
@@ -632,6 +630,118 @@ backend `POST /api/v1/db/diary`는 `{"status": "success", "data": <Diary 전체>
   돌면 매핑이 유실된다. 그때도 **마스킹은 그대로 하고**(fail-closed) ERROR 로그를
   남긴다. 유출 대신 관측 가능한 품질 저하를 택한 것이며, `_record_to_ledger`가 같은
   상황을 다루는 방식과 같다.
+
+## 주문 검증자 — (b) 비율·구간 변환 (#336)
+
+### 문제
+
+주문 검증자(`POST /v1/verify-order`, #299)는 backend가 KIS에서 조회한 계좌 스냅샷
+(`current_price`, `cash`, `total_value`, `holding_qty`)을 JSON으로 그대로 실어
+`openai_cloud_llm`으로 보냈다. 앞의 두 계층 **모두**의 사정거리 밖이다:
+
+- **#230(backend)** 은 `backend/services.py::llm_chat()`에서 마스킹한다. `order_assist`는
+  검증자를 전용 엔드포인트로 직접 부르므로 `llm_chat()`을 지나지 않는다.
+- **#231(NAT 도구 결과)** 은 `finus_api.py`의 도구 결과와 `finus_reasoning_trace_agent`의
+  응답 경계에서 동작한다. `verifier.py`는 도구가 없는 단발 LLM 호출이고 supervisor
+  브랜치도 아니라(`verifier.py` 모듈 docstring의 세 가지 차이점) 그 경계를 어느 쪽으로도
+  지나지 않는다.
+
+계좌번호는 실리지 않았다. 나가던 것은 금액과 수량이다.
+
+### 왜 (a)가 아니라 (b)인가
+
+두 가지가 (a) 자리표시자를 이 경로에서 배제한다.
+
+1. **자리표시자는 대소 비교가 되지 않는다.** 검증자가 하는 일은 "이 주문이 계좌 상태에
+   비해 과한가"를 보는 것이고, 그것은 크기 비교다. `cash`를 `<AMOUNT_1>`로 바꾸는 순간
+   판정 자체가 성립하지 않는다.
+2. **이 경로는 fail-closed다.** 파싱 실패·판정 불가가 전부 REJECT이므로, 마스킹이 판정
+   품질을 떨어뜨리면 **정상 주문이 거부되는 방향**으로 무너진다. 금전 경로라 그 오작동의
+   비용이 크다. (a)의 알려진 한계를 여기서는 "감수하는 비용"으로 넘길 수 없다.
+
+그래서 "방식" 절이 설계 비용 때문에 미뤄 둔 (b) 비율·구간 변환을 이 경로에 적용했다.
+채팅 경로가 (a)를 유지하는 이유도 같은 축에서 갈린다 — 채팅은 판정이 아니라 서술이고
+왕복 복원이 필요하며(사용자에게 원 금액을 되돌려줘야 한다), fail-closed도 아니다.
+
+### 절대값이 꼭 필요한 판정은 남지 않는다
+
+이것이 이 절의 핵심 관찰이다. 금액·수량을 **절대값으로 비교하는 판정은 전부 코드가
+이미 내렸다** — `backend/order_assist.py::evaluate_hard_limits`의 1회 주문 한도, 지정가
+괴리, 일 주문 횟수·거래대금, 종목 비중, 현금 부족·현금 최소 비중, 보유량 초과 매도.
+그리고 검증자는 그 판정을 **통과한** 제안만 본다(`hard_check.passed=False`면 LLM을
+부르지 않는다).
+
+LLM에게 남은 일은 두 가지뿐이고 둘 다 비율이면 충분하다:
+
+- 근거의 질 — `rationale`이 비어 있거나 종목과 무관한가, 확신도가 낮은가.
+- 정합성 — 제안이 스스로 말하는 것과 계좌 상태가 서로 말이 되는가
+  ("소량 분할 매수"라면서 현금의 대부분을 쓰는가, "일부 차익 실현"이라면서 사실상 전량인가).
+
+즉 (b)를 적용하면서 잃는 판정 능력이 없다. 이 경로에서만 (b)가 싸게 성립하는 이유다.
+
+### 변환 규칙
+
+프롬프트에는 **절대 금액도 절대 수량도 하나도 싣지 않는다.** 계좌 값뿐 아니라 주문
+단가·수량, 그리고 설정된 한도 금액까지 전부 뺐다. 하나라도 남기면 구간에서 원값이
+역산되기 때문이다 — 주문금액(단가 × 수량)을 알고 `order_ratio_of_cash`가 "1~5%"임을
+알면 주문가능현금의 범위가 나온다. 이 역산 통로가 "비율로 바꾸면 안전하다"는 순진한
+구현이 실제로 남기는 구멍이고, 여기서 막는 대상이다.
+
+`derive_ratio_view()`가 만드는 것(`finus_nat/src/nat_finus_nat/verifier.py`):
+
+| 키 | 뜻 |
+| --- | --- |
+| `order_ratio_of_cash` | 주문금액 ÷ 주문가능현금 |
+| `order_ratio_of_total` | 주문금액 ÷ 총 평가금액 |
+| `position_weight_after` | 체결 후 이 종목 평가금액 ÷ 총 평가금액 |
+| `cash_weight_after` | 체결 후 현금 ÷ 총 평가금액 |
+| `sell_ratio_of_holding` | 매도 수량 ÷ 보유 수량 (매수면 `null`) |
+| `limit_price_gap` | 지정가가 현재가에서 벗어난 정도와 방향 (시장가면 `null`) |
+| `daily_amount_ratio_after` | 이 주문까지 포함한 오늘 거래대금 ÷ 일 한도 |
+
+함께 나가는 신호는 `has_holding`, `daily_order_count`, `daily_order_count_limit`,
+`confidence_below_soft_threshold`뿐이다. 주문 **건수**는 금액도 주식 수량도 아니라
+역산 재료가 되지 않으므로 그대로 둔다.
+
+**구간 경계**: `1% 미만 / 1~5 / 5~10 / 10~25 / 25~50 / 50~75 / 75~95 / 95~100 / 100% 초과`
+(각 상한은 불포함). 이 굵기로 잡은 근거는 위 "정합성" 판단이 이 폭에서 이미 갈린다는
+것이다 — 더 잘게 쪼개면 역산 정밀도만 올라가고 판정은 나아지지 않는다. 맨 위 두 구간을
+`75~95`와 `95~100`으로 나눈 것은 모델이 "상당 부분"과 "사실상 전량"을 구분해야 하기
+때문이다. 지정가 괴리는 방향이 의미를 가지므로 별도 구간
+(`0.5% 이내 / 0.5~2 / 2~5 / 5~10 / 10% 초과`)에 `높음`·`낮음`을 붙인다.
+
+**단가 기준은 backend와 같아야 한다.** 시장가는 현재가로 본다
+(`estimated_unit_price`의 거울). 두 곳이 갈리면 코드가 한도로 판정한 금액과 LLM이 보는
+비율이 서로 다른 주문을 가리키게 된다.
+
+### fail-closed를 정상 주문 쪽으로 무너뜨리지 않기
+
+변환 코드가 예외를 던지면 `build_user_prompt()`가 터지고, 그것은 이 모듈의 규칙상
+곧바로 **정상 주문의 REJECT**다. 그래서 `_ratio_band()`·`_gap_band()`는 **예외를 던지지
+않는 것이 계약**이다. 분모가 0이거나 없거나 페이로드가 숫자가 아닌 값을 실어 오면
+`"산출 불가"` 문자열을 돌려준다. `"0%"`로 뭉개지 않는 이유는 모델이 그것을 안전 신호로
+읽기 때문이고, 시스템 프롬프트도 "'산출 불가'는 안전하다는 신호가 아니다"라고 못 박는다.
+
+`test_order_verifier.py::test_build_user_prompt_never_raises_on_a_degenerate_snapshot`과
+`::test_a_normal_order_still_approves_after_the_conversion`이 이 두 방향을 고정한다.
+
+### 함께 막은 두 구멍
+
+- **`hard_check.violations`를 싣지 않는다.** 위반 메시지에는 backend가 만든 원 금액이
+  문장으로 들어 있다(`"주문금액 12,345,000원 > 한도 ..."`). 여기까지 왔다는 것은 위반이
+  없다는 뜻이라 실무상 항상 비어 있지만, 값이 새는 통로를 열어 둘 이유가 없다.
+- **`proposal`의 필드를 골라서 싣는다.** `ProposalPayload`는 `extra="allow"`라 backend가
+  필드를 늘릴 수 있다. `model_dump()`를 통째로 쓰면 **아무도 검토하지 않은 새 필드가**
+  외부 LLM으로 나간다.
+
+### 남는 것
+
+- 구간은 정보를 완전히 없애지 않는다. `daily_amount_ratio_after`처럼 분모가 설정 상수인
+  항목은, 그 상수를 아는 쪽에서 보면 분자의 **범위**가 나온다. 원값 노출과는 급이 다르지만
+  0은 아니다. 한도 금액을 프롬프트에서 뺀 것은 이 여지를 모델 쪽에서 좁히기 위한 것이다.
+- 검증자가 쓰는 `reason`은 여전히 자유 텍스트다. 다만 backend가 사용자 메시지의 숫자를
+  전부 페이로드 원본에서만 만들고(`OrderVerdict.reason` docstring), 시스템 프롬프트도
+  숫자 나열을 금지한다.
 
 ## Telegram 경유 계좌 정보 노출 — 한계로 명시 (#232)
 
@@ -742,6 +852,11 @@ backend `POST /api/v1/db/diary`는 `{"status": "success", "data": <Diary 전체>
   `PII_MAPPING` 박스, `mask_tool_result()`/`unmask_response()`/`restore_for_internal()`,
   마스킹 대상 도구 목록.
 - `finus_nat/src/nat_finus_nat/pii_mask.py` — `backend/pii_mask.py`의 바이트 사본.
+- `finus_nat/src/nat_finus_nat/verifier.py` — 주문 검증자의 (b) 비율·구간 변환(#336):
+  `_ratio_band()`/`_gap_band()`/`derive_ratio_view()`, 필드를 골라 싣는
+  `build_user_prompt()`, 구간의 뜻을 설명하는 `_SYSTEM_PROMPT`.
+  테스트: `finus_nat/tests/test_order_verifier.py`("스냅샷 마스킹" 절 — 원값 유출 회귀
+  가드, 구간 경계 고정, 변환 후 정상 주문 승인, 변환이 예외를 던지지 않음).
 - `finus_nat/src/nat_finus_nat/finus_api.py:_record_and_mask()` — 도구 결과의 단일 반환 지점.
 - `finus_nat/src/nat_finus_nat/agents.py:finus_reasoning_trace_agent()` — 박스 심기 + 역치환.
 - 테스트: `finus_nat/tests/test_pii_guard.py`(도구별 마스킹 대상 판정, 경계 왕복,
