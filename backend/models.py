@@ -8,10 +8,24 @@ class Portfolio(SQLModel, table=True):
     증권사 API(SSOT)의 데이터를 기반으로 동기화됩니다.
     """
     id: Optional[int] = Field(default=None, primary_key=True)
+    # unique=True가 아직 없다 (#196). scheduler._sync_portfolio_from_balance는
+    # stock_code 기준 upsert이므로 논리적으로는 코드당 1행이 불변식이고, 그 함수가
+    # 중복 행을 발견하면 한 행으로 수렴시킨다 — upsert의 정확성은 이 제약에
+    # 의존하지 않는다.
+    #
+    # 제약을 켜려면 스키마 마이그레이션이 필요하다: 이미 배포된 SQLite 파일에는
+    # 비유일 인덱스 ix_portfolio_stock_code가 이미 있고 create_all()은 기존
+    # 인덱스를 바꾸지 않으므로, DROP INDEX → 중복 행 정리 → CREATE UNIQUE INDEX
+    # 순서가 필요하다. database.py의 _PENDING_COLUMN_MIGRATIONS는 컬럼 추가
+    # 전용이라 이 형태를 담지 못한다. 중복 행을 지우지 않은 채 유니크 인덱스를
+    # 만들면 부팅이 영구 실패하므로, 별도 이슈에서 다룬다.
     stock_code: str = Field(index=True, description="종목 코드")
     stock_name: str = Field(description="종목명")
     quantity: int = Field(default=0, description="보유 수량")
     avg_price: float = Field(default=0.0, description="평균 매입가")
+    # 이 값을 채우는 프로덕션 경로는 아직 없다 — get_balance(inquire-balance,
+    # TTTC8434R) output1에 현재가 필드가 있는지가 실계좌 실측 전까지 미확인이다(#196).
+    # 경로가 생긴 뒤에도 잔고 동기화는 이 필드를 덮지 않는다(위 upsert 참고).
     current_price: Optional[float] = Field(default=None, description="현재가")
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="최근 업데이트 시간")
 
