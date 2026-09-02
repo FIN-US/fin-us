@@ -2557,7 +2557,13 @@ async def test_poller_extends_window_when_send_failure_appears_later(monkeypatch
 
 @pytest.mark.asyncio
 async def test_poller_retry_delay_follows_the_newest_failure(monkeypatch):
-    """간격은 배치에 하나뿐이라 가장 급한 update에 맞춘다 (PR #242 리뷰)."""
+    """간격은 배치에 하나뿐이라 가장 급한 update에 맞춘다 (PR #242 리뷰).
+
+    _failures가 2건 이상인 상태는 #259 1단계 이후 run()이 만들 수 없어(배치가 첫 RETRY에서
+    끊기므로 한 배치가 새로 넣는 항목은 최대 1개다) 아래에서 41을 직접 주입한다. _retry_delay의
+    min() 중재도 그래서 지금은 도달 불가지만, 상한이 배치 루프의 모양에 딸린 성질이라
+    남긴다 — skip 통지 병합·_forget_passed_updates와 같은 판단이다.
+    """
     notifier = FakeNotifier()
     notifier.enabled = True
     notifier.bot_token = "token"
@@ -2584,6 +2590,30 @@ async def test_poller_retry_delay_follows_the_newest_failure(monkeypatch):
 
     # 42가 41의 45초 간격을 물려받으면 자기 창(60초) 안에서 시도 횟수를 손해 본다.
     assert clock.sleeps == [5.0]
+
+
+def test_forget_passed_updates_drops_only_what_the_offset_passed():
+    """offset이 지나간 실패 기록만 버린다 (#241).
+
+    run()의 호출부가 보는 _failures는 #259 1단계 이후 항상 비어 있어 루프로는 이 성질을
+    재현할 수 없다. 루프가 다시 바뀌어 기록이 여러 건 쌓일 때 이 정리가 남아 있도록
+    helper 단위로 고정한다 — 헬퍼 독스트링의 근거와 짝이다.
+    """
+    notifier = FakeNotifier()
+
+    class NoopHandler:
+        async def handle_update(self, update):
+            return None
+
+    poller = _make_poller(notifier, handler=NoopHandler())
+    for update_id in (40, 41, 42):
+        poller._failures[update_id] = telegram_commands._UpdateFailure(
+            first_at=0.0, attempts=1, send_failure=False
+        )
+
+    poller._forget_passed_updates(42)
+
+    assert set(poller._failures) == {42}
 
 
 @pytest.mark.asyncio

@@ -140,7 +140,10 @@ UPDATE_RETRY_WINDOW_SECONDS = 60.0
 #
 # 이 값은 무한정 키우면 안 된다. handle_update가 던지는 지배적 경로가 전송 실패라서,
 # 영구적 전송 실패(특정 메시지의 Markdown 파싱 400)가 하나 들어오면 offset이 이 시간만큼
-# 얼어붙어 #241이 그대로 재발한다. 상한이 있다는 사실 자체를 테스트가 고정한다
+# 얼어붙는다. #259 1단계 이전에는 그 동결이 "#241의 재발"이었지만 지금은 채택한 설계다 —
+# 배치가 그 update에서 끊기는 것이 이 봇이 중복 실행 대신 고른 쪽이다. 그래서 상한이 필요한
+# 이유는 오히려 더 강해졌다: 얼어붙는 동안 뒤의 명령도 실행되지 않아 봇이 이 시간만큼 통째로
+# 무응답이다. 상한이 있다는 사실 자체를 테스트가 고정한다
 # (test_poller_eventually_skips_persistent_send_failures).
 SEND_FAILURE_RETRY_WINDOW_SECONDS = 300.0
 # 재시도 간격. 실패가 이어지면 폴링을 늦춰 텔레그램 rate limit을 자극하지 않는다.
@@ -2214,13 +2217,15 @@ class TelegramCommandPoller:
         # update_id -> 재시도 예산. 유실돼도 poison 폐기가 미뤄질 뿐 중복 실행으로 이어지지
         # 않으므로 영속화하지 않는다. 매 update 쓰기에 얹을 값이 아니다 (#248).
         #
-        # 대가는 분명히 해 둔다: _restore_state가 이 값을 건드리지 않으므로 재시작마다
-        # poison에 예산이 새로 지급된다. 배포가 잦으면 폐기가 무기한 미뤄지고, 그동안 배치는
-        # 매번 같은 poison에서 끊긴다 — #259 1단계로 뒤의 update가 선행 실행되지 않게 되면서
-        # 이 지연이 곧 "내 다음 명령이 늦게 실행됨"이 됐다. 영속화하는 offset이 "자신을
-        # poison에 붙들어 매는 상태"인 반면 이건 "poison을 포기하게 해주는 유일한 상태"라
-        # 방향이 반대다. 다만 이 값을 안 남기는 것이 새로 들이는 위험은 아니다 — 이전에도
-        # 재시작 후 Telegram이 같은 지점부터 재배달하며 예산이 리셋됐다 (PR #251 리뷰).
+        # 대가가 #259 1단계로 커졌다: _restore_state가 이 값을 건드리지 않으므로 재시작마다
+        # poison에 예산이 새로 지급되는데, 이제 배치가 그 poison에서 끊기므로 예산보다 잦은
+        # 재시작이 이어지면 폐기가 무기한 미뤄지고 **그 채팅의 모든 명령이 정지한다**.
+        # #241 하에서는 뒤의 update가 선행 실행돼 "poison 폐기가 미뤄짐"에 그쳤다.
+        # 리셋 계기는 배포가 아니라 Dockerfile의 uvicorn --reload + bind mount다 — backend
+        # 파일 저장 하나면 된다. 영속화할지 알람으로 감지만 할지는 #350에서 정한다.
+        #
+        # 방향이 offset과 반대라는 점은 그대로다: offset은 "자신을 poison에 붙들어 매는
+        # 상태"이고 이건 "poison을 포기하게 해주는 유일한 상태"다 (PR #251 리뷰).
         self._failures: dict[int, _UpdateFailure] = {}
 
     async def run(self) -> None:
@@ -2458,7 +2463,18 @@ class TelegramCommandPoller:
             logger.error("Telegram poller 상태 저장 실패, 인메모리로 계속: %s", exc)
 
     def _forget_passed_updates(self, offset: int) -> None:
-        """offset이 지나간 update_id 기록을 정리해 추적 상태가 무한히 커지지 않게 한다 (#241)."""
+        """offset이 지나간 update_id 기록을 정리해 추적 상태가 무한히 커지지 않게 한다 (#241).
+
+        #259 1단계 이후 이 정리는 도달 가능한 모든 상태에서 no-op이다. _failures에 항목을
+        새로 넣는 것은 배치를 끊는 RETRY 하나뿐이고, 그 항목은 offset이 지나가지 못한 가장
+        작은 id라 다음 배치의 맨 앞으로 정렬된다 — 거기서 pop되거나 다시 배치를 끊으므로,
+        유일한 호출부(그 pop 바로 다음 줄)가 보는 dict는 항상 비어 있다.
+
+        그래도 남기는 이유는 skip 통지 병합(_notify_updates_skipped 호출부 주석)과 같다.
+        "항목이 최대 1개"는 배치 루프의 모양에 딸린 성질이라 루프가 다시 바뀌면 무한 증가가
+        되살아나는데, 그것을 막는 코드는 여기뿐이다. 정리 자체는
+        test_forget_passed_updates_drops_only_what_the_offset_passed가 helper 단위로 고정한다.
+        """
         self._failures = {
             update_id: failure
             for update_id, failure in self._failures.items()
