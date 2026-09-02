@@ -100,7 +100,7 @@ LLM이 판단할 수 있어 유지되지만, **절대 금액 기반 판단**("�
 ## 미적용 경로 (한계로 명시)
 
 이 계층은 **`llm_chat()`을 거치는 프롬프트만** 막는다. 아래 경로·대상은 이 계층 밖이며
-후속 이슈에서 별도로 다루거나(1, 2, 4) 구조적 한계·의도된 트레이드오프로 남긴다(3, 5).
+후속 이슈에서 별도로 다루거나(1, 4) 구조적 한계·의도된 트레이드오프로 남긴다(2, 3, 5).
 
 1. **NAT 내부 도구 호출 경로** — NAT 멀티에이전트가 자체적으로 MCP 도구(KIS 잔고 등)를
    호출해 만드는 프롬프트 조각은 backend가 보지 못하므로 마스킹할 수 없다. backend는
@@ -316,25 +316,31 @@ backend가 `user_msg`로 직접 조립해 넣는 잔고 텍스트에 대한 마�
 
 ## Telegram 경유 계좌 정보 노출 — 한계로 명시 (#232)
 
-`/balance`는 KIS 잔고 리포트를 가공 없이 그대로 Telegram으로 보낸다
-(`backend/telegram_commands.py`의 `_handle_balance`). 이 경로는 `llm_chat()`을 지나지
-않으므로 위 마스킹 계층의 사정거리 밖이고, 마스킹을 걸면 명령의 존재 이유가 사라진다 —
-금액을 보려고 쓰는 명령이기 때문이다.
+`/balance`는 KIS 잔고 리포트에 값을 바꾸지 않는 `render()` 틀만 씌워 그대로 Telegram으로
+보낸다(`backend/telegram_commands.py`의 `_handle_balance`). `render()`는 텔레그램으로 나가기
+직전의 단일 통과 지점(`presentation.py`, #297)이지만 길이 예산이 없어 값을 지우거나 줄이지
+않는다. 이 경로는 `llm_chat()`을 지나지 않으므로 위 마스킹 계층의 사정거리 밖이고,
+마스킹을 걸면 명령의 존재 이유가 사라진다 — 금액을 보려고 쓰는 명령이기 때문이다.
 
 **결정: Telegram 채널을 비식별화 대상에서 제외하고 한계로 기록한다. 코드 변경 없음.**
 
 ### 대상 — `/balance`만이 아니다
 
 이슈 #232는 `/balance`와 주문 확인 메시지를 들었지만, 실제로 Telegram으로 나가는 계좌
-정보는 세 갈래다. 하나만 예외로 적으면 나머지 둘이 문서에서 빠진다.
+정보는 네 갈래다. 일부만 예외로 적으면 나머지가 문서에서 빠진다.
 
 | 경로 | 나가는 값 | 조립 지점 |
 | --- | --- | --- |
 | `/balance` (와 `balance:refresh` 버튼) | 보유 종목명·종목코드·보유수량·평균매입가·평가금액·평가손익·수익률 | `telegram_commands.py` `_handle_balance` → `mcp-trading/balance.js` `formatBalanceReport()` |
-| 주문 승인 메시지 | 예상 주문금액·현재가·주문가능금액·보유수량 | `order_assist.py` `format_approval_message` (`snapshot`은 `get_stock_quote`/`get_balance`/`get_orderable_cash` 병렬 조회에서 온다) |
+| 수동 주문 확인 메시지 (`/buy`·`/sell`) | 예상 주문금액·현재가·**예수금** | `telegram_commands.py` `_format_order_prompt` — `get_balance` 응답에서 예수금 줄을 골라 접두사만 떼고 그대로 붙인다 |
+| 자율 제안 승인 메시지 | 예상 주문금액·현재가·**주문가능금액**·보유수량 | `order_assist.py` `format_approval_message` (`snapshot`은 `get_stock_quote`/`get_balance`/`get_orderable_cash` 병렬 조회에서 온다) |
 | 모닝 브리핑 | LLM이 잔고를 근거로 쓴 문장 속 금액 | `scheduler.py` `morning_briefing_task` → `format_morning_briefing` |
 
-모닝 브리핑이 이 표에 들어가는 이유가 중요하다. 이 프롬프트는 위 계층이 **마스킹하는**
+주문 경로가 두 줄인 것은 표기 편의가 아니라 실제로 함수가 둘이기 때문이다. 수동 경로는
+`get_balance`의 **예수금**을, 자율 제안 경로는 `get_orderable_cash`의 **주문가능금액**을
+싣는다(#310). 한 줄로 합치면 한쪽을 고칠 때 다른 쪽이 문서에서 조용히 빠진다.
+
+모닝 브리핑이 이 표에 들어가는 이유는 따로 있다. 이 프롬프트는 위 계층이 **마스킹하는**
 대상이지만, `unmask_pii()`가 응답을 원값으로 되돌린 뒤 그 텍스트가 Telegram으로 나간다.
 즉 이 계층은 LLM 제공자에게 가는 값을 막는 것이지 사용자에게 표시되는 값을 막는 것이
 아니다 — Telegram 채널은 설계상 **원값 채널**이다.
@@ -359,11 +365,20 @@ backend가 `user_msg`로 직접 조립해 넣는 잔고 텍스트에 대한 마�
   `is_placeholder_secret()` 검사로 정해지고, `send_text`는 `enabled`가 아니면 즉시
   `False`를 돌려준다.
 
-`chat_id` 고정 자체는 `backend/tests/test_telegram_notifier.py`가 페이로드 단언으로
-이미 지키고 있었고, 수신 게이트 쪽은 `/balance` 기준의 회귀 테스트가 없어 이번에
-`backend/tests/test_telegram_commands.py::test_balance_ignores_updates_from_other_chats`를
-추가했다. 이 결정의 전제가 코드 한 줄(게이트)에 걸려 있으므로 문서가 아니라 테스트가
-지켜야 한다.
+이 결정의 전제는 위 네 가지가 전부 성립할 때만 유지되므로, 문서가 아니라 테스트가
+지켜야 한다. 현재 상태는 이렇다.
+
+- 발신 대상 고정 — `backend/tests/test_telegram_notifier.py`가 페이로드의 `chat_id`를
+  직접 단언한다(이 PR 이전부터 있었다).
+- 수신 게이트 — `/balance` 기준의 회귀 테스트가 없어
+  `test_balance_ignores_updates_from_other_chats`를 추가했다. 명령과 버튼 두 진입점을
+  한 테스트에서 함께 본다.
+- 폴러 통지 필터 — 배치가 **전부** 남의 chat인 경우는
+  `test_poller_skip_notice_skipped_for_other_chat`(#241)이 이미 덮고 있었다. 다만 필터를
+  남긴 채 문구만 `updates` 전체로 만드는 변경은 그 테스트를 통과한다(실측). 그 경우
+  남의 메시지 원문이 소유자 화면에 뜨므로, 소유자와 남의 chat이 섞인 배치를 보는
+  `test_poller_skip_notice_omits_other_chat_labels_in_mixed_batch`를 추가했다.
+- 미설정 시 무발신 — `enabled` 판정은 `test_telegram_notifier.py`가 덮는다.
 
 ### 그래도 남는 것 — 이 결정이 막지 못하는 것
 
@@ -394,11 +409,13 @@ backend가 `user_msg`로 직접 조립해 넣는 잔고 텍스트에 대한 마�
   상태가 된다. 노출 시점을 한 단계 뒤로 미룰 뿐 노출 자체는 그대로다.
 - **옵션 C(요약만 보내고 상세는 프론트엔드로)** — #122로 `/api/v1/db/portfolio`가
   실데이터를 반환하기 시작해 대안 경로가 생긴 것은 맞다. 다만 `backend/main.py`는
-  현재 CORS 미들웨어만 붙어 있고 **인증이 없다.** 상세를 그쪽으로 옮기면 "chat_id로
-  고정된 수신자 하나"에서 "네트워크에서 backend에 닿을 수 있는 누구나"로 옮기는 것이
-  되어, #232가 줄이려던 노출이 오히려 늘어난다. 이 경로에 인증이 생기기 전에는 옵션
-  C가 개선이라는 근거가 없다. (관련: "미적용 경로" 1번과 마찬가지로 backend가 어떤
-  네트워크에 놓이는지가 전제다.)
+  현재 CORS 미들웨어만 붙어 있고 **인증이 없다.** 이 노출면은 옵션 C가 새로 만드는
+  것이 아니다 — `GET /api/v1/trading/balance`가 이미 `get_balance` 결과를 그대로
+  `data.report`로 돌려주고 있어, `/balance`가 보내는 것과 같은 리포트가 이미 인증 없이
+  나간다. 따라서 옵션 C의 실제 효과는 "노출면을 새로 연다"가 아니라 **Telegram 쪽
+  노출을 줄이는 대신 이미 인증 없는 경로에 의존하게 된다**는 것이고, 그 교환이 순개선이라는
+  근거가 없다. 이 경로에 인증이 생기면 다시 볼 값이 있다. (관련: "미적용 경로" 1번과
+  마찬가지로 backend가 어떤 네트워크에 놓이는지가 전제다.)
 
 ## 구현
 

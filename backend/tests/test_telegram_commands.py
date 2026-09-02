@@ -2782,6 +2782,46 @@ async def test_poller_skip_notice_skipped_for_other_chat(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_poller_skip_notice_omits_other_chat_labels_in_mixed_batch(monkeypatch):
+    """소유자와 남의 chat이 섞인 배치에서 통지 문구에 남의 원문이 실리지 않는다 (#232).
+
+    test_poller_skip_notice_skipped_for_other_chat은 배치가 전부 남의 chat일 때만
+    본다. 그래서 mine 필터를 지우는 변경은 잡히지만, 필터를 남긴 채 문구만
+    updates 전체로 만드는 변경은 그 테스트를 통과한다(실측). 그 경우 남의 메시지
+    원문이 소유자 화면에 뜨는데, 그것이 NFR-05가 "수신자는 하나"의 근거로 든
+    필터가 막으려던 바로 그 일이다.
+    """
+    notifier = FakeNotifier()
+    notifier.enabled = True
+    notifier.bot_token = "token"
+
+    class FailingHandler:
+        async def handle_update(self, update):
+            raise RuntimeError("poison update")
+
+    poller = _make_poller(notifier, handler=FailingHandler())
+    clock = FakePollerClock()
+    clock.install(monkeypatch, poller)
+
+    async def fake_get_updates():
+        if poller.offset is not None:
+            raise asyncio.CancelledError
+        return [
+            {"update_id": 41, "message": {"chat": {"id": 123}, "text": "/alerts off"}},
+            {"update_id": 42, "message": {"chat": {"id": 999}, "text": "남의 비밀"}},
+        ]
+
+    monkeypatch.setattr(poller, "_get_updates", fake_get_updates)
+
+    with pytest.raises(asyncio.CancelledError):
+        await poller.run()
+
+    assert notifier.messages == [
+        f"{telegram_commands.UPDATE_SKIPPED_NOTICE}\n실패한 요청: /alerts off"
+    ]
+
+
+@pytest.mark.asyncio
 async def test_poller_clears_failure_state_after_success(monkeypatch):
     """일시 장애로 실패한 update가 성공하면 재시도 예산 기록이 남지 않는다 (#241)."""
     notifier = FakeNotifier()
