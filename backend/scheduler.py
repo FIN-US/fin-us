@@ -62,7 +62,11 @@ from .presentation import (
     render,
 )
 from .telegram_notifier import telegram_notifier
-from .telegram_notifier import send_text_settled, should_send_telegram_alert
+from .telegram_notifier import (
+    TelegramTextSender,
+    send_text_settled,
+    should_send_telegram_alert,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -553,7 +557,7 @@ async def _send_due_catalyst_alerts(
     watchlist: list[str],
     catalyst_repo: CatalystNotificationRepo,
     *,
-    notifier: Any,
+    notifier: TelegramTextSender,
     today: date,
     level: str = DEFAULT_TELEGRAM_USER_LEVEL,
 ) -> None:
@@ -581,7 +585,7 @@ async def catalyst_calendar_task(
     *,
     watchlist_repo: WatchlistReader | None = None,
     catalyst_repo: CatalystNotificationRepo | None = None,
-    notifier: Any = telegram_notifier,
+    notifier: TelegramTextSender = telegram_notifier,
     today_factory: Callable[[], date] | None = None,
     use_redis_lock: bool = True,
     level: str | None = None,
@@ -1069,7 +1073,7 @@ async def run_rule_triggered_proposal(
     state: RedisSchedulerState | None,
     *,
     pending_orders: PendingOrderStore | None = None,
-    notifier: Any = None,
+    notifier: TelegramTextSender | None = None,
     now_factory: Callable[[], datetime] | None = None,
     assist: Callable[..., Any] | None = None,
 ) -> OrderAssistResult | None:

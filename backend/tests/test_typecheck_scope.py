@@ -19,8 +19,7 @@
 import tomllib
 from pathlib import Path
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-_PYPROJECT_PATH = _REPO_ROOT / "backend" / "pyproject.toml"
+_PYPROJECT_PATH = Path(__file__).resolve().parents[1] / "pyproject.toml"
 
 # 값을 주면 pyright의 내장 기본값이 대체되므로 설정이 함께 적어 두는 세 항목.
 # 이것들은 소스 파일을 가리지 않는다 — 각각 서드파티, 바이트코드 캐시, 숨김 항목이다.
@@ -37,13 +36,54 @@ def test_pyright_excludes_no_source_file():
     실패한다면 누군가 파일을 목록에 되돌려 놓았다는 뜻이고, 그 파일에 앞으로 쓰이는
     코드는 CI의 타입 체크 잡이 보지 않는다.
     """
-    excludes = set(_pyright_config()["exclude"])
+    excludes = frozenset(_pyright_config()["exclude"])
 
-    assert excludes == set(_DEFAULT_EXCLUDES), (
-        "pyright exclude에 기본 세 항목 외의 것이 들어 있습니다: "
-        f"{sorted(excludes - _DEFAULT_EXCLUDES)}. "
+    # 대칭차로 본다. 한쪽만 보면 기본 세 항목 중 하나가 **빠진** 경우에 실패 메시지가
+    # 빈 목록이 되어 원인을 알려 주지 못한다 — 그것도 회귀다(`**/.*`가 빠지면 .venv가
+    # 검사 대상이 되어 서드파티 오류가 쏟아지고, 그 소음을 잠재우려고 다시 파일을
+    # 제외하게 된다).
+    assert excludes == _DEFAULT_EXCLUDES, (
+        "pyright exclude가 기본 세 항목과 다릅니다 "
+        f"(더 있음={sorted(excludes - _DEFAULT_EXCLUDES)}, "
+        f"빠짐={sorted(_DEFAULT_EXCLUDES - excludes)}). "
         "제외된 파일에 새로 쓰는 코드는 CI 타입 체크 잡이 보지 않습니다 — "
         "파일 단위 제외 대신 해당 줄의 `# pyright: ignore[규칙]`를 쓰세요."
+    )
+
+
+def test_pyright_silences_no_file_and_no_rule_wholesale():
+    """`exclude` 말고도 같은 결과를 내는 두 가지 문을 함께 닫는다 (PR #337 리뷰).
+
+    `exclude`만 고정해서는 장치가 닫히지 않는다. 결과가 같은 우회로가 둘 있다:
+
+    - ``ignore = ["tests/test_config.py"]``는 파일을 파싱하되 진단을 전부 억제한다.
+      잡은 초록불이고, 그 파일의 새 코드는 검사받지 않는다 — `exclude`와 구별되지
+      않는 결과다. 게다가 설정 주석이 "파일 단위 제외 말고 줄 단위 ignore를 쓰라"고
+      안내하므로 다음 사람이 손댈 자리가 오히려 이쪽이다.
+    - ``reportArgumentType = "none"``처럼 규칙 하나를 전역으로 끄는 것도 같다. #319가
+      걷어낸 오류의 대부분이 reportArgumentType이었으니, 그 한 줄이면 이 PR 전체가
+      되돌려진다.
+
+    둘 다 "정말 필요하면 그 줄에 `# pyright: ignore[규칙]`"라는 같은 대안을 갖는다.
+    그쪽은 무엇을 왜 껐는지가 코드 옆에 남고, 그 줄만 꺼진다.
+    """
+    config = _pyright_config()
+
+    assert "ignore" not in config, (
+        "pyright ignore 목록이 생겼습니다: "
+        f"{config['ignore']}. exclude와 결과가 같습니다(진단이 전부 억제됩니다) — "
+        "해당 줄의 `# pyright: ignore[규칙]`를 쓰세요."
+    )
+
+    silenced = sorted(
+        key
+        for key, value in config.items()
+        if key.startswith("report") and value == "none"
+    )
+    assert not silenced, (
+        f"전역으로 꺼진 진단 규칙이 있습니다: {silenced}. "
+        "규칙 하나를 레포 전체에서 끄면 그 규칙이 지키던 주입 지점이 통째로 열립니다 — "
+        "해당 줄의 `# pyright: ignore[규칙]`를 쓰세요."
     )
 
 
