@@ -1685,6 +1685,168 @@ def test_sync_portfolio_removes_stale_holdings(portfolio_session):
     assert rows[0].stock_code == "005930"
 
 
+def test_sync_portfolio_upserts_instead_of_replacing_rows(portfolio_session):
+    """같은 종목을 두 번 동기화해도 행이 중복되지 않고 기존 행이 갱신됩니다 (#196).
+
+    이 테스트가 잡는 mutation: (1) upsert를 전량 DELETE + INSERT로 되돌리면 id가
+    바뀌어 id 단언이 실패한다. (2) 기존 행을 찾기만 하고 잔고 값을 반영하지 않는
+    no-op upsert는 quantity·avg_price 단언이 잡는다. (3) 기존 행을 찾지 않고 늘
+    새 행을 add하는 회귀는 len(rows) == 1이 잡는다.
+
+    id를 42로 명시해 심는 이유: SQLModel의 id는 SQLite의 rowid이고 AUTOINCREMENT가
+    없어, 테이블을 비운 뒤 다시 넣으면 rowid가 1부터 재사용된다. 기본 id(1)로
+    심으면 전량 교체 뮤턴트도 우연히 id == 1을 돌려줘 단언이 통과해버린다.
+    빈 테이블에서 절대 나올 수 없는 값을 심어야 이 단언이 판별력을 갖는다.
+    (1차 리뷰 🟡4가 지적한 "Portfolio.id를 참조하는 테이블이 생기면 참조가 매
+    주기 끊긴다"를 그대로 고정하는 단언이기도 하다.)
+    """
+    from sqlmodel import select
+    from ..models import Portfolio
+    from ..scheduler import _sync_portfolio_from_balance
+
+    portfolio_session.add(Portfolio(
+        id=42, stock_code="005930", stock_name="삼성전자", quantity=10, avg_price=70000
+    ))
+    portfolio_session.commit()
+
+    # 같은 종목, 수량·평단가만 바뀐 다음 주기 잔고
+    _sync_portfolio_from_balance(_make_balance_text(("삼성전자", "005930", 15, 72000)), portfolio_session)
+
+    rows = portfolio_session.exec(select(Portfolio)).all()
+    assert len(rows) == 1
+    assert rows[0].id == 42  # 행이 교체되지 않고 갱신됐다
+    assert rows[0].quantity == 15
+    assert rows[0].avg_price == 72000.0
+
+
+def test_sync_portfolio_preserves_fields_absent_from_balance(portfolio_session):
+    """잔고 응답에 없는 필드(current_price)가 재동기화 후에도 보존됩니다 (#196).
+
+    **이 파일에서 upsert 전환의 핵심 단언이다.** #196이 시세 조회를 붙이면
+    current_price에 값이 들어가는데, 동기화가 전량 교체면 10분 주기마다 그 값이
+    null로 되돌아가고 PR #204의 price_known 플래그가 "시세를 채웠는데도 모름"으로
+    잘못 나간다. 원인 추적이 어려운 형태의 회귀라 지금 미리 고정한다.
+
+    이 테스트가 잡는 mutation: 전량 DELETE + INSERT로 되돌리기, 또는 upsert
+    루프에서 row.current_price = None을 함께 쓰기 → 둘 다 current_price가 null이
+    되어 마지막 단언이 실패한다.
+
+    current_price를 실제로 채우는 프로덕션 경로는 아직 없다 — get_balance
+    (inquire-balance, TTTC8434R) output1에 현재가 필드가 있는지가 실계좌 실측
+    전까지 미확인이기 때문이다(#196). 그래서 여기서는 그 경로가 생긴 뒤의 상태를
+    DB에 직접 써서 재현한다.
+    """
+    from sqlmodel import select
+    from ..models import Portfolio
+    from ..scheduler import _sync_portfolio_from_balance
+
+    text = _make_balance_text(("삼성전자", "005930", 10, 70000))
+    _sync_portfolio_from_balance(text, portfolio_session)
+
+    # #196이 시세를 채운 뒤의 상태를 재현한다
+    row = portfolio_session.exec(select(Portfolio)).one()
+    row.current_price = 75000.0
+    portfolio_session.add(row)
+    portfolio_session.commit()
+
+    # 다음 주기의 동기화: 잔고에는 current_price가 없다
+    _sync_portfolio_from_balance(text, portfolio_session)
+
+    rows = portfolio_session.exec(select(Portfolio)).all()
+    assert len(rows) == 1
+    assert rows[0].current_price == 75000.0
+
+
+def test_sync_portfolio_preserves_price_only_for_still_held_stocks(portfolio_session):
+    """보존과 삭제가 한 동기화 안에서 함께 성립합니다 (#196).
+
+    upsert 전환이 "아무것도 지우지 않게" 되어버리는 반대 방향의 회귀를 잡는다:
+    stale 삭제 루프를 제거하면 SK하이닉스 행이 남아 len(rows) == 1이 실패한다.
+    동시에 삼성전자의 current_price 단언이, 삭제를 살리려고 전량 교체로 되돌리는
+    회귀를 잡는다.
+    """
+    from sqlmodel import select
+    from ..models import Portfolio
+    from ..scheduler import _sync_portfolio_from_balance
+
+    portfolio_session.add(Portfolio(
+        stock_code="005930", stock_name="삼성전자", quantity=10, avg_price=70000, current_price=75000.0
+    ))
+    portfolio_session.add(Portfolio(
+        stock_code="000660", stock_name="SK하이닉스", quantity=5, avg_price=200000, current_price=210000.0
+    ))
+    portfolio_session.commit()
+
+    # 삼성전자만 남은 잔고
+    _sync_portfolio_from_balance(_make_balance_text(("삼성전자", "005930", 10, 70000)), portfolio_session)
+
+    rows = portfolio_session.exec(select(Portfolio)).all()
+    assert len(rows) == 1                      # SK하이닉스는 삭제됐다
+    assert rows[0].stock_code == "005930"
+    assert rows[0].current_price == 75000.0    # 남은 종목의 시세는 보존됐다
+
+
+def test_sync_portfolio_collapses_duplicate_stock_code_rows(portfolio_session):
+    """같은 stock_code 행이 둘 이상이면 한 행으로 수렴합니다 (#196).
+
+    Portfolio.stock_code에는 유일성 제약이 없어(models.py는 index=True만 선언)
+    중복 행이 존재할 수 있는 상태를 스키마가 막지 못한다. 중복을 정리하지 않으면
+    upsert가 어느 행을 갱신했는지에 따라 /api/v1/portfolio 응답이 달라져
+    비결정적이 된다.
+
+    이 테스트가 잡는 mutation: 삭제 루프에서 rows[1:] 정리를 빼고 stale 종목만
+    지우도록 되돌리는 회귀 → 중복 행이 남아 len(rows) == 1이 실패한다.
+    """
+    from sqlmodel import select
+    from ..models import Portfolio
+    from ..scheduler import _sync_portfolio_from_balance
+
+    portfolio_session.add(Portfolio(stock_code="005930", stock_name="삼성전자", quantity=10, avg_price=70000))
+    portfolio_session.add(Portfolio(stock_code="005930", stock_name="삼성전자", quantity=99, avg_price=1))
+    portfolio_session.commit()
+
+    _sync_portfolio_from_balance(_make_balance_text(("삼성전자", "005930", 10, 70000)), portfolio_session)
+
+    rows = portfolio_session.exec(select(Portfolio)).all()
+    assert len(rows) == 1
+    assert rows[0].quantity == 10
+
+
+def test_sync_portfolio_collapses_duplicate_codes_within_one_response(portfolio_session):
+    """한 잔고 응답에 같은 코드가 두 번 와도 행이 하나만 남습니다 (#196).
+
+    위 테스트는 **DB에 이미 있던** 중복 행을 다루지만, 이 테스트는 동기화가
+    **스스로 만들어 내는** 중복을 다룬다. 빈 테이블에서 시작하므로 첫 항목은
+    else 분기(신규 삽입)를 타고, 그때 새 행을 existing에 등록하지 않으면 두 번째
+    항목이 또 하나의 새 행을 만든다. 그 행들은 existing에 없어 삭제 루프도
+    지나치므로 테이블에 2행이 남는다.
+
+    KIS output1은 pdno가 키라 정상 응답에는 중복이 없지만, 스키마가 막아주지
+    않는 이상 이 함수가 스스로 불변식("코드당 1행")을 깨뜨려서는 안 된다.
+
+    이 테스트가 잡는 mutation: 신규 삽입 분기의 existing[h.code] = [row] 등록을
+    제거 → len(rows)가 2가 되어 실패한다. 등록은 하되 재방문 시 갱신을 하지 않는
+    회귀는 quantity·avg_price 단언이 잡는다(마지막 항목의 값으로 수렴해야 한다).
+    """
+    from sqlmodel import select
+    from ..models import Portfolio
+    from ..scheduler import _sync_portfolio_from_balance
+
+    text = _make_balance_text(
+        ("삼성전자", "005930", 10, 70000),
+        ("삼성전자", "005930", 5, 71000),
+    )
+    returned = _sync_portfolio_from_balance(text, portfolio_session)
+
+    rows = portfolio_session.exec(select(Portfolio)).all()
+    assert len(rows) == 1
+    assert rows[0].quantity == 5          # 마지막 항목으로 갱신됐다
+    assert rows[0].avg_price == 71000.0
+    # 반환값은 잔고 응답의 항목 수라 행 수와 갈릴 수 있다(docstring 참고).
+    # #229의 PORTFOLIO_UPDATE holdings_count 호환을 위해 len(holdings)를 유지한다.
+    assert returned == 2
+
+
 def test_sync_portfolio_skips_when_balance_truncated(portfolio_session):
     """잔고 연속조회가 잘리면 기존 Portfolio 데이터를 파괴하지 않습니다.
 

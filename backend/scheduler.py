@@ -240,7 +240,7 @@ _BALANCE_TRUNCATION_MARKER = "조회가 중단되어"
 # 항상 출력한다. 따라서 이 마커가 없다는 것은 "보유 0건"이 아니라 "응답을 읽지 못함"이다.
 # run_mcp_tool은 MCP content가 비면 예외 대신 빈 문자열을 반환하므로(services.py),
 # 이 경로는 실재한다. _sync_portfolio_from_balance가 이 마커 부재를 계약 위반으로
-# 처리해 전량 교체를 막는다.
+# 처리해, 보유 0건으로 오인한 전 종목 삭제를 막는다.
 _BALANCE_HOLDINGS_MARKER = "[보유 종목 리스트]"
 
 
@@ -370,23 +370,36 @@ def _sync_portfolio_from_balance(
 ) -> int | None:
     """get_balance 응답을 바탕으로 Portfolio 테이블을 동기화합니다.
 
-    전략: 전량 교체 (기존 행 전체 삭제 후 신규 삽입). 매 잔고 조회마다 실행되어
-    보유하지 않게 된 종목을 자동으로 제거합니다.
+    전략: stock_code 기준 upsert (#196). 잔고에 있는 종목은 기존 행을 갱신하고,
+    없던 종목만 새로 삽입하며, 보유하지 않게 된 종목의 행은 삭제합니다. 매 잔고
+    조회마다 실행되므로 "잔고에서 사라진 종목은 제거된다"는 동작은 전량 교체
+    시절과 동일합니다.
 
-    잔고가 잘린 경우(is_balance_truncated) 전량 교체를 수행하면 아직 파악되지 않은
+    upsert여야 하는 이유는 **잔고 응답에 없는 필드를 보존**하기 위해서입니다.
+    전량 교체(DELETE + INSERT)는 그런 필드를 매 주기 기본값으로 되돌립니다.
+    지금은 current_price가 항상 null이라 관측되는 차이가 없지만, 이 이슈(#196)가
+    시세 조회를 붙이는 순간 10분 주기마다 값이 null로 덮여, PR #204가 도입한
+    price_known 플래그가 "시세를 채웠는데도 모름"으로 잘못 나가는 회귀가 됩니다.
+
+    잔고가 잘린 경우(is_balance_truncated) 동기화를 수행하면 아직 파악되지 않은
     보유 종목이 삭제될 수 있으므로, 동기화를 건너뛰고 기존 데이터를 보존합니다.
 
-    current_price는 get_balance(inquire-balance, TTTC8434R) output1에 현재가 필드가
-    없어 항상 null로 둡니다. null 수익률이 "실제 0%"와 혼동되지 않도록
-    /api/v1/portfolio 응답에서 return_rate: null로 구분됩니다(이슈 #122).
-    current_price 확보 방안은 후속 이슈를 참고하세요.
+    current_price는 이 함수가 **읽지도 쓰지도 않습니다.** get_balance(inquire-balance,
+    TTTC8434R) output1에 현재가 필드가 있는지가 **미확인**이기 때문입니다 — 실계좌
+    실측이 필요하며 저장소 안의 근거(balance-rlz-pl-report.js의 row.prpr)는 다른
+    TR(TTTC8494R)의 응답이라 증명이 되지 못합니다(#196). 그래서 신규 행은 모델
+    기본값 그대로 null이고, 기존 행의 값은 손대지 않은 채 보존됩니다.
+    null 수익률이 "실제 0%"와 혼동되지 않도록 /api/v1/portfolio 응답에서
+    return_rate: null로 구분됩니다(이슈 #122).
 
     holdings: 호출처에서 이미 _parse_balance_holdings를 실행한 경우 그 결과를 전달하면
     재파싱을 건너뜁니다. None이면 balance_text에서 직접 파싱합니다.
     잘림·마커 가드는 holdings 인자 유무에 관계없이 항상 balance_text를 검사합니다.
 
-    반환값(이슈 #229): 동기화를 실제로 수행했으면 삽입한 종목 수(int, 0 이상)를,
-    잘림·마커 부재로 건너뛰었으면 None을 반환합니다. bool 대신 개수를 반환하는 이유는
+    반환값(이슈 #229): 동기화를 실제로 수행했으면 동기화한 보유 종목 수(int, 0 이상)를,
+    잘림·마커 부재로 건너뛰었으면 None을 반환합니다. 이 값은 잔고 응답의 항목 수이지
+    테이블 행 수가 아닙니다 — upsert 후에는 삽입이 0건일 수 있고, 한 응답에 같은
+    코드가 두 번 오면 반환값이 행 수보다 큽니다. bool 대신 개수를 반환하는 이유는
     호출처(monitor_market_task)가 WebSocket으로 PORTFOLIO_UPDATE를 브로드캐스트할 때
     holdings_count를 함께 실어야 하는데, bool만으로는 호출처가 그 값을 얻기 위해
     holdings 리스트를 별도로 들고 있거나 다시 세야 하기 때문입니다. int 반환값 자체가
@@ -401,8 +414,9 @@ def _sync_portfolio_from_balance(
     # 마커가 없으면 "보유 0건"이 아니라 "응답을 읽지 못함"이다.
     # balance.js는 보유 종목이 없어도 마커와 "보유 종목이 없습니다."를 항상 출력한다
     # (balance.js:273-274). run_mcp_tool은 MCP content가 비면 예외 대신 ""를
-    # 반환하므로(services.py) 이 경로는 실재한다. 전량 교체는 되돌릴 수 없으므로
-    # 기존 데이터를 보존하고 error 로그로 운영자에게 알린다.
+    # 반환하므로(services.py) 이 경로는 실재한다. upsert로 바뀐 뒤에도 "잔고에 없는
+    # 종목은 삭제"는 그대로라 빈 응답으로 동기화하면 전 종목이 지워지고 되돌릴 수
+    # 없다. 기존 데이터를 보존하고 error 로그로 운영자에게 알린다.
     if _BALANCE_HOLDINGS_MARKER not in balance_text:
         logger.error(
             "잔고 응답에서 %r 섹션을 찾지 못해 Portfolio 동기화를 건너뜁니다 "
@@ -417,25 +431,61 @@ def _sync_portfolio_from_balance(
     if holdings is None:
         holdings = _parse_balance_holdings(balance_text)
 
-    # 전량 교체: 기존 행 전체 삭제
-    existing = session.exec(select(Portfolio)).all()
-    for row in existing:
-        session.delete(row)
-    session.flush()
+    # stock_code 기준 upsert (#196). 기존 행을 코드별로 모은다.
+    #
+    # dict[str, list[Portfolio]]인 이유: Portfolio.stock_code에 유일성 제약이 없어
+    # (models.py는 index=True만 선언한다) 같은 코드의 행이 둘 이상 존재할 수
+    # 있는 상태를 스키마가 막아주지 않는다. 첫 행만 갱신 대상으로 남기고 나머지는
+    # 아래에서 삭제해, 동기화가 돌 때마다 테이블이 "코드당 1행"으로 수렴한다.
+    # 이 정리가 없으면 upsert가 중복 중 어느 행을 갱신했는지에 따라 API 응답이
+    # 달라져 비결정적이 된다.
+    existing: dict[str, list[Portfolio]] = {}
+    for row in session.exec(select(Portfolio)).all():
+        existing.setdefault(row.stock_code, []).append(row)
 
-    # 신규 삽입
     now = datetime.now(timezone.utc)
+    seen: set[str] = set()
     for h in holdings:
-        session.add(Portfolio(
-            stock_code=h.code,
-            stock_name=h.name,
-            quantity=h.quantity,
-            avg_price=h.avg_price,
-            current_price=None,
-            updated_at=now,
-        ))
+        rows = existing.get(h.code)
+        if rows:
+            row = rows[0]
+            # 잔고 응답에서 온 필드만 갱신한다. current_price는 여기에 없으므로
+            # 건드리지 않는다 — 근거는 이 함수 docstring의 "upsert여야 하는 이유".
+            row.stock_name = h.name
+            row.quantity = h.quantity
+            row.avg_price = h.avg_price
+        else:
+            # 신규 행. current_price를 넘기지 않으므로 모델 기본값 None이 된다 —
+            # 전량 교체 시절 명시적으로 current_price=None을 넘기던 것과 결과가 같다.
+            row = Portfolio(
+                stock_code=h.code,
+                stock_name=h.name,
+                quantity=h.quantity,
+                avg_price=h.avg_price,
+            )
+            session.add(row)
+            # 방금 만든 행도 existing에 등록한다. 한 응답 안에 같은 코드가 두 번
+            # 나오면(KIS output1은 pdno가 키라 정상 응답에서는 없는 일이지만
+            # 스키마가 막아주지 않는다) 등록하지 않을 경우 두 번째 항목이 또 하나의
+            # 새 행을 만들어, 이 함수가 스스로 중복을 만들어 낸다.
+            existing[h.code] = [row]
+        # updated_at은 값 변화와 무관하게 매번 갱신한다 — 전량 교체 시절과 같은
+        # 의미("잔고를 마지막으로 확인한 시각")를 유지하기 위해서다.
+        row.updated_at = now
+        seen.add(h.code)
 
+    # 보유하지 않게 된 종목 제거 + 코드 중복 행 정리(위 주석 참고).
+    # 전량 교체 시절의 "잔고에 없는 종목은 사라진다" 동작을 그대로 유지한다.
+    for code, rows in existing.items():
+        stale = rows if code not in seen else rows[1:]
+        for row in stale:
+            session.delete(row)
+
+    # 커밋 경계는 전량 교체 시절과 동일하다 — 한 동기화가 한 트랜잭션이고,
+    # 갱신·삽입·삭제가 함께 커밋되거나 함께 롤백된다.
     session.commit()
+    # 반환값은 동기화한 보유 종목 수(len(holdings))로 유지한다. 갱신/삽입을 나눠
+    # 세면 호출처(#229의 PORTFOLIO_UPDATE holdings_count)가 보는 값이 바뀐다.
     logger.info("Portfolio 동기화 완료: %d개 종목", len(holdings))
     return len(holdings)
 
@@ -744,15 +794,15 @@ async def _monitor_market_task(
             owned_stocks = [h.name for h in holdings]
 
             # Portfolio 테이블 동기화 — 잔고 조회 성공 시에만 실행.
-            # 잘린 잔고에서 전량 교체하면 보유 종목이 사라지므로,
+            # 잘린 잔고로 동기화하면 아직 못 읽은 보유 종목이 삭제되므로,
             # _sync_portfolio_from_balance가 내부에서 잘림을 감지해 건너뜁니다.
             # 동기화 실패는 감시 루프에 영향을 주지 않아야 하므로 예외를 격리합니다.
             try:
                 with Session(engine) as sync_session:
                     sync_result = _sync_portfolio_from_balance(balance_text, sync_session, holdings=holdings)
                 # 잘림·마커 부재로 동기화를 건너뛴 경우(None)에는 테이블이 그대로이므로
-                # 브로드캐스트하지 않는다. 동기화가 수행된 경우 전량 교체 특성상 내용이
-                # 직전과 동일해도 신호가 나간다 — 즉 정상 주기마다 1건이다.
+                # 브로드캐스트하지 않는다. 동기화가 수행된 경우 updated_at을 매번 갱신하는
+                # 특성상 내용이 직전과 동일해도 신호가 나간다 — 즉 정상 주기마다 1건이다.
                 # payload에는 보유 종목 개수만 싣고 종목명·수량 등 실제 보유 내역은 담지
                 # 않는다. WebSocket에는 인증이 없어(#266) 계좌 보유 현황이 인증 없는
                 # 채널로 유출될 수 있으므로, 신호만 보내고 클라이언트가
