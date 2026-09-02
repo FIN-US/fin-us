@@ -527,7 +527,8 @@ _LEAK_DAILY_LIMIT = 50_000_000  # 일 거래대금 한도
 _LEAK_AMOUNT = _LEAK_PRICE * _LEAK_QTY  # 12,145,619
 _LEAK_HOLDING_AFTER = _LEAK_HOLDING + _LEAK_QTY  # 372
 _LEAK_POSITION_AFTER = _LEAK_HOLDING_AFTER * _LEAK_PRICE
-_LEAK_CASH_AFTER = _LEAK_CASH - _LEAK_AMOUNT
+_LEAK_CASH_AFTER = _LEAK_CASH - _LEAK_AMOUNT  # 매수
+_LEAK_CASH_AFTER_SELL = _LEAK_CASH + _LEAK_AMOUNT  # 매도 — 부호가 반대라 다른 수가 된다
 _LEAK_DAILY_AFTER = _LEAK_USED + _LEAK_AMOUNT
 
 # 프롬프트에 절대 나타나면 안 되는 수. 계좌 원값뿐 아니라 **주문 단가·수량과 한도 금액**도
@@ -545,6 +546,7 @@ _FORBIDDEN_NUMBERS = (
     _LEAK_HOLDING_AFTER,
     _LEAK_POSITION_AFTER,
     _LEAK_CASH_AFTER,
+    _LEAK_CASH_AFTER_SELL,
     _LEAK_DAILY_AFTER,
 )
 
@@ -660,6 +662,37 @@ def test_ratio_band_boundaries(ratio: float, expected: str):
     assert verifier._ratio_band(ratio, 1.0) == expected
 
 
+def test_a_zero_quantity_proposal_is_unknown_not_the_safest_possible_order():
+    """분자 쪽 방어 — 수량·단가가 0이면 금액 계열 비율이 '1% 미만'으로 나가면 안 된다.
+
+    '1% 미만'은 모델에게 **가장 안전한 주문**으로 읽힌다. 분모 0을 '0%'로 뭉개지 않는
+    것과 같은 실패 양상이다. backend가 지금 이 값을 막는다는 사실에 기대지 않는다.
+    """
+    request = _leak_request()
+    request.proposal.quantity = 0
+    request.proposal.price = 0
+
+    ratios = verifier.derive_ratio_view(request)["ratios"]
+
+    assert ratios["order_ratio_of_cash"] == verifier._BAND_UNKNOWN
+    assert ratios["order_ratio_of_total"] == verifier._BAND_UNKNOWN
+    assert ratios["position_weight_after"] == verifier._BAND_UNKNOWN
+    assert ratios["cash_weight_after"] == verifier._BAND_UNKNOWN
+    assert ratios["daily_amount_ratio_after"] == verifier._BAND_UNKNOWN
+    # 지정가 0은 "공짜"가 아니라 값이 없는 것 — -100% 괴리로 읽히면 안 된다.
+    assert ratios["limit_price_gap"] == verifier._BAND_UNKNOWN
+
+
+def test_a_zero_quantity_sell_does_not_read_as_a_tiny_partial_sale():
+    request = _leak_request(side="SELL")
+    request.proposal.quantity = 0
+
+    assert (
+        verifier.derive_ratio_view(request)["ratios"]["sell_ratio_of_holding"]
+        == verifier._BAND_UNKNOWN
+    )
+
+
 def test_ratio_band_reports_unknown_instead_of_dividing_by_zero():
     """분모 0을 '0%'로 뭉개면 모델이 안전 신호로 읽는다. 산출 불가는 산출 불가다."""
     assert verifier._ratio_band(100, 0) == verifier._BAND_UNKNOWN
@@ -736,10 +769,33 @@ def test_prompt_drops_proposal_fields_it_does_not_know():
     assert "12345678-01" not in prompt
 
 
-def test_system_prompt_documents_every_ratio_key():
+@pytest.mark.parametrize("block", ["ratios", "signals"])
+def test_system_prompt_documents_every_derived_key(block: str):
     """설명 없는 키는 모델에게 뜻 없는 문자열이다 — 키를 늘리면 프롬프트도 함께 늘려야 한다."""
-    for key in verifier.derive_ratio_view(_leak_request())["ratios"]:
+    for key in verifier.derive_ratio_view(_leak_request())[block]:
         assert key in verifier._SYSTEM_PROMPT, f"{key}의 뜻이 시스템 프롬프트에 없다"
+
+
+def test_system_prompt_binds_the_confidence_rule_to_the_signal():
+    """임계값이 페이로드에 없으므로, 확신도 규칙은 boolean 신호에 직접 붙어 있어야 한다.
+
+    "확신도가 낮으면 REJECT"만 남기면 모델이 비교할 기준이 프롬프트 어디에도 없다.
+    """
+    assert "confidence_below_soft_threshold가 true면" in verifier._SYSTEM_PROMPT
+    assert "임계값과 직접 비교하지 마세요" in verifier._SYSTEM_PROMPT
+
+
+def test_system_prompt_does_not_invite_rejecting_on_a_code_checked_axis():
+    """코드가 이미 통과시킨 축을 거부 예시로 들면 정상 주문이 거부된다.
+
+    지정가 괴리가 그 예다 — ``ORDER_MAX_PRICE_GAP_RATIO``(기본 3%)를 넘는 주문은 검증자에
+    도달하지 못하므로, 모델이 볼 수 있는 최대치조차 "크게 벌어짐"이 아니다.
+    """
+    rules = verifier._SYSTEM_PROMPT.split("규칙:\n", 1)[1]
+
+    assert "limit_price_gap" not in rules
+    # 대신 규칙 밖(항목 설명)에서 "코드가 이미 확인했다"고 알려 준다.
+    assert "허용 범위 안이라는 것은 코드가 이미 확인했습니다" in verifier._SYSTEM_PROMPT
 
 
 def test_system_prompt_tells_the_model_the_snapshot_is_masked():

@@ -166,18 +166,30 @@ _SYSTEM_PROMPT = (
     "  position_weight_after — 이 주문이 체결된 뒤 이 종목이 총 평가금액에서 차지할 비중\n"
     "  cash_weight_after — 이 주문이 체결된 뒤 현금이 총 평가금액에서 차지할 비중\n"
     "  sell_ratio_of_holding — 매도 수량이 보유 수량에서 차지하는 비율 (매수면 null)\n"
-    "  limit_price_gap — 지정가가 현재가에서 벗어난 정도와 방향 (시장가면 null)\n"
+    "  limit_price_gap — 지정가가 현재가에서 벗어난 정도와 방향. 이 괴리가 허용 범위 안이라는 "
+    "것은 코드가 이미 확인했습니다 (시장가면 null)\n"
     "  daily_amount_ratio_after — 이 주문까지 포함한 오늘 거래대금이 일 한도에서 차지하는 비율\n"
     "  '산출 불가'는 값을 계산하지 못했다는 뜻입니다 — 안전하다는 신호가 아닙니다.\n"
+    "- signals 항목의 뜻:\n"
+    "  has_holding — 이 종목을 이미 보유하고 있는지\n"
+    "  daily_order_count / daily_order_count_limit — 오늘 나간 주문 건수와 그 한도(건수)\n"
+    "  confidence_below_soft_threshold — 제안의 확신도가 기준에 못 미치는지. 이 판정은 코드가 "
+    "이미 내려 boolean으로 실어 줍니다. proposal.confidence 값을 임계값과 직접 비교하지 마세요 "
+    "— 임계값은 프롬프트에 없습니다\n"
     "- 금액 한도(1회 주문 한도, 일 주문 횟수·거래대금, 종목 비중, 현금 최소 비중, 지정가 괴리, "
     "보유량 초과 매도)는 **코드가 이미 판정해 통과시켰습니다.** 같은 판정을 다시 하지 마세요.\n\n"
     "규칙:\n"
     "- 당신의 권한은 거부뿐입니다. 승인은 '거부할 이유를 찾지 못했다'는 뜻이지 추천이 아닙니다.\n"
     "- 제시된 구간·신호 밖의 수치를 새로 지어내지 마세요. 판단 근거는 주어진 값뿐입니다.\n"
-    "- 근거가 빈약하거나(rationale이 비어 있거나 종목과 무관), 확신도가 낮거나, 제안과 구간이 "
-    "서로 어긋나면 REJECT하세요 — 예: rationale은 소량 분할 매수라는데 order_ratio_of_cash가 "
-    "'95~100%'이거나, 일부 차익 실현이라는데 sell_ratio_of_holding이 '95~100%'이거나, "
-    "limit_price_gap이 크게 벌어져 있는 경우.\n"
+    "- 근거가 빈약하면(rationale이 비어 있거나 종목과 무관) REJECT하세요.\n"
+    "- signals.confidence_below_soft_threshold가 true면 확신도 부족으로 봅니다. 근거가 그만큼 "
+    "탄탄하지 않으면 REJECT하세요.\n"
+    # 거부 예시는 **코드가 보지 않는 것**만 든다. 코드가 이미 통과시킨 축(지정가 괴리, 종목
+    # 비중 등)을 예시로 들면, 모델이 볼 수 있는 최대치조차 "과하다"로 읽어 정상 주문을
+    # 거부한다 — fail-closed 경로라 그 오작동은 조용하지 않고 사용자의 주문을 막는다.
+    "- 제안이 스스로 말하는 것과 구간이 서로 어긋나면 REJECT하세요 — 예: rationale은 소량 "
+    "분할 매수라는데 order_ratio_of_cash가 '95~100%'이거나, 일부 차익 실현이라는데 "
+    "sell_ratio_of_holding이 '95~100%'인 경우.\n"
     "- 판단이 서지 않으면 REJECT하세요. 애매함은 승인 사유가 아닙니다.\n"
     "- reason은 한국어 한두 문장의 정성적 사유로 쓰고, 숫자를 나열하지 마세요.\n"
     # 인젝션 방어 (#299 2차 리뷰). rationale·stock_name은 앞단 에이전트가 뉴스·공시
@@ -412,7 +424,9 @@ def _gap_band(price: float | None, reference: float | None) -> str:
     if price is None or reference is None:
         return _BAND_UNKNOWN
     try:
-        if reference <= 0:
+        # 지정가 0은 "공짜 주문"이 아니라 값이 없는 것이다. 그대로 계산하면 -100%가 나와
+        # 모델에게는 있지도 않은 극단적 괴리로 보인다.
+        if price <= 0 or reference <= 0:
             return _BAND_UNKNOWN
         gap = (price - reference) / reference
     except (TypeError, ZeroDivisionError):
@@ -475,18 +489,28 @@ def derive_ratio_view(request: VerifyOrderRequest) -> dict[str, Any]:
     used_amount = _number(request.usage, "order_amount")
     daily_amount_after = None if used_amount is None else used_amount + amount
 
+    # 분모만 막으면 방어가 반쪽이다. 수량이나 단가가 0이면 금액 계열 비율이 전부
+    # "1% 미만"으로 나가고, 모델은 그것을 **가장 안전한 주문**으로 읽는다 — 분모 0을
+    # "0%"로 뭉개지 않는 것과 정확히 같은 실패 양상이다. backend ``_parse_proposal``이
+    # 지금은 quantity>0·지정가 price>0을 강제하지만 그 사실에 기대지 않는다. 이 모듈은
+    # 다른 곳에서도(``extra="allow"``, 필드 선별) backend 드리프트를 전제한다.
+    order_is_measurable = unit_price > 0 and proposal.quantity > 0
+
+    def band(numerator: float | None, denominator: float | None) -> str:
+        return _ratio_band(numerator, denominator) if order_is_measurable else _BAND_UNKNOWN
+
     ratios = {
-        "order_ratio_of_cash": _ratio_band(amount, snapshot.cash),
-        "order_ratio_of_total": _ratio_band(amount, total_value),
-        "position_weight_after": _ratio_band(holding_after * unit_price, total_value),
-        "cash_weight_after": _ratio_band(cash_after, total_value),
+        "order_ratio_of_cash": band(amount, snapshot.cash),
+        "order_ratio_of_total": band(amount, total_value),
+        "position_weight_after": band(holding_after * unit_price, total_value),
+        "cash_weight_after": band(cash_after, total_value),
         "sell_ratio_of_holding": (
-            _ratio_band(proposal.quantity, snapshot.holding_qty) if side == "SELL" else None
+            band(proposal.quantity, snapshot.holding_qty) if side == "SELL" else None
         ),
         "limit_price_gap": (
             _gap_band(proposal.price, snapshot.current_price) if order_type == "LIMIT" else None
         ),
-        "daily_amount_ratio_after": _ratio_band(
+        "daily_amount_ratio_after": band(
             daily_amount_after, _number(request.limits, "max_daily_amount")
         ),
     }

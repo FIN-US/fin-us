@@ -716,14 +716,33 @@ LLM에게 남은 일은 두 가지뿐이고 둘 다 비율이면 충분하다:
 
 ### fail-closed를 정상 주문 쪽으로 무너뜨리지 않기
 
-변환 코드가 예외를 던지면 `build_user_prompt()`가 터지고, 그것은 이 모듈의 규칙상
-곧바로 **정상 주문의 REJECT**다. 그래서 `_ratio_band()`·`_gap_band()`는 **예외를 던지지
-않는 것이 계약**이다. 분모가 0이거나 없거나 페이로드가 숫자가 아닌 값을 실어 오면
-`"산출 불가"` 문자열을 돌려준다. `"0%"`로 뭉개지 않는 이유는 모델이 그것을 안전 신호로
+이 경로에서 오작동은 "유출"이 아니라 **정상 주문의 거부**로 나타난다. 세 군데를 그 방향으로
+맞췄다.
+
+**변환은 예외를 던지지 않는다.** 여기서 터지면 `build_user_prompt()`가 터지고, 그것이 곧
+거부다. `_ratio_band()`·`_gap_band()`는 분모가 0이거나 없거나 페이로드가 숫자가 아닌 값을
+실어 오면 `"산출 불가"`를 돌려준다. `"0%"`로 뭉개지 않는 이유는 모델이 그것을 안전 신호로
 읽기 때문이고, 시스템 프롬프트도 "'산출 불가'는 안전하다는 신호가 아니다"라고 못 박는다.
 
-`test_order_verifier.py::test_build_user_prompt_never_raises_on_a_degenerate_snapshot`과
-`::test_a_normal_order_still_approves_after_the_conversion`이 이 두 방향을 고정한다.
+**분자 쪽도 같이 막는다.** 수량이나 단가가 0이면 금액 계열 비율이 전부 `"1% 미만"`으로
+나가는데, 그것은 모델에게 **가장 안전한 주문**으로 읽힌다 — 분모 0을 `"0%"`로 뭉개는 것과
+정확히 같은 실패 양상이 부호만 반대로 나타난 것이다. `derive_ratio_view()`가
+`단가 > 0 and 수량 > 0`이 아니면 금액 계열을 `"산출 불가"`로 고정한다. backend
+`_parse_proposal`이 지금 이 값을 막지만, 이 모듈은 다른 곳에서도(`extra="allow"`, 필드 선별)
+backend 드리프트를 전제하므로 여기서도 기대지 않는다.
+
+**거부 예시는 코드가 보지 않는 축에서만 든다.** 지정가 괴리를 거부 예시로 들면 안 된다 —
+`ORDER_MAX_PRICE_GAP_RATIO`(기본 3%)를 넘는 주문은 애초에 검증자에 도달하지 못하므로, 모델이
+볼 수 있는 최대치조차 "크게 벌어진" 것이 아니다. 그것을 거부 사유로 읽으면 정상 주문이
+거부된다. 같은 이유로 확신도 규칙은 임계값 비교가 아니라 `confidence_below_soft_threshold`
+신호에 직접 붙인다 — 임계값은 프롬프트에 없으므로 "확신도가 낮으면 거부"만 남기면 모델이
+비교할 기준이 없다.
+
+`test_order_verifier.py`의
+`::test_build_user_prompt_never_raises_on_a_degenerate_snapshot`,
+`::test_a_zero_quantity_proposal_is_unknown_not_the_safest_possible_order`,
+`::test_system_prompt_does_not_invite_rejecting_on_a_code_checked_axis`,
+`::test_a_normal_order_still_approves_after_the_conversion`이 이 방향들을 고정한다.
 
 ### 함께 막은 두 구멍
 
@@ -739,6 +758,11 @@ LLM에게 남은 일은 두 가지뿐이고 둘 다 비율이면 충분하다:
 - 구간은 정보를 완전히 없애지 않는다. `daily_amount_ratio_after`처럼 분모가 설정 상수인
   항목은, 그 상수를 아는 쪽에서 보면 분자의 **범위**가 나온다. 원값 노출과는 급이 다르지만
   0은 아니다. 한도 금액을 프롬프트에서 뺀 것은 이 여지를 모델 쪽에서 좁히기 위한 것이다.
+- **`rationale`은 여전히 원문 그대로 나간다.** 앞단 제안 에이전트가 뉴스·공시를 읽고 만든
+  자유 텍스트이고, `_clip()`은 길이만 자를 뿐 내용을 보지 않는다. 그 문장에 금액이 섞이면
+  이 절의 변환을 우회해 나간다 — 이 경로에 남은 **유일한** 금액 유출 통로다. 제안 프롬프트는
+  종목과 트리거 문구만 주므로(`PROPOSAL_PROMPT_TEMPLATE`) 계좌 스냅샷이 이 문장에 들어갈
+  경로는 확인되지 않았지만, 막고 있는 것은 프롬프트 내용이지 구조가 아니다.
 - 검증자가 쓰는 `reason`은 여전히 자유 텍스트다. 다만 backend가 사용자 메시지의 숫자를
   전부 페이로드 원본에서만 만들고(`OrderVerdict.reason` docstring), 시스템 프롬프트도
   숫자 나열을 금지한다.
