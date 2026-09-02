@@ -537,6 +537,41 @@ async def test_balance_command_calls_mcp_runner():
 
 
 @pytest.mark.asyncio
+async def test_balance_ignores_updates_from_other_chats():
+    """다른 채팅의 /balance는 KIS 조회까지 가지 않는다 (#232, NFR-05).
+
+    잔고를 비식별화하지 않고 원값 그대로 Telegram에 보내도 된다는 근거는 "수신자가
+    계좌 소유자 본인 하나"라는 것 하나뿐이다(docs/nfr-05-pii-masking.md). 그 전제는
+    handle_update / _handle_callback_query의 chat_id 비교 두 줄에만 걸려 있어, 한쪽이
+    사라져도 정상 경로 테스트는 전부 통과한다. 문서가 아니라 여기서 지킨다.
+    """
+    calls = []
+
+    async def mcp_runner(server_params, tool_name, arguments):
+        calls.append((server_params, tool_name, arguments))
+        return "잔고 응답"
+
+    notifier = FakeNotifier(chat_id="123")
+    handler = TelegramCommandHandler(notifier=notifier, mcp_runner=mcp_runner)
+
+    await handler.handle_update({"message": {"chat": {"id": 999}, "text": "/balance"}})
+    await handler.handle_update(
+        {
+            "callback_query": {
+                "id": "balance-callback",
+                "data": "balance:refresh",
+                "message": {"chat": {"id": 999}},
+            }
+        }
+    )
+
+    assert calls == []
+    assert notifier.messages == []
+    assert notifier.callback_answers == []
+    assert notifier.actions == []
+
+
+@pytest.mark.asyncio
 async def test_balance_refresh_button_calls_mcp_runner():
     calls = []
 
@@ -2744,6 +2779,46 @@ async def test_poller_skip_notice_skipped_for_other_chat(monkeypatch):
 
     assert poller.offset == 42
     assert notifier.messages == []
+
+
+@pytest.mark.asyncio
+async def test_poller_skip_notice_omits_other_chat_labels_in_mixed_batch(monkeypatch):
+    """소유자와 남의 chat이 섞인 배치에서 통지 문구에 남의 원문이 실리지 않는다 (#232).
+
+    test_poller_skip_notice_skipped_for_other_chat은 배치가 전부 남의 chat일 때만
+    본다. 그래서 mine 필터를 지우는 변경은 잡히지만, 필터를 남긴 채 문구만
+    updates 전체로 만드는 변경은 그 테스트를 통과한다(실측). 그 경우 남의 메시지
+    원문이 소유자 화면에 뜨는데, 그것이 NFR-05가 "수신자는 하나"의 근거로 든
+    필터가 막으려던 바로 그 일이다.
+    """
+    notifier = FakeNotifier()
+    notifier.enabled = True
+    notifier.bot_token = "token"
+
+    class FailingHandler:
+        async def handle_update(self, update):
+            raise RuntimeError("poison update")
+
+    poller = _make_poller(notifier, handler=FailingHandler())
+    clock = FakePollerClock()
+    clock.install(monkeypatch, poller)
+
+    async def fake_get_updates():
+        if poller.offset is not None:
+            raise asyncio.CancelledError
+        return [
+            {"update_id": 41, "message": {"chat": {"id": 123}, "text": "/alerts off"}},
+            {"update_id": 42, "message": {"chat": {"id": 999}, "text": "남의 비밀"}},
+        ]
+
+    monkeypatch.setattr(poller, "_get_updates", fake_get_updates)
+
+    with pytest.raises(asyncio.CancelledError):
+        await poller.run()
+
+    assert notifier.messages == [
+        f"{telegram_commands.UPDATE_SKIPPED_NOTICE}\n실패한 요청: /alerts off"
+    ]
 
 
 @pytest.mark.asyncio
