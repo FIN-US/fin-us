@@ -1488,6 +1488,56 @@ async def test_order_command_rejects_unorderable_stock_code_before_quote_and_bal
     assert _orders(handler) == {}
 
 
+@pytest.mark.parametrize(
+    "stock_name, resolved, stock_code",
+    [
+        ("덕양에너젠", "덕양에너젠 (0001A0, KOSDAQ)", "0001A0"),
+        (
+            "한투글로벌넥스트웨이브1(A)",
+            "한투글로벌넥스트웨이브1(A) (F70100026, KOSPI)",
+            "F70100026",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_order_command_allows_alnum_stock_code_when_flag_enabled(
+    stock_name, resolved, stock_code, monkeypatch
+):
+    """KIS_ALNUM_STOCK_ORDER_ENABLED=true면 영숫자·9자 코드도 시세·잔고 조회까지 간다.
+
+    #138: KIS Open API의 실제 PDNO 수용 여부가 실계좌 없이는 확정되지 않아(#265),
+    기본값은 위 test_order_command_rejects_unorderable_stock_code_before_quote_and_balance가
+    고정하는 거절을 유지하고, 이 플래그를 켰을 때만 조회까지 통과함을 별도로 고정한다.
+    실제 주문 수용 여부는 mcp-trading/order.js의 buildCashOrderBody()·KIS 응답이
+    결정하므로 여기서는 백엔드가 더 이상 조기 차단하지 않는다는 것만 확인한다.
+    """
+    monkeypatch.setenv("KIS_ALNUM_STOCK_ORDER_ENABLED", "true")
+
+    async def mcp_runner(server_params, tool_name, arguments):
+        if tool_name == "resolve_stock_code":
+            return resolved
+        if tool_name == "get_stock_quote":
+            return "현재가: 1,000원"
+        if tool_name == "get_balance":
+            return "주문가능금액: 1,000,000원"
+        raise AssertionError(f"unexpected tool: {tool_name}")
+
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        mcp_runner=mcp_runner,
+        now_factory=lambda: datetime(2026, 5, 20, 10, 0, tzinfo=KST),
+    )
+
+    await handler.handle_update(
+        {"message": {"chat": {"id": 123}, "text": f"/buy {stock_name} 10"}}
+    )
+
+    assert _orders(handler)["123"].stock_code == stock_code
+    assert "주문 확인" in notifier.messages[-1]
+    assert "주문을 지원하지 않습니다" not in notifier.messages[-1]
+
+
 @pytest.mark.asyncio
 async def test_cancel_removes_pending_order():
     async def mcp_runner(server_params, tool_name, arguments):
@@ -1604,7 +1654,7 @@ async def test_buy_with_unresolved_echo_is_rejected(code):
     주문 경로만 통과하던 비대칭을 없앤다.
 
     뮤테이션: _is_unresolved_echo 가드를 지우면 999999가 대기 주문으로 등록돼 red가
-    된다(ZZZZ99·Q999999는 영숫자라 _ORDERABLE_STOCK_CODE_RE가 뒤에서 잡지만, 거절
+    된다(ZZZZ99·Q999999는 영숫자라 is_orderable_stock_code가 뒤에서 잡지만, 거절
     사유가 "ETN·펀드"로 바뀌므로 메시지 단정에서 red가 된다).
     """
 
