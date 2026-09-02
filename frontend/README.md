@@ -140,6 +140,7 @@ docker compose up frontend
 | nginx 설정 | `./frontend/nginx.conf` → `/etc/nginx/conf.d/default.conf` (읽기 전용) |
 | `.wasm` MIME | `application/wasm` (`nginx.conf`에서 명시) |
 | API 프록시 | `/api/`·`/health` → `http://backend:8000` (이슈 #245) |
+| 레이트리밋 | `/api/` 2r/s, `/api/v1/analyze` 6r/m + 동시 2건, 초과 시 429 (이슈 #266 1단계) |
 | backend 의존 | `depends_on` 없음 — backend가 아직 없어도 nginx는 뜨고 정적 화면이 먼저 보입니다 |
 
 ### `/api` 리버스 프록시 (#245)
@@ -166,21 +167,21 @@ backend를 기다리지 않아도 됩니다. backend가 없는 동안에는 `/ap
 대상이 됩니다. `/api/v1/analyze`는 LLM 호출로 오래 걸려 `proxy_read_timeout`을 300s로
 올려 뒀습니다.
 
-> **`CORSMiddleware`는 아직 남겨 둡니다 — 단 `ALLOW_ORIGINS`는 그 뒤에도 계속 필요합니다.**
+> **`CORSMiddleware`는 제거했습니다 — 단 `ALLOW_ORIGINS`는 그 뒤에도 계속 필요합니다.**
 > `ApiClient`가 베이스 URL 없이 상대 경로(`/api/v1/...`)로 요청하고 번들도 재빌드됐으므로
 > (#262), 브라우저는 항상 대시보드와 같은 오리진을 부르고 **HTTP 쪽** CORS 부담은
-> 사라졌습니다.
-> `CORSMiddleware`는 이제 걷어낼 수 있지만, 제거는 **후속 PR**로 분리했습니다 — 번들 교체와
-> 서버 설정 축소를 한 커밋에 묶으면 문제가 생겼을 때 어느 쪽이 원인인지 가려내기 어렵습니다.
+> 사라졌습니다. 아무도 타지 않는 미들웨어를 남겨 두면 "동작 중인 보호"처럼 보이므로
+> 걷어냈습니다(#246). 애초에 CORS는 응답을 *읽는* 것만 막고 요청 *실행*은 막지 못하므로,
+> 무인증 API의 방어가 아니었습니다 — 그 자리는 아래 레이트리밋(#266 1단계)이 맡습니다.
 >
-> **`ALLOW_ORIGINS`는 #246 이후에도 지우면 안 됩니다.** WebSocket(`/api/v1/ws`) 핸드셰이크의
+> **`ALLOW_ORIGINS`는 지우면 안 됩니다.** WebSocket(`/api/v1/ws`) 핸드셰이크의
 > Origin 허용목록을 겸하기 때문입니다(#256). `CORSMiddleware`는 WebSocket 핸드셰이크에
 > 적용되지 않아, 이 검사가 없으면 임의 사이트가 브로드캐스트를 수신할 수 있습니다
-> (Cross-Site WebSocket Hijacking). 따라서 `http://localhost:8080`은 계속 포함돼야 하고
-> (`backend/config.py`의 `ALLOW_ORIGINS` 기본값, `.env.example` 참고), 다른 호스트(예:
-> Tailscale 주소)로 시연할 때는 해당 오리진을 `ALLOW_ORIGINS`에 추가해야 합니다. **#246
-> 작업 시 이 변수를 정리 대상으로 삼지 마세요** — 지우면 화면은 정상적으로 뜨는데 실시간
-> 알림 연결만 403으로 죽어서 원인을 찾기 어렵습니다.
+> (Cross-Site WebSocket Hijacking). 미들웨어가 사라진 지금은 **이 검사가 그 목록의 유일한
+> 소비자**라 더더욱 쓰이지 않는 설정으로 보이기 쉽습니다. `http://localhost:8080`은 계속
+> 포함돼야 하고(`backend/config.py`의 `ALLOW_ORIGINS` 기본값, `.env.example` 참고), 다른
+> 호스트(예: Tailscale 주소)로 시연할 때는 해당 오리진을 `ALLOW_ORIGINS`에 추가해야 합니다.
+> 지우면 화면은 정상적으로 뜨는데 실시간 알림 연결만 403으로 죽어서 원인을 찾기 어렵습니다.
 >
 > 베이스 URL을 상대 경로로 두면 포트를 고정하는 오리진 해석(`{Scheme}://{Host}:8000`)과 달리
 > 443 뒤에서도 깨지지 않습니다. 다만 선행 슬래시가 붙은 root-relative 경로라 **서브패스까지
@@ -191,10 +192,64 @@ backend를 기다리지 않아도 됩니다. backend가 없는 동안에는 `/ap
 > `ApiClient.DefaultBaseUrl`은 에디터에서만 `http://localhost:8000`으로 폴백합니다 —
 > 에디터로 테스트하려면 backend를 호스트에서 8000번으로 띄워 두세요.
 >
-> `backend`의 8000 포트는 **아직 전 인터페이스에 게시돼 있습니다**(`docker-compose.yml`).
-> 재빌드 전에는 원격 시연이 8000 직접 호출에 기대고 있어 좁힐 수 없었지만, 이제 그 의존은
-> 없어졌습니다. 좁히는 것도 위 `CORSMiddleware` 제거와 같은 후속 PR입니다. 좁힌 뒤에도 브라우저는 8080 프록시로, nginx는
-> compose 내부 네트워크로 backend에 닿으므로 기능 영향은 없습니다.
+> `backend`의 8000 포트는 **`127.0.0.1`에만 게시됩니다**(`docker-compose.yml`, #246).
+> 재빌드 전에는 원격 시연이 8000 직접 호출에 기대고 있어 좁힐 수 없었지만 그 의존이
+> 없어졌고, 열어 두면 아래 레이트리밋을 8000 직접 호출로 그대로 우회할 수 있습니다.
+> 브라우저는 8080 프록시로, nginx는 compose 내부 네트워크로 backend에 닿으므로 기능
+> 영향은 없습니다. 호스트에서 `/docs`를 열거나 수동으로 API를 부르는 것, Unity 에디터
+> 플레이 모드(`http://localhost:8000` 폴백)는 그대로 됩니다 — 다른 기기에서 8000으로
+> 직접 붙던 흐름만 SSH 포트포워딩(`ssh -L 8000:127.0.0.1:8000 <호스트>`)이 필요합니다.
+
+### 레이트리밋 (#266 1단계)
+
+`/api/v1/analyze`는 **인증이 없으면서** 호출 한 번이 LLM(OpenAI/Anthropic) 또는 NAT 멀티
+에이전트를 태워 직접 과금으로 이어집니다. CORS는 이 위험의 방어가 되지 않습니다 — 응답을
+*읽는* 것만 막고 요청 *실행*은 막지 못하므로, 임의 페이지의
+`fetch(..., { mode: "no-cors" })` 한 줄이면 호출이 실제로 나갑니다. 그래서 제한은 프록시
+지점인 nginx에 걸었습니다. backend 코드를 건드리지 않고 한 자리에서 걸립니다.
+
+| 경로 | 제한 | 근거 |
+| --- | --- | --- |
+| `/api/v1/analyze` | 6r/m (burst 2) + **동시 2건** | LLM·NAT 과금 경로 |
+| 그 밖의 `/api/`·`/health` | 2r/s (burst 20) | MCP·KIS 외부 API 호출 |
+| 정적 자산·`/nginx-health` | 없음 | backend를 거치지 않습니다 |
+
+레이트만으로는 부족해 **동시 연결**도 함께 제한합니다. analyze 한 건은
+`proxy_read_timeout 300s`가 허용하는 만큼 살아 있을 수 있어서, 간격을 지키며 천천히 밀어
+넣어도 진행 중인 LLM 호출은 계속 쌓이기 때문입니다.
+
+초과 응답은 **429**이고, 본문은 nginx 기본 HTML이 아니라 FastAPI와 같은 모양의
+`{"detail": "..."}` JSON입니다. `ApiClient.ExtractErrorMessage`가 그 키를 읽어 배너에 그대로
+싣기 때문에, **번들을 다시 굽지 않고도** 사용자에게 읽히는 안내가 나갑니다.
+
+두 거절은 성질이 달라 본문을 갈라 뒀습니다. 레이트 초과는 잠깐 기다리면 풀리지만, 동시 실행
+초과는 진행 중인 분석이 끝나야 풀리고 그건 `proxy_read_timeout 300s`까지 갈 수 있습니다.
+
+| 거절 | 클라이언트가 보는 코드 | `Retry-After` | 배너 문구 |
+| --- | --- | --- | --- |
+| `limit_req` | 429 | `10` | 요청이 너무 잦습니다… |
+| `limit_conn` | 429 | **없음** | 이미 진행 중인 분석이 있습니다… |
+
+`limit_conn` 쪽에 `Retry-After`를 붙이지 않은 것은 의도입니다 — 언제 풀릴지는 진행 중인
+분석의 남은 시간에 달렸는데 서버가 그걸 모릅니다. 레이트 쪽 값(10초)을 복사해 넣으면 그
+시각에 다시 429이고, 상한인 300초를 적으면 대개 필요 이상으로 기다리게 합니다.
+
+`error_page`는 상태 코드로만 갈라낼 수 있어서 `limit_conn_status`를 **내부적으로만** 430으로
+둡니다. IANA 미할당 코드이고 `error_page`가 가로채므로 클라이언트에게는 나가지 않습니다
+(실측 확인). 문구를 바꾸려면 `nginx.conf`의 `@too_many_requests`·`@analysis_in_flight`
+블록만 고치면 됩니다.
+
+**스케줄러의 자동 분석은 이 제한에 걸리지 않습니다.** `backend/scheduler.py`가
+`perform_stock_analysis`를 같은 프로세스에서 직접 부르고 HTTP를 타지 않기 때문입니다.
+감시 주기(10분)와 위 한도를 맞출 필요가 없는 것도 그래서입니다.
+
+제한이 실제로 의미를 가지려면 **8000 직접 호출이 막혀 있어야 합니다.** 그래서 같은 작업에서
+`backend`의 게시를 `127.0.0.1`로 좁혔습니다(#246). 둘 중 하나만 하면 "막는 게 아니라 막는
+것처럼 보이는" 상태가 됩니다. 이 배선은 `backend/tests/test_nginx_rate_limit.py`와
+`backend/tests/test_compose_ports.py`가 고정합니다 — CI의 `nginx -t`는 문법만 보므로
+`limit_req` 한 줄이 사라져도 통과합니다.
+
+인증(#266 2단계)은 아직 없습니다. 위 제한은 **비용의 뚜껑**이지 접근 제어가 아닙니다.
 
 현재 번들은 비압축입니다(`Build/`에 `.br`·`.gz` 산출물 없음).
 

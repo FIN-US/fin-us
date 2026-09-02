@@ -310,14 +310,14 @@ def is_placeholder_secret(value: str | None) -> bool:
     return not normalized or normalized.startswith("your_") or normalized.endswith("_here")
 
 
-# CORS 설정
+# WebSocket(/api/v1/ws) 핸드셰이크의 Origin 허용목록.
 # 기본값은 docker-compose의 frontend(nginx)가 Unity WebGL 번들을 서빙하는 8080 오리진이다.
-# #245로 nginx가 /api를 backend로 프록시하고 #246·#262로 번들이 상대 경로를 쓰도록
-# 재빌드됐으므로, 브라우저 요청은 same-origin이 되어 CORS 자체가 개입하지 않는다.
-# 이제 제거할 수 있는 것은 CORSMiddleware뿐이고(#246 후속 PR), 아래 이유로 이 목록은 남는다.
-# 또한 CORSMiddleware는 WebSocket 핸드셰이크에 적용되지 않으므로, /api/v1/ws가 이 목록을
-# 직접 읽어 Origin을 대조한다(#256, main.py is_allowed_ws_origin). 즉 #246 이후 HTTP 쪽
-# 필요가 사라져도 이 목록은 WS 허용목록으로 남는다.
+# 원래는 CORS 설정을 겸했지만, #245로 nginx가 /api를 backend로 프록시하고 #246·#262로
+# 번들이 상대 경로를 쓰도록 재빌드되면서 브라우저 요청이 same-origin이 됐고, 쓰이지 않게
+# 된 CORSMiddleware는 #246에서 제거했다.
+# 목록 자체는 남는다 — CORSMiddleware는 WebSocket 핸드셰이크에 적용되지 않아, /api/v1/ws가
+# 이 목록을 직접 읽어 Origin을 대조하기 때문이다(#256, main.py is_allowed_ws_origin).
+# 지금은 그 검사가 유일한 소비자이므로, 지우면 화면은 뜨는데 실시간 알림만 403으로 끊긴다.
 _ALLOW_ORIGINS_RAW = os.getenv("ALLOW_ORIGINS", "http://localhost:8080,http://127.0.0.1:8080")
 ALLOW_ORIGINS = [origin.strip() for origin in _ALLOW_ORIGINS_RAW.split(",") if origin.strip()]
 

@@ -1,8 +1,12 @@
 """#256: /api/v1/ws 핸드셰이크의 Origin 허용목록 검사.
 
-CORSMiddleware는 WebSocket 핸드셰이크에 적용되지 않아, ALLOW_ORIGINS로 HTTP를 조여도
-WS는 임의 오리진에 열려 있었다(Cross-Site WebSocket Hijacking). 이 파일은 그 구멍이
-다시 열리지 않는지를 판정 함수(is_allowed_ws_origin)와 실제 엔드포인트 양쪽에서 본다.
+Starlette의 CORSMiddleware는 WebSocket 핸드셰이크에 적용되지 않아, ALLOW_ORIGINS로
+HTTP를 조여도 WS는 그대로 열려 있었다(Cross-Site WebSocket Hijacking). 그 비대칭을
+없앤 검사가 다시 깨지지 않도록, 같은 함수(is_allowed_ws_origin)를 읽는 엔드포인트
+양쪽에서 본다.
+
+#246에서 CORSMiddleware를 제거한 뒤로는 ALLOW_ORIGINS의 소비자가 이 검사 하나뿐이다.
+즉 여기가 빨간불이 되지 않으면 그 목록이 아무 데도 쓰이지 않는 설정처럼 보인다.
 """
 
 import pytest
@@ -59,7 +63,8 @@ def test_unlisted_origin_is_rejected(monkeypatch, origin):
 def test_wildcard_allows_any_origin(monkeypatch):
     """ALLOW_ORIGINS에 "*"가 있으면 전체 허용합니다.
 
-    CORSMiddleware가 "*"를 전체 허용으로 해석하므로 같은 목록을 읽는 WS도 맞춘다.
+    "*"는 전체 허용이다. 제거된 CORSMiddleware가 쓰던 관례를 그대로 따른다(#246) —
+    표기의 의미만 바꾸면 기존 `.env`가 조용히 다른 뜻이 되기 때문이다.
     해석이 갈리면 HTTP는 열려 있는데 WS만 막히는 상태가 되어 원인을 찾기 어렵다.
     """
     monkeypatch.setattr("backend.main.ALLOW_ORIGINS", ["*"])

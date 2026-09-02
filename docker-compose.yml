@@ -21,9 +21,16 @@ services:
       context: .
       dockerfile: backend/Dockerfile
     ports:
-      # 번들이 상대 경로로 재빌드돼(#262) 8000 직접 호출 의존이 사라졌다. 127.0.0.1에만
-      # 바인딩해 노출면을 줄이는 것은 #246 후속 PR에서 CORSMiddleware 제거와 함께 한다.
-      - "8000:8000"
+      # 인증이 없는 API이고, /api/v1/analyze 한 번이 LLM 과금으로 이어진다. 번들이 상대
+      # 경로로 재빌드돼(#262) 원격 시연의 8000 직접 호출 의존이 사라졌으므로 127.0.0.1에만
+      # 바인딩한다(#246). 전 인터페이스에 열어 두면 nginx에 건 레이트리밋(#266 1단계,
+      # frontend/nginx.conf)을 8000 직접 호출로 그대로 우회할 수 있다 — 막는 게 아니라
+      # 막는 것처럼 보이는 상태가 된다.
+      # 게시를 없애지 않는 것은 호스트에서 /docs를 열거나 수동으로 API를 부르는 흐름과,
+      # Unity 에디터 플레이 모드(ApiClient.DefaultBaseUrl이 http://localhost:8000으로
+      # 폴백한다) 때문이다. 브라우저는 8080 프록시로, nginx는 backend:8000 별칭으로
+      # 닿으므로 좁혀도 기능 영향은 없다.
+      - "127.0.0.1:8000:8000"
     volumes:
       - .:/app
       - /app/backend/.venv
@@ -60,9 +67,10 @@ services:
       dockerfile: finus_nat/Dockerfile
     ports:
       # 무인증 `/v1/chat/completions`를 그대로 받는 LLM 호출 경로라 127.0.0.1에만
-      # 바인딩한다(#285). 전 인터페이스에 열어 두면 #258이 다루는 `/api/v1/analyze`
-      # 레이트리밋을 8001 직접 호출로 우회할 수 있다. 컴포즈 내부에서는 backend가
-      # `NAT_BASE_URL: http://finus-nat:8000` 네트워크 별칭으로 부르므로 영향이 없다.
+      # 바인딩한다(#285). 전 인터페이스에 열어 두면 `/api/v1/analyze`의 레이트리밋
+      # (#266 1단계, frontend/nginx.conf)을 8001 직접 호출로 우회할 수 있다. 컴포즈
+      # 내부에서는 backend가 `NAT_BASE_URL: http://finus-nat:8000` 네트워크 별칭으로
+      # 부르므로 영향이 없다.
       # 게시를 남겨 두는 것은 수동 디버깅과, 호스트에서 백엔드만 띄울 때 쓰는
       # `.env.example`의 `NAT_BASE_URL=http://127.0.0.1:8001`을 위해서다.
       - "127.0.0.1:8001:8000"
