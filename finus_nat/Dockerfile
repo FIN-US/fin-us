@@ -18,6 +18,13 @@ ARG SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0+docker
 ENV SETUPTOOLS_SCM_PRETEND_VERSION=${SETUPTOOLS_SCM_PRETEND_VERSION}
 
 COPY finus_nat /workspace/finus_nat
+# F-17 마스킹 엔진(#230). NAT 프로세스 안에서 만들어지는 계좌 데이터를 외부 LLM에
+# 보내기 전에 가리는 데 쓴다(#231). backend 전체가 아니라 이 파일 하나만 넣는다 —
+# 순수 stdlib 모듈이라 backend 의존성이 따라오지 않고, 정규식을 복사하지 않으므로
+# backend 경로와 NAT 경로의 마스킹 판정이 갈라지지 않는다.
+# nat_finus_nat/pii.py 의 _pii_mask_candidates()가 FINUS_VENDOR_ROOT(=/workspace)
+# 기준으로 이 경로를 찾는다.
+COPY backend/pii_mask.py /workspace/backend/pii_mask.py
 COPY mcp-news /workspace/mcp-news
 COPY mcp-trading /workspace/mcp-trading
 COPY mcp-dart /workspace/mcp-dart
