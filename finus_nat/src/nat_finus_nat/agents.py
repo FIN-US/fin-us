@@ -34,6 +34,7 @@ from nat_finus_nat.finus_api import (
     DataToolLedger,
     ReasoningTrace,
 )
+from nat_finus_nat.pii_guard import PII_MAPPING, install_mapping_box, unmask_response
 
 logger = logging.getLogger(__name__)
 
@@ -342,6 +343,24 @@ def chat_response_plain_text(result: ChatResponse | str) -> str:
     if result.choices and result.choices[0].message.content is not None:
         return result.choices[0].message.content
     return ""
+
+
+def chat_response_with_text(response: ChatResponse, text: str) -> ChatResponse:
+    """*response*의 본문만 *text*로 갈아 끼운 사본을 돌려준다 (#231의 역치환용).
+
+    :func:`chat_response_plain_text`가 읽는 바로 그 자리(``choices[0].message.content``)를
+    쓴다. 중첩 model_copy를 쓰는 이유는 ``with_reasoning_trace``와 같다 — 다른 필드
+    (``usage``/``model``/``extra="allow"``로 붙은 ``routed_agent``·``tools_used``)를
+    건드리지 않아야 backend의 ``_nat_message_from_payload``가 그대로 동작한다.
+
+    본문을 실을 자리가 없으면(choices가 비었을 때) 원본을 그대로 돌려준다 —
+    :func:`chat_response_plain_text`도 그 경우 ``""``를 돌려주므로 갈아 끼울 것이 없다.
+    """
+    if not response.choices:
+        return response
+    choice = response.choices[0]
+    message = choice.message.model_copy(update={"content": text})
+    return response.model_copy(update={"choices": [choice.model_copy(update={"message": message}), *response.choices[1:]]})
 
 
 def _is_holdings_news_request(chat_request: ChatRequest) -> bool:
@@ -692,25 +711,42 @@ async def finus_reasoning_trace_agent(config: FinusReasoningTraceAgentConfig, bu
         # vendor auto_memory_agent가 중간에 끼어 있어도 안쪽이 같은 박스를 본다.
         trace = ReasoningTrace()
         trace_token = REASONING_TRACE.set(trace)
+        # PII 매핑 박스(#231)도 같은 자리에서 같은 이유로 심는다 — 두 라우터 config가
+        # 모두 이 함수를 최상위 workflow로 쓰므로, config가 무엇이든(vendor
+        # auto_memory_agent가 끼든 안 끼든) 마스킹의 시작과 끝이 한 쌍으로 맞물린다.
+        # 안쪽 도구는 이 dict를 mutate만 한다(nat_finus_nat/pii_guard.py 참고).
+        mapping_token = PII_MAPPING.set(install_mapping_box())
         try:
-            result = await inner_agent.ainvoke(chat_request_or_message)
-        finally:
-            REASONING_TRACE.reset(trace_token)
+            try:
+                result = await inner_agent.ainvoke(chat_request_or_message)
+            finally:
+                REASONING_TRACE.reset(trace_token)
 
-        # 문자열 입력(`nat run --input`)은 평문으로 돌려준다 — 각주를 실을 곳이 없다.
-        # **종전 동작과 다르다.** 옛 transcript agent는 isinstance 검사가 먼저라
-        # 문자열 입력에도 각주가 실린 ChatResponse를 돌려줬고, 그 아래 `is_string`
-        # 분기는 안쪽(supervisor)이 항상 ChatResponse를 반환하므로 도달하지 않는
-        # 죽은 코드였다 — "실을 곳이 없다"는 주석이 실행되지 않는 분기에 붙어 있었다.
-        # 여기서는 검사 순서를 뒤집어 그 의도를 실제로 실행한다. HTTP 경로(backend·
-        # scheduler)는 messages를 보내므로 영향받지 않는다.
-        if chat_request_or_message.is_string:
-            return chat_response_plain_text(result)
-        if isinstance(result, ChatResponse):
-            return with_reasoning_trace(result, trace)
-        # vendor auto_memory_agent는 str을 돌려준다 — 여기서 ChatResponse로 만들며
-        # 각주를 붙이므로, 안쪽에서 무엇이 버려졌는지와 무관하게 필드가 실린다.
-        return with_reasoning_trace(ChatResponse.from_string(str(result), usage=Usage()), trace)
+            # 문자열 입력(`nat run --input`)은 평문으로 돌려준다 — 각주를 실을 곳이 없다.
+            # **종전 동작과 다르다.** 옛 transcript agent는 isinstance 검사가 먼저라
+            # 문자열 입력에도 각주가 실린 ChatResponse를 돌려줬고, 그 아래 `is_string`
+            # 분기는 안쪽(supervisor)이 항상 ChatResponse를 반환하므로 도달하지 않는
+            # 죽은 코드였다 — "실을 곳이 없다"는 주석이 실행되지 않는 분기에 붙어 있었다.
+            # 여기서는 검사 순서를 뒤집어 그 의도를 실제로 실행한다. HTTP 경로(backend·
+            # scheduler)는 messages를 보내므로 영향받지 않는다.
+            if chat_request_or_message.is_string:
+                return unmask_response(chat_response_plain_text(result))
+            if isinstance(result, ChatResponse):
+                traced = with_reasoning_trace(result, trace)
+            else:
+                # vendor auto_memory_agent는 str을 돌려준다 — 여기서 ChatResponse로 만들며
+                # 각주를 붙이므로, 안쪽에서 무엇이 버려졌는지와 무관하게 필드가 실린다.
+                traced = with_reasoning_trace(ChatResponse.from_string(str(result), usage=Usage()), trace)
+
+            # 역치환은 각주를 붙인 **뒤**에 한다 (#231). with_reasoning_trace는 본문이
+            # supervisor가 기록해 둔 브랜치 답변과 같을 때만 각주를 붙이는데(#294),
+            # 그 기록은 마스킹된 상태로 남는다. 먼저 역치환하면 본문만 원값으로 바뀌어
+            # 비교가 어긋나고, 정상 응답에서 각주가 통째로 사라진다.
+            body = chat_response_plain_text(traced)
+            restored = unmask_response(body)
+            return traced if restored == body else chat_response_with_text(traced, restored)
+        finally:
+            PII_MAPPING.reset(mapping_token)
 
     yield FunctionInfo.from_fn(_response_fn, description=config.description)
 

@@ -23,6 +23,8 @@ from nat.builder.function_info import FunctionInfo
 from nat.cli.register_workflow import register_function
 from nat.data_models.function import FunctionBaseConfig
 
+from .pii_guard import mask_tool_result, restore_for_internal
+
 logger = logging.getLogger(__name__)
 
 # ---- Data-tool ledger for tool enforcement (#152) ----
@@ -326,6 +328,35 @@ def _record_to_ledger(tool_name: str, result: str) -> None:
         produced_rows=is_read and not is_empty,
         empty=is_empty,
     )
+
+
+def _record_and_mask(tool_name: str, result: str) -> str:
+    """원장에는 **원문**을 기록하고, 에이전트에게는 마스킹된 결과를 돌려준다 (#231).
+
+    도구 하나가 결과를 반환하는 자리는 예외 없이 여기를 지난다 — 그래야 새 도구가
+    추가될 때 마스킹만 빠지는 일이 생기지 않는다. ``finus_api.py``에 도구 결과를
+    돌려주면서 이 함수를 거치지 않는 경로가 생기면
+    ``finus_nat/tests/test_pii_guard.py``의 AST 회귀 가드가 잡는다.
+
+    **원장에는 원문을 넣는다.** ``_has_empty_result``는 MCP 소스에서 그대로 가져온
+    리터럴("해당 조건의 주문·체결이 없습니다.", "보유 종목이 없습니다.", "[계좌 집계]")과
+    JSON 구조를 보고 빈 결과를 판정한다(#209). 마스킹된 텍스트를 넘기면 그 판정이
+    마스킹 정규식의 사정에 묶인다 — 원장은 프로세스 안에만 남고 마스킹은 LLM
+    컨텍스트로 나가는 값에만 필요하므로, 둘을 갈라 두는 편이 결합이 적다.
+
+    **지금은 두 순서의 결과가 같다.** 현재 리터럴 중 마스킹 정규식에 걸리는 것이
+    하나도 없고(금액·수량·10자리 숫자 없음), 마스킹은 JSON 구조와 비어 있음 여부를
+    바꾸지 않기 때문이다. 즉 이 순서는 오늘의 버그를 고치는 것이 아니라 **앞으로
+    갈라질 여지를 막는** 선택이다. 그 전제가 깨지는 순간
+    (``_EMPTY_RESULT_LITERALS``에 "…원"이나 "N주"가 들어오는 순간)을
+    ``test_pii_guard.py::test_empty_result_literals_survive_masking``이 잡는다.
+
+    마스킹 대상이 아닌 도구(뉴스·공시·실적·일지 저장)에서는
+    :func:`~nat_finus_nat.pii_guard.mask_tool_result`가 원문을 그대로 돌려주므로
+    이 함수는 종전과 동일하게 동작한다.
+    """
+    _record_to_ledger(tool_name, result)
+    return mask_tool_result(tool_name, result)
 
 
 # Remote MCP / doc 한도
@@ -1009,8 +1040,7 @@ async def _call_kis_mcp_and_record(
         arguments=arguments,
         timeout_sec=config.timeout_sec,
     )
-    _record_to_ledger(_KIS_BALANCE_LEDGER_NAME, result)
-    return result
+    return _record_and_mask(_KIS_BALANCE_LEDGER_NAME, result)
 
 
 async def _build_kis_mcp_description(doc: str, config: FinusAccountBalanceConfig) -> str:
@@ -1053,8 +1083,7 @@ async def finus_account_balance_readonly(config: FinusAccountBalanceReadonlyConf
         """
         prepared = _prepare_kis_trading_mcp_call(inp, config)
         if isinstance(prepared, str):
-            _record_to_ledger(_KIS_BALANCE_LEDGER_NAME, prepared)
-            return prepared
+            return _record_and_mask(_KIS_BALANCE_LEDGER_NAME, prepared)
         tool_name, arguments = prepared
         if not _is_readonly_tool_name(tool_name):
             logger.warning("readonly gate blocked tool_name=%r", tool_name)
@@ -1068,8 +1097,7 @@ async def finus_account_balance_readonly(config: FinusAccountBalanceReadonlyConf
                     "주문 실행은 이 에이전트의 권한이 아니므로 재시도하지 말고 사용자에게 안내하세요."
                 ),
             )
-            _record_to_ledger(_KIS_BALANCE_LEDGER_NAME, result)
-            return result
+            return _record_and_mask(_KIS_BALANCE_LEDGER_NAME, result)
         api_type = str(arguments.get("api_type", ""))
         if not _is_readonly_api_type(api_type):
             logger.warning(
@@ -1084,8 +1112,7 @@ async def finus_account_balance_readonly(config: FinusAccountBalanceReadonlyConf
                     "주문 실행은 이 에이전트의 권한이 아니므로 재시도하지 말고 사용자에게 안내하세요."
                 ),
             )
-            _record_to_ledger(_KIS_BALANCE_LEDGER_NAME, result)
-            return result
+            return _record_and_mask(_KIS_BALANCE_LEDGER_NAME, result)
         return await _call_kis_mcp_and_record(tool_name, arguments, config)
 
     description = await _build_kis_mcp_description(get_account_balance_readonly.__doc__ or "", config)
@@ -1111,8 +1138,7 @@ def _mcp_news_stock_function_info(
             tool_name=mcp_tool,
             stock_name=stock_name,
         )
-        _record_to_ledger(ledger_tool_name, result)
-        return result
+        return _record_and_mask(ledger_tool_name, result)
 
     by_stock.__doc__ = fn_doc
     return FunctionInfo.from_fn(by_stock, description=fn_doc)
@@ -1146,8 +1172,7 @@ async def finus_disclosure_signal(config: FinusDisclosureSignalConfig, _builder:
             timeout_sec=config.timeout_sec,
             stock_name=stock_name,
         )
-        _record_to_ledger("finus_disclosure_signal", result)
-        return result
+        return _record_and_mask("finus_disclosure_signal", result)
 
     get_disclosure_signal.__doc__ = doc
     yield FunctionInfo.from_fn(get_disclosure_signal, description=doc)
@@ -1168,8 +1193,7 @@ async def finus_earnings_report(config: FinusEarningsReportConfig, _builder: Bui
             stock_name=stock_name,
             period=period,
         )
-        _record_to_ledger("finus_earnings_report", result)
-        return result
+        return _record_and_mask("finus_earnings_report", result)
 
     get_earnings_report.__doc__ = doc
     yield FunctionInfo.from_fn(get_earnings_report, description=doc)
@@ -1199,8 +1223,7 @@ async def finus_mcp_trading_today_orders(config: FinusMcpTradingTodayOrdersConfi
             tool_name="get_today_daily_orders",
             arguments=arguments,
         )
-        _record_to_ledger("finus_mcp_trading_today_orders", result)
-        return result
+        return _record_and_mask("finus_mcp_trading_today_orders", result)
 
     get_today_daily_orders.__doc__ = doc
     yield FunctionInfo.from_fn(
@@ -1225,8 +1248,7 @@ async def finus_mcp_trading_get_balance(config: FinusMcpTradingGetBalanceConfig,
             tool_name="get_balance",
             arguments={},
         )
-        _record_to_ledger("finus_mcp_trading_get_balance", result)
-        return result
+        return _record_and_mask("finus_mcp_trading_get_balance", result)
 
     get_balance.__doc__ = doc
     yield FunctionInfo.from_fn(
@@ -1255,8 +1277,7 @@ async def finus_mcp_trading_balance_rlz_pl(config: FinusMcpTradingBalanceRlzPlCo
             tool_name="get_balance_rlz_pl",
             arguments=arguments,
         )
-        _record_to_ledger("finus_mcp_trading_balance_rlz_pl", result)
-        return result
+        return _record_and_mask("finus_mcp_trading_balance_rlz_pl", result)
 
     get_balance_rlz_pl.__doc__ = doc
     yield FunctionInfo.from_fn(
@@ -1281,16 +1302,20 @@ async def finus_save_diary(config: FinusSaveDiaryConfig, _builder: Builder):
         Returns:
             저장된 일지 메타데이터 JSON 문자열. 실패 시 ``error`` 필드를 가진 JSON.
         """
-        title = (inp.title or "").strip()
-        content = (inp.content or "").strip()
+        # 역치환 후 저장한다 (#231). 일지 본문은 LLM이 **마스킹된 잔고를 보고** 쓴
+        # 것이라, 그대로 넘기면 "<AMOUNT_9f2a1c_1>주 매수"가 backend DB에 영구히
+        # 박힌다 — 요청이 끝나면 매핑이 사라져 복구할 수 없다. 목적지가 외부 LLM이
+        # 아니라 우리 backend이므로 여기서 원값으로 되돌리는 것이 맞다.
+        # restore_for_internal은 이 요청이 만든 자리표시자만 되돌리고, backend가
+        # 만든 것(사용자 원문 유래)은 그대로 통과시켜 backend가 판정하게 둔다.
+        title = restore_for_internal((inp.title or "").strip())
+        content = restore_for_internal((inp.content or "").strip())
         if not title:
             result = _err_json("diary_title_required", hint="Provide a non-empty title.")
-            _record_to_ledger("finus_save_diary", result)
-            return result
+            return _record_and_mask("finus_save_diary", result)
         if not content:
             result = _err_json("diary_content_required", hint="Provide non-empty diary content.")
-            _record_to_ledger("finus_save_diary", result)
-            return result
+            return _record_and_mask("finus_save_diary", result)
 
         url = f"{base_url}/api/v1/db/diary"
         try:
@@ -1305,20 +1330,26 @@ async def finus_save_diary(config: FinusSaveDiaryConfig, _builder: Builder):
                 detail=exc.response.text[:500],
                 url=url,
             )
-            _record_to_ledger("finus_save_diary", result)
-            return result
+            return _record_and_mask("finus_save_diary", result)
         except Exception as exc:  # noqa: BLE001
             result = _err_json("diary_api_request_failed", detail=str(exc), url=url)
-            _record_to_ledger("finus_save_diary", result)
-            return result
+            return _record_and_mask("finus_save_diary", result)
 
         if body.get("status") != "success":
             result = _err_json("diary_api_error", response=body)
-            _record_to_ledger("finus_save_diary", result)
-            return result
-        result = json.dumps(body.get("data"), ensure_ascii=False)
-        _record_to_ledger("finus_save_diary", result)
-        return result
+            return _record_and_mask("finus_save_diary", result)
+        # 저장 성공 응답은 **메타데이터만** 돌려준다 (#231, PR #335 리뷰). backend는
+        # `{"status": "success", "data": <Diary 전체>}`를 주는데, 그 `data`에는 방금
+        # 위에서 역치환한 `title`·`content`가 평문 그대로 들어 있다. 그대로 반환하면
+        # 이 이슈가 막은 평문이 같은 요청 안에서 Observation으로 컨텍스트에 재유입돼
+        # 다음 턴에 외부 LLM으로 나간다. 에이전트가 저장 확인에 필요한 것은 식별자와
+        # 시각뿐이므로 되비춤 자체를 없앤다.
+        data = body.get("data")
+        if not isinstance(data, dict):
+            data = {}
+        saved = {"id": data.get("id"), "created_at": data.get("created_at")}
+        result = json.dumps(saved, ensure_ascii=False)
+        return _record_and_mask("finus_save_diary", result)
 
     yield FunctionInfo.from_fn(
         save_trading_diary,
@@ -1351,20 +1382,16 @@ async def finus_list_diaries(config: FinusListDiariesConfig, _builder: Builder):
                 detail=exc.response.text[:500],
                 url=url,
             )
-            _record_to_ledger("finus_list_diaries", result)
-            return result
+            return _record_and_mask("finus_list_diaries", result)
         except Exception as exc:  # noqa: BLE001
             result = _err_json("diary_api_request_failed", detail=str(exc), url=url)
-            _record_to_ledger("finus_list_diaries", result)
-            return result
+            return _record_and_mask("finus_list_diaries", result)
 
         if body.get("status") != "success":
             result = _err_json("diary_api_error", response=body)
-            _record_to_ledger("finus_list_diaries", result)
-            return result
+            return _record_and_mask("finus_list_diaries", result)
         result = json.dumps(body.get("data"), ensure_ascii=False)
-        _record_to_ledger("finus_list_diaries", result)
-        return result
+        return _record_and_mask("finus_list_diaries", result)
 
     yield FunctionInfo.from_fn(
         list_trading_diaries,
@@ -1461,8 +1488,7 @@ async def finus_account_balance(config: FinusAccountBalanceConfig, _builder: Bui
         """
         prepared = _prepare_kis_trading_mcp_call(inp, config)
         if isinstance(prepared, str):
-            _record_to_ledger(_KIS_BALANCE_LEDGER_NAME, prepared)
-            return prepared
+            return _record_and_mask(_KIS_BALANCE_LEDGER_NAME, prepared)
         tool_name, arguments = prepared
         return await _call_kis_mcp_and_record(tool_name, arguments, config)
 

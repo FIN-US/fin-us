@@ -102,10 +102,10 @@ LLM이 판단할 수 있어 유지되지만, **절대 금액 기반 판단**("�
 이 계층은 **`llm_chat()`을 거치는 프롬프트만** 막는다. 아래 경로·대상은 이 계층 밖이며
 후속 이슈에서 별도로 다루거나(1, 4) 구조적 한계·의도된 트레이드오프로 남긴다(2, 3, 5).
 
-1. **NAT 내부 도구 호출 경로** — NAT 멀티에이전트가 자체적으로 MCP 도구(KIS 잔고 등)를
-   호출해 만드는 프롬프트 조각은 backend가 보지 못하므로 마스킹할 수 없다. backend는
-   `user_msg`만 NAT에 보내고, NAT 프로세스 내부에서 추가로 조회한 데이터는 그 안에서
-   바로 OpenAI로 나간다. → **#231**에서 다룬다.
+1. ~~**NAT 내부 도구 호출 경로**~~ — **해소됨(#231).** backend는 `user_msg`만 NAT에
+   보내므로 이 계층은 NAT 내부에서 생성되는 계좌 데이터를 볼 수 없다. 그 경로는
+   backend가 아니라 **NAT 프로세스 안에서** 닫았다 — 아래 "NAT 내부 도구 결과 마스킹"
+   절 참고. 이 항목은 후속 이슈로 넘긴 것이 아니라 별도 계층으로 닫힌 항목이다.
 2. **Telegram 경유 계좌 정보(`/balance`, 주문 승인 메시지, 모닝 브리핑)** — LLM 호출이
    아니라 이 미들웨어의 사정거리 밖이다. `/balance`는 사용 목적 자체가 원값 표시이므로
    마스킹을 적용하면 명령의 존재 이유가 사라진다. **#232에서 비식별화 대상 제외로
@@ -452,6 +452,187 @@ NAT 내부에서 서브에이전트가 자체 조회해 만드는 프롬프트 �
 backend가 `user_msg`로 직접 조립해 넣는 잔고 텍스트에 대한 마스킹은 그와 별개로
 유지한다.
 
+## NAT 내부 도구 결과 마스킹 — 해소됨 (#231)
+
+### 문제
+
+`_llm_nat_chat`은 `user_msg` 1건만 NAT에 보낸다. 사용자가 "내 잔고 어때?"라고 물으면
+그 문장에는 PII가 없고, 계좌 데이터는 **NAT 프로세스 안에서** 만들어진다.
+
+```
+backend → NAT ("내 잔고 어때?" — 마스킹해도 걸릴 게 없다)
+          NAT 라우터 → trading_agent
+                       → KIS MCP get_balance
+                       → 잔고 리포트(보유 종목·수량·평단가·평가금액·예수금)가
+                         ReAct 컨텍스트에 삽입 → openai_cloud_llm → api.openai.com
+```
+
+즉 F-17에서 유출량이 가장 큰 경로가 backend 계층 **바깥**에 있었다.
+
+### 결정 — 옵션 A(도구 결과 마스킹)
+
+이슈가 제시한 세 안 중 A를 택했다.
+
+- **옵션 B(LLM 호출 경계 훅)를 택하지 않은 이유**: NAT이 그 훅을 제공하지 않으므로
+  `finus_nat/scripts/patch_vendor.py` 계열의 벤더 패치가 된다. 그 패치는 상류 소스와
+  바이트 단위로 맞물려 있어 NAT 업그레이드마다 깨지고, `ci.yml`의 "벤더 패치 적용 검증"
+  스텝이 이미 그 부채를 감시하고 있다. 부채를 한 건 더 얹는 선택이다.
+- **옵션 C(계좌 취급 에이전트만 `ollama_llm`)를 택하지 않은 이유**: 에이전트별 LLM 분리는
+  NAT 설정으로 가능하지만(각 `*_agent.yml`의 `llm_name`), 라우팅을 맡는
+  `router_supervisor_agent`가 브랜치의 답변 본문을 보고 판단하므로 라우터까지 로컬로
+  내려야 유출이 실제로 사라진다. 그리고 이 프로젝트의 도구 강제 게이트(#152/#205)는
+  ReAct 루프가 도구를 정확히 골라 Observation을 남기는 것을 전제로 하는데, 로컬 모델의
+  도구 호출 품질이 그 전제를 만족한다는 근거가 없다. 금전 경로의 게이트를 미검증 모델에
+  거는 교환이라 채택하지 않았다. **유출을 원천 제거한다는 점에서 근본 해결이라는 판단은
+  유효하며, 로컬 모델 품질이 검증되면 다시 볼 값이 있다.**
+
+### 배선 — 세 지점
+
+`finus_nat/src/nat_finus_nat/pii_guard.py`가 소유한다.
+
+1. **박스 심기** — `agents.finus_reasoning_trace_agent`가 요청마다 `PII_MAPPING`
+   ContextVar에 빈 dict를 심는다. 두 라우터 config(`router.yml`, `router_nomemory.yml`)가
+   모두 이 함수를 최상위 `workflow`로 쓰므로, vendor `auto_memory_agent`가 끼든 안 끼든
+   마스킹의 시작과 끝이 한 쌍으로 맞물린다(#273이 각주를 이 자리로 올린 것과 같은 근거).
+2. **나갈 때 마스킹** — 계좌 계열 도구가 결과를 반환하는 자리는 예외 없이
+   `finus_api._record_and_mask`를 지난다. 원장(#152/#209)에는 원문이, 에이전트에게는
+   마스킹본이 간다.
+3. **돌아올 때 역치환** — 같은 최상위 에이전트가 최종 응답 본문에 `unmask_response`를
+   적용한다. 각주(#294)를 붙인 **뒤**에 한다 — 먼저 역치환하면 본문이
+   supervisor가 기록해 둔 브랜치 답변과 달라져 정상 응답에서 각주가 통째로 사라진다.
+
+### 마스킹 대상 — 도구 단위 fail-closed
+
+| 도구 | 마스킹 | 근거 |
+| --- | --- | --- |
+| `finus_account_balance` (+ readonly 래퍼) | O | Kis Trading MCP pass-through — 계좌 자격증명 채널 |
+| `finus_mcp_trading_get_balance` | O | 잔고·보유종목 |
+| `finus_mcp_trading_balance_rlz_pl` | O | 실현손익 |
+| `finus_mcp_trading_today_orders` | O | 당일 주문·체결 |
+| `finus_list_diaries` | O | 저장된 일지 본문의 금액·수량 |
+| `finus_save_diary` | O | 저장 응답이 방금 역치환한 본문을 되비춘다 — 아래 참고 |
+| `finus_market_news` / `finus_disclosure_signal` / `finus_earnings_report` | X | 공개 정보 |
+
+`finus_account_balance`는 같은 도구가 잔고(`inquire_balance`)와 시세(`inquire_price`)를
+모두 서비스한다. **api_type으로 가르지 않고 도구 단위로 전부 마스킹한다.** 시세만
+면제하려면 "계좌 계열 TR 목록"을 이쪽에서 관리해야 하는데, 그 목록의 출처는 외부 MCP
+서버(upstream `open-trading-api`)라 이 저장소가 통제하지 못한다. 새 TR이 추가될 때마다
+목록에서 빠지고, 빠진 항목은 조용한 유출이 된다. 도구 단위로 두면 새 TR의 기본값이
+"마스킹됨"이다.
+
+**감수하는 비용**: 시세(현재가·호가·차트)도 자리표시자로 나가므로 LLM은 절대 가격 수준을
+근거로 판단할 수 없다. "방식" 절에 적힌 (a) 방식의 알려진 한계와 같은 종류의 비용이며,
+왕복이 무손실이라 **사용자가 보는 최종 값은 원값 그대로**다. 품질 저하가 실제로 관측되면
+api_type 면제 목록을 별도 이슈로 검토한다.
+
+### 두 계층의 자리표시자가 섞이는 문제
+
+backend `llm_chat`은 NAT을 부르기 **전에** `user_msg`를 자기 매핑으로 마스킹하고, 응답을
+받은 **뒤에** 자기 매핑으로 역치환한다. 즉 NAT이 보는 요청과 돌려주는 응답에는 backend가
+만든 자리표시자가 섞여 있다.
+
+`unmask_pii`는 매핑에 없는 자리표시자를 전부 "(이전 금액 1)"로 바꾸므로(fail-open), NAT
+경계에서 그대로 쓰면 backend의 자리표시자까지 갈아엎어 **사용자가 방금 쓴 금액이 사라진다.**
+그래서 `unmask_response`는 **자기 scope의 것만** 건드린다:
+
+| 응답에 있는 자리표시자 | NAT 경계의 처리 |
+| --- | --- |
+| 이 요청의 매핑에 있음 | 원값 복원 |
+| 이 요청의 scope인데 매핑에 없음 (LLM이 지어냄) | 중립 문구 + 경고 로그 |
+| 낯선 scope (backend 것, 이전 턴 것) | **손대지 않음** — backend `unmask_pii`가 판정 |
+
+결과적으로 두 계층이 겹치지 않고 이어진다. NAT이 자기 토큰을 걷어내고, 남은 내부 토큰은
+backend의 fail-open이 쓸어 담는다.
+
+### 반대 방향 — 매매일지 저장
+
+`finus_save_diary`가 backend DB에 쓰는 제목·본문은 **역치환한 뒤** POST한다
+(`restore_for_internal`). 일지 본문은 LLM이 마스킹된 잔고를 보고 쓴 것이라 그대로
+저장하면 `<AMOUNT_9f2a1c_1>`가 DB에 영구히 박히는데, 요청이 끝나면 매핑이 사라져
+복구할 수 없다. 목적지가 외부 LLM이 아니라 우리 backend이므로 원값이 맞다.
+
+**단, 되돌린 값이 응답으로 되비쳐 오는 경로를 함께 닫아야 한다** (PR #335 리뷰).
+backend `POST /api/v1/db/diary`는 `{"status": "success", "data": <Diary 전체>}`를
+돌려주고, 그 `data`에는 방금 역치환한 `title`·`content`가 평문 그대로 들어 있다.
+이것을 Observation으로 반환하면 이 절이 막은 평문이 **같은 요청 안에서** 컨텍스트에
+재유입돼 다음 턴에 `api.openai.com`으로 나간다 — 도구 결과 마스킹 전체가 무의미해진다.
+두 겹으로 닫았다:
+
+1. **성공 경로** — 반환값을 `{"id", "created_at"}`로 좁혀 되비춤 자체를 없앴다. 에이전트가
+   저장 확인에 필요한 것은 식별자와 시각뿐이다.
+2. **오류 경로** — `finus_save_diary`를 `MASKED_TOOLS`에 넣었다. backend 422 응답의
+   `detail`은 검증 실패한 요청 본문을 그대로 되비추므로 좁히기로는 덮이지 않는다.
+   fail-closed 쪽을 함께 둔다.
+
+두 겹 모두 `test_pii_guard.py`의 회귀 테스트가 각각 고정한다(한쪽만 되돌려도 실패하는
+것을 실측했다).
+
+### Mem0 저장 경로 — 별도 조치 불필요 (F-17 범위 판정)
+
+이슈가 판정을 요구한 항목이다. **별도 조치가 필요 없다**는 결론이며 근거는 배선 위치다.
+
+`router.yml`의 vendor `auto_memory_agent`(`memory_router_agent`)는
+`finus_reasoning_trace_agent` **안쪽**에 있다. 역치환은 그 바깥에서 일어나므로,
+`add_user_memory`가 보는 텍스트는 마스킹된 상태다:
+
+- 사용자 발화 — backend `llm_chat`이 이미 마스킹해서 보낸 것
+- 도구 결과·답변 본문 — 이 이슈의 마스킹이 걸린 것
+
+같은 이유로 `finus_sqlite_transcript_agent`가 `chat_messages`에 쌓는 히스토리도
+마스킹된 텍스트다. 즉 **평문 계좌 정보가 별도 저장소에 축적되는 경로는 없다.**
+
+두 저장소에 남는 자리표시자는 다음 턴에 낯선 scope가 되어(요청마다 nonce가 새로 뽑힌다)
+경계에서 손대지 않고 통과하고, backend의 fail-open이 중립 문구로 바꾼다. 사용자가
+"아까 그 금액"을 되물으면 "(이전 금액 1)"이 나온다 — (a) 방식이 이미 감수한 한계와
+같은 것이고, 조용한 오답이 아니라 관측 가능한 문구라는 점이 이 설계의 요지다.
+(`router.yml`의 `add_user_memory` description도 "durable user traits" 외의 일회성
+데이터 저장을 금지하고 있어, 금액이 메모리에 남는 것 자체가 의도된 사용이 아니다.)
+
+### 마스킹 엔진 공유 — 바이트 사본
+
+`finus_nat`은 `backend`를 의존성으로 갖지 않고(`finus_nat/pyproject.toml`), NAT 이미지도
+`backend`를 COPY하지 않는다(`finus_nat/Dockerfile`). import로 공유할 수 없으므로
+`backend/pii_mask.py`를 `finus_nat/src/nat_finus_nat/pii_mask.py`로 **바이트 단위 복제**했다.
+
+한쪽만 고치면 같은 잔고 텍스트가 두 경로에서 다르게 마스킹돼 한 대화 안에서 자리표시자
+규약이 갈린다. `test_pii_guard.py::TestVendoredCopy`가 두 파일의 바이트 동일성과
+"stdlib만 import한다"(복제가 성립하는 전제)를 CI에서 강제한다.
+
+공용 패키지로 뽑는 편이 정석이지만, 배포 단위가 셋(backend 이미지 / NAT 이미지 /
+로컬 `uv sync`)이라 패키징·버전 동기화 비용이 이 이슈의 범위를 넘는다. 사본 2개 +
+바이트 동일성 검사로 같은 안전성을 훨씬 싸게 얻는다고 판단했다.
+
+### 이 절이 닫지 못한 것
+
+- **주문 검증자(`/v1/verify-order`, #299)** — backend가 계좌 스냅샷(`cash`,
+  `total_value`, `holding_qty`)을 JSON으로 직접 실어 보내고 `verifier.py`가 그대로
+  LLM에 넘긴다. `llm_chat`도 이 도구 경로도 지나지 않아 두 계층 **모두**의 사정거리
+  밖이다. 계좌번호는 실리지 않고 금액·수량만 실린다. 이 경로에 (a) 방식을 적용하면
+  "주문금액이 예수금 대비 과도한가"라는 검증자의 판정 자체가 성립하지 않으므로
+  (자리표시자는 대소 비교가 되지 않는다), 자리표시자가 아니라 비율·구간 변환((b) 방식)이
+  필요하다. 설계 비용이 이 이슈의 범위를 넘어 **#336으로 분리했다.**
+- **도구 인자 방향에는 역치환이 없다 (#338)** — 마스킹은 도구 **결과**에만 걸리고,
+  `restore_for_internal`을 타는 곳은 `finus_save_diary` 하나뿐이다. `finus_account_balance`는
+  주문 권한이 있는 pass-through이므로(`configs/common.yml`), 에이전트가 마스킹된 잔고에서
+  읽은 `<QTY_...>`를 그대로 `params`에 실으면 주문이 실패한다. 잘못된 주문이 나가지는
+  않고(MCP 검증이 거부하는 시끄러운 실패) "보유 전량 매도" 같은 흐름이 깨진다. 위
+  "감수하는 비용"은 절대 금액 판단만 다루므로 이 건은 별개다. 인자에도 역치환을 태우는
+  것이 정답인지가 자명하지 않아 — 시끄러운 실패를 조용한 오주문 가능성과 맞바꾸는
+  선택이다 — **#338로 분리했다.**
+- **사용자 발화 유래 자리표시자가 일지 DB에 남는다 (#339)** — `restore_for_internal`이
+  낯선 scope를 통과시키는 근거는 "backend `unmask_pii`가 판정하게 둔다"인데, 저장
+  목적지인 `POST /api/v1/db/diary`는 저장만 하고 `unmask_pii`를 타지 않는다
+  (`backend/main.py::create_db_diary`). 그래서 backend가 만든 `<AMOUNT_be3f1a_1>`이
+  `Diary.content`에 영구히 박힌다. 통과 규칙은 **응답 본문**에는 맞지만 **저장 경로**는
+  backend 왕복의 바깥이라 성립하지 않는다. #230 시점부터 있던 층간 틈이고, 해소하려면
+  backend의 매핑 수명을 요청 범위로 끌어올리거나 저장 배선을 옮겨야 해 **#339로
+  분리했다.**
+- **시세 데이터 과다 마스킹** — 위 "감수하는 비용" 참고.
+- **박스를 물려받지 못한 실행 경로** — ContextVar를 전파하지 않는 스레드풀에서 도구가
+  돌면 매핑이 유실된다. 그때도 **마스킹은 그대로 하고**(fail-closed) ERROR 로그를
+  남긴다. 유출 대신 관측 가능한 품질 저하를 택한 것이며, `_record_to_ledger`가 같은
+  상황을 다루는 방식과 같다.
+
 ## Telegram 경유 계좌 정보 노출 — 한계로 명시 (#232)
 
 `/balance`는 KIS 잔고 리포트에 값을 바꾸지 않는 `render()` 틀만 씌워 그대로 Telegram으로
@@ -557,6 +738,14 @@ backend가 `user_msg`로 직접 조립해 넣는 잔고 텍스트에 대한 마�
 
 ## 구현
 
+- `finus_nat/src/nat_finus_nat/pii_guard.py` — NAT 내부 도구 결과 마스킹(#231):
+  `PII_MAPPING` 박스, `mask_tool_result()`/`unmask_response()`/`restore_for_internal()`,
+  마스킹 대상 도구 목록.
+- `finus_nat/src/nat_finus_nat/pii_mask.py` — `backend/pii_mask.py`의 바이트 사본.
+- `finus_nat/src/nat_finus_nat/finus_api.py:_record_and_mask()` — 도구 결과의 단일 반환 지점.
+- `finus_nat/src/nat_finus_nat/agents.py:finus_reasoning_trace_agent()` — 박스 심기 + 역치환.
+- 테스트: `finus_nat/tests/test_pii_guard.py`(도구별 마스킹 대상 판정, 경계 왕복,
+  두 계층 간섭 없음, 일지 저장 역치환, `_record_and_mask` 우회 AST 가드, 사본 드리프트).
 - `backend/pii_mask.py` — recognizer 3종, `mask_pii()`/`unmask_pii()`. services.py에
   인라인하지 않고 별도 모듈로 분리했다(#140에서 `stock_code.py`로 공용화한 선례를 따름).
 - `backend/services.py:llm_chat()` — 통합 지점.
