@@ -179,6 +179,22 @@ test(
       }),
       /stock_code는 6~7자 영숫자 또는 9자 코드여야 합니다/,
     );
+    // 소문자는 플래그를 켜도 거절한다 — 짝인 backend/stock_code.py의
+    // _ORDERABLE_STOCK_CODE_ALNUM_RE가 IGNORECASE 없이 [0-9A-Z]만 받으므로, 여기서
+    // 관용하면 같은 값에 두 계층의 판정이 갈리고 소문자가 그대로 PDNO에 실린다.
+    for (const lowercased of ["0001a0", "f70100026", "q500020"]) {
+      assert.throws(
+        () => buildCashOrderBody({
+          accountNo: "1234567801",
+          stockCode: lowercased,
+          quantity: 1,
+          price: 10000,
+          orderType: "LIMIT",
+        }),
+        /stock_code는 6~7자 영숫자 또는 9자 코드여야 합니다/,
+        `${lowercased}는 플래그 켜짐에서도 거절해야 한다(backend와 짝맞춤)`,
+      );
+    }
   },
 );
 

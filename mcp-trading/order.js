@@ -92,7 +92,12 @@ export function buildCashOrderBody({ accountNo, stockCode, quantity, price, orde
   if (isAlnumStockOrderEnabled()) {
     // 플래그 켜짐: 영숫자 6~7자·9자를 연다(8자는 종목마스터에 0건이라 제외, #140과
     // 같은 근거). KIS PDNO 실제 수용 여부는 이 가드를 통과한 뒤 KIS 응답으로 결정된다.
-    if (!/^(?:[0-9A-Z]{6,7}|[0-9A-Z]{9})$/i.test(code)) {
+    // `/i`를 달면 안 된다 — 짝인 backend/stock_code.py의 _ORDERABLE_STOCK_CODE_ALNUM_RE는
+    // IGNORECASE가 없어 소문자를 거절하므로, 여기만 관용하면 같은 값에 두 계층이 다른
+    // 판정을 내리고 소문자 그대로 PDNO에 실린다(index.js는 upper 정규화를 하지 않는다).
+    // 기본값 분기는 결정 가드가 /^\d{6,7}$/라 대소문자가 무의미했다 — 이 분기에서만
+    // 생기는 갈림이다.
+    if (!/^(?:[0-9A-Z]{6,7}|[0-9A-Z]{9})$/.test(code)) {
       throw new Error("stock_code는 6~7자 영숫자 또는 9자 코드여야 합니다.");
     }
   } else {
