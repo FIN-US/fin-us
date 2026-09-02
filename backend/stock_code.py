@@ -5,6 +5,7 @@ services.py와 telegram_commands.py가 각자 중복 구현하던 정규식과 �
 """
 import json
 import logging
+import os
 import re
 from pathlib import Path
 
@@ -75,7 +76,50 @@ _STOCK_CODE_RE = re.compile(r"\A(?:[0-9A-Z]{6,7}|[0-9A-Z]{9})\Z")
 #
 # `\d`는 파이썬에서 전각 숫자까지 매치하므로 JS의 ASCII 전용 `\d`와 어긋나지 않도록
 # `[0-9]`로 명시한다. 앵커를 패턴에 넣어 order.js와 형태를 맞춘다.
+#
+# 기본값(이 상수)은 유지한다 — KIS Open API가 영숫자 PDNO를 order-cash TR에서 실제로
+# 수용하는지는 #265 조사에서도 확정되지 않았다("ETN 7자는 order_cash.py 스펙 문구상
+# 근거 있음, 9자 펀드·영숫자 6자 신형우선주·신주인수권은 미확인, 전부 문서 근거일 뿐
+# 실호출 확인은 아님"). 실계좌 없이는 판정할 수 없으므로 가드를 무조건 열지 않고
+# KIS_ALNUM_STOCK_ORDER_ENABLED 플래그 뒤에 둔다 — 아래 is_orderable_stock_code()가
+# 실제 판정 진입점이며, 이 상수는 그 함수의 "플래그 꺼짐(기본값)" 분기에서만 쓰인다.
 _ORDERABLE_STOCK_CODE_RE = re.compile(r"\A[0-9]{6,7}\Z")
+
+# 플래그가 켜졌을 때(KIS_ALNUM_STOCK_ORDER_ENABLED=true) 허용하는 범위. _STOCK_CODE_RE
+# (입력이 코드 형태인지 판정하는 정규식)와 같은 길이 분포(6·7·9자, 8자는 마스터에
+# 0건이라 제외)를 쓴다. mcp-trading/order.js의 플래그 켜짐 분기와 형태를 맞춘다.
+_ORDERABLE_STOCK_CODE_ALNUM_RE = re.compile(r"\A(?:[0-9A-Z]{6,7}|[0-9A-Z]{9})\Z")
+
+
+def _alnum_stock_order_enabled() -> bool:
+    """영숫자·9자 코드 주문 가드 완화 플래그(#138).
+
+    매 호출 os.environ을 다시 읽는다 — 모듈 임포트 시점에 한 번만 굳히면 테스트가
+    monkeypatch.setenv로 설정해도 이미 굳은 값을 바꾸지 못한다.
+    mcp-trading/order.js의 `process.env.KIS_ALNUM_STOCK_ORDER_ENABLED === "true"`와
+    비교 방식을 맞춘다 — 정확히 "true" 문자열만 켠 것으로 인정하고 대소문자·공백은
+    관용하지 않는다. 두 계층이 같은 값에 같은 판정을 내려야 한쪽만 열리는 사고를
+    막을 수 있다.
+    """
+    return os.environ.get("KIS_ALNUM_STOCK_ORDER_ENABLED", "") == "true"
+
+
+def is_orderable_stock_code(code: str) -> bool:
+    """code(이미 upper() 정규화된 값)가 현재 정책상 주문 가능한 형태인지 판정합니다.
+
+    telegram_commands.py의 주문 준비 경로가 이 함수로 mcp-trading/order.js의
+    buildCashOrderBody() 가드를 미리 복제해, 조기 거절로 시세·잔고 조회와 60초 대기
+    슬롯 낭비를 막는다(#73).
+
+    ⚠️  결합 유지 필수: 이 함수와 mcp-trading/order.js:77-84(+ 플래그 분기)는 쌍을
+        이루므로 한쪽만 바꾸면 그 계층에서 조용히 계속 막힌다. 플래그를 켤 때는 두
+        계층에 같은 KIS_ALNUM_STOCK_ORDER_ENABLED 값을 넣어야 한다 — mcp-trading은
+        backend가 띄우는 자식 프로세스라 config._MCP_ENV_ALLOWED_PREFIXES의 KIS_
+        접두사 통과 목록을 통해 같은 값을 그대로 물려받는다.
+    """
+    if _alnum_stock_order_enabled():
+        return bool(_ORDERABLE_STOCK_CODE_ALNUM_RE.fullmatch(code))
+    return bool(_ORDERABLE_STOCK_CODE_RE.fullmatch(code))
 
 
 # ──────────────────────────────────────────────────────────────────────────

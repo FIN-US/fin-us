@@ -75,10 +75,10 @@ from .trading_orders import (
     order_reply_markup,
 )
 from .stock_code import (
-    _ORDERABLE_STOCK_CODE_RE,
     _STOCK_CODE_EXTRACT_RE,
     _is_unresolved_echo,
     extract_stock_name,
+    is_orderable_stock_code,
 )
 from .order_assist import ProposalTrigger, parse_current_price, run_order_assist
 
@@ -1321,10 +1321,11 @@ class TelegramCommandHandler:
                 )
                 return
             # 추출 성공 != 주문 가능. mcp-trading/order.js의 buildCashOrderBody()가
-            # 숫자 코드만 주문을 받으므로(#73에서 확정된 정책), 시세·잔고 조회와 60초
-            # 대기 슬롯을 쓰기 전에 여기서 끊는다. 이 검사가 없으면 /confirm 이후에야
-            # 같은 사유로 실패한다.
-            if not _ORDERABLE_STOCK_CODE_RE.fullmatch(stock_code):
+            # 기본값으로는 숫자 코드만 주문을 받으므로(#73에서 확정된 정책, #138에서
+            # KIS_ALNUM_STOCK_ORDER_ENABLED 플래그로 완화 가능해짐), 시세·잔고 조회와
+            # 60초 대기 슬롯을 쓰기 전에 여기서 끊는다. 이 검사가 없으면 /confirm
+            # 이후에야 같은 사유로 실패한다.
+            if not is_orderable_stock_code(stock_code):
                 # 사용자가 입력한 건 종목명인데 거절 사유는 종목코드 형태다.
                 # 코드를 함께 보여주지 않으면 인과가 보이지 않는다.
                 # 조사(은/는)는 코드 끝자리 받침에 따라 갈리므로 아예 쓰지 않는다.
