@@ -7,8 +7,12 @@ from datetime import date, datetime, timezone
 from typing import Any, Callable
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from sqlmodel import Session, select
-from .catalyst_repo import CatalystEventInput, SqliteCatalystEventRepo
-from .filtered_signal_repo import SqliteFilteredSignalRepo
+from .catalyst_repo import (
+    CatalystEventInput,
+    CatalystNotificationRepo,
+    SqliteCatalystEventRepo,
+)
+from .filtered_signal_repo import FilteredSignalRecorder, SqliteFilteredSignalRepo
 from .ws_manager import manager
 from .database import engine
 from .config import (
@@ -41,6 +45,7 @@ from .order_rules import (
 )
 from .trading_orders import is_korean_market_open, order_reply_markup
 from .services import (
+    ReportSession,
     SignalScore,
     perform_stock_analysis,
     run_mcp_tool,
@@ -49,7 +54,7 @@ from .services import (
 )
 from .models import Portfolio
 from .timeutil import KST
-from .watchlist_repo import SqliteWatchlistRepo
+from .watchlist_repo import SqliteWatchlistRepo, WatchlistReader
 from .presentation import (
     DEFAULT_TELEGRAM_USER_LEVEL,
     KIND_ALERT,
@@ -507,7 +512,7 @@ def _format_catalyst_alert(event: Any) -> str:
 
 async def _collect_catalyst_events(
     watchlist: list[str],
-    catalyst_repo: SqliteCatalystEventRepo,
+    catalyst_repo: CatalystNotificationRepo,
 ) -> None:
     for stock in watchlist:
         try:
@@ -546,7 +551,7 @@ async def _telegram_user_level(state: Any = None) -> str:
 
 async def _send_due_catalyst_alerts(
     watchlist: list[str],
-    catalyst_repo: SqliteCatalystEventRepo,
+    catalyst_repo: CatalystNotificationRepo,
     *,
     notifier: Any,
     today: date,
@@ -574,8 +579,8 @@ async def _send_due_catalyst_alerts(
 
 async def catalyst_calendar_task(
     *,
-    watchlist_repo: SqliteWatchlistRepo | None = None,
-    catalyst_repo: SqliteCatalystEventRepo | None = None,
+    watchlist_repo: WatchlistReader | None = None,
+    catalyst_repo: CatalystNotificationRepo | None = None,
     notifier: Any = telegram_notifier,
     today_factory: Callable[[], date] | None = None,
     use_redis_lock: bool = True,
@@ -638,8 +643,8 @@ async def catalyst_calendar_task(
     )
 
 async def monitor_market_task(
-    watchlist_repo: SqliteWatchlistRepo | None = None,
-    filtered_signal_repo: SqliteFilteredSignalRepo | None = None,
+    watchlist_repo: WatchlistReader | None = None,
+    filtered_signal_repo: FilteredSignalRecorder | None = None,
 ):
     """
     주기적으로 시장 상황을 모니터링합니다.
@@ -674,8 +679,8 @@ async def monitor_market_task(
 
 async def _monitor_market_task(
     state: RedisSchedulerState | None,
-    watchlist_repo: SqliteWatchlistRepo | None = None,
-    filtered_signal_repo: SqliteFilteredSignalRepo | None = None,
+    watchlist_repo: WatchlistReader | None = None,
+    filtered_signal_repo: FilteredSignalRecorder | None = None,
 ):
     global _balance_failure_streak, _last_balance_error
 
@@ -857,7 +862,7 @@ async def _send_telegram_alert_if_needed(
 
 
 async def _record_filtered_signal(
-    repo: SqliteFilteredSignalRepo | None,
+    repo: FilteredSignalRecorder | None,
     stock: str,
     source: str,
     signal_score: SignalScore,
@@ -926,9 +931,9 @@ async def _record_filtered_signal(
 async def _monitor_signal(
     stock: str,
     source: SignalSource,
-    session: Session,
+    session: ReportSession,
     state: RedisSchedulerState | None,
-    filtered_signal_repo: SqliteFilteredSignalRepo | None = None,
+    filtered_signal_repo: FilteredSignalRecorder | None = None,
     *,
     rule: OrderAssistRule | None = None,
 ) -> RuleMatch | None:
@@ -1207,7 +1212,7 @@ async def ping_task():
 
 
 async def morning_briefing_task(
-    watchlist_repo: SqliteWatchlistRepo | None = None,
+    watchlist_repo: WatchlistReader | None = None,
     *,
     level: str | None = None,
 ):
@@ -1235,7 +1240,7 @@ async def morning_briefing_task(
 
 
 async def purge_filtered_signals_task(
-    filtered_signal_repo: SqliteFilteredSignalRepo | None = None,
+    filtered_signal_repo: FilteredSignalRecorder | None = None,
 ) -> None:
     """보존 기간이 지난 걸러진 신호 기록을 정리한다 (#304).
 

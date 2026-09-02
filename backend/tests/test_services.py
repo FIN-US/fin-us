@@ -13,8 +13,10 @@ from types import SimpleNamespace
 import httpx
 import pytest
 from fastapi import HTTPException
+from mcp import StdioServerParameters
 
 from backend import services
+from backend.services import SignalScore
 
 
 class FakeSession:
@@ -108,7 +110,10 @@ async def test_run_mcp_tool_raises_tool_level_error_detail(monkeypatch):
 
     with pytest.raises(HTTPException) as exc_info:
         await services.run_mcp_tool(
-            SimpleNamespace(),
+            # stdio_client가 대역이라 이 값은 어디에도 쓰이지 않는다. 그래도 선언
+            # 타입대로 넘긴다 — 임의의 객체를 넘기면 주입 지점의 계약이 이 호출에서만
+            # 사라진다 (#319).
+            StdioServerParameters(command="noop"),
             "get_balance",
             {},
         )
@@ -1901,7 +1906,9 @@ async def test_placeholders_do_not_collide_across_calls_in_same_conversation(mon
         seen.append(user_msg)
         # 자리표시자 형식과 무관하게(nonce 유무 모두) 턴 1의 자리표시자를 뽑는다 —
         # nonce를 제거하는 mutation에서도 이 fake가 깨지지 않고 아래 단언이 red가 되도록.
-        turn1_placeholder = re.search(r"<AMOUNT[^>]*>", seen[0]).group(0)
+        turn1_match = re.search(r"<AMOUNT[^>]*>", seen[0])
+        assert turn1_match is not None
+        turn1_placeholder = turn1_match.group(0)
         return f"앞서 말씀하신 {turn1_placeholder} 기준으로는"
 
     monkeypatch.setattr(services, "_llm_nat_chat", echo_prev)
@@ -2142,18 +2149,30 @@ def test_parse_signal_score_ignores_prose_around_the_json():
     assert parsed.score == 3
 
 
+def scored(payload: str) -> SignalScore:
+    """parse_signal_score의 결과에서 None을 걷어낸다 (#319).
+
+    이 함수는 파싱 실패 시 None을 돌려준다 — 그 경로를 따로 고정하는 테스트가 바로
+    아래에 있다. 여기 단언들은 "파싱에 성공한 값"만 다루므로 그 사실을 한 번 좁혀
+    두고, 파싱이 깨지면 검사기 대신 이 단언이 실패한다.
+    """
+    parsed = services.parse_signal_score(payload)
+    assert parsed is not None
+    return parsed
+
+
 def test_parse_signal_score_clamps_out_of_range_and_rounds_floats():
     """레인지를 벗어난 값은 버리지 않고 자른다 — 방향 정보는 살아 있다.
 
     이 경계 처리를 파싱 실패로 바꾸면 하필 대형 신호(모델이 7점을 주는 경우)에서만
     fail-open이 잦아진다.
     """
-    assert services.parse_signal_score('{"score": 9}').score == 3
-    assert services.parse_signal_score('{"score": -9}').score == -3
-    assert services.parse_signal_score('{"score": 2.4}').score == 2
-    assert services.parse_signal_score('{"score": "2"}').score == 2
+    assert scored('{"score": 9}').score == 3
+    assert scored('{"score": -9}').score == -3
+    assert scored('{"score": 2.4}').score == 2
+    assert scored('{"score": "2"}').score == 2
     assert (
-        services.parse_signal_score('{"score": 1, "headline_scores": [8, -8]}').headline_scores
+        scored('{"score": 1, "headline_scores": [8, -8]}').headline_scores
         == (3, -3)
     )
 
@@ -2198,6 +2217,7 @@ def test_parse_signal_score_truncates_overlong_reason():
     )
 
     assert parsed is not None
+    assert parsed.reason is not None
     assert len(parsed.reason) == services._SIGNAL_REASON_MAX_CHARS
 
 

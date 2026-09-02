@@ -12,6 +12,27 @@ from ..services import SignalScore
 from .test_balance_parser import TRUNCATION_NOTES_BY_REASON
 
 
+class UnusedSession:
+    """세션을 건드리지 않는 경로에 넘기는 자리표시자 (#319).
+
+    아래 _monitor_signal 테스트들은 perform_stock_analysis를 통째로 대체하므로 세션은
+    한 번도 쓰이지 않는다. 예전에는 ``object()``를 넘겼는데, 그러면 "쓰이지 않는다"가
+    아니라 "무엇이든 통과한다"가 되어 주입 지점의 계약이 이 호출들에서만 사라졌다.
+
+    세 메서드는 ReportSession 계약을 만족하되 불리면 실패한다 — 대체가 풀려 실제
+    저장 경로로 새는 날, 조용히 지나가는 대신 그 자리에서 드러난다.
+    """
+
+    def add(self, instance: object, /) -> None:
+        raise AssertionError("이 경로는 세션을 쓰지 않아야 한다")
+
+    def commit(self) -> None:
+        raise AssertionError("이 경로는 세션을 쓰지 않아야 한다")
+
+    def refresh(self, instance: object, /) -> None:
+        raise AssertionError("이 경로는 세션을 쓰지 않아야 한다")
+
+
 def _scored(is_significant: bool, score: int | None = None) -> SignalScore:
     """유의성 판정만 고정하는 SignalScore (#298).
 
@@ -380,7 +401,7 @@ async def test_monitor_signal_sends_telegram_for_urgent_analysis(monkeypatch):
     monkeypatch.setattr("backend.scheduler.telegram_notifier.send_analysis_alert", mock_telegram)
     monkeypatch.setattr("backend.scheduler.manager.broadcast", mock_broadcast)
 
-    await _monitor_signal("삼성전자", source, object(), state)
+    await _monitor_signal("삼성전자", source, UnusedSession(), state)
 
     mock_telegram.assert_called_once()
     mock_broadcast.assert_called_once()
@@ -422,7 +443,7 @@ async def test_monitor_signal_sends_telegram_for_all_mode_analysis(monkeypatch):
     monkeypatch.setattr("backend.scheduler.telegram_notifier.send_analysis_alert", mock_telegram)
     monkeypatch.setattr("backend.scheduler.manager.broadcast", mock_broadcast)
 
-    await _monitor_signal("삼성전자", source, object(), state)
+    await _monitor_signal("삼성전자", source, UnusedSession(), state)
 
     mock_telegram.assert_called_once()
 
@@ -463,7 +484,7 @@ async def test_monitor_signal_skips_telegram_when_alert_mode_off(monkeypatch):
     monkeypatch.setattr("backend.scheduler.telegram_notifier.send_analysis_alert", mock_telegram)
     monkeypatch.setattr("backend.scheduler.manager.broadcast", mock_broadcast)
 
-    await _monitor_signal("삼성전자", source, object(), state)
+    await _monitor_signal("삼성전자", source, UnusedSession(), state)
 
     mock_telegram.assert_not_called()
     mock_broadcast.assert_called_once()
@@ -506,7 +527,7 @@ async def test_monitor_signal_keeps_websocket_when_telegram_fails(monkeypatch):
     monkeypatch.setattr("backend.scheduler.telegram_notifier.send_analysis_alert", failing_telegram)
     monkeypatch.setattr("backend.scheduler.manager.broadcast", mock_broadcast)
 
-    await _monitor_signal("삼성전자", source, object(), state)
+    await _monitor_signal("삼성전자", source, UnusedSession(), state)
 
     mock_broadcast.assert_called_once()
 

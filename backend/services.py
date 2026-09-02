@@ -4,7 +4,7 @@ import logging
 import re
 from datetime import date
 from statistics import pstdev
-from typing import Any, Literal, NamedTuple, Optional, Sequence, get_args, overload
+from typing import Any, Literal, NamedTuple, Optional, Protocol, Sequence, get_args, overload
 from urllib.parse import quote as _url_quote
 from fastapi import HTTPException
 from anthropic import AsyncAnthropic
@@ -13,7 +13,6 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 from pydantic import ValidationError
-from sqlmodel import Session
 from .config import (
     OPENAI_API_KEY, OPENAI_CHAT_MODEL,
     ANTHROPIC_API_KEY, ANTHROPIC_CHAT_MODEL,
@@ -327,10 +326,30 @@ def _analysis_from_toolless_text(raw: str) -> dict[str, Any]:
     ).model_dump()
 
 
+class ReportSession(Protocol):
+    """perform_stock_analysis가 세션에 요구하는 전부 (#319).
+
+    이 함수가 세션으로 하는 일은 리포트 한 행을 넣고 커밋한 뒤 새로 읽는 것뿐이다.
+    선언 타입이 sqlmodel ``Session``이면 질의·트랜잭션 API 전체가 계약이 되어, 세 메서드만
+    갖춘 대역이 주입 지점을 통과하지 못한다 — 그 대역을 통과시키려고 호출부가 cast를 쓰면
+    저장 경로 자체가 검사 밖으로 나간다.
+
+    인자를 위치 전용(``/``)으로 선언한다. 호출부가 전부 위치 인자로 부르므로 이름은
+    계약이 아니고, 이름까지 고정하면 대역이 ``report`` 같은 자기 도메인 이름을 쓰지
+    못한다.
+    """
+
+    def add(self, instance: object, /) -> None: ...
+
+    def commit(self) -> None: ...
+
+    def refresh(self, instance: object, /) -> None: ...
+
+
 async def perform_stock_analysis(
     stock: str,
     provider: str,
-    session: Session,
+    session: ReportSession,
     *,
     trigger_source: str | None = None,
     trigger_signal: str | None = None,

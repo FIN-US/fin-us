@@ -5,9 +5,10 @@
 둔다 — /api/v1/db/* 라우트들이 이미 요청 세션에 직접 질의하는 방식과 맞춘다.
 """
 import logging
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Optional, Sequence, cast
+from typing import Any, Callable, Optional, Protocol, Sequence, cast
 
 from sqlalchemy import CursorResult, delete, func
 from sqlmodel import Session, col, select
@@ -62,8 +63,37 @@ class FilteredSignalHistogram:
     newest: Optional[datetime]
 
 
+class FilteredSignalRecorder(Protocol):
+    """감시 루프와 정리 작업이 걸러진 신호 저장소에 요구하는 전부 (#319).
+
+    집계 조회(:meth:`SqliteFilteredSignalRepo.summarize` 계열)는 API 쪽 소비자의
+    것이라 여기 없다. 이 계약을 쓰는 두 자리는 기록과 만료 정리만 한다.
+    """
+
+    async def record(
+        self,
+        *,
+        stock_name: str,
+        source: str,
+        score: Optional[int],
+        threshold: int,
+        reason: Optional[str] = None,
+        uncertainty: Optional[float] = None,
+    ) -> None: ...
+
+    async def purge_expired(
+        self, retention_days: int, /, *, now: Optional[datetime] = None
+    ) -> int: ...
+
+
 class SqliteFilteredSignalRepo:
-    def __init__(self, session_factory: Callable[[], Session]):
+    # session_factory의 반환 타입이 ``Session``이 아니라 그 컨텍스트 매니저 계약이다
+    # (#319). 이 클래스가 팩토리에 요구하는 것은 ``with``로 열면 세션이 나온다는 것
+    # 하나뿐인데, ``Session``으로 못박아 두면 열린 세션을 그대로 돌려주는 테스트용
+    # 래퍼(test_filtered_signal의 _KeepOpenSession — 한 인메모리 DB를 여러 호출이
+    # 공유하게 만든다)가 통과하지 못해 호출부가 cast로 검사를 껐다.
+    # 다른 repo들은 이 자리에 대역이 없어 그대로 둔다 — 소비자 없는 넓히기는 근거가 없다.
+    def __init__(self, session_factory: Callable[[], AbstractContextManager[Session]]):
         self._session_factory = session_factory
 
     async def record(

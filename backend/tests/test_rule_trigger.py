@@ -8,10 +8,8 @@
 import asyncio
 import logging
 from datetime import datetime
-from typing import cast
 
 import pytest
-from sqlmodel import Session
 
 from ..order_assist import OrderAssistResult
 from ..order_rules import RULE_ID, OrderAssistRule, RuleMatch
@@ -19,10 +17,10 @@ from ..redis_state import InMemoryPendingOrderStore, RedisSchedulerState
 from ..telegram_notifier import SETTLED_SEND_RETRY_BACKOFF_SECONDS
 from ..timeutil import KST
 from ..trading_orders import ORDER_CONFIRM_CALLBACK, PendingOrder
-from ..watchlist_repo import SqliteWatchlistRepo
 from .test_scheduler import (
     FakeRedis,
     FakeWatchlistRepo,
+    UnusedSession,
     _resolved_broadcast_mock,
     _scored,
 )
@@ -524,7 +522,7 @@ async def test_monitor_signal_reports_a_rule_match(monkeypatch):
     )
 
     match = await _monitor_signal(
-        "삼성전자", source, cast(Session, object()), RedisSchedulerState(FakeRedis()), rule=rule
+        "삼성전자", source, UnusedSession(), RedisSchedulerState(FakeRedis()), rule=rule
     )
 
     assert match == RuleMatch(RULE_ID, "삼성전자", "news", "critical")
@@ -539,7 +537,7 @@ async def test_monitor_signal_reports_nothing_without_a_rule(monkeypatch):
     source = SignalSource(name="news", mcp_params=object(), tool_name="get_market_news")
 
     match = await _monitor_signal(
-        "삼성전자", source, cast(Session, object()), RedisSchedulerState(FakeRedis()), rule=None
+        "삼성전자", source, UnusedSession(), RedisSchedulerState(FakeRedis()), rule=None
     )
 
     assert match is None
@@ -611,7 +609,7 @@ async def test_rule_covers_owned_and_watchlist_stocks(monkeypatch):
         monkeypatch, "[보유 종목 리스트]\n- 삼성전자 (005930) · 10주"
     )
 
-    await monitor_market_task(watchlist_repo=cast(SqliteWatchlistRepo, FakeWatchlistRepo(["카카오"])))
+    await monitor_market_task(watchlist_repo=FakeWatchlistRepo(["카카오"]))
 
     assert [m.stock for m in collected] == ["삼성전자", "카카오"]
 
@@ -629,6 +627,6 @@ async def test_default_monitor_stocks_never_trigger_the_rule(monkeypatch):
 
     collected = _market_task_patches(monkeypatch, "[보유 종목 리스트]\n")
 
-    await monitor_market_task(watchlist_repo=cast(SqliteWatchlistRepo, FakeWatchlistRepo()))
+    await monitor_market_task(watchlist_repo=FakeWatchlistRepo())
 
     assert collected == []

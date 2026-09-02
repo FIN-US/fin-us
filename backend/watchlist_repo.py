@@ -1,8 +1,20 @@
-from typing import Callable
+from typing import Callable, Protocol
 
 from sqlmodel import Session, col, select
 
 from .models import WatchlistItem
+
+
+class WatchlistReader(Protocol):
+    """감시 루프가 관심 종목 저장소에 요구하는 전부 (#319).
+
+    스케줄러의 세 작업(monitor_market_task·catalyst_calendar_task·
+    morning_briefing_task)은 목록을 읽기만 한다. 추가·삭제는 텔레그램 명령 쪽 계약이라
+    여기 올리지 않는다 — 올리면 "읽기만 하는 대역"이 감시 루프의 주입 지점을 통과하지
+    못해, 호출부 테스트가 cast로 검사를 끄게 된다.
+    """
+
+    async def get_watchlist(self) -> list[str]: ...
 
 
 class SqliteWatchlistRepo:

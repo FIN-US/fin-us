@@ -11,7 +11,7 @@
 
 from datetime import datetime, timedelta
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -27,7 +27,6 @@ from backend.order_assist import (
     DailyUsage,
     OrderLimits,
     OrderProposal,
-    ProposalCooldown,
     ProposalTrigger,
     VerifierVerdict,
     check_orderable_code,
@@ -42,7 +41,6 @@ from backend.order_assist import (
 )
 from backend.redis_state import InMemoryPendingOrderStore, RedisKeys
 from backend.telegram_commands import ADVISE_COMMAND_HELP, TelegramCommandHandler
-from backend.telegram_notifier import TelegramNotifier
 from backend.trading_orders import ORDER_EXPIRES_AFTER
 
 KST = ZoneInfo("Asia/Seoul")
@@ -731,7 +729,7 @@ async def _run(
         mcp_runner=mcp if mcp is not None else _mcp_runner(),
         now_factory=now_factory or (lambda: now),
         limits=limits or OrderLimits(),
-        cooldown=cast(ProposalCooldown, cooldown or FakeCooldown()),
+        cooldown=cooldown or FakeCooldown(),
         session_factory=session_factory or (lambda: _EmptySession()),
         propose=propose,
         verify=verify,
@@ -1224,12 +1222,10 @@ class _Notifier:
         return True
 
 
-# 아래 cast는 대역 때문이다 (#292). 주입 지점의 선언 타입이 구체 클래스라 대역이
-# 그대로는 타입 검사를 통과하지 못한다. Protocol로 좁혀 cast를 걷어내는 것은 #319다.
 def _advise_handler(monkeypatch, result, *, captured=None):
     notifier = _Notifier()
     handler = TelegramCommandHandler(
-        notifier=cast(TelegramNotifier, notifier), now_factory=lambda: MARKET_OPEN_NOW
+        notifier=notifier, now_factory=lambda: MARKET_OPEN_NOW
     )
 
     async def fake_run(trigger, **kwargs):

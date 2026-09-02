@@ -1,7 +1,7 @@
 """걸러진 신호 채점 기록의 저장·정리·집계 (#304)."""
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, get_args, cast
+from typing import Any, get_args
 
 import pytest
 from fastapi.testclient import TestClient
@@ -44,10 +44,7 @@ def repo_fixture(session: Session):
         def __exit__(self, *exc):
             return False
 
-    # 아래 cast는 이 대역 때문이다. 주입 지점의 선언 타입이 구체 클래스(Session)라
-    # 대역이 그대로는 타입 검사를 통과하지 못한다. Protocol로 좁혀 cast를 걷어내는
-    # 것은 #319가 추적한다.
-    return SqliteFilteredSignalRepo(cast(Callable[[], Session], lambda: _KeepOpenSession()))
+    return SqliteFilteredSignalRepo(lambda: _KeepOpenSession())
 
 
 @pytest.fixture(name="client")
