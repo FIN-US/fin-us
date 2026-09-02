@@ -92,7 +92,11 @@ const DAILY_CCLD_TIME_BUDGET_MS = 90_000;
 //
 // 결론: 근거가 정성적 수준이라 기본값 0을 유지한다. 실측치(또는 확정 TPS 문서)가 나오면
 // 이 env로 값만 바꿔 넣으면 된다(재배포는 여전히 필요하지만 코드 변경은 불필요).
-const DAILY_CCLD_PAGE_DELAY_MS = readPageDelayMsEnv("DAILY_CCLD_PAGE_DELAY_MS", 0);
+// 상한은 이 루프의 시간 예산이다 — 예산 이상의 지연은 첫 페이지 직후 예산을 소진시켜
+// 연속조회를 항상 1페이지로 잘라버린다(readPageDelayMsEnv 주석 (a)).
+const DAILY_CCLD_PAGE_DELAY_MS = readPageDelayMsEnv("DAILY_CCLD_PAGE_DELAY_MS", 0, {
+  maxMs: DAILY_CCLD_TIME_BUDGET_MS,
+});
 const BALANCE_RLZ_PL_PATH = "/uapi/domestic-stock/v1/trading/inquire-balance-rlz-pl";
 const BALANCE_RLZ_PL_TR_ID = (() => {
   const override = (process.env.KIS_TR_ID_BALANCE_RLZ_PL || process.env.FINUS_KIS_TR_ID_BALANCE_RLZ_PL || "").trim();
@@ -104,7 +108,9 @@ const BALANCE_RLZ_PL_MAX_PAGES = 50;
 // 두 TR의 호출자·상한·요청당 타임아웃이 동일하므로 동일한 값을 쓴다.
 const BALANCE_RLZ_PL_TIME_BUDGET_MS = 90_000;
 // 이슈 #210: DAILY_CCLD_PAGE_DELAY_MS와 같은 이유로 기본값 0, 같은 env 패턴으로 오버라이드.
-const BALANCE_RLZ_PL_PAGE_DELAY_MS = readPageDelayMsEnv("BALANCE_RLZ_PL_PAGE_DELAY_MS", 0);
+const BALANCE_RLZ_PL_PAGE_DELAY_MS = readPageDelayMsEnv("BALANCE_RLZ_PL_PAGE_DELAY_MS", 0, {
+  maxMs: BALANCE_RLZ_PL_TIME_BUDGET_MS,
+});
 const PSBL_ORDER_PATH = "/uapi/domestic-stock/v1/trading/inquire-psbl-order";
 // 매수가능조회 TR ID. 연속조회가 없는 단건 조회라 페이지 상한·시간 예산이 없다.
 // 오버라이드 이름은 KIS_TR_ID_DAILY_CCLD / KIS_TR_ID_BALANCE_RLZ_PL과 같은 관례를 따른다
