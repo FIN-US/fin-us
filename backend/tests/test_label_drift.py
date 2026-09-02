@@ -44,11 +44,20 @@ _SOURCE_FILES = sorted(_SRC_ROOT.rglob("*.py"))
 _ROUTER_CONFIGS = sorted(_CONFIGS_ROOT.glob("router*.yml"))
 
 # 원장 기록 함수와, 그 함수에 도구명을 흘려 보내는 래퍼의 키워드 인자.
-# finus_api.py의 원격 MCP 호출 래퍼는 도구명을 자기 파라미터로 받아 _record_to_ledger에
+# finus_api.py의 원격 MCP 호출 래퍼는 도구명을 자기 파라미터로 받아 원장 기록 함수에
 # 그대로 넘긴다 — 그 경로의 실제 도구명은 호출부의 ledger_tool_name= 리터럴에만 있다.
-_LEDGER_FUNC = "_record_to_ledger"
+#
+# 진입점이 둘인 이유(#231): 도구가 결과를 돌려주는 자리는 이제 전부 `_record_and_mask`를
+# 지난다(원장 기록 + PII 마스킹). `_record_to_ledger`는 그 안에서 한 번 불리는 하위
+# 함수로 남았으므로, 도구명 리터럴은 `_record_and_mask` 호출부에 있다. 둘 다 훑어야
+# 이 검사가 비지 않는다 — 하나만 두면 #282 드리프트 검사가 조용히 공허해진다.
+_LEDGER_FUNCS = frozenset({"_record_to_ledger", "_record_and_mask"})
 _LEDGER_FIRST_PARAM = "tool_name"
 _LEDGER_KWARG = "ledger_tool_name"
+# 래퍼가 "자기 파라미터를 그대로 전달"하는 자리의 이름들. 실제 값은 그 래퍼의 호출부에서
+# 이미 수집되므로 미해석으로 세지 않는다. `tool_name`은 `_record_and_mask`가
+# `_record_to_ledger`로 넘기는 자리다.
+_FORWARDED_PARAM_NAMES = frozenset({_LEDGER_KWARG, _LEDGER_FIRST_PARAM})
 
 
 def _module_level_str_constants(tree: ast.Module) -> dict[str, str]:
@@ -70,7 +79,7 @@ def _module_level_str_constants(tree: ast.Module) -> dict[str, str]:
 
 
 def _ledger_tool_name_exprs(tree: ast.Module) -> list[ast.expr]:
-    """도구명이 담기는 표현식을 전부 모은다 — _record_to_ledger 첫 인자 + ledger_tool_name=."""
+    """도구명이 담기는 표현식을 전부 모은다 — _LEDGER_FUNCS 첫 인자 + ledger_tool_name=."""
     exprs: list[ast.expr] = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
@@ -82,7 +91,7 @@ def _ledger_tool_name_exprs(tree: ast.Module) -> list[ast.expr]:
             called = func.attr
         else:
             called = None
-        if called == _LEDGER_FUNC:
+        if called in _LEDGER_FUNCS:
             if node.args:
                 exprs.append(node.args[0])
             else:
@@ -115,9 +124,10 @@ def _extract_ledger_tool_names() -> tuple[set[str], list[str]]:
                 names.add(expr.value)
             elif isinstance(expr, ast.Name) and expr.id in constants:
                 names.add(constants[expr.id])
-            elif isinstance(expr, ast.Name) and expr.id == _LEDGER_KWARG:
-                # 래퍼가 자기 파라미터를 그대로 전달하는 자리. 실제 값은 호출부의
-                # ledger_tool_name= 리터럴에서 이미 수집된다.
+            elif isinstance(expr, ast.Name) and expr.id in _FORWARDED_PARAM_NAMES:
+                # 래퍼가 자기 파라미터를 그대로 전달하는 자리. 실제 값은 그 래퍼의
+                # 호출부(ledger_tool_name= 리터럴, _record_and_mask 첫 인자)에서
+                # 이미 수집된다.
                 continue
             else:
                 location = path.relative_to(_REPO_ROOT).as_posix()
@@ -188,7 +198,7 @@ def test_every_ledger_tool_name_is_statically_resolvable():
     )
     assert names, (
         f"{_SRC_ROOT.name} 아래에서 도구명을 하나도 찾지 못했습니다 — "
-        f"'{_LEDGER_FUNC}' 호출 규약이 바뀌었다면 추출 규칙을 함께 고쳐야 합니다."
+        f"{sorted(_LEDGER_FUNCS)} 호출 규약이 바뀌었다면 추출 규칙을 함께 고쳐야 합니다."
     )
 
 
