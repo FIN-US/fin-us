@@ -11,5 +11,7 @@
             <ui:Label text="보유 수량: -" name="quantity" style="font-size: 30px; color: rgb(20, 20, 20); margin-bottom: 6px;"/>
             <ui:Label text="수익률: -" name="return-rate" style="font-size: 30px; color: rgb(20, 20, 20);"/>
         </ui:VisualElement>
+        <!-- 실데이터 로드 실패 배너(이슈 #244). 평소에는 display:none이고 PanelController가 켠다. -->
+        <ui:Label text="" name="data-source-banner" style="position: absolute; left: 0; right: 0; bottom: 0; padding-top: 14px; padding-right: 20px; padding-bottom: 14px; padding-left: 20px; background-color: rgba(184, 28, 28, 0.92); color: rgb(255, 255, 255); font-size: 28px; -unity-text-align: middle-center; white-space: normal; display: none;"/>
     </ui:VisualElement>
 </ui:UXML>

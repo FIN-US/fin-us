@@ -7,7 +7,11 @@ using UnityEngine.UIElements;
 [RequireComponent(typeof(UIDocument))]
 public class DashboardUiController : MonoBehaviour
 {
-    [SerializeField] private string apiBaseUrl = "http://localhost:8787";
+    // 비워 두면 페이지와 같은 오리진을 쓴다(nginx가 /api를 backend로 프록시, #245·#246).
+    // 다른 호스트의 백엔드를 붙일 때만 인스펙터에서 채운다.
+    // 이전 기본값이던 http://localhost:8787은 backend/main.py 엔트리포인트의 옛 기본 포트였다.
+    // 그 기본값도 8000으로 통일했으므로 코드베이스에서 8787은 사라졌다.
+    [SerializeField] private string apiBaseUrl = "";
     [SerializeField] private Font uiFont;
 
     private ApiClient apiClient;
@@ -100,7 +104,7 @@ public class DashboardUiController : MonoBehaviour
             balanceReportField.isReadOnly = true;
         }
 
-        apiClient = new ApiClient(apiBaseUrl);
+        apiClient = new ApiClient(string.IsNullOrWhiteSpace(apiBaseUrl) ? ApiClient.DefaultBaseUrl : apiBaseUrl);
 
         RegisterButtonCallbacks();
         SetIdleState();

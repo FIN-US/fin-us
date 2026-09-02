@@ -6,7 +6,6 @@
     <meta name="viewport" content="width=device-width, height=device-height, initial-scale=1.0, user-scalable=no, shrink-to-fit=yes">
     <title>frontend</title>
     <link rel="stylesheet" href="TemplateData/style.css">
-    <script src="TemplateData/profiler.js"></script>
   </head>
   <body>
     <div id="unity-container">
@@ -64,9 +63,6 @@
         }).then((unityInstance) => {
           window.finusUnityInstance = unityInstance;
           document.querySelector("#unity-loading-bar").style.display = "none";
-          var profile = unityProfiler.createButton(unityInstance);
-          profile.id = "unity-profiler-button";
-          document.body.appendChild(profile);
         }).catch((message) => {
           alert(message);
         });

@@ -21,6 +21,8 @@ services:
       context: .
       dockerfile: backend/Dockerfile
     ports:
+      # 번들이 상대 경로로 재빌드돼(#262) 8000 직접 호출 의존이 사라졌다. 127.0.0.1에만
+      # 바인딩해 노출면을 줄이는 것은 #246 후속 PR에서 CORSMiddleware 제거와 함께 한다.
       - "8000:8000"
     volumes:
       - .:/app

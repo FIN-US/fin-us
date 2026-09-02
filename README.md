@@ -171,13 +171,20 @@ bash scripts/check_env.sh
 uv sync --project backend
 uv run --project backend uvicorn backend.main:app --host 0.0.0.0 --port 8000
 
-# 3. Frontend(Unity WebGL 번들) 실행
+# 3. Frontend(Unity WebGL 번들) 실행 — 화면 확인용 정적 서빙
 # file://로 직접 열면 로더가 동작하지 않으므로 반드시 HTTP로 서빙합니다.
 python -m http.server 8080 --directory frontend/Build
 ```
 
-> Docker Compose를 쓰면 `frontend` 서비스(nginx)가 같은 일을 대신합니다. 자세한 내용은
-> [`frontend/README.md`](frontend/README.md)를 참고하세요.
+> ⚠️ **이 정적 서빙만으로는 백엔드 연동이 되지 않습니다.** 번들은 백엔드 주소를 모른 채 상대
+> 경로(`/api/v1/...`)로만 호출하므로(#246), 위 2번 백엔드가 떠 있어도 `/api` 프록시가 없는
+> `http.server`에서는 404가 나고 대시보드에 실데이터 연결 실패 배너와 샘플 데이터가 표시됩니다.
+> 화면·레이아웃만 확인할 때 쓰세요.
+>
+> 백엔드 연동까지 확인하려면 아래 [Docker로 한번에 설치하기](#docker)의 compose 경로를 쓰세요 —
+> `frontend`(nginx)가 `/api/`를 같은 네트워크의 `backend`로 중계합니다. compose의 `frontend`만
+> 띄우고 백엔드는 호스트에서 돌리는 조합은 nginx가 `backend:8000`을 찾지 못해 502가 납니다.
+> 자세한 내용은 [`frontend/README.md`](frontend/README.md)를 참고하세요.
 
 <a id="docker" name="docker"></a>
 
@@ -203,9 +210,9 @@ bash scripts/run_stack.sh
 | `finus-nat` | 8001 | `127.0.0.1` | 멀티 에이전트 엔진 |
 | `redis` | 6379 | `127.0.0.1` | 신호 중복 방지 캐시 |
 
-- `frontend`(nginx)는 `/api/`와 `/health`를 `backend:8000`으로 프록시합니다. 이 경로로 부르면 대시보드와 API가 브라우저에서 같은 오리진(8080)이 됩니다. **다만 현재 Unity 번들은 아직 `http://localhost:8000`을 하드코딩해 8000번을 직접 호출하므로, 실제로 same-origin이 되는 것은 번들이 상대 경로를 쓰게 되는 #246 이후입니다.** 그전까지는 `ALLOW_ORIGINS`가 계속 필요합니다. 8000 포트는 API 직접 호출과 `/docs`용으로도 열려 있습니다. 자세한 내용은 [`frontend/README.md`](frontend/README.md)를 참고하세요.
+- `frontend`(nginx)는 `/api/`와 `/health`를 `backend:8000`으로 프록시합니다(#245). Unity 번들 소스는 상대 경로(`/api/v1/...`)만 쓰므로(#246) 대시보드와 API가 브라우저에서 항상 같은 오리진(8080)이고, 호스트·스킴·포트가 무엇이든(로컬, Tailscale, 443의 리버스 프록시 뒤) 그대로 동작합니다. 단 root-relative 경로라 서브패스 마운트(`https://example.com/finus/`)까지 따라가지는 않으므로, 그 구성에서는 프록시가 `/api`를 루트에서 함께 중계해야 합니다. **번들도 재빌드되어 더 이상 8000번을 직접 호출하지 않습니다**(#262) — 이로써 가능해진 `CORSMiddleware` 제거와 8000 포트 노출 축소는 후속 PR에서 함께 정리합니다(`ALLOW_ORIGINS` 자체는 아래 WebSocket 항목대로 계속 남습니다). 자세한 내용은 [`frontend/README.md`](frontend/README.md)를 참고하세요.
 - `ALLOW_ORIGINS`는 CORS뿐 아니라 WebSocket(`/api/v1/ws`) 핸드셰이크의 Origin 검사에도 쓰입니다(#256). `CORSMiddleware`는 WebSocket 핸드셰이크에 적용되지 않아, 이 검사가 없으면 임의 사이트가 브로드캐스트를 수신할 수 있습니다(Cross-Site WebSocket Hijacking). 따라서 #246 이후 HTTP가 same-origin이 되어도 **대시보드를 여는 오리진은 계속 `ALLOW_ORIGINS`에 등록해야 합니다.** 등록하지 않으면 화면은 뜨지만 실시간 알림 연결만 403으로 끊깁니다. Origin 헤더를 보내지 않는 비브라우저 클라이언트(`curl`, `wscat` 등)는 검사 대상이 아닙니다.
-- `finus-nat`(8001)과 `redis`(6379)는 **호스트의 루프백에만** 게시됩니다(#285). **인증이 없으면서, 컴포즈 내부 통신만으로 충분한** 두 서비스여서입니다 — `finus-nat`은 `/v1/chat/completions`를 그대로 받고, `redis`에는 `requirepass`가 없는데 대기 주문·폴러 offset·스케줄러 락 같은 금전 경로의 상태가 들어 있습니다. `backend`(8000)도 인증이 없지만 위 표에서 보듯 전 인터페이스에 남아 있습니다 — 현행 Unity 번들이 `http://localhost:8000`을 하드코딩해 원격 시연이 8000 직접 호출에 기대고 있어서이고, 좁히는 것은 #246의 번들 교체 뒤로 남아 있습니다. 다른 기기에서 이 두 포트로 직접 붙던 흐름이 있었다면 SSH 포트포워딩(`ssh -L 6379:127.0.0.1:6379 <호스트>`)을 쓰세요. 컴포즈 내부 통신은 `finus-nat:8000`·`redis:6379` 네트워크 별칭을 쓰므로 영향이 없고, 호스트에서 `uvicorn --reload`로 백엔드만 띄우는 흐름은 `.env.example`의 `REDIS_URL=redis://127.0.0.1:6379/0`·`NAT_BASE_URL=http://127.0.0.1:8001`이 받습니다. 기존 `.env`를 그대로 쓰느라 그 두 줄이 없는 환경을 위해 `backend/config.py`의 기본값도 같은 주소를 가리킵니다(#305). 루프백 게시는 IPv4 전용이라 `localhost` 대신 `127.0.0.1`로 적습니다 — `localhost`가 `::1`로 먼저 풀리는 호스트에서 클라이언트의 주소 폴백에 기대지 않기 위해서입니다.
+- `finus-nat`(8001)과 `redis`(6379)는 **호스트의 루프백에만** 게시됩니다(#285). **인증이 없으면서, 컴포즈 내부 통신만으로 충분한** 두 서비스여서입니다 — `finus-nat`은 `/v1/chat/completions`를 그대로 받고, `redis`에는 `requirepass`가 없는데 대기 주문·폴러 offset·스케줄러 락 같은 금전 경로의 상태가 들어 있습니다. `backend`(8000)도 인증이 없지만 위 표에서 보듯 전 인터페이스에 남아 있습니다 — 번들 교체(#246·#262) 전까지 원격 시연이 8000 직접 호출에 기대고 있었기 때문입니다. 번들이 상대 경로로 바뀐 지금은 좁힐 수 있고, 후속 PR로 남아 있습니다. 다른 기기에서 이 두 포트로 직접 붙던 흐름이 있었다면 SSH 포트포워딩(`ssh -L 6379:127.0.0.1:6379 <호스트>`)을 쓰세요. 컴포즈 내부 통신은 `finus-nat:8000`·`redis:6379` 네트워크 별칭을 쓰므로 영향이 없고, 호스트에서 `uvicorn --reload`로 백엔드만 띄우는 흐름은 `.env.example`의 `REDIS_URL=redis://127.0.0.1:6379/0`·`NAT_BASE_URL=http://127.0.0.1:8001`이 받습니다. 기존 `.env`를 그대로 쓰느라 그 두 줄이 없는 환경을 위해 `backend/config.py`의 기본값도 같은 주소를 가리킵니다(#305). 루프백 게시는 IPv4 전용이라 `localhost` 대신 `127.0.0.1`로 적습니다 — `localhost`가 `::1`로 먼저 풀리는 호스트에서 클라이언트의 주소 폴백에 기대지 않기 위해서입니다.
 - `backend`는 `finus-nat`과 `redis`가 정상(healthy)이 된 뒤에 뜹니다. `finus-nat`은 준비되는 대로 healthy가 되며, 처음 90초 동안은 헬스체크가 실패해도 재시도로 세지 않습니다(`docker-compose.yml`의 `start_period`). 90초가 지난 뒤에도 응답이 없으면 15초 간격으로 10번 더 확인한 뒤 unhealthy로 판정하므로, 최악의 경우 약 4분 뒤에 `backend` 기동이 중단됩니다.
 - 로컬에서 `uvicorn --reload`만 쓰고 싶다면 볼륨 마운트된 소스로 호스트에서 실행하면 됩니다.
 

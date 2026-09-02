@@ -61,6 +61,9 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+# 번들이 상대 경로로 바뀌면(#246) 요청이 same-origin이 되어 이 미들웨어는 불필요해진다.
+# 다만 제거는 재빌드된 번들이 랜딩된 뒤로 미룬다 — 지금 걷어내면 아직 8000번을 직접
+# 호출하는 현행 번들이 곧바로 차단된다. 제거는 후속 PR에서 ALLOW_ORIGINS와 함께 한다.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOW_ORIGINS,
@@ -488,4 +491,9 @@ async def websocket_endpoint(websocket: WebSocket):
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("FIN_US_BACKEND_PORT", "8787")))
+    # 기본 포트는 compose·문서·에디터 폴백이 모두 쓰는 8000으로 맞춘다.
+    # 이전 기본값 8787은 이 엔트리포인트에서만 쓰이던 값이라 혼선의 원인이었다.
+    # 그 대신 compose의 backend와 포트가 겹치므로, 둘을 동시에 띄우면 EADDRINUSE가 난다.
+    # 같은 서비스를 두 번 띄우는 것이니 정직한 실패다. 굳이 겹쳐 쓰려면
+    # FIN_US_BACKEND_PORT로 다른 포트를 지정한다.
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("FIN_US_BACKEND_PORT", "8000")))

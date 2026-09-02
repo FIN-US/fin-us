@@ -24,12 +24,17 @@ public class PieChart : MonoBehaviour
     [SerializeField] private float highlightScale = 1.035f;
     [SerializeField] private float highlightEdgeWidth = 0.035f;
     [SerializeField] private float highlightEdgeOffset = 0.03f;
+    // 샘플 데이터를 그릴 때 조각 색을 회색 쪽으로 끌어당겨, 배너 없이도 실데이터와
+    // 구분되게 한다(이슈 #244). 0이면 실데이터와 같은 색, 1이면 완전한 회색이다.
+    [SerializeField, Range(0f, 1f)] private float sampleDataDesaturation = 0.72f;
+    [SerializeField] private Color sampleDataTint = new Color(0.62f, 0.62f, 0.62f);
 
     private static readonly int BaseColorId = Shader.PropertyToID("_BaseColor");
     private static readonly int ColorId = Shader.PropertyToID("_Color");
     private MaterialPropertyBlock propertyBlock;
     private Material runtimeHighlightMaterial;
     private Material runtimeOverlayLineMaterial;
+    private bool renderingSampleData;
 
     void Awake()
     {
@@ -45,9 +50,11 @@ public class PieChart : MonoBehaviour
             Destroy(runtimeOverlayLineMaterial);
     }
 
-    public void Generate(PortfolioData portfolioData)
+    // isSampleData=true이면 실데이터 로드 실패로 Resources의 샘플을 그리는 경우다(#244).
+    public void Generate(PortfolioData portfolioData, bool isSampleData = false)
     {
         data = portfolioData;
+        renderingSampleData = isSampleData;
         foreach (var s in slices)
             Destroy(s);
         slices.Clear();
@@ -439,6 +446,14 @@ public class PieChart : MonoBehaviour
     }
 
     Color GetColor(float returnRate)
+    {
+        Color color = GetReturnRateColor(returnRate);
+        return renderingSampleData
+            ? Color.Lerp(color, sampleDataTint, Mathf.Clamp01(sampleDataDesaturation))
+            : color;
+    }
+
+    Color GetReturnRateColor(float returnRate)
     {
         if (returnRate > 2f)
             return Color.Lerp(new Color(1f, 0.6f, 0.6f), new Color(1f, 0.1f, 0.1f), Mathf.Clamp01(returnRate / 20f));
