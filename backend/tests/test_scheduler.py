@@ -1812,6 +1812,41 @@ def test_sync_portfolio_collapses_duplicate_stock_code_rows(portfolio_session):
     assert rows[0].quantity == 10
 
 
+def test_sync_portfolio_collapses_duplicate_codes_within_one_response(portfolio_session):
+    """한 잔고 응답에 같은 코드가 두 번 와도 행이 하나만 남습니다 (#196).
+
+    위 테스트는 **DB에 이미 있던** 중복 행을 다루지만, 이 테스트는 동기화가
+    **스스로 만들어 내는** 중복을 다룬다. 빈 테이블에서 시작하므로 첫 항목은
+    else 분기(신규 삽입)를 타고, 그때 새 행을 existing에 등록하지 않으면 두 번째
+    항목이 또 하나의 새 행을 만든다. 그 행들은 existing에 없어 삭제 루프도
+    지나치므로 테이블에 2행이 남는다.
+
+    KIS output1은 pdno가 키라 정상 응답에는 중복이 없지만, 스키마가 막아주지
+    않는 이상 이 함수가 스스로 불변식("코드당 1행")을 깨뜨려서는 안 된다.
+
+    이 테스트가 잡는 mutation: 신규 삽입 분기의 existing[h.code] = [row] 등록을
+    제거 → len(rows)가 2가 되어 실패한다. 등록은 하되 재방문 시 갱신을 하지 않는
+    회귀는 quantity·avg_price 단언이 잡는다(마지막 항목의 값으로 수렴해야 한다).
+    """
+    from sqlmodel import select
+    from ..models import Portfolio
+    from ..scheduler import _sync_portfolio_from_balance
+
+    text = _make_balance_text(
+        ("삼성전자", "005930", 10, 70000),
+        ("삼성전자", "005930", 5, 71000),
+    )
+    returned = _sync_portfolio_from_balance(text, portfolio_session)
+
+    rows = portfolio_session.exec(select(Portfolio)).all()
+    assert len(rows) == 1
+    assert rows[0].quantity == 5          # 마지막 항목으로 갱신됐다
+    assert rows[0].avg_price == 71000.0
+    # 반환값은 잔고 응답의 항목 수라 행 수와 갈릴 수 있다(docstring 참고).
+    # #229의 PORTFOLIO_UPDATE holdings_count 호환을 위해 len(holdings)를 유지한다.
+    assert returned == 2
+
+
 def test_sync_portfolio_skips_when_balance_truncated(portfolio_session):
     """잔고 연속조회가 잘리면 기존 Portfolio 데이터를 파괴하지 않습니다.
 
