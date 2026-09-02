@@ -77,24 +77,58 @@ def _module_str_constants(tree: ast.Module) -> dict[str, str]:
     return consts
 
 
-def _recorded_tool_names() -> set[str]:
-    """``finus_api.py``가 ``_record_and_mask``에 넘기는 도구 이름 전부.
+# 래퍼가 "자기 파라미터를 그대로 전달"하는 자리의 이름. 실제 값은 그 래퍼의 호출부
+# (``ledger_tool_name=`` 리터럴)에서 수집되므로 미해석으로 세지 않는다. 형제 가드
+# ``backend/tests/test_label_drift.py``의 ``_FORWARDED_PARAM_NAMES``와 같은 규약이다 —
+# ``_record_to_ledger``의 docstring이 "리터럴이나 모듈 상수로 유지하라"를 계약으로
+# 못박아 뒀고, 전달 자리는 그 계약의 유일한 예외다.
+_LEDGER_KWARG = "ledger_tool_name"
+_FORWARDED_PARAM_NAMES = frozenset({_LEDGER_KWARG})
+
+
+def _tool_name_exprs(tree: ast.Module) -> list[ast.expr]:
+    """도구명이 담기는 표현식을 전부 모은다 — ``_record_and_mask`` 첫 인자 + ``ledger_tool_name=``.
+
+    호출부의 ``ledger_tool_name=``까지 같이 걷어야 파라미터로 전달되는 래퍼
+    (``_mcp_news_stock_function_info``)의 **실제 이름**이 집합에 들어온다.
+    """
+    exprs: list[ast.expr] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if _is_call_to(node, "_record_and_mask"):
+            # 첫 인자를 키워드로 넘긴 형태는 아래 keywords 루프에도 걸리지 않아 조용히
+            # 사라진다. 호출 노드 자체를 넣어 미해석으로 드러나게 한다.
+            by_kw = [kw.value for kw in node.keywords if kw.arg == "tool_name"]
+            exprs.append(node.args[0] if node.args else (by_kw[0] if by_kw else node))
+        exprs.extend(kw.value for kw in node.keywords if kw.arg == _LEDGER_KWARG)
+    return exprs
+
+
+def _recorded_tool_names() -> tuple[set[str], list[str]]:
+    """``finus_api.py``가 원장·마스킹에 넘기는 (도구 이름 집합, 정적으로 해석 못 한 표현식).
 
     첫 인자가 문자열 리터럴이면 그대로, 모듈 상수 이름이면 그 값으로 해석한다
     (``_record_and_mask(_KIS_BALANCE_LEDGER_NAME, ...)`` 경로).
+
+    **미해석을 조용히 버리지 않고 돌려준다** (PR #335 리뷰). 버리면 새 계좌 도구가
+    도구명을 파라미터로 넘기는 순간 아래 역방향 가드를 그대로 빠져나간다 — 방금 고친
+    ``async def`` 사각지대와 같은 종류다.
     """
     tree = ast.parse(_FINUS_API_PATH.read_text(encoding="utf-8"))
     consts = _module_str_constants(tree)
     names: set[str] = set()
-    for node in ast.walk(tree):
-        if not _is_call_to(node, "_record_and_mask") or not node.args:
+    unresolved: list[str] = []
+    for expr in _tool_name_exprs(tree):
+        if isinstance(expr, ast.Constant) and isinstance(expr.value, str):
+            names.add(expr.value)
+        elif isinstance(expr, ast.Name) and expr.id in consts:
+            names.add(consts[expr.id])
+        elif isinstance(expr, ast.Name) and expr.id in _FORWARDED_PARAM_NAMES:
             continue
-        first = node.args[0]
-        if isinstance(first, ast.Constant) and isinstance(first.value, str):
-            names.add(first.value)
-        elif isinstance(first, ast.Name) and first.id in consts:
-            names.add(consts[first.id])
-    return names
+        else:
+            unresolved.append(f"{_FINUS_API_PATH.name}:{expr.lineno}: {ast.unparse(expr)}")
+    return names, unresolved
 
 
 def _request(text: str) -> ChatRequestOrMessage:
@@ -169,11 +203,29 @@ class TestMaskToolResult:
         도구 이름이 바뀌면 목록의 문자열이 조용히 죽어 마스킹이 통째로 빠진다. 이름은
         원장 키에서 그대로 읽으므로 실제 소스와 대조해 고정한다.
         """
-        recorded = _recorded_tool_names()
+        recorded, _ = _recorded_tool_names()
         assert MASKED_TOOLS <= recorded, (
             f"MASKED_TOOLS의 {sorted(MASKED_TOOLS - recorded)}가 finus_api.py의 "
             "_record_and_mask 호출에 없습니다. 도구 이름이 바뀌었다면 "
             "pii_guard.MASKED_TOOLS도 함께 고쳐야 마스킹이 계속 걸립니다."
+        )
+
+    def test_every_tool_name_is_statically_resolvable(self):
+        """도구명을 하나라도 정적으로 못 읽으면 아래 역방향 가드가 공허해지므로 먼저 막는다.
+
+        미해석을 조용히 건너뛰면, 새 계좌 도구가 도구명을 파라미터로 넘기는 순간
+        ``test_new_account_tools_are_masked_by_default``를 그대로 빠져나간다 — 방금 고친
+        ``async def`` 사각지대와 같은 종류다 (PR #335 리뷰).
+
+        형제 가드 ``backend/tests/test_label_drift.py::``
+        ``test_every_ledger_tool_name_is_statically_resolvable``과 같은 규약이다.
+        """
+        _, unresolved = _recorded_tool_names()
+        assert unresolved == [], (
+            "finus_api.py의 도구 결과 반환에서 도구명을 정적으로 해석하지 못했습니다. "
+            "리터럴이나 모듈 상수로 되돌리거나, 파라미터로 전달한다면 호출부가 "
+            f"{_LEDGER_KWARG}= 리터럴로 넘기고 _FORWARDED_PARAM_NAMES에 추가하세요 "
+            f"(그대로 두면 마스킹 커버리지 검사가 조용히 비어 갑니다): {unresolved}"
         )
 
     def test_new_account_tools_are_masked_by_default(self):
@@ -190,9 +242,8 @@ class TestMaskToolResult:
         생긴다면, 목록이 아니라 이 테스트에 근거를 적고 면제해야 한다.
         """
         account_prefixes = ("finus_mcp_trading_", "finus_account_")
-        account_tools = {
-            name for name in _recorded_tool_names() if name.startswith(account_prefixes)
-        }
+        recorded, _ = _recorded_tool_names()
+        account_tools = {name for name in recorded if name.startswith(account_prefixes)}
         assert account_tools, "계좌 계열 도구를 하나도 찾지 못했습니다 — 접두사 규칙을 확인하세요."
         assert account_tools <= MASKED_TOOLS, (
             f"계좌 계열 도구 {sorted(account_tools - MASKED_TOOLS)}가 "
