@@ -39,7 +39,7 @@ import re
 import secrets
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Awaitable, Callable, Literal
+from typing import Any, Awaitable, Callable, Literal, Protocol
 
 import httpx
 from sqlmodel import Session
@@ -685,6 +685,23 @@ def load_daily_usage(session_factory: Callable[[], Any], now: datetime) -> Daily
     return DailyUsage(order_count=len(rows), order_amount=amount)
 
 
+class ReproposalCooldown(Protocol):
+    """run_order_assist가 냉각 장치에 요구하는 전부 (#319).
+
+    호출부가 쓰는 것은 조회와 기록 둘뿐이다. 키를 만드는 :meth:`ProposalCooldown.key`와
+    TTL 설정은 구현의 사정이라 계약이 아니다 — 올리면 대역이 redis 키 규칙까지
+    흉내 내야 이 주입 지점을 통과한다.
+
+    두 인자는 위치 전용(``/``)이다. 호출부가 전부 위치로 넘기므로 이름은 계약이 아니다.
+    """
+
+    async def active(
+        self, stock_code: str, rule_id: str | None, /
+    ) -> tuple[bool, bool]: ...
+
+    async def mark(self, stock_code: str, rule_id: str | None, /) -> None: ...
+
+
 class ProposalCooldown:
     """종목코드+룰 단위 재제안 냉각. redis TTL 하나로 강제한다.
 
@@ -1026,7 +1043,7 @@ async def run_order_assist(
     mcp_runner: Callable[[Any, str, dict[str, Any]], Awaitable[str]] | None = None,
     now_factory: Callable[[], datetime] | None = None,
     limits: OrderLimits | None = None,
-    cooldown: ProposalCooldown | None = None,
+    cooldown: ReproposalCooldown | None = None,
     session_factory: Callable[[], Any] | None = None,
     propose: Callable[[str], Awaitable[str]] | None = None,
     verify: Callable[[dict[str, Any], str], Awaitable[VerifierVerdict]] | None = None,

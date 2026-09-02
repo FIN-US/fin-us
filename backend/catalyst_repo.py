@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from datetime import date, timedelta
-from typing import Callable
+from typing import Callable, Protocol
 
 from pydantic import BaseModel, Field
 from sqlmodel import Session, col, select
@@ -27,6 +27,32 @@ class DueCatalystEvent:
     description: str
     source: str
     days_until_event: int
+
+
+class CatalystNotificationRepo(Protocol):
+    """catalyst_calendar_task가 촉매 저장소에 요구하는 전부 (#319).
+
+    ``list_upcoming``은 일부러 뺐다. 그건 /catalysts 명령이 사용자에게 목록을 보여
+    주려고 쓰는 조회이고, 이 작업은 "오늘·내일 알릴 것"만 본다. 계약을 구체 클래스로
+    두면 대역이 쓰지도 않는 메서드까지 갖춰야 주입 지점을 통과한다.
+
+    첫 인자는 위치 전용(``/``)이다. 호출부가 전부 위치로 넘기므로 이름은 계약이
+    아니고, 이름까지 고정하면 대역이 자기 도메인 이름(``watchlist`` 등)을 쓰지 못한다.
+    ``today``·``days_until_event``는 반대로 호출부가 키워드로 넘기므로 그대로 둔다 —
+    그 이름들은 실제로 계약이다.
+    """
+
+    async def upsert_events(
+        self, events: list[CatalystEventInput], /
+    ) -> list[CatalystEvent]: ...
+
+    async def list_due_for_notification(
+        self, stock_names: list[str], /, *, today: date
+    ) -> list[DueCatalystEvent]: ...
+
+    async def mark_notification_sent(
+        self, event_id: int, /, *, days_until_event: int
+    ) -> None: ...
 
 
 class SqliteCatalystEventRepo:

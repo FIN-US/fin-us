@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from typing import NamedTuple
+from typing import NamedTuple, cast
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -134,6 +134,16 @@ class FakeNotifier:
         self.bot_username = bot_username
         self.loaded_bot_username = False
         self.bot_commands = None
+        # 폴러 계약(TelegramPollerNotifier)의 두 값. 여기 선언이 없으면 테스트가
+        # 필요할 때 밖에서 얹는 수밖에 없는데, 클래스 밖에서 새로 만드는 속성은
+        # 타입 체커가 오타를 잡아 주지 못한다 — enabled를 enable로 쓴 대역은 폴러의
+        # "알림이 꺼져 있으면 루프를 돌지 않는다" 분기를 조용히 반대로 통과시킨다.
+        self.bot_token = "test-bot-token"
+        self.enabled = True
+        # send_text_settled가 getattr로 읽는 선택 값(429의 flood-wait 길이). 계약이
+        # 아니라 "있으면 쓰는 것"이라 Protocol에는 없지만, 그 경로를 검증하는
+        # 테스트가 값을 얹으므로 대역에는 자리를 둔다.
+        self.last_retry_after_seconds: int | None = None
         self.messages = []
         self.reply_markups = []
         self.actions = []
@@ -3425,7 +3435,16 @@ class ProgressFakeNotifier(FakeNotifier):
     쌓인다 — 최종 답변이 편집이 아니라 새 메시지로 나가는지 검증하기 위함이다.
     """
 
-    def __init__(self, *, delete_result=True, edit_result=True, message_id=4242, **kwargs):
+    def __init__(
+        self,
+        *,
+        delete_result=True,
+        edit_result=True,
+        # None은 "message_id를 확보하지 못했다"를 재현하는 값이라 계약의 일부다.
+        # 기본값만 보고 int로 추론되면 그 시나리오가 검사에서 빠진다 (#319).
+        message_id: int | None = 4242,
+        **kwargs,
+    ):
         super().__init__(**kwargs)
         self.delete_result = delete_result
         self.edit_result = edit_result
@@ -3875,7 +3894,11 @@ async def test_settled_send_returns_false_when_splitting_itself_raises():
     notifier = FakeNotifier()
     handler = TelegramCommandHandler(notifier=notifier)
 
-    assert await handler._send_text_settled(Unprintable()) is False
+    # 이 cast는 대역을 주입 지점에 통과시키려는 것이 아니라 계약을 일부러 어기는
+    # 것이다 — str이 아닌 값이 들어왔을 때 조립 단계의 예외를 삼키는지가 이
+    # 테스트의 대상이라, 어긋남 자체가 입력이다 (test_telegram_notifier의
+    # Unprintable 테스트와 같은 방식).
+    assert await handler._send_text_settled(cast(str, Unprintable())) is False
     assert notifier.messages == []
 
 
