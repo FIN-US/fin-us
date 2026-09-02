@@ -28,17 +28,13 @@ COOLDOWN_TTL_SEC = 60 * 10
 TELEGRAM_ALERT_MODES = {"urgent", "all", "off"}
 DEFAULT_TELEGRAM_ALERT_MODE = "urgent"
 
-# 폴러 상태(offset·handled_ahead) TTL: 7일.
+# 폴러 상태(offset) TTL: 7일.
 # Telegram 서버는 미확정 update를 24시간만 보관하므로, 그보다 오래된 offset은 보호할 대상이
 # 이미 없다. TTL은 값의 유효기간이 아니라 폴러가 영구히 내려간 뒤 남는 키를 정리하는 장치다.
 # 쓰기는 update를 처리할 때만 일어나므로 7일 내내 update가 없으면 만료된다 — 폴러가 살아
 # 있다는 것만으로는 갱신되지 않는다. 이 값을 줄이려면 RedisTelegramPollerStore 독스트링의
 # "유휴 기간 < TTL" 조건을 먼저 따져야 한다 (PR #251 리뷰).
 TELEGRAM_POLLER_STATE_TTL_SEC = 60 * 60 * 24 * 7
-# 저장된 handled_ahead의 허용 상한. 도달 가능한 최댓값(산출 근거는
-# RedisTelegramPollerStore._deserialize)에서 넉넉히 떨어뜨렸다 — 오염된 값만 걸러내고
-# 정상 상태는 절대 버리지 않도록 잡았다. 상한에 걸리면 상태를 버리므로 중복 실행이 생긴다.
-MAX_HANDLED_AHEAD = 100_000
 # offset의 허용 상한. Telegram update_id는 32비트라 정상값이 넘을 수 없다.
 # 왜 위쪽도 닫는지는 RedisTelegramPollerStore._deserialize 참조.
 MAX_OFFSET = 2**31
@@ -257,16 +253,16 @@ class RedisSchedulerState:
 class TelegramPollerState:
     """폴러가 재시작을 넘겨 살려야 하는 최소 상태 (#248).
 
-    두 값은 항상 함께 읽고 함께 쓴다. offset만 살아남고 handled_ahead가 사라지면
-    poison 뒤에서 이미 실행한 update가 재배달되어 중복 실행되고, 반대로 handled_ahead만
-    살아남으면 offset이 되감겨 같은 결과가 된다. 한 덩어리로 다뤄야 의미가 있다.
+    #248은 offset과 함께 handled_ahead(poison 뒤에서 선행 실행한 update_id)를 담았다. 그
+    필드는 #259 1단계에서 없앴다 — 배치가 poison에서 끊기게 되면서 선행 실행 자체가 사라져
+    기억할 것이 남지 않는다. 값이 하나뿐이어도 dataclass를 유지하는 이유는 저장소 계약
+    (TelegramPollerStore)이 "한 번에 읽고 한 번에 쓰는 상태 덩어리"이기 때문이다.
 
     재시도 예산(_UpdateFailure)은 일부러 담지 않는다. 유실되면 poison의 폐기 시점이
     미뤄질 뿐 중복 실행으로 이어지지 않으므로, 매 update 쓰기에 얹을 값이 아니다.
     """
 
     offset: int | None = None
-    handled_ahead: frozenset[int] = frozenset()
 
 
 class TelegramPollerStore(Protocol):
@@ -278,7 +274,7 @@ class TelegramPollerStore(Protocol):
     (#248이 닫으려던 중복 실행 창이 그대로 열린다). 그래서 이름·인자 모양만큼은
     test_redis_state.test_store_matches_protocol_shape가 CI에서 고정한다.
 
-    두 값을 한 덩어리(TelegramPollerState)로 주고받는 이유는 그 dataclass의 독스트링에 있다.
+    상태를 한 덩어리(TelegramPollerState)로 주고받는 이유는 그 dataclass의 독스트링에 있다.
     """
 
     async def load(self) -> TelegramPollerState: ...
@@ -304,11 +300,11 @@ class InMemoryTelegramPollerStore:
 
 
 class RedisTelegramPollerStore:
-    """폴러의 offset·handled_ahead를 redis에 영속화한다 (#248).
+    """폴러의 offset을 redis에 영속화한다 (#248).
 
-    두 값을 한 키에 JSON 한 덩어리로 쓴다. 키를 나누면 offset만 전진하고 handled_ahead
-    정리는 유실된 절반 상태가 생기는데, 그게 정확히 이 이슈가 막으려는 중복 실행의 원인이다.
-    폴러는 단일 인스턴스이므로 원자적 SET 하나면 둘의 일관성이 보장된다.
+    #259 1단계 전에는 handled_ahead도 같은 키에 함께 썼다. 지금 남은 값은 offset 하나지만
+    JSON 오브젝트 형태는 유지한다 — 스칼라로 바꾸면 다음에 담을 값이 생길 때 저장 형식이
+    또 한 번 바뀌고, 그 사이 배포는 서로의 payload를 읽지 못한다.
 
     호출자(TelegramCommandPoller)가 예외를 삼키는 fail-open이다.
     RedisPendingOrderStore의 fail-closed와 갈리는 근거는 "redis가 죽었을 때 무엇이 중복될 수
@@ -390,53 +386,18 @@ class RedisTelegramPollerStore:
             # 정상값이 넘길 수 없다 (PR #251 리뷰).
             if offset > MAX_OFFSET:
                 raise ValueError(f"offset too large ({offset} > {MAX_OFFSET})")
-        # `or []`로 기본값을 주면 false·0·"" 같은 falsy 비-list 값이 조용히 []로 바뀌어
-        # 바로 아래 검사를 건너뛴다. 결과는 fail-safe지만 손상을 감지하지 못해 키가 남고
-        # 다음 재시작도 같은 값을 그대로 통과시킨다 (PR #251 리뷰).
-        handled_ahead = data.get("handled_ahead")
-        if handled_ahead is None:
-            handled_ahead = []
-        if not isinstance(handled_ahead, list):
-            raise TypeError(f"handled_ahead must be a list, got {handled_ahead!r}")
-        # 정상 운영에서 이 집합은 _forget_passed_updates가 묶는다. 상한은 오염된 값이
-        # 들어왔을 때만 의미가 있다. 검사가 json.loads 뒤라 파싱 시점의 메모리 폭증 자체는
-        # 막지 못한다 — 실제로 막는 것은 그 값을 save()가 매 update마다 재직렬화(sorted +
-        # json.dumps)하는 지속 비용이다 (PR #251 리뷰). 한계에 걸리면 상태를 버리고 중복이
-        # 생기므로 도달 가능한 최댓값에서 넉넉히 떨어뜨렸다: 전송 실패 창 335초 동안 최소
-        # 간격 5초로 폴링하면 67배치이고, 배치당 최대치는 _get_updates가 넘기는 limit이다.
-        # limit을 지정하지 않으면 Telegram 기본값 100이라 67 × 100 = 6,700이 상한이다.
-        # 실제로는 telegram_commands.GET_UPDATES_LIMIT(=10)을 명시하므로 67 × 10 = 670이고
-        # (#253), 6,700은 limit을 지우는 회귀까지 덮는 상계다. MAX_HANDLED_AHEAD는 그 상계의
-        # 15배 이상이므로, limit이 바뀌어도 이 상한을 함께 고칠 일은 없다.
-        if len(handled_ahead) > MAX_HANDLED_AHEAD:
-            raise ValueError(
-                f"handled_ahead too large ({len(handled_ahead)} > {MAX_HANDLED_AHEAD})"
-            )
-        for update_id in handled_ahead:
-            if isinstance(update_id, bool) or not isinstance(update_id, int):
-                raise TypeError(f"handled_ahead must hold ints, got {update_id!r}")
-        return TelegramPollerState(offset=offset, handled_ahead=frozenset(handled_ahead))
+        # 모르는 키는 그냥 무시한다. 이 배포가 처음 읽는 값은 #259 1단계 이전이 쓴
+        # {"offset": ..., "handled_ahead": [...]}이고, handled_ahead를 이제 안 읽는 것이
+        # 곧 의도한 동작이다 — 되돌린 최적화의 상태이므로 복원할 대상이 아니다.
+        return TelegramPollerState(offset=offset)
 
     async def save(self, state: TelegramPollerState) -> None:
-        # 상한은 load()에만 걸려 있어, 메모리에서 넘어가면 여기서는 그대로 쓰고 다음 재시작의
-        # load()가 조용히 거부한다 — 영속화가 무의미해진 상태를 알릴 신호가 없어진다.
-        # 실패 방향 자체는 수용 가능하므로(상태를 버려도 offset=None 재시작이 받는 집합이
-        # handled_ahead가 덮던 집합과 같다) 거부 대신 경고만 남긴다 (PR #251 리뷰).
-        if len(state.handled_ahead) > MAX_HANDLED_AHEAD // 2:
-            logger.warning(
-                "telegram poller handled_ahead가 상한의 절반을 넘었다 (%s / %s). "
-                "상한을 넘기면 다음 재시작의 load()가 상태를 버려 중복 실행이 생긴다.",
-                len(state.handled_ahead),
-                MAX_HANDLED_AHEAD,
-            )
-        # 상태가 그대로여도(blocked 재배달 배치처럼) 같은 payload를 다시 쓴다. dirty check를
-        # 두지 않은 이유는 TTL 갱신이 아니라 비용 대비다 — blocked 구간은 재시도 예산으로
-        # 유계(≤335초)이고 TTL은 7일(604,800초)이라 만료까지 3자릿수 배수의 여유가 있고,
-        # 쓰기가 진짜 0인 유휴 구간은 dirty check가 있든 없든 같다. 단일 채팅 규모에서 중복
-        # SET의 비용이 무시 가능해 상태를 하나 더 들일 값어치가 없다고 봤다 (PR #251 리뷰).
-        payload = json.dumps(
-            {"offset": state.offset, "handled_ahead": sorted(state.handled_ahead)}
-        )
+        # 상태가 그대로여도 같은 payload를 다시 쓴다. dirty check를 두지 않은 이유는 TTL
+        # 갱신이 아니라 비용 대비다 — 재시도 대기 구간은 예산으로 유계(≤335초)이고 TTL은
+        # 7일(604,800초)이라 만료까지 3자릿수 배수의 여유가 있고, 쓰기가 진짜 0인 유휴
+        # 구간은 dirty check가 있든 없든 같다. 단일 채팅 규모에서 중복 SET의 비용이 무시
+        # 가능해 상태를 하나 더 들일 값어치가 없다고 봤다 (PR #251 리뷰).
+        payload = json.dumps({"offset": state.offset})
         await self.redis.set(
             self._keys.telegram_poller_state(), payload, ex=self.ttl_sec
         )

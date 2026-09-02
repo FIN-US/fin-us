@@ -140,7 +140,10 @@ UPDATE_RETRY_WINDOW_SECONDS = 60.0
 #
 # 이 값은 무한정 키우면 안 된다. handle_update가 던지는 지배적 경로가 전송 실패라서,
 # 영구적 전송 실패(특정 메시지의 Markdown 파싱 400)가 하나 들어오면 offset이 이 시간만큼
-# 얼어붙어 #241이 그대로 재발한다. 상한이 있다는 사실 자체를 테스트가 고정한다
+# 얼어붙는다. #259 1단계 이전에는 그 동결이 "#241의 재발"이었지만 지금은 채택한 설계다 —
+# 배치가 그 update에서 끊기는 것이 이 봇이 중복 실행 대신 고른 쪽이다. 그래서 상한이 필요한
+# 이유는 오히려 더 강해졌다: 얼어붙는 동안 뒤의 명령도 실행되지 않아 봇이 이 시간만큼 통째로
+# 무응답이다. 상한이 있다는 사실 자체를 테스트가 고정한다
 # (test_poller_eventually_skips_persistent_send_failures).
 SEND_FAILURE_RETRY_WINDOW_SECONDS = 300.0
 # 재시도 간격. 실패가 이어지면 폴링을 늦춰 텔레그램 rate limit을 자극하지 않는다.
@@ -2124,10 +2127,15 @@ class TelegramCommandHandler:
 def _update_sort_key(update: dict[str, Any]) -> tuple[int, int]:
     """update_id 오름차순 정렬 키. update_id가 없는 update는 맨 앞으로 보낸다 (#241).
 
+    #259 1단계로 "poison 뒤 update 선행 실행"은 되돌렸지만 이 정렬은 남는다. 배치를 poison에서
+    끊는 것은 미해결 update를 그보다 뒤의 update보다 먼저 만난다는 전제 위에서만 offset을
+    지켜주기 때문이다 — 역순 배치라면 뒤쪽 update가 먼저 성공해 offset이 poison을 지나가고,
+    그러면 그 poison은 재배달 대상에서 조용히 사라진다.
+
     update_id가 없는 update는 재시도 예산도 offset도 추적할 수 없어 실패해도 그 자리에서
-    끝난다(= blocked를 만들지 않는다). 그래서 앞에 두어도 뒤에 오는 update의 재시도 판정에
+    끝난다(= 배치를 끊지 않는다). 그래서 앞에 두어도 뒤에 오는 update의 재시도 판정에
     영향을 주지 않는다. 다만 offset이 그걸 지나갈 수 없어 재배달될 때마다 다시 실행되고,
-    blocked가 아니라 sleep도 없으므로 getUpdates busy loop가 된다. 실제 Telegram은 항상
+    배치가 끊기지 않아 sleep도 없으므로 getUpdates busy loop가 된다. 실제 Telegram은 항상
     update_id를 주므로 이론적 경로다 (PR #242 리뷰).
     """
     update_id = update.get("update_id")
@@ -2194,19 +2202,14 @@ class TelegramCommandPoller:
                 pending_order_store=_create_pending_order_store(),
             )
         self.handler = handler
-        # offset과 _handled_ahead는 redis에 함께 영속화된다 (#248). 둘 다 인메모리였을 때는
-        # blocked 구간에 프로세스가 죽으면 여기 기록된 update들이 "실행됐지만 서버에 미확정"
-        # 상태로 남아 재시작 후 전부 재실행됐다. 창의 길이가 재시도 예산과 같아
-        # (일반 실패 65초, 전송 실패 335초) 무시할 수 없었다.
+        # offset은 redis에 영속화된다 (#248). 인메모리였을 때는 재시작이 offset을 처음으로
+        # 되감아, 배치 중간까지 실행한 update가 통째로 재배달·재실행됐다.
         #
-        # "429와 재시작이 배포라는 원인을 공유한다"는 근거는 폐기했다 — 배포는 자기가 죽이는
-        # 프로세스의 poison을 만들 수 없고(_handled_ahead는 blocked가 이미 True일 때만 차므로
-        # poison이 사망보다 먼저, 같은 프로세스 안에서 일어나야 한다), 애초에 이 레포엔 CD도
-        # restart: 정책도 없다. 실제 재시작 계기는 Dockerfile의 uvicorn --reload + .:/app
-        # bind mount이며, 그 재시작은 SIGTERM → lifespan → stop_telegram_commands()의 취소
-        # 경로를 탄다. 근거는 확률이 아니라 비용 대비다: _handled_ahead는 Telegram이 원리적으로
-        # 보호해줄 수 없는 유일한 상태인데(서버는 미확정 update만 알 뿐 무엇을 이미 실행했는지
-        # 모른다) 영속화 비용은 이미 쓰는 키에 필드 하나다 (PR #251 리뷰).
+        # #248이 offset과 함께 저장하던 _handled_ahead는 #259 1단계에서 사라졌다. 그 집합은
+        # "poison 뒤 update를 먼저 실행한다"는 #241의 최적화가 만들어낸 중복 실행 위험을 막는
+        # 장치였는데, 최적화 자체를 되돌려 poison에서 배치를 끊게 하면서 기억해야 할 선행
+        # 실행이 없어졌다. 남는 창은 handle_update 한 번의 실행 시간뿐이라 offset만 저장한다
+        # (#270 → #259).
         self.state_store: TelegramPollerStore = (
             state_store if state_store is not None else _create_poller_state_store()
         )
@@ -2214,23 +2217,16 @@ class TelegramCommandPoller:
         # update_id -> 재시도 예산. 유실돼도 poison 폐기가 미뤄질 뿐 중복 실행으로 이어지지
         # 않으므로 영속화하지 않는다. 매 update 쓰기에 얹을 값이 아니다 (#248).
         #
-        # 대가는 분명히 해 둔다: _restore_state가 이 값을 건드리지 않으므로 재시작마다
-        # poison에 예산이 새로 지급된다. 배포가 잦으면 폐기가 무기한 미뤄지고 그동안
-        # _handled_ahead도 함께 묶인다. 영속화하는 offset·_handled_ahead가 "자신을 poison에
-        # 붙들어 매는 상태"인 반면 이건 "poison을 포기하게 해주는 유일한 상태"라 방향이
-        # 반대다. 다만 이 PR이 새로 들이는 위험은 아니다 — 이전에도 재시작 후 Telegram이
-        # 같은 지점부터 재배달하며 예산이 리셋됐다 (PR #251 리뷰).
-        self._failures: dict[int, _UpdateFailure] = {}
-        # 재시도 대기 중인 update보다 뒤에 있어서 먼저 처리해버린 update_id.
-        # offset은 실패 지점에서 멈추므로 이 update들은 다음 폴링에 다시 배달되는데,
-        # 그대로 재실행하면 주문 같은 부수효과가 중복된다 (#241).
+        # 대가가 #259 1단계로 커졌다: _restore_state가 이 값을 건드리지 않으므로 재시작마다
+        # poison에 예산이 새로 지급되는데, 이제 배치가 그 poison에서 끊기므로 예산보다 잦은
+        # 재시작이 이어지면 폐기가 무기한 미뤄지고 **그 채팅의 모든 명령이 정지한다**.
+        # #241 하에서는 뒤의 update가 선행 실행돼 "poison 폐기가 미뤄짐"에 그쳤다.
+        # 리셋 계기는 배포가 아니라 Dockerfile의 uvicorn --reload + bind mount다 — backend
+        # 파일 저장 하나면 된다. 영속화할지 알람으로 감지만 할지는 #350에서 정한다.
         #
-        # 영속화로 창은 "실행 완료 후 redis 쓰기까지"로 좁혀졌지만 0은 아니다. 순서를 뒤집어
-        # 실행 전에 기록하면 중복 대신 유실(기록만 남고 실행 안 됨)이 되는데, 여기서는
-        # at-least-once가 낫다 — 금전 경로는 GETDEL claim·set_if_absent가 이미 막고 있어
-        # 중복의 실질 비용은 LLM 재호출과 중복 메시지인 반면, 유실은 사용자의 명령이 아무
-        # 흔적 없이 사라지는 것이다 (#248).
-        self._handled_ahead: set[int] = set()
+        # 방향이 offset과 반대라는 점은 그대로다: offset은 "자신을 poison에 붙들어 매는
+        # 상태"이고 이건 "poison을 포기하게 해주는 유일한 상태"다 (PR #251 리뷰).
+        self._failures: dict[int, _UpdateFailure] = {}
 
     async def run(self) -> None:
         if not self.notifier.enabled:
@@ -2249,37 +2245,34 @@ class TelegramCommandPoller:
                 await self._sleep(UPDATE_RETRY_BACKOFF_SECONDS[0])
                 continue
 
-            # 재시도 대기 중인 update가 앞에 있으면 offset을 더 전진시킬 수 없다.
-            # 그래도 배치의 나머지 update는 계속 처리해서, poison 1건이 뒤의 명령을
-            # 통째로 막지 않게 한다 (#241).
-            # blocked는 미해결 update를 먼저 만난다는 전제 위에서만 offset을 지켜준다.
-            # getUpdates가 오름차순을 보장한다는 외부 전제에 정확성을 걸지 않도록
-            # 여기서 직접 정렬해 전제를 없앤다 (#241).
+            # 재시도 대기 중인 update를 만나면 배치를 그 자리에서 끊는다. #241은 반대로
+            # 뒤의 update를 계속 실행해 head-of-line blocking을 없앴는데, 그 선행 실행분은
+            # offset이 확정하지 못한 채 재배달되므로 "무엇을 이미 실행했는지"를 기억하는
+            # 상태(_handled_ahead)가 딸려왔다. 그 상태의 유실은 곧 주문 부수효과의 중복
+            # 실행이고, 그것을 막을 장치는 상태 자신뿐이었다. 단일 채팅·단일 프로세스인 이
+            # 봇에서 선행 실행이 사는 값은 "내 다음 명령이 최대 335초(전송 실패 예산) 늦게
+            # 실행되는 것"을 피하는 정도라, 중복 실행 위험과 맞바꾸지 않는다 (#270 → #259).
+            #
+            # 끊는 것은 미해결 update를 그보다 뒤의 update보다 먼저 만난다는 전제 위에서만
+            # offset을 지켜준다. getUpdates가 오름차순을 보장한다는 외부 전제에 정확성을
+            # 걸지 않도록 여기서 직접 정렬해 전제를 없앤다 (#241).
             updates = sorted(updates, key=_update_sort_key)
-            blocked = False
+            retry_pending = False
             skipped: list[dict[str, Any]] = []
             for update in updates:
                 update_id = update.get("update_id")
-                if isinstance(update_id, int) and update_id in self._handled_ahead:
-                    # 이미 처리한 update의 재배달이다. 다시 실행하면 부수효과가 중복되므로
-                    # 건너뛰되, offset은 전진시켜야 여기서 다시 막히지 않는다 (#241).
-                    outcome = _UpdateOutcome.DONE
-                else:
-                    outcome = await self._handle_one_update(update, update_id)
+                outcome = await self._handle_one_update(update, update_id)
                 if outcome is _UpdateOutcome.RETRY:
-                    blocked = True
-                    continue
+                    retry_pending = True
+                    break
                 if outcome is _UpdateOutcome.SKIPPED:
                     skipped.append(update)
                 if not isinstance(update_id, int):
                     continue
 
                 self._failures.pop(update_id, None)
-                if blocked:
-                    self._handled_ahead.add(update_id)
-                else:
-                    self.offset = update_id + 1
-                    self._forget_passed_updates(self.offset)
+                self.offset = update_id + 1
+                self._forget_passed_updates(self.offset)
                 # 배치 끝이 아니라 update마다 쓴다. 배치 단위로 미루면 중간에 죽었을 때
                 # 이미 실행한 update의 기록이 통째로 사라져 영속화의 의미가 없다 (#248).
                 #
@@ -2302,8 +2295,15 @@ class TelegramCommandPoller:
             if skipped:
                 # 배치 통지는 한 건으로 합친다. poison N건에 N번 발송하면 채팅당 초당 ~1건
                 # 제한에 걸려 429를 만들고, 429는 다시 전송 실패 = 새 poison이 된다 (PR #242 리뷰).
+                #
+                # #259 1단계 이후 이 목록의 원소는 실제로는 최대 1개다 — 예산은 시도해야 쌓이고
+                # 시도는 첫 RETRY에서 끊기므로, 한 배치에서 예산을 소진할 수 있는 update는
+                # 맨 앞의 것 하나뿐이다. 합치는 코드를 남겨두는 이유는 그 상한이 배치 루프의
+                # 모양에 딸린 성질이라서다: 루프가 다시 바뀌면 N건이 되살아나는데, 그때
+                # 통지가 429를 만드는 경로는 여기서만 막힌다. 상한 자체는
+                # test_skip_notice_merges_updates_into_one_message가 helper 단위로 고정한다.
                 await self._notify_updates_skipped(skipped)
-            if blocked:
+            if retry_pending:
                 # 실패한 update를 곧바로 다시 받아 예산을 순식간에 소진하지 않도록 쉬어 간다.
                 # 실패가 이어지면 간격을 늘려 복구 창을 벌고 rate limit도 덜 자극한다 (#241).
                 await self._sleep(self._retry_delay())
@@ -2420,7 +2420,7 @@ class TelegramCommandPoller:
             logger.error("Telegram skip notice not delivered for %s updates", len(mine))
 
     async def _restore_state(self) -> None:
-        """재시작 전 offset·_handled_ahead를 복원한다 (#248).
+        """재시작 전 offset을 복원한다 (#248).
 
         실패하면 빈 상태로 시작한다. Telegram이 미확정 update를 전부 재배달하므로 명령이
         유실되지는 않지만, 실행됐던 것이 다시 실행된다 — 영속화 이전과 같은 상태다.
@@ -2439,16 +2439,11 @@ class TelegramCommandPoller:
             logger.error("Telegram poller 상태 복원 실패, 빈 상태로 시작: %s", exc)
             return
         self.offset = state.offset
-        self._handled_ahead = set(state.handled_ahead)
-        if state.offset is not None or state.handled_ahead:
-            logger.info(
-                "Telegram poller 상태 복원: offset=%s, 처리 완료 대기 %s건",
-                state.offset,
-                len(state.handled_ahead),
-            )
+        if state.offset is not None:
+            logger.info("Telegram poller 상태 복원: offset=%s", state.offset)
 
     async def _persist_state(self) -> None:
-        """offset과 _handled_ahead를 한 번에 저장한다 (#248).
+        """offset을 저장한다 (#248).
 
         쓰기 실패는 삼킨다 — fail-open 근거는 RedisTelegramPollerStore 독스트링에 있다.
         폴링은 인메모리 상태로 계속되고, 다음 update의 쓰기가 성공하면 그 시점 상태가
@@ -2460,12 +2455,7 @@ class TelegramCommandPoller:
         """
         try:
             await asyncio.wait_for(
-                self.state_store.save(
-                    TelegramPollerState(
-                        offset=self.offset,
-                        handled_ahead=frozenset(self._handled_ahead),
-                    )
-                ),
+                self.state_store.save(TelegramPollerState(offset=self.offset)),
                 timeout=STATE_STORE_TIMEOUT_SECONDS,
             )
         except Exception as exc:
@@ -2473,14 +2463,22 @@ class TelegramCommandPoller:
             logger.error("Telegram poller 상태 저장 실패, 인메모리로 계속: %s", exc)
 
     def _forget_passed_updates(self, offset: int) -> None:
-        """offset이 지나간 update_id 기록을 정리해 추적 상태가 무한히 커지지 않게 한다 (#241)."""
+        """offset이 지나간 update_id 기록을 정리해 추적 상태가 무한히 커지지 않게 한다 (#241).
+
+        #259 1단계 이후 이 정리는 도달 가능한 모든 상태에서 no-op이다. _failures에 항목을
+        새로 넣는 것은 배치를 끊는 RETRY 하나뿐이고, 그 항목은 offset이 지나가지 못한 가장
+        작은 id라 다음 배치의 맨 앞으로 정렬된다 — 거기서 pop되거나 다시 배치를 끊으므로,
+        유일한 호출부(그 pop 바로 다음 줄)가 보는 dict는 항상 비어 있다.
+
+        그래도 남기는 이유는 skip 통지 병합(_notify_updates_skipped 호출부 주석)과 같다.
+        "항목이 최대 1개"는 배치 루프의 모양에 딸린 성질이라 루프가 다시 바뀌면 무한 증가가
+        되살아나는데, 그것을 막는 코드는 여기뿐이다. 정리 자체는
+        test_forget_passed_updates_drops_only_what_the_offset_passed가 helper 단위로 고정한다.
+        """
         self._failures = {
             update_id: failure
             for update_id, failure in self._failures.items()
             if update_id >= offset
-        }
-        self._handled_ahead = {
-            update_id for update_id in self._handled_ahead if update_id >= offset
         }
 
     async def _sleep(self, seconds: float) -> None:

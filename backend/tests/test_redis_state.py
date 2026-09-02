@@ -4,7 +4,6 @@ import json
 import pytest
 
 from backend.redis_state import (
-    MAX_HANDLED_AHEAD,
     SIGNAL_HASH_TTL_SEC,
     TELEGRAM_POLLER_STATE_TTL_SEC,
     InMemoryPendingOrderStore,
@@ -179,18 +178,16 @@ async def test_telegram_alert_mode_ignores_invalid_values():
 
 
 @pytest.mark.asyncio
-async def test_poller_state_round_trips_offset_and_handled_ahead():
+async def test_poller_state_round_trips_offset():
     redis = FakeRedis()
     store = RedisTelegramPollerStore(redis)
 
     assert await store.load() == TelegramPollerState()
 
-    await store.save(TelegramPollerState(offset=44, handled_ahead=frozenset({42, 43})))
+    await store.save(TelegramPollerState(offset=44))
     loaded = await store.load()
 
     assert loaded.offset == 44
-    assert loaded.handled_ahead == frozenset({42, 43})
-    # 두 값이 한 키에 함께 저장되어야 절반만 반영된 상태가 생기지 않는다.
     assert list(redis.store) == ["finus:telegram:poller_state"]
     assert redis.calls[-1][2] == TELEGRAM_POLLER_STATE_TTL_SEC
 
@@ -220,16 +217,6 @@ async def test_poller_state_load_drops_corrupted_value():
         # 위쪽도 닫혀 있어야 한다. 거대 양수가 새면 Telegram이 미확정 update를 전부 삭제하고
         # 봇이 영구 무응답이 된다 (PR #251 리뷰).
         '{"offset": 99999999999}',
-        '{"offset": 42, "handled_ahead": "42"}',
-        '{"offset": 42, "handled_ahead": ["42"]}',
-        # 원소의 bool 가드. 구현은 있었는데 케이스가 없어 뮤테이션이 살아 있었다
-        # (PR #251 리뷰). `1 in frozenset({True})`가 True라 update_id 1이 건너뛰어진다.
-        '{"offset": 42, "handled_ahead": [true]}',
-        # falsy 비-list 값. `or []`로 기본값을 주면 조용히 []가 되어 검사를 건너뛴다
-        # (PR #251 리뷰).
-        '{"handled_ahead": false}',
-        '{"handled_ahead": 0}',
-        '{"handled_ahead": ""}',
     ],
 )
 async def test_poller_state_load_rejects_wrong_types(payload):
@@ -247,52 +234,54 @@ async def test_poller_state_save_overwrites_whole_state():
     redis = FakeRedis()
     store = RedisTelegramPollerStore(redis)
 
-    await store.save(TelegramPollerState(offset=None, handled_ahead=frozenset({42, 43})))
-    await store.save(TelegramPollerState(offset=44, handled_ahead=frozenset()))
+    await store.save(TelegramPollerState(offset=None))
+    await store.save(TelegramPollerState(offset=44))
 
-    assert await store.load() == TelegramPollerState(offset=44, handled_ahead=frozenset())
+    assert await store.load() == TelegramPollerState(offset=44)
 
 
 @pytest.mark.asyncio
-async def test_poller_state_load_accepts_zero_offset_and_empty_handled_ahead():
-    """0과 빈 리스트는 정상값이다 — falsy라고 손상으로 몰면 안 된다 (PR #251 리뷰)."""
+async def test_poller_state_load_accepts_zero_offset():
+    """0은 정상값이다 — falsy라고 손상으로 몰면 안 된다 (PR #251 리뷰)."""
     redis = FakeRedis()
-    redis.store["finus:telegram:poller_state"] = '{"offset": 0, "handled_ahead": []}'
+    redis.store["finus:telegram:poller_state"] = '{"offset": 0}'
     store = RedisTelegramPollerStore(redis)
 
-    assert await store.load() == TelegramPollerState(offset=0, handled_ahead=frozenset())
+    assert await store.load() == TelegramPollerState(offset=0)
     # 정상값이므로 키가 남아 있어야 한다.
     assert "finus:telegram:poller_state" in redis.store
 
 
 @pytest.mark.asyncio
-async def test_poller_state_load_rejects_oversized_handled_ahead():
-    """오염된 거대 집합은 버린다. frozenset 생성과 매 update sorted()가 CPU를 먹는다 (PR #251 리뷰)."""
+async def test_poller_state_load_ignores_legacy_handled_ahead_field():
+    """#259 1단계 이전 배포가 남긴 payload를 손상으로 몰지 않는다.
+
+    되돌린 최적화의 상태라 복원할 대상이 아니지만, 거부하면 키가 삭제되면서 offset까지 함께
+    날아가 재시작이 미확정 update를 처음부터 다시 배달받는다 — 필드 하나 무시로 끝날 일이
+    전면 재실행이 된다.
+    """
     redis = FakeRedis()
-    oversized = list(range(MAX_HANDLED_AHEAD + 1))
-    redis.store["finus:telegram:poller_state"] = json.dumps({"offset": 1, "handled_ahead": oversized})
+    redis.store["finus:telegram:poller_state"] = json.dumps(
+        {"offset": 44, "handled_ahead": [42, 43]}
+    )
     store = RedisTelegramPollerStore(redis)
 
-    assert await store.load() == TelegramPollerState()
-    assert redis.store == {}
+    assert await store.load() == TelegramPollerState(offset=44)
+    assert "finus:telegram:poller_state" in redis.store
 
 
 @pytest.mark.asyncio
-async def test_poller_state_load_keeps_realistic_handled_ahead_size():
-    """도달 가능한 최댓값의 상계(6,700)는 상한에 걸리지 않아야 한다 (PR #251 리뷰).
-
-    상한에 걸리면 상태를 버려 중복 실행이 생긴다 — 정상 상태를 버리는 상한은 이 PR이
-    고치려는 버그를 되살린다. 전송 실패 창 335초 / 최소 간격 5초 = 67배치이고, 배치당
-    최대치는 getUpdates의 limit이다(미지정 = 기본값 100 → 6,700). 실제 도달 가능한 값은
-    GET_UPDATES_LIMIT(=10)이 걸려 67 × 10 = 670이므로(#253), 6,700은 limit을 지우는 회귀까지
-    덮는 상계다 — 이 단언은 그 아래 모든 값에 대해서도 성립한다.
-    """
+async def test_poller_state_save_drops_the_legacy_handled_ahead_field():
+    """다음 쓰기가 옛 필드를 지운다 — payload에 읽지 않는 값이 TTL 내내 남지 않는다."""
     redis = FakeRedis()
-    reachable = list(range(6_700))
-    redis.store["finus:telegram:poller_state"] = json.dumps({"offset": 1, "handled_ahead": reachable})
+    redis.store["finus:telegram:poller_state"] = json.dumps(
+        {"offset": 44, "handled_ahead": [42, 43]}
+    )
     store = RedisTelegramPollerStore(redis)
 
-    assert len((await store.load()).handled_ahead) == 6_700
+    await store.save(TelegramPollerState(offset=45))
+
+    assert json.loads(redis.store["finus:telegram:poller_state"]) == {"offset": 45}
 
 
 @pytest.mark.asyncio
@@ -314,33 +303,6 @@ async def test_poller_state_load_logs_when_corrupted_key_delete_fails(caplog):
         assert await store.load() == TelegramPollerState()
 
     assert "손상 키 삭제 실패" in caplog.text
-
-
-@pytest.mark.asyncio
-async def test_poller_state_save_warns_when_handled_ahead_nears_limit(caplog):
-    """상한은 load에만 걸려 있어, 넘어가는 순간을 save가 알리지 않으면 신호가 없다 (PR #251 리뷰)."""
-    store = RedisTelegramPollerStore(FakeRedis())
-    near_limit = frozenset(range(MAX_HANDLED_AHEAD // 2 + 1))
-
-    with caplog.at_level("WARNING"):
-        await store.save(TelegramPollerState(offset=1, handled_ahead=near_limit))
-
-    assert "상한의 절반을 넘었다" in caplog.text
-
-
-@pytest.mark.asyncio
-async def test_poller_state_save_is_quiet_below_warning_threshold(caplog):
-    """도달 가능한 크기의 상계(6,700)에서 경고가 울리면 로그가 무의미해진다 (PR #251 리뷰).
-
-    단언을 caplog.text == ""로 두면 무관한 라이브러리 경고 하나에 깨지고, 원인이 이 PR과
-    무관해 보여 추적이 어렵다. 뮤테이션 감지력은 이 문구 검사와 동일하다 (PR #251 리뷰).
-    """
-    store = RedisTelegramPollerStore(FakeRedis())
-
-    with caplog.at_level("WARNING"):
-        await store.save(TelegramPollerState(offset=1, handled_ahead=frozenset(range(6_700))))
-
-    assert "상한의 절반을 넘었다" not in caplog.text
 
 
 # ---------------------------------------------------------------------------
