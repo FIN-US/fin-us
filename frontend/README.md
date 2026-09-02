@@ -18,6 +18,7 @@ frontend/
 ├── ProjectSettings/ # Unity 프로젝트 설정 (git 추적)
 ├── Build/           # WebGL 빌드 산출물 — 아래 3개 경로만 선별 추적
 │                    #   index.html / Build/** / TemplateData/**
+├── build-stamp.txt  # 위 번들이 어느 Assets/에서 나왔는지 적어 둔 트리 해시 (CI가 대조)
 ├── nginx.conf       # docker-compose의 frontend 서비스가 Build/를 서빙할 때 쓰는 nginx 설정
 └── frontend.slnx    # Visual Studio 솔루션
 ```
@@ -66,11 +67,59 @@ python -m http.server 8080 --directory frontend/Build
    Unity가 선택한 폴더 *아래에* `Build/`·`TemplateData/`·`index.html`을 만들기 때문에
    최종 경로는 `frontend/Build/Build/Build.wasm` 형태가 됩니다 (이중 `Build/`가 정상입니다).
    `frontend`를 고르면 `.gitignore` 화이트리스트에 걸리지 않습니다.
-4. `git add frontend/Build/ && git commit`으로 소스 변경과 함께 커밋합니다.
+4. 빌드가 끝나면 **곧바로** 스탬프를 갱신합니다.
+
+   ```bash
+   scripts/frontend_build_stamp.sh write
+   ```
+
+   이 스크립트는 지금 `frontend/Assets/`와 `frontend/Build/`의 git 트리 해시를
+   `frontend/build-stamp.txt`에 적습니다. **"이 번들은 이 소스에서 나왔다"는 기록**이고,
+   CI가 두 값을 모두 대조합니다. 그래서 **재빌드 직후에만** 실행해야 합니다 — 재빌드 없이
+   실행하면 어긋난 상태에 도장을 찍는 것이라 검사 자체가 무의미해집니다.
+
+   지난 스탬프 이후 `frontend/Build/`가 전혀 바뀌지 않았으면 스크립트가 거부합니다.
+   소스를 고쳤는데 번들 바이트가 정말 동일하게 나온 경우에만 `write --force`로 넘기세요.
+5. `git add frontend/Build/ frontend/build-stamp.txt && git commit`으로 소스 변경과 함께
+   커밋합니다.
 
 > `.gitignore`는 위 3개 경로만 화이트리스트합니다. 빌드 설정을 바꿔 다른 산출물
 > (예: `Build/StreamingAssets/`)이 생기면 `git add`가 **에러 없이 건너뜁니다.**
 > `git status --ignored frontend/Build/`로 누락을 확인하고 `.gitignore`를 함께 갱신하세요.
+
+#### CI가 잡아 주는 것과 사람이 해야 하는 것
+
+CI의 `unity-build-drift` 잡이 두 가지를 봅니다 (`.github/workflows/ci.yml`).
+
+| 검사 | 무엇을 잡는가 |
+| --- | --- |
+| Assets 변경 시 Build 동반 커밋 여부 | 재빌드를 아예 빠뜨린 PR |
+| 번들 스탬프와 현재 트리 대조 | 스탬프를 찍은 시점의 `Assets/`·`Build/` 조합과 지금 커밋된 것이 다른 경우 |
+
+**자동으로 검증되는 것** — 커밋된 `frontend/Assets/`와 `frontend/Build/`가 마지막으로
+스탬프를 찍은 시점의 그 조합인지. 재빌드를 잊었든, 재빌드 후 소스를 한 번 더 고치고
+스탬프를 그대로 뒀든(#345의 원인), 번들을 손으로 고쳤든 PR이 빨간불이 됩니다.
+
+**사람이 해야 하는 것 — `write`를 진짜 재빌드 직후에 실행하기.** 스탬프는 트리 해시일 뿐
+"이 번들이 이 소스를 빌드해서 나왔다"를 증명하지 못합니다. 스크립트가 "지난 스탬프 이후
+`Build/`가 안 바뀌었으면 거부"로 가장 흔한 우회를 막지만, **이건 사람의 규율을 돕는
+과속방지턱이지 보증이 아닙니다.** 다음 두 경우는 CI를 그대로 통과합니다.
+
+- `write --force`로 거부를 넘긴 경우.
+- **`Build/`가 재빌드 아닌 이유로 바뀐 상태에서 `write`한 경우** — 번들 파일을 손으로
+  고쳤거나, main의 재빌드 커밋을 머지하면서 스탬프는 내 것을 남긴 뒤 소스만 고친 경우가
+  그렇습니다. 가드는 "지난 스탬프 이후 `Build/`가 바뀌었는가"만 보므로, 그 변화가 **이
+  소스를** 빌드한 결과인지는 구분하지 못합니다.
+
+반대로, **"커밋1에서 재빌드하고 커밋2에서 소스만 고친 뒤 재스탬프"는 가드에 걸립니다** —
+커밋2 시점에는 `Build/`가 지난 스탬프 이후 그대로라 `write`가 거부합니다. 그래도 커밋 단위
+검사를 도입하지 않은 이유는 따로 있습니다. 이 저장소는 소스 수정과 `build:` 재빌드를 별도
+커밋으로 나누는 것이 관례라(예: `7bd1900` → `9c6f518`), 커밋마다 스탬프 일치를 요구하면
+정상적인 PR이 전부 막힙니다.
+
+> 위 잔여 경로를 진짜로 닫으려면 CI에서 Unity WebGL 빌드를 돌려 커밋된 번들과 대조하는
+> 수밖에 없습니다(#345의 선택지 B). Unity 라이선스와 빌드 시간 비용 때문에 트리 해시
+> 스탬프(선택지 A)를 택했고, 그 대가로 이 위험이 남습니다.
 
 ### 배포 파이프라인 현황
 
