@@ -89,7 +89,20 @@ MASKED_TOOLS: frozenset[str] = frozenset({
     "finus_mcp_trading_balance_rlz_pl",  # 실현손익
     "finus_mcp_trading_today_orders",    # 당일 주문·체결
     "finus_list_diaries",                # 저장된 매매일지 본문(금액·수량 포함)
+    "finus_save_diary",                  # 저장 응답이 방금 역치환한 본문을 되비춘다 — 아래 참고
 })
+
+# **왜 `finus_save_diary`가 조회 도구도 아닌데 목록에 있는가**
+#
+# 이 도구는 저장 직전 `restore_for_internal`로 제목·본문을 **원값으로 되돌린다**. 그런데
+# backend `POST /api/v1/db/diary`는 `{"status": "success", "data": <Diary 전체>}`를
+# 돌려주고(`backend/main.py`), `Diary`에는 방금 되돌린 `title`·`content`가 그대로 들어
+# 있다. 그 응답을 Observation으로 돌려주면 이 계층이 막은 평문이 **같은 요청 안에서**
+# 컨텍스트에 재유입돼 다음 턴에 외부 LLM으로 나간다.
+#
+# 성공 경로는 `finus_api`가 반환값을 `{"id", "created_at"}`로 좁혀 되비춤 자체를 없앴지만,
+# 목록에도 넣어 둔다 — 오류 경로(`diary_api_http_error`의 `detail`은 backend 422 응답에
+# 실린 요청 본문을 그대로 담을 수 있다)까지 한 번에 덮는 fail-closed 쪽이다.
 
 # 자리표시자 형식은 pii_mask._PLACEHOLDER_RE와 같지만 **scope를 캡처**한다 — 위
 # docstring의 "자기가 만든 것만" 판정에 필요하다. 얼터네이션을 같은 출처
@@ -154,6 +167,10 @@ def restore_for_internal(text: str) -> str:
     (사용자 원문 유래)까지 여기서 중립 문구로 갈아엎으면, backend의 왕복이 깨진 채
     DB에 저장된다.
     """
+    # 이웃한 ``unmask_response``는 ``box is None``으로 갈리는데 여기는 빈 dict까지 함께
+    # 걷어낸다. **동작 차이는 없다** — 빈 박스로 아래 sub()를 돌려도 되돌릴 항목이 없어
+    # 원문이 그대로 나온다. 이쪽은 그 경우를 빠른 경로로 접어 둔 것뿐이고, 저쪽은 박스가
+    # 비어도 "이 요청 scope인데 매핑에 없는 것"의 판정 흐름을 한 갈래로 유지한다.
     box = PII_MAPPING.get()
     if not text or not box:
         return text

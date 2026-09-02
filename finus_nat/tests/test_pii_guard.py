@@ -55,6 +55,48 @@ _NAT_PII_MASK = _REPO_ROOT / "finus_nat" / "src" / "nat_finus_nat" / "pii_mask.p
 _BALANCE_FIXTURE = _REPO_ROOT / "mcp-trading" / "tests" / "fixtures" / "balance_report.json"
 
 
+def _is_call_to(node: ast.AST, name: str) -> bool:
+    """*node*가 ``name(...)`` 형태의 호출인가."""
+    return isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == name
+
+
+def _module_str_constants(tree: ast.Module) -> dict[str, str]:
+    """모듈 최상위의 ``NAME = "문자열"`` 상수 — ``_KIS_BALANCE_LEDGER_NAME`` 같은 것."""
+    consts: dict[str, str] = {}
+    for node in tree.body:
+        targets = (
+            [node.target] if isinstance(node, ast.AnnAssign) else
+            list(node.targets) if isinstance(node, ast.Assign) else []
+        )
+        value = getattr(node, "value", None)
+        if not isinstance(value, ast.Constant) or not isinstance(value.value, str):
+            continue
+        for target in targets:
+            if isinstance(target, ast.Name):
+                consts[target.id] = value.value
+    return consts
+
+
+def _recorded_tool_names() -> set[str]:
+    """``finus_api.py``가 ``_record_and_mask``에 넘기는 도구 이름 전부.
+
+    첫 인자가 문자열 리터럴이면 그대로, 모듈 상수 이름이면 그 값으로 해석한다
+    (``_record_and_mask(_KIS_BALANCE_LEDGER_NAME, ...)`` 경로).
+    """
+    tree = ast.parse(_FINUS_API_PATH.read_text(encoding="utf-8"))
+    consts = _module_str_constants(tree)
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if not _is_call_to(node, "_record_and_mask") or not node.args:
+            continue
+        first = node.args[0]
+        if isinstance(first, ast.Constant) and isinstance(first.value, str):
+            names.add(first.value)
+        elif isinstance(first, ast.Name) and first.id in consts:
+            names.add(consts[first.id])
+    return names
+
+
 def _request(text: str) -> ChatRequestOrMessage:
     return ChatRequestOrMessage(messages=[{"role": "user", "content": text}])
 
@@ -121,18 +163,42 @@ class TestMaskToolResult:
         assert mask_tool_result("finus_earnings_report", text) == text
         assert mapping_box == {}
 
-    def test_every_account_data_tool_is_covered(self):
-        """계좌 자격증명으로 조회하는 도구가 목록에서 빠지면 실패한다.
+    def test_masked_tool_names_still_exist_in_source(self):
+        """``MASKED_TOOLS``의 이름이 ``finus_api.py``에 없으면 실패한다.
 
-        도구 이름은 ``finus_api.py``의 원장 키에서 그대로 읽는다 — 도구 이름이 바뀌면
-        ``MASKED_TOOLS``의 문자열이 조용히 죽으므로, 실제 소스와 대조해 고정한다.
+        도구 이름이 바뀌면 목록의 문자열이 조용히 죽어 마스킹이 통째로 빠진다. 이름은
+        원장 키에서 그대로 읽으므로 실제 소스와 대조해 고정한다.
         """
-        source = _FINUS_API_PATH.read_text(encoding="utf-8")
-        for name in MASKED_TOOLS:
-            assert f'"{name}"' in source, (
-                f"MASKED_TOOLS의 {name!r}가 finus_api.py에 없습니다. 도구 이름이 바뀌었다면 "
-                "pii_guard.MASKED_TOOLS도 함께 고쳐야 마스킹이 계속 걸립니다."
-            )
+        recorded = _recorded_tool_names()
+        assert MASKED_TOOLS <= recorded, (
+            f"MASKED_TOOLS의 {sorted(MASKED_TOOLS - recorded)}가 finus_api.py의 "
+            "_record_and_mask 호출에 없습니다. 도구 이름이 바뀌었다면 "
+            "pii_guard.MASKED_TOOLS도 함께 고쳐야 마스킹이 계속 걸립니다."
+        )
+
+    def test_new_account_tools_are_masked_by_default(self):
+        """새 계좌 도구가 ``MASKED_TOOLS``에서 빠지면 실패한다 — fail-closed의 유일한 가드.
+
+        위 테스트는 ``MASKED_TOOLS ⊆ 소스`` 방향이라 **목록에서 빠진 도구**를 잡지 못한다
+        (PR #335 리뷰). 이쪽이 반대 방향이다: ``finus_api.py``가 결과를 돌려주는 도구
+        가운데 계좌 계열 접두사를 가진 것은 전부 목록에 있어야 한다. 새 계좌 도구를
+        추가하면서 목록을 잊으면 여기서 걸린다.
+
+        접두사 판정 근거: ``finus_mcp_trading_*``는 KIS 잔고·손익·주문 조회 계열이고,
+        ``finus_account_*``는 Kis Trading MCP pass-through 래퍼다. 둘 다 계좌 자격증명
+        채널이므로 예외 없이 마스킹 대상이다. 정말 마스킹하지 않아야 할 계좌 계열 도구가
+        생긴다면, 목록이 아니라 이 테스트에 근거를 적고 면제해야 한다.
+        """
+        account_prefixes = ("finus_mcp_trading_", "finus_account_")
+        account_tools = {
+            name for name in _recorded_tool_names() if name.startswith(account_prefixes)
+        }
+        assert account_tools, "계좌 계열 도구를 하나도 찾지 못했습니다 — 접두사 규칙을 확인하세요."
+        assert account_tools <= MASKED_TOOLS, (
+            f"계좌 계열 도구 {sorted(account_tools - MASKED_TOOLS)}가 "
+            "pii_guard.MASKED_TOOLS에 없습니다. 계좌 자격증명으로 조회한 결과가 마스킹 없이 "
+            "외부 LLM 컨텍스트로 나갑니다(#231)."
+        )
 
     def test_masks_even_without_a_box_and_logs(self, caplog):
         """박스가 없어도 마스킹은 한다(fail-closed) — 유출보다 품질 저하를 택한다."""
@@ -283,6 +349,106 @@ class TestRestoreForInternal:
 
         assert captured["json"] == {"title": "매매일지", "content": "오늘 삼성전자 3주 210,000원"}
 
+    async def test_save_diary_response_does_not_echo_plaintext_back_to_llm(
+        self, monkeypatch, mapping_box, ledger
+    ):
+        """저장 응답이 방금 역치환한 본문을 Observation으로 되비추면 실패한다 (PR #335 리뷰).
+
+        backend ``POST /api/v1/db/diary``는 ``{"status": "success", "data": <Diary 전체>}``를
+        돌려주고 그 ``data``에는 평문 ``title``·``content``가 들어 있다. 그대로 반환하면
+        이 이슈가 막은 평문이 **같은 요청 안에서** 컨텍스트에 재유입돼 다음 턴에 외부
+        LLM으로 나간다 — 도구 결과 마스킹 전체가 무의미해지는 경로다.
+        """
+        plaintext_title = "매매일지 2026-05-24"
+        plaintext_content = "삼성전자 3주 210,000원 매수"
+
+        class FakeResponse:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                # backend/main.py::create_db_diary의 실제 응답 모양.
+                return {
+                    "status": "success",
+                    "data": {
+                        "id": 7,
+                        "title": plaintext_title,
+                        "content": plaintext_content,
+                        "created_at": "2026-05-24T09:00:00+00:00",
+                    },
+                }
+
+        class FakeClient:
+            def __init__(self, timeout):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def post(self, url, json):
+                return FakeResponse()
+
+        monkeypatch.setattr(finus_api.httpx, "AsyncClient", FakeClient)
+
+        masked = mask_tool_result("finus_mcp_trading_get_balance", plaintext_content)
+        config = finus_api.FinusSaveDiaryConfig(backend_url="http://test-backend:8000")
+        async with finus_api.finus_save_diary(config, None) as info:
+            observation = await info.single_fn(
+                finus_api.FinusSaveDiaryInput(title=plaintext_title, content=masked)
+            )
+
+        # (1) 금액·수량이 평문으로 LLM에게 돌아가지 않는다.
+        assert "210,000원" not in observation
+        assert "3주" not in observation
+        # (2) 저장 확인에 필요한 메타데이터는 남는다.
+        assert json.loads(observation) == {"id": 7, "created_at": "2026-05-24T09:00:00+00:00"}
+        # (3) 원장에는 남는다 — 마스킹은 LLM 컨텍스트로 나가는 값에만 필요하다(#209).
+        assert ledger.records[-1].tool_name == "finus_save_diary"
+
+    async def test_save_diary_error_detail_is_masked(self, monkeypatch, mapping_box, ledger):
+        """저장 실패 응답이 요청 본문을 되비춰도 평문이 나가지 않는다 (PR #335 리뷰).
+
+        성공 경로는 반환값을 메타데이터로 좁혀 되비춤을 없앴지만, 오류 경로는 그럴 수
+        없다 — backend의 422 응답 ``detail``에는 방금 역치환한 본문이 그대로 실린다.
+        ``finus_save_diary``가 ``MASKED_TOOLS``에 있어야 이 경로가 덮인다.
+        """
+
+        class FakeResponse:
+            status_code = 422
+            # FastAPI 검증 오류는 입력을 그대로 되비춘다.
+            text = '{"detail":[{"loc":["body","content"],"input":"삼성전자 3주 210,000원 매수"}]}'
+
+            def raise_for_status(self):
+                raise finus_api.httpx.HTTPStatusError("422", request=None, response=self)
+
+        class FakeClient:
+            def __init__(self, timeout):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def post(self, url, json):
+                return FakeResponse()
+
+        monkeypatch.setattr(finus_api.httpx, "AsyncClient", FakeClient)
+
+        config = finus_api.FinusSaveDiaryConfig(backend_url="http://test-backend:8000")
+        async with finus_api.finus_save_diary(config, None) as info:
+            observation = await info.single_fn(
+                finus_api.FinusSaveDiaryInput(title="매매일지", content="삼성전자 3주 210,000원 매수")
+            )
+
+        assert "diary_api_http_error" in observation
+        assert "210,000원" not in observation
+        assert "3주" not in observation
+
 
 # ---------------------------------------------------------------------------
 # 4. 최상위 에이전트 배선 — 마스킹과 역치환이 한 쌍으로 맞물리는가
@@ -373,17 +539,23 @@ class TestNoBypass:
         """
         tree = ast.parse(_FINUS_API_PATH.read_text(encoding="utf-8"))
 
-        offenders: list[int] = []
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.FunctionDef) or node.name == "_record_and_mask":
-                continue
-            for inner in ast.walk(node):
-                if (
-                    isinstance(inner, ast.Call)
-                    and isinstance(inner.func, ast.Name)
-                    and inner.func.id == "_record_to_ledger"
-                ):
-                    offenders.append(inner.lineno)
+        # 도구는 전부 ``async def``다. 함수를 훑어 들어가는 대신 **호출 전부를 모으고
+        # 허용된 자리(_record_and_mask 정의 안)만 뺀다** — 이렇게 하면 def 종류
+        # (FunctionDef/AsyncFunctionDef)나 중첩 깊이, 모듈 최상위 호출까지 한 번에
+        # 덮인다. 이전 판은 ``ast.FunctionDef``만 봐서 async 도구 전부가 사각지대였다
+        # (PR #335 리뷰, 실측: 사정권에 든 것은 sync 함수 하나뿐이었다).
+        allowed = {
+            inner.lineno
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == "_record_and_mask"
+            for inner in ast.walk(node)
+            if _is_call_to(inner, "_record_to_ledger")
+        }
+        offenders = sorted(
+            {node.lineno for node in ast.walk(tree) if _is_call_to(node, "_record_to_ledger")}
+            - allowed
+        )
 
         assert offenders == [], (
             f"finus_api.py:{offenders} 가 _record_to_ledger를 직접 호출합니다. "

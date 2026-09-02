@@ -411,6 +411,7 @@ backend → NAT ("내 잔고 어때?" — 마스킹해도 걸릴 게 없다)
 | `finus_mcp_trading_balance_rlz_pl` | O | 실현손익 |
 | `finus_mcp_trading_today_orders` | O | 당일 주문·체결 |
 | `finus_list_diaries` | O | 저장된 일지 본문의 금액·수량 |
+| `finus_save_diary` | O | 저장 응답이 방금 역치환한 본문을 되비춘다 — 아래 참고 |
 | `finus_market_news` / `finus_disclosure_signal` / `finus_earnings_report` | X | 공개 정보 |
 
 `finus_account_balance`는 같은 도구가 잔고(`inquire_balance`)와 시세(`inquire_price`)를
@@ -450,6 +451,22 @@ backend의 fail-open이 쓸어 담는다.
 (`restore_for_internal`). 일지 본문은 LLM이 마스킹된 잔고를 보고 쓴 것이라 그대로
 저장하면 `<AMOUNT_9f2a1c_1>`가 DB에 영구히 박히는데, 요청이 끝나면 매핑이 사라져
 복구할 수 없다. 목적지가 외부 LLM이 아니라 우리 backend이므로 원값이 맞다.
+
+**단, 되돌린 값이 응답으로 되비쳐 오는 경로를 함께 닫아야 한다** (PR #335 리뷰).
+backend `POST /api/v1/db/diary`는 `{"status": "success", "data": <Diary 전체>}`를
+돌려주고, 그 `data`에는 방금 역치환한 `title`·`content`가 평문 그대로 들어 있다.
+이것을 Observation으로 반환하면 이 절이 막은 평문이 **같은 요청 안에서** 컨텍스트에
+재유입돼 다음 턴에 `api.openai.com`으로 나간다 — 도구 결과 마스킹 전체가 무의미해진다.
+두 겹으로 닫았다:
+
+1. **성공 경로** — 반환값을 `{"id", "created_at"}`로 좁혀 되비춤 자체를 없앴다. 에이전트가
+   저장 확인에 필요한 것은 식별자와 시각뿐이다.
+2. **오류 경로** — `finus_save_diary`를 `MASKED_TOOLS`에 넣었다. backend 422 응답의
+   `detail`은 검증 실패한 요청 본문을 그대로 되비추므로 좁히기로는 덮이지 않는다.
+   fail-closed 쪽을 함께 둔다.
+
+두 겹 모두 `test_pii_guard.py`의 회귀 테스트가 각각 고정한다(한쪽만 되돌려도 실패하는
+것을 실측했다).
 
 ### Mem0 저장 경로 — 별도 조치 불필요 (F-17 범위 판정)
 
@@ -495,6 +512,22 @@ backend의 fail-open이 쓸어 담는다.
   "주문금액이 예수금 대비 과도한가"라는 검증자의 판정 자체가 성립하지 않으므로
   (자리표시자는 대소 비교가 되지 않는다), 자리표시자가 아니라 비율·구간 변환((b) 방식)이
   필요하다. 설계 비용이 이 이슈의 범위를 넘어 **#336으로 분리했다.**
+- **도구 인자 방향에는 역치환이 없다 (#338)** — 마스킹은 도구 **결과**에만 걸리고,
+  `restore_for_internal`을 타는 곳은 `finus_save_diary` 하나뿐이다. `finus_account_balance`는
+  주문 권한이 있는 pass-through이므로(`configs/common.yml`), 에이전트가 마스킹된 잔고에서
+  읽은 `<QTY_...>`를 그대로 `params`에 실으면 주문이 실패한다. 잘못된 주문이 나가지는
+  않고(MCP 검증이 거부하는 시끄러운 실패) "보유 전량 매도" 같은 흐름이 깨진다. 위
+  "감수하는 비용"은 절대 금액 판단만 다루므로 이 건은 별개다. 인자에도 역치환을 태우는
+  것이 정답인지가 자명하지 않아 — 시끄러운 실패를 조용한 오주문 가능성과 맞바꾸는
+  선택이다 — **#338로 분리했다.**
+- **사용자 발화 유래 자리표시자가 일지 DB에 남는다 (#339)** — `restore_for_internal`이
+  낯선 scope를 통과시키는 근거는 "backend `unmask_pii`가 판정하게 둔다"인데, 저장
+  목적지인 `POST /api/v1/db/diary`는 저장만 하고 `unmask_pii`를 타지 않는다
+  (`backend/main.py::create_db_diary`). 그래서 backend가 만든 `<AMOUNT_be3f1a_1>`이
+  `Diary.content`에 영구히 박힌다. 통과 규칙은 **응답 본문**에는 맞지만 **저장 경로**는
+  backend 왕복의 바깥이라 성립하지 않는다. #230 시점부터 있던 층간 틈이고, 해소하려면
+  backend의 매핑 수명을 요청 범위로 끌어올리거나 저장 배선을 옮겨야 해 **#339로
+  분리했다.**
 - **시세 데이터 과다 마스킹** — 위 "감수하는 비용" 참고.
 - **박스를 물려받지 못한 실행 경로** — ContextVar를 전파하지 않는 스레드풀에서 도구가
   돌면 매핑이 유실된다. 그때도 **마스킹은 그대로 하고**(fail-closed) ERROR 로그를

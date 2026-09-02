@@ -1338,7 +1338,17 @@ async def finus_save_diary(config: FinusSaveDiaryConfig, _builder: Builder):
         if body.get("status") != "success":
             result = _err_json("diary_api_error", response=body)
             return _record_and_mask("finus_save_diary", result)
-        result = json.dumps(body.get("data"), ensure_ascii=False)
+        # 저장 성공 응답은 **메타데이터만** 돌려준다 (#231, PR #335 리뷰). backend는
+        # `{"status": "success", "data": <Diary 전체>}`를 주는데, 그 `data`에는 방금
+        # 위에서 역치환한 `title`·`content`가 평문 그대로 들어 있다. 그대로 반환하면
+        # 이 이슈가 막은 평문이 같은 요청 안에서 Observation으로 컨텍스트에 재유입돼
+        # 다음 턴에 외부 LLM으로 나간다. 에이전트가 저장 확인에 필요한 것은 식별자와
+        # 시각뿐이므로 되비춤 자체를 없앤다.
+        data = body.get("data")
+        if not isinstance(data, dict):
+            data = {}
+        saved = {"id": data.get("id"), "created_at": data.get("created_at")}
+        result = json.dumps(saved, ensure_ascii=False)
         return _record_and_mask("finus_save_diary", result)
 
     yield FunctionInfo.from_fn(
