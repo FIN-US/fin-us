@@ -82,12 +82,17 @@ _STOCK_CODE_RE = re.compile(r"\A(?:[0-9A-Z]{6,7}|[0-9A-Z]{9})\Z")
 # 근거 있음, 9자 펀드·영숫자 6자 신형우선주·신주인수권은 미확인, 전부 문서 근거일 뿐
 # 실호출 확인은 아님"). 실계좌 없이는 판정할 수 없으므로 가드를 무조건 열지 않고
 # KIS_ALNUM_STOCK_ORDER_ENABLED 플래그 뒤에 둔다 — 아래 is_orderable_stock_code()가
-# 실제 판정 진입점이며, 이 상수는 그 함수의 "플래그 꺼짐(기본값)" 분기에서만 쓰인다.
+# 텔레그램 주문 경로의 판정 진입점이며, 이 상수는 그 함수의 "플래그 꺼짐(기본값)"
+# 분기에서, 그리고 order_assist.check_orderable_code()에서 쓰인다. 후자는 플래그와
+# 무관하게 이 상수를 직접 참조한다(아래 ⚠️ 블록 3번째 복제본 항목 참조).
 _ORDERABLE_STOCK_CODE_RE = re.compile(r"\A[0-9]{6,7}\Z")
 
 # 플래그가 켜졌을 때(KIS_ALNUM_STOCK_ORDER_ENABLED=true) 허용하는 범위. _STOCK_CODE_RE
 # (입력이 코드 형태인지 판정하는 정규식)와 같은 길이 분포(6·7·9자, 8자는 마스터에
 # 0건이라 제외)를 쓴다. mcp-trading/order.js의 플래그 켜짐 분기와 형태를 맞춘다.
+# _STOCK_CODE_RE와 패턴이 바이트 단위로 같지만 의도적으로 분리해 둔다 — 하나는 "입력이
+# 코드 형태인가", 다른 하나는 "주문을 받을 범위인가"로 역할이 다르고, 한쪽이 바뀌어도
+# 다른 쪽이 따라갈 이유가 없다(별칭으로 묶으면 그 구분이 사라진다).
 _ORDERABLE_STOCK_CODE_ALNUM_RE = re.compile(r"\A(?:[0-9A-Z]{6,7}|[0-9A-Z]{9})\Z")
 
 
@@ -116,6 +121,14 @@ def is_orderable_stock_code(code: str) -> bool:
         계층에 같은 KIS_ALNUM_STOCK_ORDER_ENABLED 값을 넣어야 한다 — mcp-trading은
         backend가 띄우는 자식 프로세스라 config._MCP_ENV_ALLOWED_PREFIXES의 KIS_
         접두사 통과 목록을 통해 같은 값을 그대로 물려받는다.
+
+        3번째 복제본이 하나 더 있다: order_assist.check_orderable_code()가
+        _ORDERABLE_STOCK_CODE_RE를 직접 참조한다(자동 제안 경로의 하드 한도 판정).
+        이건 의도된 비대칭이다 — 플래그를 켜도 자동 제안은 숫자 6~7자만 낸다.
+        사람이 명시적으로 입력한 코드와 달리 봇이 스스로 고른 종목은 KIS 수용
+        여부가 확정될 때까지(#265 실측) 기존 범위에 묶어 둔다.
+        test_order_assist.py의 "플래그 켜짐에서도 제안 경로는 숫자만" 테스트가 이
+        비대칭을 고정한다.
     """
     if _alnum_stock_order_enabled():
         return bool(_ORDERABLE_STOCK_CODE_ALNUM_RE.fullmatch(code))
