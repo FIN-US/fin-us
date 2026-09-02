@@ -505,3 +505,57 @@ test("fetchAllPaged: 루프 진입 시점 체크로 중단되면 그 반복에�
   // 대기는 페이지 사이 1회(= pages - 1)뿐. 마지막 페이지 뒤에는 대기가 없다.
   assert.deepEqual(sleepCalls, [100]);
 });
+
+// ─── 이슈 #306: 기본 sleep 경로 포지티브 컨트롤 ───────────────────────────────
+
+// 위 pageDelayMs 테스트 6건(이슈 #210 3건 + 이슈 #307 3건)은 전부 sleep을 주입하므로
+// 기본 sleep 구현을 한 번도
+// 실행하지 않는다. 그런데 balance.test.js의 "fetchAllBalance schedules no
+// page-to-page delay" 가드는 sleep을 주입할 수 없어, 기본 sleep이 전역 setTimeout을
+// 호출한다는 전제 위에 서 있다. 그 전제가 깨지면(예: 기본값을 node:timers/promises의
+// setTimeout으로 바꾸면) 스파이에 아무것도 잡히지 않아 가드가 조용히 초록불로 남는다.
+//
+// 이 테스트는 그 전제 자체를 단언하는 포지티브 컨트롤이다. 같은 방식의 전역 setTimeout
+// 스파이 아래에서 sleep을 주입하지 않고 pageDelayMs를 넘겨, 기본 sleep이 실제로 전역
+// setTimeout에 그 값을 건다는 것을 확인한다. 기본 sleep 구현이 바뀌면 balance.test.js의
+// 가드보다 이 테스트가 먼저 빨간불이 되어 두 파일의 결합이 드러난다.
+test("fetchAllPaged: 기본 sleep은 전역 setTimeout에 pageDelayMs를 건다 (balance.test.js 가드의 포지티브 컨트롤)", async () => {
+  let callCount = 0;
+  const fetchPage = async () => {
+    callCount += 1;
+    return {
+      body: {
+        output1: [{ pdno: String(callCount).padStart(6, "0") }],
+        output2: callCount === 1 ? [{ tot: "1" }] : [],
+        // 3번째 응답에서 커서가 끊겨 루프가 끝난다 → 페이지 간격은 2번
+        ctx_area_fk100: callCount < 3 ? `FK${callCount}` : "",
+        ctx_area_nk100: callCount < 3 ? `NK${callCount}` : "",
+      },
+      trCont: "F",
+    };
+  };
+
+  const originalSetTimeout = globalThis.setTimeout;
+  const scheduledDelays = [];
+  let result;
+
+  globalThis.setTimeout = function spySetTimeout(handler, delay, ...args) {
+    scheduledDelays.push(delay);
+    return originalSetTimeout.call(this, handler, delay, ...args);
+  };
+
+  try {
+    result = await fetchAllPaged(fetchPage, {
+      maxPages: MAX_PAGES,
+      timeBudgetMs: TIME_BUDGET_MS,
+      pageDelayMs: 1, // sleep 미주입 → 기본 구현이 실행된다
+    });
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
+
+  assert.equal(callCount, 3);
+  assert.equal(result.truncated, "no_cursor");
+  // 기본 sleep이 전역 setTimeout을 안 쓰게 되면 이 배열이 비어 실패한다.
+  assert.deepEqual(scheduledDelays, [1, 1]);
+});
