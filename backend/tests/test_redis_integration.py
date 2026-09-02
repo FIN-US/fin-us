@@ -110,13 +110,12 @@ async def test_real_redis_poller_state_survives_a_new_store_instance():
 
     try:
         writer = RedisTelegramPollerStore(redis, keys=keys)
-        await writer.save(TelegramPollerState(offset=44, handled_ahead=frozenset({42, 43})))
+        await writer.save(TelegramPollerState(offset=44))
 
         reader = RedisTelegramPollerStore(redis, keys=keys)
         loaded = await reader.load()
 
         assert loaded.offset == 44
-        assert loaded.handled_ahead == frozenset({42, 43})
         assert await redis.ttl(keys.telegram_poller_state()) > 0
     finally:
         stale = await redis.keys(f"{prefix}:*")

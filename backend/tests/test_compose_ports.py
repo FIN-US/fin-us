@@ -1,7 +1,7 @@
 """docker-compose가 무인증 서비스를 전 인터페이스에 게시하지 않는지 고정한다(#285).
 
 `finus-nat`은 `/v1/chat/completions`를 인증 없이 받고, `redis`에는 `requirepass`가
-없는데 대기 주문(`RedisPendingOrderStore`)·폴러 offset·`_handled_ahead`(#248)·스케줄러
+없는데 대기 주문(`RedisPendingOrderStore`)·폴러 offset(#248)·스케줄러
 락처럼 금전 경로의 상태가 들어 있다. 둘 다 컴포즈 내부에서는 네트워크 별칭으로만
 불리므로 호스트 게시는 로컬 디버깅 편의일 뿐이고, 그 편의는 루프백으로 충분하다.
 

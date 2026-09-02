@@ -2623,12 +2623,20 @@ async def test_poller_eventually_skips_persistent_send_failures(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_poller_handles_later_update_when_earlier_update_is_poison(monkeypatch):
-    """배치 안의 poison 1건이 뒤의 정상 update를 막지 않는다 (#241)."""
+async def test_poller_stops_the_batch_at_a_poison_update(monkeypatch):
+    """poison을 만나면 배치를 끊는다 — 뒤의 update는 poison이 폐기된 뒤에야 실행된다.
+
+    #241은 반대였다(뒤의 update를 선행 실행). 그 선행 실행분은 offset이 확정하지 못한 채
+    재배달되므로 "이미 실행했다"는 상태(_handled_ahead)가 필요했고, 그 상태의 유실이 곧
+    주문 부수효과의 중복 실행이었다. #259 1단계가 그 교환을 되돌린다 — 여기서 고정하는
+    것은 "42가 41의 예산이 소진되기 전에는 한 번도 실행되지 않는다"이다 (#270 → #259).
+    """
     notifier = FakeNotifier()
     notifier.enabled = True
     notifier.bot_token = "token"
     handled = []
+    # 41이 아직 창 안일 때 42가 실행됐는지 보려면, 배치가 끊긴 시점마다 확인해야 한다.
+    handled_before_skip = []
 
     class PartialHandler:
         async def handle_update(self, update):
@@ -2637,7 +2645,14 @@ async def test_poller_handles_later_update_when_earlier_update_is_poison(monkeyp
             handled.append(update["update_id"])
 
     poller = _make_poller(notifier, handler=PartialHandler())
-    clock = FakePollerClock()
+
+    class WatermarkClock(FakePollerClock):
+        async def _sleep(self, delay):
+            # 41이 폐기되기 전 매 배치 끝에서 42는 아직 손도 대지 않은 상태여야 한다.
+            handled_before_skip.append(list(handled))
+            await super()._sleep(delay)
+
+    clock = WatermarkClock()
     clock.install(monkeypatch, poller)
     batch = _poison_batch()
 
@@ -2653,10 +2668,12 @@ async def test_poller_handles_later_update_when_earlier_update_is_poison(monkeyp
     with pytest.raises(asyncio.CancelledError):
         await poller.run()
 
-    # 정상 update는 첫 배치에서 바로 처리되고, 재배달되어도 중복 실행되지 않는다.
+    # 41이 폐기되기 전 세 배치에서 42는 실행되지 않았다. 선행 실행이 살아 있으면
+    # 첫 배치부터 [42]가 찍힌다.
+    assert handled_before_skip == [[], [], []]
+    # 41 폐기 뒤에야 42가, 정확히 한 번 실행된다.
     assert handled == [42]
     assert poller.offset == 43
-    assert poller._handled_ahead == set()
     assert poller._failures == {}
     # 상수를 그대로 비교하면 동어반복이라 값 변경을 못 잡는다. 리터럴로 고정한다 (PR #242 리뷰).
     assert clock.sleeps == [5.0, 15.0, 45.0]
@@ -2667,7 +2684,7 @@ async def test_poller_handles_later_update_when_earlier_update_is_poison(monkeyp
 
 @pytest.mark.asyncio
 async def test_poller_offset_stays_behind_poison_until_retries_exhausted(monkeypatch):
-    """poison 뒤의 update를 처리해도 offset은 poison이 해소되기 전엔 넘어가지 않는다 (#241)."""
+    """offset은 poison이 해소되기 전엔 그것을 넘어가지 않는다 (#241)."""
     notifier = FakeNotifier()
     notifier.enabled = True
     notifier.bot_token = "token"
@@ -2701,10 +2718,9 @@ async def test_poller_offset_stays_behind_poison_until_retries_exhausted(monkeyp
     with pytest.raises(asyncio.CancelledError):
         await poller.run()
 
-    # 뒤의 update는 처리됐지만(중복 없이 1회), 41은 아직 창 안이라 버려지지 않았다.
-    assert handled == [42]
+    # 41이 아직 창 안이라 배치가 거기서 끊긴다 — 42는 실행되지 않는다.
+    assert handled == []
     assert poller.offset is None
-    assert poller._handled_ahead == {42}
     assert poller._failures[41].attempts == 2
     assert clock.now < telegram_commands.UPDATE_RETRY_WINDOW_SECONDS
     assert notifier.messages == []
@@ -2712,7 +2728,11 @@ async def test_poller_offset_stays_behind_poison_until_retries_exhausted(monkeyp
 
 @pytest.mark.asyncio
 async def test_poller_offset_stays_behind_poison_in_out_of_order_batch(monkeypatch):
-    """배치가 update_id 역순으로 와도 offset은 poison을 넘지 않는다 (#241)."""
+    """배치가 update_id 역순으로 와도 offset은 poison을 넘지 않는다 (#241).
+
+    정렬이 빠지면 42가 먼저 성공해 offset이 43이 되고, 41은 재배달 대상에서 사라진다 —
+    배치를 poison에서 끊는 것만으로는 이 유실을 막지 못한다.
+    """
     notifier = FakeNotifier()
     notifier.enabled = True
     notifier.bot_token = "token"
@@ -2745,19 +2765,27 @@ async def test_poller_offset_stays_behind_poison_in_out_of_order_batch(monkeypat
     assert poller.offset is None
     assert set(poller._failures) == {41}
     assert poller._failures[41].attempts == 1
-    assert poller._handled_ahead == {42}
-    assert handled == [None, 42]
+    # update_id 없는 update는 정렬 키가 맨 앞으로 보내고 실패해도 배치를 끊지 않으므로
+    # 41보다 먼저 실행된다. 42는 41에 막혀 이 배치에서 실행되지 않는다.
+    assert handled == [None]
 
 
 @pytest.mark.asyncio
-async def test_poller_batches_skip_notice_for_multiple_poison_updates(monkeypatch):
-    """한 배치에 poison이 여럿이어도 통지는 한 건으로 합친다 (#241, PR #242 리뷰)."""
+async def test_poller_skips_poison_updates_one_at_a_time(monkeypatch):
+    """poison이 여럿이면 앞에서부터 하나씩 폐기된다 — 뒤의 것은 그전에 시도조차 되지 않는다.
+
+    #241에서는 한 배치가 여럿을 함께 폐기할 수 있었다. 배치를 끊는 지금은 예산이 쌓이려면
+    시도가 있어야 하고 시도는 첫 RETRY에서 멈추므로, 한 배치가 폐기할 수 있는 것은 맨 앞
+    하나뿐이다. 통지 병합 자체는 test_skip_notice_merges_updates_into_one_message가 고정한다.
+    """
     notifier = FakeNotifier()
     notifier.enabled = True
     notifier.bot_token = "token"
+    attempted = []
 
     class FailingHandler:
         async def handle_update(self, update):
+            attempted.append(update["update_id"])
             raise RuntimeError("poison update")
 
     poller = _make_poller(notifier, handler=FailingHandler())
@@ -2777,6 +2805,35 @@ async def test_poller_batches_skip_notice_for_multiple_poison_updates(monkeypatc
         await poller.run()
 
     assert poller.offset == 43
+    # 41의 예산(4회)이 소진되기 전에는 42를 건드리지 않는다.
+    assert attempted == [41, 41, 41, 41, 42, 42, 42, 42]
+    assert notifier.messages == [
+        f"{telegram_commands.UPDATE_SKIPPED_NOTICE}\n실패한 요청: /alerts off",
+        f"{telegram_commands.UPDATE_SKIPPED_NOTICE}\n실패한 요청: /help",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_skip_notice_merges_updates_into_one_message():
+    """통지는 update가 몇 건이든 한 건으로 합친다 (#241, PR #242 리뷰).
+
+    poison N건에 N번 발송하면 채팅당 초당 ~1건 제한에 걸려 429를 만들고, 429는 다시 전송
+    실패 = 새 poison이 된다. #259 1단계 이후 배치가 실어 보내는 건수는 최대 1이라 run()을
+    통해서는 이 성질을 더 이상 재현할 수 없다 — 배치 루프가 다시 바뀌어 N건이 되살아날 때
+    이 병합이 남아 있도록 helper 단위로 고정한다.
+    """
+    notifier = FakeNotifier()
+    notifier.enabled = True
+    notifier.bot_token = "token"
+
+    class NoopHandler:
+        async def handle_update(self, update):
+            return None
+
+    poller = _make_poller(notifier, handler=NoopHandler())
+
+    await poller._notify_updates_skipped(_poison_batch())
+
     assert notifier.messages == [
         f"{telegram_commands.UPDATE_SKIPPED_NOTICE}\n실패한 요청: /alerts off, /help"
     ]
@@ -2946,11 +3003,12 @@ def test_poller_defaults_to_redis_state_store(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_poller_restart_does_not_reexecute_updates_handled_ahead_of_poison(monkeypatch):
-    """poison 뒤에서 먼저 실행한 update는 재시작 후에도 다시 실행되지 않는다 (#248).
+async def test_poller_restart_cannot_reexecute_updates_behind_a_poison(monkeypatch):
+    """poison 뒤의 update는 재시작을 사이에 두고도 중복 실행될 수 없다 (#248 → #259 1단계).
 
-    이 이슈의 본체다. 영속화 이전에는 blocked 구간(일반 실패 65초, 전송 실패 335초)에
-    프로세스가 죽으면 offset과 _handled_ahead가 함께 사라져 42, 43이 재실행됐다.
+    #248은 이 성질을 _handled_ahead의 영속화로 샀다. 그 집합이 유실되면(redis 장애·손상 키)
+    보호가 통째로 사라지는 구조였다. 배치를 poison에서 끊으면 선행 실행 자체가 없어져
+    기억할 것도, 유실될 것도 남지 않는다 — 이 테스트는 상태가 아니라 그 부재를 고정한다.
     """
     notifier = FakeNotifier()
     notifier.enabled = True
@@ -2987,19 +3045,18 @@ async def test_poller_restart_does_not_reexecute_updates_handled_ahead_of_poison
     with pytest.raises(asyncio.CancelledError):
         await first.run()
 
-    # 41은 아직 창 안이라 offset이 멈춰 있고, 42·43은 이미 실행됐다.
-    assert handled == [42, 43]
+    # 41이 창 안이라 배치가 거기서 끊긴다 — 42·43은 아직 실행되지 않았다.
+    assert handled == []
     assert first.offset is None
-    assert first._handled_ahead == {42, 43}
 
     # 프로세스 교체. 41은 여전히 미확정이라 텔레그램이 42·43까지 다시 배달한다.
     second = run_process()
     with pytest.raises(asyncio.CancelledError):
         await second.run()
 
-    assert handled == [42, 43]  # 재실행 없음
+    # 재시작 전에 실행한 것이 없으므로 중복될 것도 없다.
+    assert handled == []
     assert second.offset is None
-    assert second._handled_ahead == {42, 43}
 
 
 @pytest.mark.asyncio
@@ -3008,7 +3065,7 @@ async def test_poller_restores_offset_across_restart(monkeypatch):
     notifier = FakeNotifier()
     notifier.enabled = True
     notifier.bot_token = "token"
-    store = InMemoryTelegramPollerStore(TelegramPollerState(offset=42, handled_ahead=frozenset()))
+    store = InMemoryTelegramPollerStore(TelegramPollerState(offset=42))
     requested_offsets = []
 
     class NoopHandler:
@@ -4698,9 +4755,12 @@ async def test_confirmed_order_is_reexecuted_when_restart_lands_in_the_settled_s
 
     창의 정체: place_order 성공(telegram_commands.py의 _handle_confirm)과 _persist_state()
     (run()의 배치 루프) 사이에 _send_text_settled가 최대 20초 들어앉는다. 그 사이 SIGTERM이
-    오면 offset이 전진하지 못한 채 죽고, Telegram이 같은 update를 재배달하며, _handled_ahead도
-    비어 있어 재실행된다. claim(GETDEL)은 이미 주문을 소비했으므로 재실행은 "확정할 대기
+    오면 offset이 전진하지 못한 채 죽고, Telegram이 같은 update를 재배달하며, 재실행을 막을
+    상태가 아무것도 없다. claim(GETDEL)은 이미 주문을 소비했으므로 재실행은 "확정할 대기
     주문이 없습니다"로 끝난다 — 체결된 주문을 미체결로 오표시한다.
+
+    이 창은 #241 revert(#259 1단계)와 무관하다. 원인이 _handled_ahead의 유무가 아니라
+    handle_update 한 번의 실행 시간이기 때문이다.
 
     이 테스트는 지금 열려 있는 창을 **기록**하는 것이지 승인하는 것이 아니다. 닫는 작업은
     #293으로 뺐고, 그 이슈가 닫히면 아래 마지막 두 단언이 뒤집혀야 한다.
