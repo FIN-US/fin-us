@@ -18,6 +18,7 @@ frontend/
 ├── ProjectSettings/ # Unity 프로젝트 설정 (git 추적)
 ├── Build/           # WebGL 빌드 산출물 — 아래 3개 경로만 선별 추적
 │                    #   index.html / Build/** / TemplateData/**
+├── build-stamp.txt  # 위 번들이 어느 Assets/에서 나왔는지 적어 둔 트리 해시 (CI가 대조)
 ├── nginx.conf       # docker-compose의 frontend 서비스가 Build/를 서빙할 때 쓰는 nginx 설정
 └── frontend.slnx    # Visual Studio 솔루션
 ```
@@ -66,11 +67,44 @@ python -m http.server 8080 --directory frontend/Build
    Unity가 선택한 폴더 *아래에* `Build/`·`TemplateData/`·`index.html`을 만들기 때문에
    최종 경로는 `frontend/Build/Build/Build.wasm` 형태가 됩니다 (이중 `Build/`가 정상입니다).
    `frontend`를 고르면 `.gitignore` 화이트리스트에 걸리지 않습니다.
-4. `git add frontend/Build/ && git commit`으로 소스 변경과 함께 커밋합니다.
+4. 빌드가 끝나면 **곧바로** 스탬프를 갱신합니다.
+
+   ```bash
+   scripts/frontend_build_stamp.sh write
+   ```
+
+   이 스크립트는 지금 `frontend/Assets/`의 git 트리 해시를 `frontend/build-stamp.txt`에
+   적습니다. **"이 번들은 이 소스에서 나왔다"는 기록**이고, CI가 이 값을 대조합니다.
+   그래서 **재빌드 직후에만** 실행해야 합니다 — 재빌드 없이 실행하면 어긋난 상태에
+   도장을 찍는 것이라 검사 자체가 무의미해집니다.
+5. `git add frontend/Build/ frontend/build-stamp.txt && git commit`으로 소스 변경과 함께
+   커밋합니다.
 
 > `.gitignore`는 위 3개 경로만 화이트리스트합니다. 빌드 설정을 바꿔 다른 산출물
 > (예: `Build/StreamingAssets/`)이 생기면 `git add`가 **에러 없이 건너뜁니다.**
 > `git status --ignored frontend/Build/`로 누락을 확인하고 `.gitignore`를 함께 갱신하세요.
+
+#### CI가 잡아 주는 것과 사람이 해야 하는 것
+
+CI의 `unity-build-drift` 잡이 두 가지를 봅니다 (`.github/workflows/ci.yml`).
+
+| 검사 | 무엇을 잡는가 | 못 잡는 것 |
+| --- | --- | --- |
+| Assets 변경 시 Build 동반 커밋 여부 | 재빌드를 아예 빠뜨린 커밋 | 재빌드 뒤 소스를 더 고친 상태 |
+| 번들 스탬프와 현재 `Assets/` 대조 | 스탬프를 찍은 소스와 지금 커밋된 소스가 다른 모든 경우 | 아래 |
+
+**자동으로 검증되는 것** — 커밋된 `frontend/Assets/`가 마지막으로 스탬프를 찍은 시점의
+`Assets/`와 같은지. 재빌드를 잊었든, 재빌드 후 소스를 한 번 더 고쳤든(#345의 원인), 스탬프가
+어긋나므로 PR이 빨간불이 됩니다.
+
+**사람이 해야 하는 것** — 스탬프는 *소스*의 해시일 뿐이라, `scripts/frontend_build_stamp.sh
+write`를 **정말 재빌드한 직후에** 실행했는지는 검증할 수 없습니다. 재빌드 없이 스탬프만
+새로 찍으면 해시는 맞아떨어집니다. 다만 그 경우 `frontend/Build/`의 바이트는 그대로라
+위 표의 첫 번째 검사가 대신 걸립니다 — 두 검사를 **함께** 통과하려면 실제로 다시 빌드하는
+수밖에 없습니다.
+
+> CI에서 Unity WebGL 빌드를 직접 돌려 커밋된 번들과 대조하는 방법(#345의 선택지 B)도
+> 있었지만, Unity 라이선스와 빌드 시간 비용 때문에 트리 해시 스탬프(선택지 A)를 택했습니다.
 
 ### 배포 파이프라인 현황
 
