@@ -12,6 +12,40 @@ from ..services import SignalScore
 from .test_balance_parser import TRUNCATION_NOTES_BY_REASON
 
 
+class SessionUsedUnexpectedly(BaseException):
+    """UnusedSession이 실제로 불렸을 때 던지는 신호.
+
+    ``Exception``이 아니라 ``BaseException``을 상속하는 이유가 이 클래스의 존재
+    이유다 (PR #337 리뷰). 유일한 사용처인 :func:`_monitor_signal`은 본문 전체가
+    ``except Exception``으로 감싸여 있어, 평범한 ``AssertionError``를 던지면 로그
+    한 줄로 삼켜지고 테스트는 뒤쪽 단언이 어긋나서 **간접적으로만** red가 된다 —
+    그러면 실패 메시지가 "세션을 썼다"가 아니라 "알림이 안 나갔다"로 나온다.
+    ``BaseException``은 그 절을 지나가므로 원인이 그대로 올라온다.
+    """
+
+
+class UnusedSession:
+    """세션을 건드리지 않는 경로에 넘기는 자리표시자 (#319).
+
+    아래 _monitor_signal 테스트들은 perform_stock_analysis를 통째로 대체하므로 세션은
+    한 번도 쓰이지 않는다. 예전에는 ``object()``를 넘겼는데, 그러면 "쓰이지 않는다"가
+    아니라 "무엇이든 통과한다"가 되어 주입 지점의 계약이 이 호출들에서만 사라졌다.
+
+    세 메서드는 ReportSession 계약을 만족하되 불리면 실패한다 — 대체가 풀려 실제
+    저장 경로로 새는 날, 호출부의 ``except Exception``에 삼켜지지 않고 그대로
+    올라온다(:class:`SessionUsedUnexpectedly` 참고).
+    """
+
+    def add(self, instance: object, /) -> None:
+        raise SessionUsedUnexpectedly("이 경로는 세션을 쓰지 않아야 한다")
+
+    def commit(self) -> None:
+        raise SessionUsedUnexpectedly("이 경로는 세션을 쓰지 않아야 한다")
+
+    def refresh(self, instance: object, /) -> None:
+        raise SessionUsedUnexpectedly("이 경로는 세션을 쓰지 않아야 한다")
+
+
 def _scored(is_significant: bool, score: int | None = None) -> SignalScore:
     """유의성 판정만 고정하는 SignalScore (#298).
 
@@ -380,7 +414,7 @@ async def test_monitor_signal_sends_telegram_for_urgent_analysis(monkeypatch):
     monkeypatch.setattr("backend.scheduler.telegram_notifier.send_analysis_alert", mock_telegram)
     monkeypatch.setattr("backend.scheduler.manager.broadcast", mock_broadcast)
 
-    await _monitor_signal("삼성전자", source, object(), state)
+    await _monitor_signal("삼성전자", source, UnusedSession(), state)
 
     mock_telegram.assert_called_once()
     mock_broadcast.assert_called_once()
@@ -422,7 +456,7 @@ async def test_monitor_signal_sends_telegram_for_all_mode_analysis(monkeypatch):
     monkeypatch.setattr("backend.scheduler.telegram_notifier.send_analysis_alert", mock_telegram)
     monkeypatch.setattr("backend.scheduler.manager.broadcast", mock_broadcast)
 
-    await _monitor_signal("삼성전자", source, object(), state)
+    await _monitor_signal("삼성전자", source, UnusedSession(), state)
 
     mock_telegram.assert_called_once()
 
@@ -463,7 +497,7 @@ async def test_monitor_signal_skips_telegram_when_alert_mode_off(monkeypatch):
     monkeypatch.setattr("backend.scheduler.telegram_notifier.send_analysis_alert", mock_telegram)
     monkeypatch.setattr("backend.scheduler.manager.broadcast", mock_broadcast)
 
-    await _monitor_signal("삼성전자", source, object(), state)
+    await _monitor_signal("삼성전자", source, UnusedSession(), state)
 
     mock_telegram.assert_not_called()
     mock_broadcast.assert_called_once()
@@ -506,7 +540,7 @@ async def test_monitor_signal_keeps_websocket_when_telegram_fails(monkeypatch):
     monkeypatch.setattr("backend.scheduler.telegram_notifier.send_analysis_alert", failing_telegram)
     monkeypatch.setattr("backend.scheduler.manager.broadcast", mock_broadcast)
 
-    await _monitor_signal("삼성전자", source, object(), state)
+    await _monitor_signal("삼성전자", source, UnusedSession(), state)
 
     mock_broadcast.assert_called_once()
 
@@ -1970,8 +2004,8 @@ async def test_monitor_market_task_survives_portfolio_broadcast_failure(monkeypa
     예외도 격리해야 한다. 이 테스트가 잡는 mutation: 브로드캐스트 예외를 격리하지 않으면
     monitor_market_task가 예외를 전파해 await 자체가 실패한다.
 
-    참고: 현재 ConnectionManager.broadcast는 커넥션별 send_json을 각각 try/except로
-    삼켜(ws_manager.py:26-32) 스스로 예외를 던지지 않으므로, 이 시나리오는 실제
+    참고: 현재 ConnectionManager.broadcast는 커넥션별 send_text를 루프 안 try/except로
+    삼켜 스스로 예외를 던지지 않으므로, 이 시나리오는 실제
     운영 경로에서는 아직 발생할 수 없다. 이 테스트는 monitor_market_task 쪽 방어
     코드가 지키는 계약을 문서화하는 성격이며, ws_manager의 예외 처리가 바뀌면
     (예: 커넥션이 아니라 broadcast 자체가 실패를 전파하도록 바뀌면) 실효를 갖는다.

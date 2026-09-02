@@ -55,7 +55,8 @@ from .telegram_notifier import (
     SETTLED_SEND_RETRY_BACKOFF_SECONDS,
     SETTLED_SEND_TIMEOUT_SECONDS,
     TELEGRAM_ALERT_MODES,
-    TelegramNotifier,
+    TelegramCommandNotifier,
+    TelegramPollerNotifier,
     fetch_telegram_api,
     send_text_settled,
     telegram_notifier,
@@ -548,7 +549,7 @@ class TelegramCommandHandler:
     def __init__(
         self,
         *,
-        notifier: TelegramNotifier,
+        notifier: TelegramCommandNotifier,
         state_factory: Callable[[], Any] = redis_state,
         watchlist_repo: Any | None = None,
         catalyst_repo: Any | None = None,
@@ -2179,7 +2180,7 @@ class TelegramCommandPoller:
     def __init__(
         self,
         *,
-        notifier: TelegramNotifier = telegram_notifier,
+        notifier: TelegramPollerNotifier = telegram_notifier,
         handler: TelegramCommandHandler | None = None,
         state_store: TelegramPollerStore | None = None,
     ):

@@ -1,22 +1,53 @@
 import json
 import logging
-from fastapi import WebSocket, WebSocketDisconnect
+from typing import Protocol
 
 logger = logging.getLogger(__name__)
+
+
+class BroadcastSocket(Protocol):
+    """브로드캐스트가 커넥션에 요구하는 전부 (#319).
+
+    fastapi의 ``WebSocket``을 그대로 선언 타입으로 두면 이 매니저와 아무 관계 없는
+    것들(``receive``·``scope``·``client_state`` …)까지 계약이 되어, send_text만 갖춘
+    대역이 목록에 들어가지 못한다. 실제로 test_ws_manager가 다섯 자리에서 cast로
+    검사를 껐고, cast는 그 자리에서 이름·인자 모양의 어긋남까지 함께 덮는다.
+
+    ``accept``는 여기 없다. 수용은 커넥션을 목록에 넣기 전 한 번뿐인 일이라 아래
+    :class:`AcceptingSocket`이 따로 요구한다 — 브로드캐스트만 검증하는 대역이 쓰지도
+    않는 메서드를 갖추게 만들면 계약을 좁힌 의미가 없다.
+
+    ``data``를 위치 전용(``/``)으로 둔다. broadcast는 위치 인자로만 부르므로 인자
+    이름은 계약이 아니고, 이름까지 고정하면 대역이 ``payload`` 같은 자기 이름을
+    쓰지 못한다.
+    """
+
+    async def send_text(self, data: str, /) -> None: ...
+
+
+class AcceptingSocket(BroadcastSocket, Protocol):
+    """:meth:`ConnectionManager.connect`가 요구하는 계약.
+
+    수용까지 맡는 자리라 ``accept``가 더 붙는다. 실제 호출부는 main.py의 엔드포인트
+    하나이고 거기서는 fastapi의 ``WebSocket``이 그대로 들어온다.
+    """
+
+    async def accept(self) -> None: ...
+
 
 class ConnectionManager:
     """
     WebSocket 연결을 관리하고 실시간 브로드캐스트 기능을 제공합니다.
     """
     def __init__(self):
-        self.active_connections: list[WebSocket] = []
+        self.active_connections: list[BroadcastSocket] = []
 
-    async def connect(self, websocket: WebSocket):
+    async def connect(self, websocket: AcceptingSocket):
         await websocket.accept()
         self.active_connections.append(websocket)
         logger.info(f"New WebSocket connection. Total active: {len(self.active_connections)}")
 
-    def disconnect(self, websocket: WebSocket):
+    def disconnect(self, websocket: BroadcastSocket):
         if websocket in self.active_connections:
             self.active_connections.remove(websocket)
             logger.info(f"WebSocket disconnected. Remaining: {len(self.active_connections)}")

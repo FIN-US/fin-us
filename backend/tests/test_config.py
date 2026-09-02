@@ -4,8 +4,23 @@ from pathlib import Path
 
 import pytest
 
+from mcp import StdioServerParameters
+
 import backend.config as config
 from backend.config import DART_MCP_PARAMS, NEWS_MCP_PARAMS, TRADING_MCP_PARAMS, _stdio_server_params
+
+
+def child_env(params: StdioServerParameters) -> dict[str, str]:
+    """자식 프로세스에 넘어가는 환경을 꺼낸다 (#319).
+
+    ``StdioServerParameters.env``의 선언 타입은 ``dict[str, str] | None``이고,
+    _stdio_server_params는 항상 dict를 채운다. 아래 단언들은 그 사실에 기대 곧바로
+    첨자를 붙이는데, 그러면 검사기에게는 매번 None 첨자로 보인다. 여기서 한 번
+    좁혀 두면 아래가 읽기 그대로 남는다 — env가 None이 되는 것 자체가 회귀이므로
+    그때는 이 단언이 실패하는 것이 옳다.
+    """
+    assert params.env is not None
+    return params.env
 
 
 def test_mcp_stdio_params_pass_filtered_environment_to_child_processes():
@@ -28,13 +43,13 @@ def test_mcp_stdio_params_do_not_pass_parent_only_secrets(monkeypatch):
 
     params = _stdio_server_params(Path("/tmp/mcp-news"))
 
-    assert params.env["NAVER_CLIENT_ID"] == "naver-id"
-    assert params.env["KIS_API_KEY"] == "kis-key"
-    assert params.env["DART_API_KEY"] == "dart-key"
-    assert params.env["FIN_US_TRACE_ID"] == "trace-id"
-    assert "DATABASE_URL" not in params.env
-    assert "OPENAI_API_KEY" not in params.env
-    assert "TELEGRAM_BOT_TOKEN" not in params.env
+    assert child_env(params)["NAVER_CLIENT_ID"] == "naver-id"
+    assert child_env(params)["KIS_API_KEY"] == "kis-key"
+    assert child_env(params)["DART_API_KEY"] == "dart-key"
+    assert child_env(params)["FIN_US_TRACE_ID"] == "trace-id"
+    assert "DATABASE_URL" not in child_env(params)
+    assert "OPENAI_API_KEY" not in child_env(params)
+    assert "TELEGRAM_BOT_TOKEN" not in child_env(params)
 
 
 def test_mcp_stdio_params_pass_order_dedup_ledger_settings(monkeypatch):
@@ -43,8 +58,8 @@ def test_mcp_stdio_params_pass_order_dedup_ledger_settings(monkeypatch):
 
     params = _stdio_server_params(Path("/opt/mcp-trading"))
 
-    assert params.env["KIS_ORDER_DEDUP_PATH"] == "/var/lib/finus/kis-order-dedup.json"
-    assert params.env["KIS_ORDER_DEDUP_TTL_MS"] == "120000"
+    assert child_env(params)["KIS_ORDER_DEDUP_PATH"] == "/var/lib/finus/kis-order-dedup.json"
+    assert child_env(params)["KIS_ORDER_DEDUP_TTL_MS"] == "120000"
 
 
 def test_mcp_stdio_params_pass_kis_token_cache_and_tr_id_overrides(monkeypatch):
@@ -57,9 +72,9 @@ def test_mcp_stdio_params_pass_kis_token_cache_and_tr_id_overrides(monkeypatch):
 
     params = _stdio_server_params(Path("/opt/mcp-trading"))
 
-    assert params.env["KIS_TOKEN_CACHE_PATH"] == "/var/lib/finus/kis-token-cache.json"
-    assert params.env["KIS_TR_ID_DAILY_CCLD"] == "TTTC0081R"
-    assert params.env["KIS_TR_ID_BALANCE_RLZ_PL"] == "TTTC8494R"
+    assert child_env(params)["KIS_TOKEN_CACHE_PATH"] == "/var/lib/finus/kis-token-cache.json"
+    assert child_env(params)["KIS_TR_ID_DAILY_CCLD"] == "TTTC0081R"
+    assert child_env(params)["KIS_TR_ID_BALANCE_RLZ_PL"] == "TTTC8494R"
 
 
 def test_mcp_stdio_params_pass_real_order_enabled_and_fail_closed_when_unset(monkeypatch):
@@ -70,11 +85,11 @@ def test_mcp_stdio_params_pass_real_order_enabled_and_fail_closed_when_unset(mon
     # 전달되지 않아 fail-closed(주문 차단)가 유지되어야 한다.
     monkeypatch.setenv("KIS_REAL_ORDER_ENABLED", "true")
     params_enabled = _stdio_server_params(Path("/opt/mcp-trading"))
-    assert params_enabled.env["KIS_REAL_ORDER_ENABLED"] == "true"
+    assert child_env(params_enabled)["KIS_REAL_ORDER_ENABLED"] == "true"
 
     monkeypatch.delenv("KIS_REAL_ORDER_ENABLED", raising=False)
     params_unset = _stdio_server_params(Path("/opt/mcp-trading"))
-    assert "KIS_REAL_ORDER_ENABLED" not in params_unset.env
+    assert "KIS_REAL_ORDER_ENABLED" not in child_env(params_unset)
 
 
 def test_mcp_stdio_params_pass_finus_kis_tr_id_overrides_but_not_other_finus_vars(monkeypatch):
@@ -89,9 +104,9 @@ def test_mcp_stdio_params_pass_finus_kis_tr_id_overrides_but_not_other_finus_var
 
     params = _stdio_server_params(Path("/opt/mcp-trading"))
 
-    assert params.env["FINUS_KIS_TR_ID_DAILY_CCLD"] == "TTTC0081R"
-    assert params.env["FINUS_KIS_TR_ID_BALANCE_RLZ_PL"] == "TTTC8494R"
-    assert "FINUS_BACKEND_URL" not in params.env
+    assert child_env(params)["FINUS_KIS_TR_ID_DAILY_CCLD"] == "TTTC0081R"
+    assert child_env(params)["FINUS_KIS_TR_ID_BALANCE_RLZ_PL"] == "TTTC8494R"
+    assert "FINUS_BACKEND_URL" not in child_env(params)
 
 
 def test_mcp_stdio_params_forward_any_kis_prefixed_variable_by_mechanism(monkeypatch):
@@ -107,7 +122,7 @@ def test_mcp_stdio_params_forward_any_kis_prefixed_variable_by_mechanism(monkeyp
 
     params = _stdio_server_params(Path("/opt/mcp-trading"))
 
-    assert params.env["KIS_FUTURE_VARIABLE_NOT_YET_INVENTED"] == "future-value"
+    assert child_env(params)["KIS_FUTURE_VARIABLE_NOT_YET_INVENTED"] == "future-value"
 
 
 @pytest.mark.parametrize(
@@ -144,7 +159,7 @@ def test_mcp_stdio_params_forward_kis_real_order_enabled_raw_value_unchanged(mon
 
     params = _stdio_server_params(Path("/opt/mcp-trading"))
 
-    assert params.env["KIS_REAL_ORDER_ENABLED"] == "true"
+    assert child_env(params)["KIS_REAL_ORDER_ENABLED"] == "true"
 
 
 def test_mcp_stdio_params_forward_non_true_spelling_unchanged_and_blocked_on_both_sides(monkeypatch):
@@ -157,7 +172,7 @@ def test_mcp_stdio_params_forward_non_true_spelling_unchanged_and_blocked_on_bot
 
     params = _stdio_server_params(Path("/opt/mcp-trading"))
 
-    assert params.env["KIS_REAL_ORDER_ENABLED"] == "yes"
+    assert child_env(params)["KIS_REAL_ORDER_ENABLED"] == "yes"
     assert config._is_truthy_flag("yes") is False
 
 

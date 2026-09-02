@@ -6,12 +6,10 @@
 
 from contextlib import asynccontextmanager
 from datetime import date
-from typing import cast
 
 import pytest
 
 import backend.scheduler as scheduler_module
-from backend.catalyst_repo import SqliteCatalystEventRepo
 from backend.presentation import LEVEL_INTERMEDIATE, TERM_FOOTNOTE_MARK
 from backend.watchlist_repo import SqliteWatchlistRepo
 
@@ -64,10 +62,6 @@ class FakeNotifier:
         return True
 
 
-# 아래 catalyst_calendar_task 호출의 cast는 이 대역들 때문이다 (#292). 주입 지점의 선언 타입이 구체
-# 클래스라 대역이 그대로는 타입 검사를 통과하지 못한다. 이 주입 지점을 Protocol로
-# 좁히고 아래 cast를 걷어내는 것은 #319가 추적한다(#271이 좁힌 것은 state_store와
-# pending_order_store 둘뿐이다). 그때까지는 주입 지점에서만 좁혀 둔다.
 class FakeCatalystRepo:
     def __init__(self, events):
         self._events = events
@@ -77,7 +71,9 @@ class FakeCatalystRepo:
         return list(self._events)
 
     async def upsert_events(self, events):
-        return None
+        # 실제 repo는 새로 만든 행 목록을 돌려준다. 이 대역이 None을 돌려주던 동안에는
+        # 그 어긋남을 cast가 덮고 있었다 (#319).
+        return []
 
     async def mark_notification_sent(self, event_id, *, days_until_event):
         self.marked.append(event_id)
@@ -156,8 +152,8 @@ async def test_catalyst_alerts_carry_the_saved_level(monkeypatch, fake_redis_sta
     monkeypatch.setattr(scheduler_module, "_collect_catalyst_events", lambda *a, **k: _noop())
 
     await scheduler_module.catalyst_calendar_task(
-        watchlist_repo=cast(SqliteWatchlistRepo, FakeWatchlistRepo()),
-        catalyst_repo=cast(SqliteCatalystEventRepo, repo),
+        watchlist_repo=FakeWatchlistRepo(),
+        catalyst_repo=repo,
         notifier=notifier,
         today_factory=lambda: date(2026, 8, 18),
     )
@@ -183,8 +179,8 @@ async def test_a_no_redis_run_does_not_open_redis_for_the_level(monkeypatch):
     notifier = FakeNotifier()
 
     await scheduler_module.catalyst_calendar_task(
-        watchlist_repo=cast(SqliteWatchlistRepo, FakeWatchlistRepo()),
-        catalyst_repo=cast(SqliteCatalystEventRepo, FakeCatalystRepo([])),
+        watchlist_repo=FakeWatchlistRepo(),
+        catalyst_repo=FakeCatalystRepo([]),
         notifier=notifier,
         today_factory=lambda: date(2026, 8, 18),
         use_redis_lock=False,

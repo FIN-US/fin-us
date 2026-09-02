@@ -3,7 +3,7 @@ import logging
 import re
 import time
 from numbers import Real
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Protocol
 
 import httpx
 
@@ -289,6 +289,50 @@ def _message_id_from_send_body(body: Any) -> int | None:
         return None
     message_id = result.get("message_id")
     return message_id if isinstance(message_id, int) else None
+
+
+class TelegramTextSender(Protocol):
+    """send_text_settled가 notifier에게 요구하는 전부 (#319).
+
+    이 모듈의 재시도 경로는 조각을 보내는 것 말고 하는 일이 없다. 계약을 구체 클래스로
+    두면 "전송만 하는 대역"이 주입 지점을 통과하지 못해 호출부 테스트가 cast로 검사를
+    끄게 되는데, cast는 그 자리에서 이름·인자 모양까지 함께 꺼 버린다.
+    """
+
+    async def send_text(
+        self, text: str, *, reply_markup: dict[str, Any] | None = None
+    ) -> bool: ...
+
+
+class TelegramCommandNotifier(TelegramTextSender, Protocol):
+    """TelegramCommandHandler가 notifier에 요구하는 전부 (#319).
+
+    ``chat_id``는 메서드가 아니라 상태다 — 핸들러가 자기 채팅의 update만 처리하는
+    판정에 쓴다. 여기 없는 것들(``send_text_returning_id``·``delete_message``·
+    ``edit_message_text``·``bot_username``)은 일부러 뺐다. 핸들러가 전부 getattr로
+    존재 여부를 물어 없으면 그 기능만 건너뛰므로, 계약에 올리면 "있어야 하는 것"과
+    "있으면 쓰는 것"의 구분이 사라진다.
+    """
+
+    chat_id: str
+
+    async def send_chat_action(self, action: str = "typing") -> bool: ...
+
+    async def answer_callback_query(
+        self, callback_query_id: str, *, text: str | None = None
+    ) -> bool: ...
+
+
+class TelegramPollerNotifier(TelegramCommandNotifier, Protocol):
+    """TelegramCommandPoller가 notifier에 요구하는 전부 (#319).
+
+    폴러는 핸들러가 쓰는 것을 모두 쓰고(핸들러를 자기 notifier로 만들기도 한다) 거기에
+    두 가지를 더 쓴다 — getUpdates를 부를 ``bot_token``과, 알림이 꺼진 설정에서 루프를
+    시작하지 않기 위한 ``enabled``.
+    """
+
+    bot_token: str
+    enabled: bool
 
 
 class TelegramNotifier:
@@ -730,7 +774,7 @@ SETTLED_SEND_TIMEOUT_SECONDS = 20.0
 
 
 async def send_text_settled(
-    notifier: TelegramNotifier,
+    notifier: TelegramTextSender,
     text: str,
     *,
     reply_markup: dict[str, Any] | None = None,
@@ -829,7 +873,7 @@ async def send_text_settled(
 
 
 async def _send_part_settled(
-    notifier: TelegramNotifier,
+    notifier: TelegramTextSender,
     part: str,
     reply_markup: dict[str, Any] | None,
     *,
