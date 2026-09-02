@@ -17,6 +17,7 @@ from backend.stock_code import (
     _is_unresolved_echo,
     _looks_like_stock_code,
     _master_stocks_path,
+    is_orderable_stock_code,
 )
 
 # 종목마스터 실제 데이터(4,353종 전수) — 판정 함수가 이름·별칭을 코드로 오인하지
@@ -198,6 +199,51 @@ class TestOrderableStockCodeRe:
         Python의 `\d`는 전각 숫자를 포함하므로 `[0-9]`로 명시한 이유를 고정한다.
         """
         assert not _ORDERABLE_STOCK_CODE_RE.fullmatch("００５９３０")
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# is_orderable_stock_code — KIS_ALNUM_STOCK_ORDER_ENABLED 플래그 분기 (#138)
+# 미설정(기본값)은 _ORDERABLE_STOCK_CODE_RE와 동일해야 하고, "true"일 때만
+# mcp-trading/order.js의 확장 가드(영숫자 6~7자·9자)와 같은 범위를 허용해야 한다.
+# ──────────────────────────────────────────────────────────────────────────
+
+class TestIsOrderableStockCode:
+    """뮤테이션: 플래그 분기를 무력화(항상 확장 정규식 사용 등)하면
+    test_flag_unset_matches_default_policy가 red가 된다.
+    """
+
+    def test_flag_unset_matches_default_policy(self, monkeypatch):
+        """플래그 미설정 시 #73 정책(숫자 6~7자만)을 그대로 유지한다."""
+        monkeypatch.delenv("KIS_ALNUM_STOCK_ORDER_ENABLED", raising=False)
+        assert is_orderable_stock_code("005930")
+        assert is_orderable_stock_code("1234567")
+        assert not is_orderable_stock_code("0001A0")
+        assert not is_orderable_stock_code("F70100026")
+
+    def test_flag_false_matches_default_policy(self, monkeypatch):
+        monkeypatch.setenv("KIS_ALNUM_STOCK_ORDER_ENABLED", "false")
+        assert not is_orderable_stock_code("0001A0")
+        assert not is_orderable_stock_code("F70100026")
+
+    def test_flag_true_allows_alphanumeric_and_nine_char_codes(self, monkeypatch):
+        """플래그를 켜면 order.js 확장 가드와 같은 범위(6~7자 영숫자, 9자)를 연다."""
+        monkeypatch.setenv("KIS_ALNUM_STOCK_ORDER_ENABLED", "true")
+        assert is_orderable_stock_code("005930")
+        assert is_orderable_stock_code("1234567")
+        assert is_orderable_stock_code("0001A0")
+        assert is_orderable_stock_code("Q500020")
+        assert is_orderable_stock_code("F70100026")
+
+    def test_flag_true_still_rejects_eight_char(self, monkeypatch):
+        """8자는 종목마스터에 0건이라 플래그를 켜도 계속 거절한다(#140과 동일 근거)."""
+        monkeypatch.setenv("KIS_ALNUM_STOCK_ORDER_ENABLED", "true")
+        assert not is_orderable_stock_code("12345678")
+
+    def test_flag_value_must_match_exactly(self, monkeypatch):
+        """대소문자·공백을 관용하면 mcp-trading/order.js(`=== "true"`)와 판정이
+        갈릴 수 있다 — 정확히 "true"만 인정한다."""
+        monkeypatch.setenv("KIS_ALNUM_STOCK_ORDER_ENABLED", "True")
+        assert not is_orderable_stock_code("0001A0")
 
 
 # ──────────────────────────────────────────────────────────────────────────

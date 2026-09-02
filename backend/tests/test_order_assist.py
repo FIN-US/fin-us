@@ -301,6 +301,28 @@ def test_plain_numeric_code_passes_when_not_blacklisted():
     assert check_orderable_code("005930", frozenset({"035420"})) is None
 
 
+def test_suggestion_path_stays_numeric_only_even_when_alnum_flag_is_on(monkeypatch):
+    """자동 제안 경로는 KIS_ALNUM_STOCK_ORDER_ENABLED=true에서도 숫자 코드만 낸다.
+
+    의도된 비대칭이다(#138) — 텔레그램 주문 경로는 stock_code.is_orderable_stock_code()를
+    거쳐 플래그를 따르지만, check_orderable_code()는 _ORDERABLE_STOCK_CODE_RE를 직접
+    참조해 봇이 스스로 고른 종목을 기존 범위(숫자 6~7자)에 묶어 둔다. KIS가 영숫자·9자
+    PDNO를 실제로 수용하는지 확정되기 전(#265 실측)까지 유지한다.
+    나중에 이 비대칭을 없앨 때는 이 테스트를 함께 지워야 한다 — 조용히 갈리지 않도록
+    여기서 고정한다.
+    """
+    monkeypatch.setenv("KIS_ALNUM_STOCK_ORDER_ENABLED", "true")
+
+    for code in ("0001A0", "F70100026", "Q500020"):
+        violation = check_orderable_code(code, frozenset())
+
+        assert violation is not None, f"{code}는 플래그 켜짐에서도 제안 경로에서 거절돼야 한다"
+        assert violation.code == "unorderable_code"
+
+    # 대조군: 숫자 코드는 플래그와 무관하게 통과한다(테스트가 전부를 거절하는 게 아님).
+    assert check_orderable_code("005930", frozenset()) is None
+
+
 # ---------------------------------------------------------------------------
 # 제안 / 스냅샷 파싱
 # ---------------------------------------------------------------------------

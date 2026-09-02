@@ -122,6 +122,107 @@ test("buildCashOrderBody rejects alphanumeric stock codes as unsupported order t
   );
 });
 
+test("buildCashOrderBody rejects nine-char fund codes as unsupported order targets", () => {
+  assert.throws(
+    () => buildCashOrderBody({
+      accountNo: "1234567801",
+      stockCode: "F70100026",
+      quantity: 1,
+      price: 10000,
+      orderType: "LIMIT",
+    }),
+    /stock_code는 6자리 또는 7자리 종목코드여야 합니다/,
+  );
+});
+
+test(
+  "buildCashOrderBody allows alphanumeric and nine-char codes when KIS_ALNUM_STOCK_ORDER_ENABLED=true (#138)",
+  (t) => {
+    const originalEnvValue = process.env.KIS_ALNUM_STOCK_ORDER_ENABLED;
+    t.after(() => {
+      if (originalEnvValue === undefined) {
+        delete process.env.KIS_ALNUM_STOCK_ORDER_ENABLED;
+      } else {
+        process.env.KIS_ALNUM_STOCK_ORDER_ENABLED = originalEnvValue;
+      }
+    });
+    process.env.KIS_ALNUM_STOCK_ORDER_ENABLED = "true";
+
+    assert.equal(
+      buildCashOrderBody({
+        accountNo: "1234567801",
+        stockCode: "0001A0",
+        quantity: 1,
+        price: 10000,
+        orderType: "LIMIT",
+      }).PDNO,
+      "0001A0",
+    );
+    assert.equal(
+      buildCashOrderBody({
+        accountNo: "1234567801",
+        stockCode: "F70100026",
+        quantity: 1,
+        price: 10000,
+        orderType: "LIMIT",
+      }).PDNO,
+      "F70100026",
+    );
+    // 8자는 종목마스터에 0건이라 플래그를 켜도 계속 거절한다(#140과 같은 근거).
+    assert.throws(
+      () => buildCashOrderBody({
+        accountNo: "1234567801",
+        stockCode: "12345678",
+        quantity: 1,
+        price: 10000,
+        orderType: "LIMIT",
+      }),
+      /stock_code는 6~7자 영숫자 또는 9자 코드여야 합니다/,
+    );
+    // 소문자는 플래그를 켜도 거절한다 — 짝인 backend/stock_code.py의
+    // _ORDERABLE_STOCK_CODE_ALNUM_RE가 IGNORECASE 없이 [0-9A-Z]만 받으므로, 여기서
+    // 관용하면 같은 값에 두 계층의 판정이 갈리고 소문자가 그대로 PDNO에 실린다.
+    for (const lowercased of ["0001a0", "f70100026", "q500020"]) {
+      assert.throws(
+        () => buildCashOrderBody({
+          accountNo: "1234567801",
+          stockCode: lowercased,
+          quantity: 1,
+          price: 10000,
+          orderType: "LIMIT",
+        }),
+        /stock_code는 6~7자 영숫자 또는 9자 코드여야 합니다/,
+        `${lowercased}는 플래그 켜짐에서도 거절해야 한다(backend와 짝맞춤)`,
+      );
+    }
+  },
+);
+
+test("buildCashOrderBody keeps rejecting alphanumeric codes when the flag is not exactly \"true\"", (t) => {
+  const originalEnvValue = process.env.KIS_ALNUM_STOCK_ORDER_ENABLED;
+  t.after(() => {
+    if (originalEnvValue === undefined) {
+      delete process.env.KIS_ALNUM_STOCK_ORDER_ENABLED;
+    } else {
+      process.env.KIS_ALNUM_STOCK_ORDER_ENABLED = originalEnvValue;
+    }
+  });
+  // backend/stock_code.py의 _alnum_stock_order_enabled()와 비교 방식을 맞춘다 —
+  // 대소문자·공백을 관용하면 두 계층의 판정이 갈릴 수 있다.
+  process.env.KIS_ALNUM_STOCK_ORDER_ENABLED = "True";
+
+  assert.throws(
+    () => buildCashOrderBody({
+      accountNo: "1234567801",
+      stockCode: "0001A0",
+      quantity: 1,
+      price: 10000,
+      orderType: "LIMIT",
+    }),
+    /이 종목은 현재 주문을 지원하지 않습니다/,
+  );
+});
+
 test("formatOrderResult includes order number when present", () => {
   assert.equal(
     formatOrderResult({
