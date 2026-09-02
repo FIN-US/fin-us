@@ -62,13 +62,21 @@ public class ApiClient
             yield break;
         }
 
-        var newsResponse = JsonUtility.FromJson<NewsApiResponse>(newsReq.downloadHandler.text);
-        var trendResponse = JsonUtility.FromJson<TrendApiResponse>(trendReq.downloadHandler.text);
+        var newsResponse = TryFromJson<NewsApiResponse>(newsReq.downloadHandler.text);
+        var trendResponse = TryFromJson<TrendApiResponse>(trendReq.downloadHandler.text);
+
+        // 파싱 실패를 빈 결과로 넘기면 "뉴스가 없음"과 구분되지 않는다. 다른 Fetch들과
+        // 같이 onError로 돌린다.
+        if (newsResponse == null || trendResponse == null)
+        {
+            onError?.Invoke("뉴스·트렌드 데이터를 파싱하지 못했습니다.");
+            yield break;
+        }
 
         onSuccess?.Invoke(new DataOnlyResult
         {
-            newsItems = newsResponse?.data?.news ?? new string[0],
-            trendRaw = trendResponse?.data?.trend ?? string.Empty
+            newsItems = newsResponse.data?.news ?? new string[0],
+            trendRaw = trendResponse.data?.trend ?? string.Empty
         });
     }
 
@@ -85,7 +93,7 @@ public class ApiClient
             yield break;
         }
 
-        var parsed = JsonUtility.FromJson<AnalyzeApiResponse>(req.downloadHandler.text);
+        var parsed = TryFromJson<AnalyzeApiResponse>(req.downloadHandler.text);
         if (parsed == null || parsed.status != "success" || parsed.data == null)
         {
             onError?.Invoke("분석 데이터를 파싱하지 못했습니다.");
@@ -107,7 +115,7 @@ public class ApiClient
             yield break;
         }
 
-        var parsed = JsonUtility.FromJson<BalanceApiResponse>(req.downloadHandler.text);
+        var parsed = TryFromJson<BalanceApiResponse>(req.downloadHandler.text);
         if (parsed == null || parsed.status != "success" || parsed.data == null)
         {
             onError?.Invoke("잔고 데이터를 파싱하지 못했습니다.");
@@ -129,7 +137,7 @@ public class ApiClient
             yield break;
         }
 
-        var parsed = JsonUtility.FromJson<NewsApiResponse>(req.downloadHandler.text);
+        var parsed = TryFromJson<NewsApiResponse>(req.downloadHandler.text);
         if (parsed == null || parsed.status != "success" || parsed.data == null)
         {
             onError?.Invoke("뉴스 데이터를 파싱하지 못했습니다.");
@@ -151,7 +159,7 @@ public class ApiClient
             yield break;
         }
 
-        var parsed = JsonUtility.FromJson<TrendApiResponse>(req.downloadHandler.text);
+        var parsed = TryFromJson<TrendApiResponse>(req.downloadHandler.text);
         if (parsed == null || parsed.status != "success" || parsed.data == null)
         {
             onError?.Invoke("트렌드 데이터를 파싱하지 못했습니다.");
@@ -161,17 +169,37 @@ public class ApiClient
         onSuccess?.Invoke(parsed.data.trend ?? string.Empty);
     }
 
+    // JsonUtility.FromJson은 JSON이 아닌 본문에 대해 null을 주지 않고 ArgumentException을
+    // 던진다. 이 클래스의 파싱은 전부 코루틴 안에서 일어나므로, 예외가 나면 코루틴이 그
+    // 자리에서 끊기고 onError조차 불리지 않는다 — 화면에는 아무 일도 일어나지 않고, #244가
+    // 막으려던 "조용한 실패"가 그대로 재현된다.
+    //
+    // 가정과 달리 이 경로는 드물지 않다. backend가 떠 있지 않으면 nginx가 502를 HTML 본문과
+    // 함께 돌려주는데(#245의 프록시 구성), 그 본문이 곧바로 여기로 들어온다. 즉 가장 흔한
+    // 실패 상황에서 실패 배너가 뜨지 않는다.
+    private static T TryFromJson<T>(string body) where T : class
+    {
+        if (string.IsNullOrWhiteSpace(body))
+            return null;
+
+        try
+        {
+            return JsonUtility.FromJson<T>(body);
+        }
+        catch (ArgumentException)
+        {
+            // 본문이 JSON이 아니다. 호출부는 null을 "파싱 실패"로 다뤄 onError로 넘긴다.
+            return null;
+        }
+    }
+
     // FastAPI HTTPException 응답은 보통 { "detail": "문자열" }. 없으면 UnityWebRequest.error로 폴백.
     private static string ExtractErrorMessage(UnityWebRequest request, string fallbackPrefix)
     {
-        var body = request.downloadHandler?.text;
-        if (!string.IsNullOrWhiteSpace(body))
+        var detail = TryFromJson<ErrorDetailResponse>(request.downloadHandler?.text);
+        if (!string.IsNullOrWhiteSpace(detail?.detail))
         {
-            var detail = JsonUtility.FromJson<ErrorDetailResponse>(body);
-            if (!string.IsNullOrWhiteSpace(detail?.detail))
-            {
-                return detail.detail;
-            }
+            return detail.detail;
         }
 
         var errorDetail = string.IsNullOrWhiteSpace(request.error) ? request.result.ToString() : request.error;
@@ -190,7 +218,7 @@ public class ApiClient
             yield break;
         }
 
-        var parsed = JsonUtility.FromJson<PortfolioApiResponse>(req.downloadHandler.text);
+        var parsed = TryFromJson<PortfolioApiResponse>(req.downloadHandler.text);
         if (parsed == null || parsed.status != "success" || parsed.data == null)
         {
             onError?.Invoke("포트폴리오 데이터를 파싱하지 못했습니다.");
