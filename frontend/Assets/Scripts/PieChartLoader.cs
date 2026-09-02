@@ -50,8 +50,21 @@ public class PieChartLoader : MonoBehaviour
         ));
     }
 
-    void LoadSample(string error)
+    // 배너에 실을 요약. ApiClient.ExtractErrorMessage가 붙이는 "(url=..., status=...)"
+    // 꼬리에는 백엔드 내부 주소가 들어 있어, 그대로 띄우면 사용자 화면에 노출된다.
+    // 원문은 호출부의 Debug.LogError가 콘솔에 남긴다(#262 리뷰).
+    static string SummarizeForBanner(string error)
     {
+        if (string.IsNullOrEmpty(error))
+            return error;
+
+        int tail = error.IndexOf(" (url=", System.StringComparison.Ordinal);
+        return tail < 0 ? error : error.Substring(0, tail);
+    }
+
+    void LoadSample(string rawError)
+    {
+        string error = SummarizeForBanner(rawError);
         TextAsset json = Resources.Load<TextAsset>("data");
         PortfolioData data = json == null ? null : JsonUtility.FromJson<PortfolioData>(json.text);
 

@@ -34,6 +34,9 @@ public class PanelController : MonoBehaviour
         EnsureBindings();
     }
 
+    // 반환값은 "숫자 라벨이 준비됐는가"만 뜻한다. 배너는 표시 전용이라 이 조건에 넣지
+    // 않는다 — 배너 생성이 실패해도 UpdatePanel·UpdateTopBar는 계속 돌아야 한다.
+    // 배너 준비 여부는 SetDataSourceMessage가 따로 판정해 호출자에게 알린다(#262 리뷰).
     bool EnsureBindings()
     {
         if (stockName != null &&
@@ -42,8 +45,7 @@ public class PanelController : MonoBehaviour
             returnRate != null &&
             totalAsset != null &&
             totalReturnRate != null &&
-            quantity != null &&
-            dataSourceBanner != null)
+            quantity != null)
         {
             return true;
         }
@@ -83,8 +85,21 @@ public class PanelController : MonoBehaviour
             returnRate != null &&
             totalAsset != null &&
             totalReturnRate != null &&
-            quantity != null &&
-            dataSourceBanner != null;
+            quantity != null;
+    }
+
+    // 라벨이 이미 바인딩된 뒤(EnsureBindings가 곧바로 true를 반환하는 경로)에는 위 바인딩
+    // 패스가 돌지 않으므로, 배너만 따로 붙일 자리가 필요하다.
+    void EnsureDataSourceBanner()
+    {
+        if (dataSourceBanner != null)
+            return;
+
+        VisualElement root = document == null ? null : document.rootVisualElement;
+        if (root == null)
+            return;
+
+        dataSourceBanner = root.Q<Label>("data-source-banner") ?? CreateDataSourceBanner(root);
     }
 
     Label CreateDataSourceBanner(VisualElement root)
@@ -144,8 +159,12 @@ public class PanelController : MonoBehaviour
         if (!EnsureBindings())
             return false;
 
+        EnsureDataSourceBanner();
         RefreshDataSourceBanner();
-        return true;
+
+        // 배너가 없으면 메시지를 화면에 남기지 못한 것이다. false를 돌려 호출자의
+        // 재시도 루프가 다음 프레임에 다시 시도하게 한다.
+        return dataSourceBanner != null;
     }
 
     void RefreshDataSourceBanner()
