@@ -9,6 +9,7 @@
 """
 
 from datetime import datetime
+from typing import cast
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -18,6 +19,7 @@ from backend.redis_state import (
     InMemoryPendingOrderStore,
     RedisPendingOrderStore,
 )
+from backend.telegram_notifier import TelegramNotifier
 from backend.trading_orders import OrderExecutionResult, PendingOrder
 from backend.telegram_commands import TelegramCommandHandler
 
@@ -341,6 +343,10 @@ def test_memory_store_sync_eq_with_empty_dict():
 # 통합: TTL 만료 후 /confirm, /cancel 시 명시적 오류 메시지
 # ---------------------------------------------------------------------------
 
+# 아래 주입 지점의 cast는 이 대역 때문이다 (#292). 주입 지점의 선언 타입이 구체
+# 클래스라 대역이 그대로는 타입 검사를 통과하지 못한다. 이 주입 지점을 Protocol로
+# 좁히고 아래 cast를 걷어내는 것은 #319가 추적한다(#271이 좁힌 것은 state_store와
+# pending_order_store 둘뿐이다). 그때까지는 주입 지점에서만 좁혀 둔다.
 class FakeNotifier:
     def __init__(self, chat_id="123"):
         self.chat_id = chat_id
@@ -391,7 +397,7 @@ async def test_confirm_after_ttl_expiry_gives_explicit_error():
     store = RedisPendingOrderStore(redis)
     notifier = FakeNotifier()
     handler = TelegramCommandHandler(
-        notifier=notifier,
+        notifier=cast(TelegramNotifier, notifier),
         pending_order_store=store,
         order_gateway=FakeOrderGateway(),
         now_factory=lambda: datetime(2026, 5, 20, 10, 2, tzinfo=KST),
@@ -410,7 +416,7 @@ async def test_cancel_after_ttl_expiry_gives_explicit_error():
     store = RedisPendingOrderStore(redis)
     notifier = FakeNotifier()
     handler = TelegramCommandHandler(
-        notifier=notifier,
+        notifier=cast(TelegramNotifier, notifier),
         pending_order_store=store,
         now_factory=lambda: datetime(2026, 5, 20, 10, 2, tzinfo=KST),
     )
@@ -429,7 +435,7 @@ async def test_confirm_button_after_ttl_expiry_gives_stale_callback_text():
     store = RedisPendingOrderStore(redis)
     notifier = FakeNotifier()
     handler = TelegramCommandHandler(
-        notifier=notifier,
+        notifier=cast(TelegramNotifier, notifier),
         pending_order_store=store,
     )
 
@@ -454,7 +460,7 @@ async def test_confirm_redis_failure_sends_error_message():
     store = RedisPendingOrderStore(redis)
     notifier = FakeNotifier()
     handler = TelegramCommandHandler(
-        notifier=notifier,
+        notifier=cast(TelegramNotifier, notifier),
         pending_order_store=store,
         order_gateway=FakeOrderGateway(),
         now_factory=lambda: datetime(2026, 5, 20, 10, 0, tzinfo=KST),
@@ -474,7 +480,7 @@ async def test_cancel_redis_failure_sends_error_message():
     store = RedisPendingOrderStore(redis)
     notifier = FakeNotifier()
     handler = TelegramCommandHandler(
-        notifier=notifier,
+        notifier=cast(TelegramNotifier, notifier),
         pending_order_store=store,
         now_factory=lambda: datetime(2026, 5, 20, 10, 0, tzinfo=KST),
     )
@@ -507,7 +513,7 @@ async def test_app_level_expiry_drops_order_before_confirm():
     await store.set("123", order)
 
     handler = TelegramCommandHandler(
-        notifier=notifier,
+        notifier=cast(TelegramNotifier, notifier),
         pending_order_store=store,
         order_gateway=FakeOrderGateway(),
         now_factory=lambda: confirm_at,
@@ -535,7 +541,7 @@ async def test_confirm_cancel_flow_with_redis_store():
     await store.set("123", order)
 
     handler = TelegramCommandHandler(
-        notifier=notifier,
+        notifier=cast(TelegramNotifier, notifier),
         pending_order_store=store,
         now_factory=lambda: datetime(2026, 5, 20, 10, 0, 30, tzinfo=KST),
     )
@@ -575,7 +581,7 @@ async def test_duplicate_confirm_calls_place_order_only_once():
     await store.set("123", order)
 
     handler = TelegramCommandHandler(
-        notifier=notifier,
+        notifier=cast(TelegramNotifier, notifier),
         pending_order_store=store,
         order_gateway=gateway,
         now_factory=lambda: datetime(2026, 5, 20, 10, 0, 30, tzinfo=KST),
@@ -717,7 +723,7 @@ async def test_buy_command_second_call_rejected_after_race():
     store = InMemoryPendingOrderStore()
     notifier = FakeNotifier()
     handler = TelegramCommandHandler(
-        notifier=notifier,
+        notifier=cast(TelegramNotifier, notifier),
         pending_order_store=store,
         mcp_runner=mcp_runner,
         now_factory=lambda: datetime(2026, 5, 20, 10, 0, 0, tzinfo=KST),

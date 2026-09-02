@@ -1,5 +1,6 @@
 import asyncio
 import os
+from typing import Awaitable, cast
 from uuid import uuid4
 
 import pytest
@@ -28,7 +29,10 @@ async def _redis_client():
 
     client = Redis.from_url(url, decode_responses=True)
     try:
-        await client.ping()
+        # redis-py는 동기·비동기 클라이언트가 명령 시그니처를 공유하느라
+        # ping()을 Awaitable[bool] | bool로 선언한다. 비동기 클라이언트에서는
+        # 항상 앞쪽이지만 체커는 그것을 알 수 없다.
+        await cast(Awaitable[bool], client.ping())
     except Exception as exc:
         await client.aclose()
         # 접속 실패를 skip으로 넘기면, CI에서 서비스 컨테이너가 죽거나 주소가 어긋난

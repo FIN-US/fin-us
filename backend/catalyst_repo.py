@@ -3,7 +3,7 @@ from datetime import date, timedelta
 from typing import Callable
 
 from pydantic import BaseModel, Field
-from sqlmodel import Session, select
+from sqlmodel import Session, col, select
 
 from .models import CatalystEvent
 
@@ -73,7 +73,7 @@ class SqliteCatalystEventRepo:
                         CatalystEvent.stock_name == stock_name,
                         CatalystEvent.event_date >= today,
                     )
-                    .order_by(CatalystEvent.event_date, CatalystEvent.event_type)
+                    .order_by(col(CatalystEvent.event_date), col(CatalystEvent.event_type))
                     .limit(limit)
                 ).all()
             )
@@ -92,11 +92,11 @@ class SqliteCatalystEventRepo:
             events = session.exec(
                 select(CatalystEvent)
                 .where(
-                    CatalystEvent.stock_name.in_(stock_names),
+                    col(CatalystEvent.stock_name).in_(stock_names),
                     CatalystEvent.event_date >= today,
                     CatalystEvent.event_date <= tomorrow,
                 )
-                .order_by(CatalystEvent.event_date, CatalystEvent.stock_name)
+                .order_by(col(CatalystEvent.event_date), col(CatalystEvent.stock_name))
             ).all()
 
         due: list[DueCatalystEvent] = []

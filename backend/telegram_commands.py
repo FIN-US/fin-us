@@ -6,7 +6,7 @@ import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from enum import Enum
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any, Callable
 from urllib.parse import quote as _url_quote
 
@@ -34,36 +34,73 @@ from .redis_state import (
     create_redis_client,
     redis_state,
 )
-from .services import llm_chat, run_mcp_tool
+from .presentation import (
+    DEFAULT_TELEGRAM_USER_LEVEL,
+    KIND_ANALYSIS,
+    KIND_QUOTE,
+    LEVEL_BEGINNER,
+    LEVEL_INTERMEDIATE,
+    as_list_items,
+    sanitize_markdown,
+    reasoning_footnote,
+    kind_for_agent,
+    level_label,
+    normalize_level,
+    render,
+    split_for_telegram,
+)
+from .services import llm_chat, run_mcp_tool, short_error as _short_error
 from .watchlist_repo import SqliteWatchlistRepo
 from .telegram_notifier import (
+    SETTLED_SEND_RETRY_BACKOFF_SECONDS,
+    SETTLED_SEND_TIMEOUT_SECONDS,
     TELEGRAM_ALERT_MODES,
-    TELEGRAM_MESSAGE_LIMIT,
     TelegramNotifier,
     fetch_telegram_api,
+    send_text_settled,
     telegram_notifier,
 )
 from .timeutil import KST
 from .trading_orders import (
+    ORDER_CANCEL_CALLBACK,
+    ORDER_CONFIRM_CALLBACK,
+    ORDER_EXPIRES_AFTER,
     McpTradingOrderGateway,
+    OrderSide,
     OrderType,
     PendingOrder,
     TradeRecorder,
     is_korean_market_open,
+    order_reply_markup,
 )
 from .stock_code import (
     _ORDERABLE_STOCK_CODE_RE,
     _STOCK_CODE_EXTRACT_RE,
     _is_unresolved_echo,
+    extract_stock_name,
 )
+from .order_assist import ProposalTrigger, parse_current_price, run_order_assist
 
 logger = logging.getLogger(__name__)
 
 ALERT_COMMAND_HELP = "사용법: /alerts urgent | all | off | status"
+LEVEL_COMMAND_HELP = "사용법: /level 초보 | 중급"
+LEVEL_ONBOARDING_QUESTION = "주식 투자 얼마나 익숙하세요?"
+# 온보딩은 이 한 문항이 전부다. 지식 퀴즈로 수준을 판정하지 않는다 — 봇이 사용자를 시험하는
+# 관계가 되는 순간 설명을 켜 두는 것이 창피한 일이 되고, 그러면 초보 모드가 쓰이지 않는다.
+START_MESSAGE = "\n".join(
+    [
+        "안녕하세요. 이 봇은 시세·공시·매매를 텔레그램에서 다룹니다.",
+        "",
+        LEVEL_ONBOARDING_QUESTION,
+        "초보를 고르면 낯선 용어에 한 줄 설명이 붙습니다. 나중에 /level 로 바꿀 수 있어요.",
+    ]
+)
 BUY_COMMAND_HELP = "사용법: /buy <종목명> <수량> [지정가]"
 SELL_COMMAND_HELP = "사용법: /sell <종목명> <수량> [지정가]"
 WATCH_COMMAND_HELP = "사용법: /watch add <종목명> | remove <종목명> | list"
 CATALYST_COMMAND_HELP = "사용법: /catalysts <종목명>"
+ADVISE_COMMAND_HELP = "사용법: /advise <종목명>"
 EARNINGS_COMMAND_HELP = "사용법: /earnings <종목명> [기간]  예: /earnings 삼성전자 2025Q1"
 NATURAL_ORDER_HELP = "자연어 주문을 해석할 수 없습니다. /buy 또는 /sell 형식으로 입력하세요."
 # 미등록 코드는 mcp-trading/stock-master.js가 {code: X, name: X, market: "UNKNOWN"}을
@@ -72,11 +109,11 @@ UNRESOLVED_STOCK_WARNING = (
     "⚠️ 종목명을 확인하지 못했습니다. 입력한 코드가 맞는지 다시 확인하세요."
 )
 # _STOCK_CODE_EXTRACT_RE, _ORDERABLE_STOCK_CODE_RE → backend/stock_code.py (#140)
-ORDER_EXPIRES_AFTER = timedelta(seconds=60)
-ORDER_CONFIRM_CALLBACK = "order:confirm"
-ORDER_CANCEL_CALLBACK = "order:cancel"
+# ORDER_CONFIRM_CALLBACK, ORDER_CANCEL_CALLBACK, order_reply_markup → trading_orders.py (#314).
+# 스케줄러의 자동 제안도 같은 버튼을 써야 해서 옮겼다. 이름은 여기서 계속 읽을 수 있다.
 ORDER_STALE_CALLBACK_TEXT = "이전 주문 버튼입니다. 최신 주문 메시지에서 다시 선택하세요."
 ALERT_CALLBACK_PREFIX = "alerts:"
+LEVEL_CALLBACK_PREFIX = "level:"
 BALANCE_REFRESH_CALLBACK = "balance:refresh"
 TRADE_CALLBACK_PREFIX = "trade:"
 LOOKUP_CALLBACK_PREFIX = "lookup:"
@@ -84,6 +121,7 @@ WATCH_LIST_CALLBACK = "watch:list"
 WATCH_LIST_QUOTE_DELAY_SECONDS = 1.1
 MARKET_QUOTE_CALLBACK = "market:quote"
 MARKET_TREND_CALLBACK = "market:trend"
+MARKET_TREND_DETAIL_CALLBACK = "market:trend_detail"
 MARKET_STALE_CALLBACK_TEXT = "이전 조회 버튼입니다. 최신 조회 메시지에서 다시 선택하세요."
 MARKET_CALLBACK_LIMIT = 100
 # 실패한 update는 offset을 유지해 재시도한다(일시 장애 때 명령을 버리지 않기 위함).
@@ -144,28 +182,16 @@ UPDATE_LABEL_LIMIT = 40
 STATE_STORE_TIMEOUT_SECONDS = 3.0
 
 
-# 부수효과가 확정된 뒤의 전송은 update 재시도로 되살릴 수 없다(#247). 대신 그 자리에서
-# 짧게 재시도해 429 같은 일시 장애를 흡수한다 — "전송만 별도로 재시도"에 해당한다.
+# 확정 전송의 재시도 상수(SETTLED_SEND_*)와 루프(send_text_settled)는 telegram_notifier로
+# 옮겼다 (PR #327 리뷰). 스케줄러의 자동 제안(#314)이 같은 재시도를 써야 하는데, 핸들러
+# 메서드로 두면 그쪽에서 부를 수 없어 한쪽만 단발 전송이 되고 같은 429에 한쪽 메시지만
+# 조용히 버려진다. 이름은 위 import로 여기서 계속 읽을 수 있다.
 #
-# 이 값을 키우면 안 되는 이유가 둘이다.
-#   1. 폴러 루프를 그 시간만큼 붙잡으므로, 같은 배치에서 재시도를 기다리는 다른 update가
-#      시도 없이 예산(일반 실패 60초)만 잃는다. PR #242가 넓힌 예산을 되돌리는 방향이다.
-#   2. /buy 확인 프롬프트는 대기 주문의 60초 만료 창을 나눠 쓴다. 늦게 도착할수록 사용자가
-#      확인 버튼을 누를 시간이 줄어든다.
-#
-# 429의 retry_after를 읽을 수 없어(notifier.send_text가 bool만 돌려준다) 간격은 추측이다.
-# Telegram이 더 긴 ban을 주면 4시도가 모두 그 안에서 소진되고 메시지는 버려진다.
-SETTLED_SEND_RETRY_BACKOFF_SECONDS = (1.0, 3.0, 9.0)
-# 위 백오프 합(13초)은 상한이 아니다. 시도마다 HTTP 왕복이 붙고 telegram_notifier의 httpx
-# 타임아웃이 10초라, Telegram이 429로 즉답하지 않고 무응답이면 4시도 × 10초 + 13초 = 53초까지
-# 늘어난다. 그러면 위 두 대가가 모두 한계까지 간다 — /buy 프롬프트가 60초 만료 창을 거의
-# 다 먹고, 같은 배치의 update는 예산을 통째로 잃는다 (PR #253 리뷰).
-#
-# 그래서 백오프 합이 아니라 벽시계로 상한을 강제한다. 429는 즉답이라 현실 경로는 여전히
-# 백오프 합에 가깝고, 이 상한은 무응답·행 같은 병리적 경우만 잘라낸다.
-# 상한이 있다는 사실과 그 값이 만료 창 안에 든다는 것을 테스트가 고정한다
-# (test_settled_send_retry_is_bounded, test_settled_send_gives_up_at_the_wall_clock_bound).
-SETTLED_SEND_TIMEOUT_SECONDS = 20.0
+# 다만 **여기 있는 이름을 monkeypatch해도 상한은 바뀌지 않는다** — 값을 읽는 것은
+# telegram_notifier 안이고 이쪽은 임포트 시점에 묶인 별개 바인딩이다. 테스트가 상한을
+# 줄이려면 telegram_notifier 쪽을 패치해야 하며, 잘못된 대상을 잡으면
+# test_settled_send_gives_up_at_the_wall_clock_bound의 elapsed 단언이 잡는다.
+
 # getUpdates 배치 크기. 명시하지 않으면 Telegram 기본값이 100이라, 배치 전체가 settled
 # 전송에 닿으면 한 루프의 점유가 100 × SETTLED_SEND_TIMEOUT_SECONDS까지 늘어나 사실상
 # 상한이 없어진다. 배치를 작게 끊으면 최악이 유계가 된다 (PR #253 2차 리뷰).
@@ -190,6 +216,7 @@ TELEGRAM_INTERACTIVE_HELP = "\n".join(
     [
         "사용 가능한 명령:",
         "/alerts urgent|all|off|status - Telegram 알림 모드 변경",
+        "/level 초보|중급 - 용어 설명 표시 수준 변경",
         "/balance - 예수금·총자산·보유 종목 조회",
         "/watch add <종목명>|remove <종목명>|list - 관심 종목 관리",
         "/catalysts <종목명> - 예정 촉매 이벤트 조회",
@@ -199,6 +226,7 @@ TELEGRAM_INTERACTIVE_HELP = "\n".join(
         "/quote <종목명> - 현재가 조회",
         "/trend <종목명> - 외국인·기관·개인 수급 조회",
         "/earnings <종목명> [기간] - DART 실적·뉴스 분석",
+        "/advise <종목명> - 주문 보조: 제안 → 한도 검사 → 검증 → 확정 버튼",
         "/buy <종목명> <수량> [지정가] - 매수 주문 준비",
         "/sell <종목명> <수량> [지정가] - 매도 주문 준비",
         "/confirm - 대기 주문 확정",
@@ -215,9 +243,12 @@ TELEGRAM_BOT_COMMANDS = [
     {"command": "trend", "description": "종목 외국인·기관·개인 수급 조회"},
     {"command": "earnings", "description": "DART 실적·뉴스 분석"},
     {"command": "alerts", "description": "Telegram 알림 모드 변경"},
+    {"command": "level", "description": "용어 설명 표시 수준 변경 (초보/중급)"},
+    {"command": "start", "description": "봇 소개와 수준 설정"},
     {"command": "visualize", "description": "Unity 포트폴리오 시각화 링크"},
     {"command": "trade", "description": "매수·매도 주문 입력 안내"},
     {"command": "lookup", "description": "현재가·수급 조회 입력 안내"},
+    {"command": "advise", "description": "주문 보조 (예: /advise 삼성전자)"},
     {"command": "buy", "description": "매수 주문 준비 (예: /buy 삼성전자 1)"},
     {"command": "sell", "description": "매도 주문 준비 (예: /sell 삼성전자 1)"},
     {"command": "confirm", "description": "대기 주문 확정"},
@@ -240,140 +271,228 @@ LOOKUP_COMMAND_HELP = "\n".join(
         f"{TREND_COMMAND_HELP}  예: /trend 삼성전자",
     ]
 )
-TELEGRAM_TRUNCATION_SUFFIX = "...(이하 생략)"
 
 # ---- 추론 과정 표시 (#260) ----
 
 NAT_PROGRESS_MESSAGE = "⏳ 분석 중입니다..."
 # 진행 메시지 삭제가 거부됐을 때 남길 종료 표시. "분석 중"이 영원히 남지 않게 한다.
 PROGRESS_DONE_MESSAGE = "✅ 분석 완료"
-REASONING_FOOTNOTE_SEPARATOR = "─────"
-# 각주 전체 길이 상한. 각주 자리를 먼저 확보하고 본문을 자르는 구조라, 각주가 길어지면
-# 본문 몫이 그만큼 줄어든다. 상한이 없으면 본문 예산이 음수가 되어 답변이 통째로
-# 사라진 채 각주만 남을 수 있다.
-REASONING_FOOTNOTE_MAX_CHARS = 300
 
-# NAT supervisor 브랜치명 → 사용자에게 보여줄 한국어 라벨.
-# 키는 finus_nat/configs/router*.yml의 branches[].name과 같아야 한다 —
-# 누락은 backend/tests/test_label_drift.py가 CI에서 잡는다 (#282).
-AGENT_LABELS: dict[str, str] = {
-    "trading_agent": "트레이딩 에이전트",
-    "monitoring_agent": "모니터링 에이전트",
-    "news_agent": "뉴스 에이전트",
-    "recommend_agent": "추천 에이전트",
-    "strategy_agent": "전략 에이전트",
-    "diary_agent": "매매일지 에이전트",
-}
-
-# 도구 강제 원장(finus_nat/src/nat_finus_nat/finus_api.py의 _record_to_ledger 호출부)에
-# 기록되는 내부 도구명 → 사용자에게 보여줄 한국어 라벨.
-# 매핑에 없는 도구는 내부 이름을 그대로 노출한다 — 조용히 감추면 각주가 "확인한 자료"를
-# 실제보다 적게 보여주게 되어, 근거를 보여준다는 목적 자체가 무너진다. 그렇게 열화가
-# graceful한 만큼 누락을 아무도 눈치채지 못하므로, 원장 도구명과의 드리프트는
-# backend/tests/test_label_drift.py가 CI에서 잡는다 (#282).
-TOOL_LABELS: dict[str, str] = {
-    "finus_account_balance": "KIS 시세·계좌 조회",
-    "finus_market_news": "뉴스 검색",
-    "finus_disclosure_signal": "지분공시 조회",
-    "finus_earnings_report": "DART 실적 조회",
-    "finus_mcp_trading_today_orders": "당일 주문·체결 조회",
-    "finus_mcp_trading_get_balance": "계좌 잔고 조회",
-    "finus_mcp_trading_balance_rlz_pl": "실현손익 조회",
-    "finus_save_diary": "매매일지 저장",
-    "finus_list_diaries": "매매일지 조회",
-}
+# 각주 상수(REASONING_FOOTNOTE_*)와 라벨 표(AGENT_LABELS·TOOL_LABELS), 각주 조립 자체는
+# #297에서 presentation으로 옮겼다. 동작은 그대로다 — 옮긴 이유는 나가는 문장을 조립하는
+# 지점이 하나여야 용어 각주와의 순서·길이 예산을 한 곳에서 정할 수 있기 때문이다.
+# 이 모듈은 그 이름들을 다시 내보내지 않는다. 재수출만 남은 임포트는 정의가 두 곳에 있다는
+# 착시를 만들고, 정적 검사에는 미사용 임포트로 보인다 (#297 자가리뷰).
 
 _telegram_command_task: asyncio.Task | None = None
 
-
-def _telegram_text(text: str, limit: int = TELEGRAM_MESSAGE_LIMIT) -> str:
-    stripped = text.strip()
-    if len(stripped) <= limit:
-        return stripped
-    # max(0, ...): limit이 말줄임 접미사보다 짧아도 음수 인덱스로 뒤집히지 않게 한다.
-    keep = max(0, limit - len(TELEGRAM_TRUNCATION_SUFFIX))
-    return f"{stripped[:keep]}{TELEGRAM_TRUNCATION_SUFFIX}"
-
-
-def _reasoning_footnote(routed_agent: Any, tools_used: Any) -> str:
-    """담당 에이전트·확인한 자료 각주를 만든다. 근거가 없으면 빈 문자열 (#260).
-
-    입력은 NAT 응답의 ``routed_agent``/``tools_used`` 필드에서만 온다 — 답변 텍스트를
-    파싱해 에이전트명이나 도구명을 추측하지 않는다 (#129와 같은 원칙). 파싱으로 만들면
-    "실제로 호출한 도구"가 아니라 "모델이 호출했다고 주장하는 도구"가 되어, 근거로
-    보여주는 각주가 오히려 환각을 사실처럼 전달하는 표면이 된다.
-
-    두 값이 모두 없으면(구버전 finus_nat 등) 각주를 조용히 생략한다. 라우팅은 됐는데
-    도구가 하나도 실행되지 않은 경우는 "없음"으로 드러낸다 — 도구 없이 나온 답변이라는
-    사실 자체가 사용자가 알아야 할 근거다.
-
-    호출했지만 실패한 도구는 ``(실패)``, 성공했지만 결과가 비었던 도구는 ``(결과 없음)``을
-    붙여 데이터를 얻은 호출과 구분한다. 둘 다 그냥 "확인한 자료"로 적으면 사용자는 답변이
-    그 데이터에 근거했다고 읽는다 — 실제로는 아니므로, 근거를 보여준다는 이 기능의 목적과
-    정반대의 오독이 된다. 빈 결과는 특히 NAT가 "[조회 결과 없음] ..."을 본문으로 돌려주는
-    경로(#209)와 겹쳐, 본문은 데이터가 없다고 말하는데 각주만 자료를 확인했다고 말하게
-    된다. 그렇다고 목록에서 빼면 시도조차 안 한 것처럼 보이므로, 빼지 않고 결과를 함께 적는다.
-    """
-    agent = routed_agent.strip() if isinstance(routed_agent, str) else ""
-    tools = list(tools_used) if isinstance(tools_used, (list, tuple)) else []
-    if not agent and not tools:
-        return ""
-
-    entries: list[str] = []
-    for tool in tools:
-        name = getattr(tool, "name", None)
-        if not isinstance(name, str) or not name.strip():
-            continue
-        entry = TOOL_LABELS.get(name.strip(), name.strip())
-        if getattr(tool, "ok", False) is not True:
-            entry = f"{entry}(실패)"
-        elif getattr(tool, "empty", False) is True:
-            entry = f"{entry}(결과 없음)"
-        if entry not in entries:  # 서로 다른 내부 도구가 같은 라벨로 접힐 수 있다
-            entries.append(entry)
-
-    if not agent and not entries:
-        return ""
-
-    parts: list[str] = []
-    if agent:
-        parts.append(f"🤖 {AGENT_LABELS.get(agent, agent)}")
-    parts.append(f"📚 확인한 자료: {', '.join(entries) if entries else '없음'}")
-    footnote = f"{REASONING_FOOTNOTE_SEPARATOR}\n{' · '.join(parts)}"
-    return _telegram_text(footnote, REASONING_FOOTNOTE_MAX_CHARS)
+# 설명 수준 캐시 (#297). 값 자체는 거의 바뀌지 않으므로 짧게 들고 있어도 사용자가 체감할
+# 지연은 없고, /level로 바꾸면 _apply_level이 그 자리에서 캐시를 갱신하므로 즉시 반영된다.
+LEVEL_CACHE_TTL_SECONDS = 60.0
+# 읽기에 실패했을 때는 더 길게 기다린다. 실패의 지배적 원인은 redis 부재이고 그건 다음
+# 1초 안에 낫지 않는다 — 짧게 잡으면 장애 내내 메시지마다 소켓 타임아웃을 다시 문다.
+LEVEL_LOOKUP_FAILURE_COOLDOWN_SECONDS = 300.0
+_level_cache: tuple[str, float] | None = None
 
 
-def _answer_with_footnote(answer: str, footnote: str) -> str:
-    """답변 본문과 각주를 텔레그램 길이 한도 안에 함께 담는다 (#260).
-
-    각주 자리를 먼저 확보한 뒤 본문을 나머지에 맞춰 자른다. 합친 뒤에 자르면 긴 답변에서
-    각주가 통째로 잘려나가, 정작 근거가 필요한 답변에서만 근거가 사라진다.
-    """
-    if not footnote:
-        return _telegram_text(answer)
-    block = f"\n\n{footnote}"
-    return f"{_telegram_text(answer, TELEGRAM_MESSAGE_LIMIT - len(block))}{block}"
+def _level_cache_get(now: float) -> str | None:
+    if _level_cache is None or now >= _level_cache[1]:
+        return None
+    return _level_cache[0]
 
 
-def _nat_answer_message(result: Any) -> str:
-    """NAT 응답을 각주까지 붙인 텔레그램 메시지로 만든다 (#260).
+def _level_cache_put(level: str, expires_at: float) -> None:
+    global _level_cache
+    _level_cache = (level, expires_at)
+
+
+def reset_level_cache() -> None:
+    """캐시를 비운다. 테스트가 수준 저장소를 갈아끼울 때 쓴다."""
+    global _level_cache
+    _level_cache = None
+
+
+
+def _nat_answer_message(
+    result: Any,
+    level: str = DEFAULT_TELEGRAM_USER_LEVEL,
+    question: str = "",
+) -> str:
+    """NAT 응답을 텔레그램 메시지로 만든다 (#260, #297).
 
     ``routed_agent``/``tools_used``는 ``services.NatAnswer``가 실어 오는 속성이다.
     속성이 없는 값(구버전 경로, 문자열만 주는 대역)이면 각주 없이 본문만 보낸다.
+
+    #297에서 조립을 presentation.render에 위임했다. 마크다운 정리와 용어 각주가 함께
+    붙지만 추론 각주의 모양은 그대로다. 틀은 라우팅된 에이전트로 정한다(매매일지 답변은
+    일지 틀). 본문을 파싱해 추측하지 않는 것이 #260 각주와 같은 원칙이다.
+
+    길이는 여기서 맞추지 않는다 (#313). 상한을 넘으면 전송 계층이 나눠 보내고, 각주는
+    마지막 조각에 남는다 — 자리 다툼이 없어졌으므로 예산 규칙도 없어졌다.
     """
-    footnote = _reasoning_footnote(
-        getattr(result, "routed_agent", None),
-        getattr(result, "tools_used", ()),
+    routed_agent = getattr(result, "routed_agent", None)
+    return render(
+        result,
+        kind_for_agent(routed_agent),
+        level,
+        reasoning=reasoning_footnote(routed_agent, getattr(result, "tools_used", ())),
+        question=question,
     )
-    return _answer_with_footnote(str(result), footnote)
 
 
-def _short_error(exc: Exception) -> str:
-    raw = getattr(exc, "detail", str(exc))
-    text = str(raw or "").strip()
-    if not text:
-        text = exc.__class__.__name__
-    return text[:300]
+# ---- 수급 표 (#297 검수 4차) ----
+
+# 텔레그램에서 표는 유지할 수 없다. 한 행이 폭을 넘으면 뒷조각이 아무 열에나 떨어져
+# 정렬이 통째로 무너지고, 폭은 읽는 쪽 글자 크기 설정에 달려 있어 우리가 보장할 수 없다.
+# 그래서 가로 표를 세로 나열로 바꾼다 — 세로는 접혀도 "- " 표시가 항목 경계를 지킨다.
+#
+# 5일 × 3주체를 세로로 펴면 20줄이라 그것대로 안 읽힌다. 기본 메시지는 방향 한 줄과
+# 최근 1일만 보여주고, 5일치는 버튼을 누른 사람에게만 별도 메시지로 보낸다. 링크로 빼지
+# 않는 이유는 목적지 화면이 없기도 하지만, 이 봇의 값이 "텔레그램 안에서 끝난다"는 데
+# 있기 때문이다.
+#
+# mcp-trading/index.js의 getInvestorTrading이 만드는 행을 읽는다. 다른 서비스의 출력
+# 형식에 기대는 파싱이라 깨질 수 있으므로, 한 행도 못 읽으면 원문을 그대로 내보낸다
+# (_format_investor_flow의 None 반환). 형식이 바뀌면 요약이 사라질 뿐 조회는 계속 된다.
+_INVESTOR_ROW_RE = re.compile(
+    r"^\s*(\d{8})\s*\|\s*개인:\s*(-?[\d,]+)\s*\|\s*"
+    r"외국인:\s*(-?[\d,]+)\s*\|\s*기관:\s*(-?[\d,]+)\s*$",
+    re.M,
+)
+# 요약에 싣는 일수. 상세는 MCP가 준 만큼 전부 싣는다.
+TREND_SUMMARY_DAYS = 1
+
+
+def trend_detail_button_text(days: int) -> str:
+    """상세 버튼 라벨. 일수를 고정값으로 박지 않는다 (#297 검수 2차).
+
+    MCP는 최대 5일을 주지만 실제로는 그날 데이터가 있는 만큼만 온다 — 연휴 직후면 3일치다.
+    라벨에 5를 박아 두면 "5일 상세 보기"를 눌렀는데 "3일 상세"가 나온다.
+    """
+    return f"📊 {days}일 상세 보기"
+
+
+@dataclass(frozen=True)
+class InvestorFlow:
+    """하루치 투자자별 순매수 수량(주). 음수면 순매도."""
+
+    date: str
+    individual: int
+    foreign: int
+    institution: int
+
+
+# (표시 이름, 필드명). 순서가 화면 순서다.
+TREND_ACTORS: tuple[tuple[str, str], ...] = (
+    ("개인", "individual"),
+    ("외국인", "foreign"),
+    ("기관", "institution"),
+)
+
+
+def _parse_investor_flows(raw: str) -> list[InvestorFlow]:
+    """수급 응답에서 날짜별 행을 뽑는다. 못 읽으면 빈 목록.
+
+    값이 없는 칸을 "-"로 채우는 행(formatQuantity의 빈 값 처리)은 정규식에 걸리지 않아
+    조용히 빠진다. 그 하루를 요약에서 빼는 편이, 0으로 채워 "순매수도 순매도도 아님"이라고
+    말하는 것보다 낫다 — 없는 데이터를 지어내지 않는다는 이 레포의 선(#162)과 같다.
+    """
+    flows = [
+        InvestorFlow(
+            date=match.group(1),
+            individual=int(match.group(2).replace(",", "")),
+            foreign=int(match.group(3).replace(",", "")),
+            institution=int(match.group(4).replace(",", "")),
+        )
+        for match in _INVESTOR_ROW_RE.finditer(raw)
+    ]
+    # MCP가 최신순으로 준다고 가정하지 않는다. 정렬이 뒤집히면 "3일 연속"이 거꾸로 세어진다.
+    return sorted(flows, key=lambda flow: flow.date, reverse=True)
+
+
+def _format_flow_date(date: str) -> str:
+    return f"{date[4:6]}/{date[6:8]}" if len(date) == 8 else date
+
+
+def _format_flow_rounded(value: int) -> str:
+    """요약용 표기. 만 주 이상은 만 단위로 접는다.
+
+    요약에서 중요한 것은 방향과 규모지 정확한 주수가 아니다. 정확한 값이 필요한 사람은
+    상세 버튼을 누르고, 거기서는 반올림하지 않는다.
+    """
+    if abs(value) >= 10_000:
+        return f"{value / 10_000:+,.0f}만주"
+    return f"{value:+,}주"
+
+
+def _flow_streak(flows: list[InvestorFlow], field: str) -> int:
+    """최근일부터 같은 방향이 이어진 일수. 0이 끼면 거기서 끊는다."""
+    latest = getattr(flows[0], field)
+    if latest == 0:
+        return 0
+    positive = latest > 0
+    streak = 0
+    for flow in flows:
+        value = getattr(flow, field)
+        if value == 0 or (value > 0) != positive:
+            break
+        streak += 1
+    return streak
+
+
+def _trend_headline(flows: list[InvestorFlow]) -> str:
+    """가장 길게 이어진 방향 한 줄. 계산일 뿐 판단이 아니다.
+
+    "외국인 3일 연속 순매수"는 데이터에서 바로 나오는 사실이다. 여기에 그래서 어떻다는
+    말을 붙이지 않는다 — 그건 이 계층이 할 일이 아니고, 붙이는 순간 투자 권유가 된다.
+    """
+    ranked = sorted(
+        (
+            (_flow_streak(flows, field), abs(getattr(flows[0], field)), label, field)
+            for label, field in TREND_ACTORS
+        ),
+        reverse=True,
+    )
+    streak, _, label, field = ranked[0]
+    if streak == 0:
+        return ""
+    direction = "순매수" if getattr(flows[0], field) > 0 else "순매도"
+    if streak == 1:
+        return f"{label} {direction}"
+    return f"{label} {streak}일 연속 {direction}"
+
+
+def _format_flow_block(flow: InvestorFlow, *, rounded: bool) -> list[str]:
+    formatter = _format_flow_rounded if rounded else (lambda value: f"{value:+,}")
+    return [
+        _format_flow_date(flow.date),
+        *as_list_items(
+            [f"{label} {formatter(getattr(flow, field))}" for label, field in TREND_ACTORS]
+        ),
+    ]
+
+
+def _format_trend_summary(stock: str, flows: list[InvestorFlow]) -> str:
+    """방향 한 줄 + 최근 1일 세로.
+
+    파싱 결과를 인자로 받는다. 호출부가 이미 한 번 읽었고(빈 목록이면 원문으로 떨어진다)
+    그 길이가 상세 버튼 라벨에도 쓰이므로, 여기서 또 읽으면 두 값이 어긋날 수 있다.
+    """
+    lines = [f"[{stock}] 투자자 매매동향"]
+    headline = _trend_headline(flows)
+    if headline:
+        lines.append(headline)
+    for flow in flows[:TREND_SUMMARY_DAYS]:
+        lines += ["", *_format_flow_block(flow, rounded=True)]
+    return "\n".join(lines)
+
+
+def _format_trend_detail(stock: str, flows: list[InvestorFlow]) -> str:
+    """전체 일수를 세로로. 반올림하지 않는다."""
+    lines = [f"[{stock}] 투자자 매매동향 {len(flows)}일 상세", "단위: 주, +는 순매수"]
+    for flow in flows:
+        lines += ["", *_format_flow_block(flow, rounded=False)]
+    return "\n".join(lines)
 
 
 def _telegram_command_parts(text: str) -> tuple[str, str, str]:
@@ -482,6 +601,12 @@ class TelegramCommandHandler:
         if self._matches_command(command, bot_username, "/alerts"):
             await self._handle_alerts(argument)
             return
+        if self._matches_command(command, bot_username, "/level"):
+            await self._handle_level(argument)
+            return
+        if self._matches_command(command, bot_username, "/start"):
+            await self._handle_start()
+            return
         if self._matches_command(command, bot_username, "/help"):
             await self._send_text_or_raise(
                 TELEGRAM_INTERACTIVE_HELP,
@@ -520,6 +645,9 @@ class TelegramCommandHandler:
             return
         if self._matches_command(command, bot_username, "/earnings"):
             await self._handle_earnings(argument, str(chat.get("id", "")).strip())
+            return
+        if self._matches_command(command, bot_username, "/advise"):
+            await self._handle_advise(argument, str(chat.get("id", "")).strip())
             return
         if self._matches_command(command, bot_username, "/buy"):
             await self._handle_order_command("BUY", argument, str(chat.get("id", "")).strip())
@@ -570,6 +698,12 @@ class TelegramCommandHandler:
         이 호출이 든 try 블록은 TelegramSendError를 반드시 재던져야 한다. 전송 실패를
         사용자 메시지로 변환하면 무의미한 중복 메시지가 한 번 더 나간다.
         test_every_try_containing_a_retryable_send_reraises_it이 이를 강제한다 (#249).
+
+        메시지가 나뉘어(#313) 앞 조각만 나간 뒤 실패하면, update 재실행은 첫 조각부터
+        다시 보낸다. 이미 도착한 조각이 한 벌 더 보이는 대신 빠진 뒷부분이 채워진다 —
+        이 경로의 계약이 "다시 실행해도 같은 결과"이므로 재실행 지점을 조각 단위로
+        기억할 자리가 없고, 있더라도 중복보다 누락이 나쁘다. 부수효과가 확정돼 재실행할
+        수 없는 경로는 _send_text_settled가 조각 단위로 이어 보낸다.
         """
         sent = await self.notifier.send_text(text, reply_markup=reply_markup)
         if sent is False:
@@ -581,80 +715,18 @@ class TelegramCommandHandler:
         *,
         reply_markup: dict[str, Any] | None = None,
     ) -> bool:
-        """부수효과가 확정된 뒤의 전송. 실패해도 update를 재시도하지 않는다 (#247).
+        """확정된 부수효과의 결과 전송. 재시도 규칙은 telegram_notifier에 하나뿐이다.
 
-        재시도하면 원래 의도를 달성하지 못하고 다른 메시지로 끝나기 때문이다. /buy는 대기
-        주문이 이미 저장돼 재실행이 "이미 대기 중인 주문이 있습니다"로 끝나 사용자가 확인
-        버튼을 영영 못 받고, /confirm은 claim(GETDEL)으로 주문이 소비돼 재실행이 "확정할
-        대기 주문이 없습니다"로 끝나 체결된 주문을 미체결로 인식하게 만든다.
+        스케줄러의 자동 제안(#314)이 같은 함수를 부른다 — 한쪽만 단발 전송이면 같은 429에
+        한쪽 메시지만 조용히 버려진다 (PR #327 리뷰). 조각 나누기와 조각 단위 재시도(#313)도
+        그쪽으로 함께 옮겨 갔다. 자동 제안의 승인 프롬프트는 제안 근거와 검증 의견을 함께
+        실어 상한을 넘길 수 있으므로, 나누기가 이 경로에만 있으면 안 된다.
 
-        대신 전송만 그 자리에서 재시도해 429 같은 일시 장애를 흡수한다. 그래도 실패하면
-        로그만 남긴다 — 사용자에게 말을 걸 수 없는 상태에서 할 수 있는 일이 없다.
-
-        재시도가 폴러 루프를 붙잡는 시간의 상한과 그 대가는 SETTLED_SEND_TIMEOUT_SECONDS
-        주석에 적어 두었다.
-
-        반환값은 전송 성공 여부다. 호출부가 "통지가 나갔는가"로 뒷정리를 갈라야 하는
-        경우가 있다(/buy는 실패 시 대기 주문을 지운다).
+        여기서는 테스트가 대체할 수 있는 _sleep을 넘겨 주는 것 말고 하는 일이 없다.
         """
-        attempts = len(SETTLED_SEND_RETRY_BACKOFF_SECONDS) + 1
-        started_at = time.monotonic()
-        try:
-            # 시도 횟수가 아니라 벽시계로 상한을 강제한다. 무응답이면 시도마다 httpx
-            # 타임아웃(10초)이 그대로 붙어 횟수만으로는 상한이 서지 않기 때문이다.
-            # asyncio.timeout은 자기 데드라인이 아닌 외부 취소는 CancelledError로 그대로
-            # 통과시키므로 폴러의 graceful shutdown을 방해하지 않는다.
-            async with asyncio.timeout(SETTLED_SEND_TIMEOUT_SECONDS):
-                for index in range(attempts):
-                    sent = await self.notifier.send_text(text, reply_markup=reply_markup)
-                    if sent is not False:
-                        return True
-                    if index >= len(SETTLED_SEND_RETRY_BACKOFF_SECONDS):
-                        break
-
-                    delay = SETTLED_SEND_RETRY_BACKOFF_SECONDS[index]
-                    # 429의 flood-wait은 흔히 30초 이상이라 (1, 3, 9) 추측으로는 4시도가
-                    # 전부 ban 구간에 소진된다. 게다가 ban 중 재요청은 대기 시간을 늘리는
-                    # 방향으로 작용한다 — 남은 예산 안에 안 풀리면 재시도가 무의미할 뿐
-                    # 아니라 해롭다 (PR #253 2차 리뷰).
-                    #
-                    # last_retry_after_seconds는 notifier에 걸린 공유 가변 상태다. 이 읽기가
-                    # 방금 그 send_text의 결과를 보는 근거는 둘뿐이다: send_text가 성공·실패
-                    # 양쪽에서 값을 갱신해 호출 간 이월이 없다는 것과, 위 send_text 반환과
-                    # 이 줄 사이에 await가 없어 이벤트 루프가 다른 코루틴에 넘어가지 않는다는
-                    # 것. 사이에 await를 하나 넣으면(로깅을 비동기로 바꾸는 정도로도) 다른
-                    # 전송의 flood-wait을 읽게 된다 (PR #253 3차 리뷰).
-                    retry_after = getattr(self.notifier, "last_retry_after_seconds", None)
-                    if retry_after is not None:
-                        remaining = SETTLED_SEND_TIMEOUT_SECONDS - (
-                            time.monotonic() - started_at
-                        )
-                        if retry_after > remaining:
-                            logger.error(
-                                "확정된 부수효과의 결과를 전송하지 못했습니다 "
-                                "(%s자, flood-wait %s초 > 남은 예산 %.1f초 — 재시도 포기)",
-                                len(text),
-                                retry_after,
-                                max(0.0, remaining),
-                            )
-                            return False
-                        delay = max(delay, float(retry_after))
-                    await self._sleep(delay)
-        except TimeoutError:
-            logger.error(
-                "확정된 부수효과의 결과를 전송하지 못했습니다 (%s자, 벽시계 상한 %s초 초과)",
-                len(text),
-                SETTLED_SEND_TIMEOUT_SECONDS,
-            )
-            return False
-        # 본문은 남기지 않는다. 이 경로에는 체결 내역·잔고가 실려 있고, 진단에 필요한 것은
-        # "어느 지점에서 몇 번 만에 포기했는가"이지 사용자에게 보내려던 문장이 아니다.
-        logger.error(
-            "확정된 부수효과의 결과를 전송하지 못했습니다 (%s자, %s시도 후 포기)",
-            len(text),
-            attempts,
+        return await send_text_settled(
+            self.notifier, text, reply_markup=reply_markup, sleep=self._sleep
         )
-        return False
 
     async def _sleep(self, seconds: float) -> None:
         """테스트가 전역 asyncio.sleep 대신 이 인스턴스만 대체할 수 있게 하는 간접층.
@@ -690,6 +762,9 @@ class TelegramCommandHandler:
             )
             return
 
+        if data.startswith(LEVEL_CALLBACK_PREFIX):
+            await self._handle_level_callback(callback_query_id, data)
+            return
         if data.startswith(ALERT_CALLBACK_PREFIX):
             await self._handle_alerts_callback(callback_query_id, data)
             return
@@ -714,6 +789,14 @@ class TelegramCommandHandler:
 
         if data.startswith(f"{MARKET_QUOTE_CALLBACK}:"):
             await self._handle_market_callback(callback_query_id, chat_id, "quote", data)
+            return
+
+        # 접두어가 겹치므로 긴 쪽(market:trend_detail)을 먼저 본다. 순서가 바뀌면 상세
+        # 버튼이 요약 경로로 떨어져 같은 메시지가 두 번 나간다.
+        if data.startswith(f"{MARKET_TREND_DETAIL_CALLBACK}:"):
+            await self._handle_market_callback(
+                callback_query_id, chat_id, "trend_detail", data
+            )
             return
 
         if data.startswith(f"{MARKET_TREND_CALLBACK}:"):
@@ -841,7 +924,9 @@ class TelegramCommandHandler:
         # 토큰 소비는 되돌릴 수 있는 부수효과라 확정시킬 이유가 없다 — 전송이 성공한 뒤에
         # 소비해 재시도 경계를 전송 뒤로 옮긴다 (PR #253 2차 리뷰).
         context = self.market_callbacks.get(token) if token else None
-        if context is None:
+        # token이 falsy면 context는 반드시 None이므로 판정 결과는 그대로다.
+        # token을 함께 보면 아래 pop(token)에서 str | None이 str로 좁혀진다.
+        if token is None or context is None:
             await self._answer_callback_query(
                 callback_query_id,
                 text=MARKET_STALE_CALLBACK_TEXT,
@@ -860,7 +945,7 @@ class TelegramCommandHandler:
         if action == "quote":
             await self._handle_quote(stock, chat_id)
         else:
-            await self._handle_trend(stock, chat_id)
+            await self._handle_trend(stock, chat_id, detail=action == "trend_detail")
         # 전송이 성공한 뒤에만 소비한다. 위에서 TelegramSendError가 나면 여기 도달하지
         # 않으므로 재시도가 같은 토큰으로 같은 조회를 다시 수행한다.
         self.market_callbacks.pop(token, None)
@@ -897,6 +982,100 @@ class TelegramCommandHandler:
                 f"Telegram 알림 모드가 {self._format_alert_mode(action)}(으)로 변경되었습니다.",
                 reply_markup=self._alerts_reply_markup(),
             )
+
+    async def _handle_start(self) -> None:
+        """봇 소개 + 수준 1문항. /start는 텔레그램이 첫 대화에서 자동으로 보내는 명령이다 (#297).
+
+        여기서 수준을 저장하지 않는다 — 버튼을 누르지 않고 넘어간 사용자도 기본값(초보)으로
+        동작해야 한다. 저장은 버튼 콜백이나 /level에서만 일어난다.
+        """
+        await self._send_text_or_raise(
+            START_MESSAGE,
+            reply_markup=self._level_reply_markup(),
+        )
+
+    async def _handle_level(self, argument: str) -> None:
+        """/level 초보|중급. 인자가 없으면 현재 설정을 버튼과 함께 보여준다 (#297).
+
+        /alerts와 같은 모양을 일부러 지켰다 — 두 명령 다 "이 채팅의 표시 설정"이고,
+        인자 없이 치면 현재 상태가 나오는 규칙이 명령마다 다르면 사용자가 외울 것이 늘어난다.
+        """
+        parts = argument.split()
+        if not parts:
+            level = await self._current_level()
+            await self._send_text_or_raise(
+                f"현재 설명 수준: {level_label(level)}\n{LEVEL_COMMAND_HELP}",
+                reply_markup=self._level_reply_markup(),
+            )
+            return
+
+        requested = normalize_level(parts[0])
+        if requested is None:
+            await self._send_text_or_raise(
+                LEVEL_COMMAND_HELP,
+                reply_markup=self._level_reply_markup(),
+            )
+            return
+
+        await self._apply_level(requested)
+
+    async def _apply_level(self, level: str) -> None:
+        async with self._state() as state:
+            await state.set_telegram_user_level(level)
+        # 저장이 성공한 뒤에만 캐시를 갱신한다. 먼저 갱신하면 저장에 실패한 값이 이 프로세스
+        # 안에서만 적용된 것처럼 보이고, 재시작 후 조용히 되돌아간다.
+        _level_cache_put(level, time.monotonic() + LEVEL_CACHE_TTL_SECONDS)
+        await self._send_text_or_raise(
+            self._level_changed_message(level),
+            reply_markup=self._level_reply_markup(),
+        )
+
+    def _level_changed_message(self, level: str) -> str:
+        if level == LEVEL_BEGINNER:
+            detail = "낯선 용어가 나오면 한 줄 설명을 붙여 드립니다."
+        else:
+            detail = "용어 설명 없이 내용만 보냅니다."
+        return f"설명 수준을 {level_label(level)}(으)로 바꿨습니다. {detail}"
+
+    async def _handle_level_callback(self, callback_query_id: str, data: str) -> None:
+        requested = normalize_level(data.removeprefix(LEVEL_CALLBACK_PREFIX).strip())
+        if requested is None:
+            await self._answer_callback_query(callback_query_id, text="지원하지 않는 버튼입니다.")
+            return
+        await self._answer_callback_query(callback_query_id)
+        await self._apply_level(requested)
+
+    async def _current_level(self) -> str:
+        """저장된 설명 수준. 읽지 못하면 기본값(초보) (#297).
+
+        redis를 만지는 다른 명령(/alerts·/buy)과 달리 여기서 예외를 삼킨다. 그 명령들은
+        redis 장애가 곧 명령의 실패지만, 수준은 **다른 메시지의 곁다리 정보**다 —
+        수준을 못 읽었다고 시세나 알림 자체를 실패시키면, 부가 기능이 본 기능의 가용성을
+        떨어뜨리는 꼴이 된다. 못 읽으면 설명을 붙이는 쪽(초보)으로 떨어진다: 아는 사람에게
+        설명이 한 줄 붙는 쪽이, 모르는 사람이 설명을 못 받는 쪽보다 덜 나쁘다.
+
+        캐시는 성능이 아니라 그 fail-open을 싸게 만들기 위한 것이다. 캐시가 없으면 redis가
+        죽어 있는 동안 나가는 **모든** 메시지가 소켓 타임아웃(3초, #268)을 한 번씩 문다 —
+        조회도 답변도 3초씩 늦어지는데 그 대가로 얻는 것은 어차피 기본값이다. 그래서 실패는
+        더 길게 기억한다.
+
+        캐시가 인스턴스가 아니라 모듈 수준인 이유: 이 설정은 채팅 하나에 하나뿐이고
+        (알림 모드와 같은 단일 키), 폴러가 핸들러를 다시 세워도 같은 값이어야 한다.
+        """
+        now = time.monotonic()
+        cached = _level_cache_get(now)
+        if cached is not None:
+            return cached
+        try:
+            async with self._state() as state:
+                level = await state.get_telegram_user_level()
+            ttl = LEVEL_CACHE_TTL_SECONDS
+        except Exception as exc:
+            logger.warning("설명 수준을 읽지 못해 기본값을 씁니다: %s", exc)
+            level = DEFAULT_TELEGRAM_USER_LEVEL
+            ttl = LEVEL_LOOKUP_FAILURE_COOLDOWN_SECONDS
+        _level_cache_put(level, now + ttl)
+        return level
 
     async def _handle_watch(self, argument: str) -> None:
         parts = argument.split(None, 1)
@@ -980,13 +1159,21 @@ class TelegramCommandHandler:
             )
             return
 
-        lines = [f"📅 {stock} 예정 이벤트"]
-        for event in events:
-            label = self._format_catalyst_type(getattr(event, "event_type", ""))
-            lines.append(
-                f"• {event.event_date.isoformat()}  {getattr(event, 'description', '')} ({label})"
+        items = [
+            f"{event.event_date.isoformat()}  {getattr(event, 'description', '')}"
+            f" ({self._format_catalyst_type(getattr(event, 'event_type', ''))})"
+            for event in events
+        ]
+        # 제목은 목록 밖이다. 글머리표는 "•"가 아니라 이 봇의 나열 표시를 쓴다 (#297 자가리뷰).
+        lines = [f"📅 {stock} 예정 이벤트", *as_list_items(items)]
+        await self._send_text_or_raise(
+            render(
+                "\n".join(lines),
+                KIND_QUOTE,
+                await self._current_level(),
+                question=argument,
             )
-        await self._send_text_or_raise(_telegram_text("\n".join(lines)))
+        )
 
     async def _handle_balance(self) -> None:
         await self.notifier.send_chat_action("typing")
@@ -996,7 +1183,7 @@ class TelegramCommandHandler:
             await self._send_text_or_raise(f"조회 실패: {_short_error(exc)}")
             return
         await self._send_text_or_raise(
-            _telegram_text(str(result)),
+            render(result, KIND_QUOTE, await self._current_level()),
             reply_markup=self._balance_reply_markup(),
         )
 
@@ -1017,11 +1204,69 @@ class TelegramCommandHandler:
             await self._send_text_or_raise(f"조회 실패: {_short_error(exc)}")
             return
         await self._send_text_or_raise(
-            _telegram_text(str(result)),
+            render(
+                result,
+                KIND_QUOTE,
+                await self._current_level(),
+                question=argument,
+            ),
             reply_markup=self._market_reply_markup("trend", chat_id, stock),
         )
 
-    async def _handle_order_command(self, side: str, argument: str, chat_id: str) -> None:
+    async def _handle_advise(self, argument: str, chat_id: str) -> None:
+        """``/advise <종목명>`` — 주문 보조 (#299).
+
+        이 메서드가 하는 일은 파싱, 호출, 결과 전달이 전부다. 제안·한도 판정·검증·
+        대기 주문 저장은 모두 order_assist.run_order_assist 안에 있다. 규칙이 두 파일에
+        나뉘면 "어느 쪽이 최종 판정인가"가 흐려지고, 그 순간 한쪽만 고치는 변경이 생긴다.
+
+        승인 결과의 버튼은 기존 _order_reply_markup을 그대로 쓴다 — 확정/취소 콜백,
+        60초 만료, 체결 흐름이 /buy와 완전히 같은 경로를 탄다.
+        """
+        stock_name = argument.strip()
+        if not stock_name:
+            await self._send_text_or_raise(ADVISE_COMMAND_HELP)
+            return
+
+        await self.notifier.send_chat_action("typing")
+        # 제안 에이전트 왕복은 수십 초가 걸린다. /earnings·NAT 폴백과 같은 방식으로
+        # 접수 즉시 진행 메시지를 남기고, 결과가 오면 치운다 (#260).
+        progress_message_id = await self._send_progress_message(NAT_PROGRESS_MESSAGE)
+        trigger = ProposalTrigger(source="telegram", stock=stock_name, chat_id=chat_id)
+        try:
+            result = await run_order_assist(
+                trigger,
+                pending_orders=self.pending_orders,
+                mcp_runner=self.mcp_runner,
+                now_factory=self.now_factory,
+            )
+        except Exception as exc:
+            await self._clear_progress_message(progress_message_id)
+            await self._send_text_or_raise(f"주문 보조 실패: {_short_error(exc)}")
+            return
+        await self._clear_progress_message(progress_message_id)
+
+        if result.order is None:
+            # 거부·충돌 둘 다 여기로 온다. 충돌을 조용히 버리면 사용자는 명령이 씹힌
+            # 것으로 읽는다 — 대기 주문이 있다는 사실을 반드시 알려야 한다.
+            await self._send_text_settled(result.message)
+            return
+
+        notified = await self._send_text_settled(
+            result.message,
+            reply_markup=self._order_reply_markup(result.order),
+        )
+        if not notified:
+            # /buy와 같은 처리다. 프롬프트가 끝내 안 나갔으면 사용자는 대기 주문의
+            # 존재를 모르고, 60초 안의 다음 명령이 영문 모를 충돌로 막힌다 (#247).
+            try:
+                await self.pending_orders.delete(chat_id)
+            except Exception as exc:
+                logger.error("제안 프롬프트 미전달 후 대기 주문 정리 실패: %s", exc)
+
+    async def _handle_order_command(
+        self, side: OrderSide, argument: str, chat_id: str
+    ) -> None:
         usage = BUY_COMMAND_HELP if side == "BUY" else SELL_COMMAND_HELP
         parsed = self._parse_order_argument(argument)
         if parsed is None:
@@ -1111,12 +1356,36 @@ class TelegramCommandHandler:
             await self._send_text_or_raise(f"주문 준비 실패: {_short_error(exc)}")
             return
 
+        if order_type == "MARKET":
+            # 시장가에는 지정가가 없지만, 단가를 모르는 채로 두면 그 0이 체결 기록
+            # (TradeHistory.price)까지 그대로 내려가 일 거래대금 한도를 무력화한다(#309).
+            # KIS 현금주문 응답에는 체결가가 없으므로(order-cash output은 ODNO·ORD_TMD뿐)
+            # 방금 프롬프트용으로 받아 둔 현재가를 기록용 참고단가로 쓴다. /advise는 이미
+            # 같은 값을 같은 자리에 넣는다(order_assist.run_order_assist).
+            #
+            # 읽지 못해도 주문은 막지 않는다 — 사용자가 명시적으로 낸 주문을 기록 사정으로
+            # 되돌리는 것이기 때문이다. 대신 0이 그대로 남고, load_daily_usage의 가드가
+            # 그날 /advise를 usage_failed로 막는다. 한도가 조용히 넓어지는 것보다 그쪽이
+            # 낫다는 것이 #309의 결론이다.
+            reference_price = parse_current_price(str(quote_result))
+            if reference_price is None:
+                logger.warning(
+                    "시장가 참고단가를 읽지 못했다 (stock=%s) — 이 주문이 확정되면 단가 "
+                    "없이 기록되고, 그때부터 오늘 /advise가 일 거래대금 집계 실패로 "
+                    "막힌다 (#309)",
+                    stock_code,
+                )
+            else:
+                price = reference_price
+
         order = PendingOrder(
             chat_id=chat_id,
             stock_name=resolved_name,
             stock_code=stock_code,
             side=side,
             quantity=quantity,
+            # MARKET이면 표시·기록용 참고단가(주문 시점 현재가)다. 주문 자체에는 쓰이지
+            # 않는다 — McpTradingOrderGateway가 시장가에는 price=0을 보낸다.
             price=price,
             # now(명령 수신 시각)가 아니라 저장 직전 시각으로 스탬프한다. 위 MCP 조회는
             # run_mcp_tool의 wait_for(30초)를 두 구간(resolve, gather) 쓰므로 최대 60초가
@@ -1274,12 +1543,12 @@ class TelegramCommandHandler:
             and re.search(r"\d[\d,]*\s*주", text) is not None
         )
 
-    def _parse_natural_order_text(self, text: str) -> tuple[str, str] | None:
+    def _parse_natural_order_text(self, text: str) -> tuple[OrderSide, str] | None:
         buy_count = text.count("매수")
         sell_count = text.count("매도")
         if buy_count + sell_count != 1:
             return None
-        side = "BUY" if buy_count == 1 else "SELL"
+        side: OrderSide = "BUY" if buy_count == 1 else "SELL"
 
         quantity_match = re.search(r"(?P<quantity>\d[\d,]*)\s*주", text)
         if quantity_match is None:
@@ -1337,11 +1606,9 @@ class TelegramCommandHandler:
         return match.group(1) if match else None
 
     def _extract_stock_name(self, text: str) -> str | None:
-        # resolve_stock_code 응답 "종목명 (코드, 시장)"에서 코드 앵커 앞부분이 종목명이다.
-        match = _STOCK_CODE_EXTRACT_RE.search(text)
-        if match is None:
-            return None
-        return text[: match.start()].strip() or None
+        # 규칙은 stock_code.extract_stock_name 하나가 소유한다 — order_assist도 같은
+        # 것을 쓴다. 두 곳이 각자 자르면 같은 종목이 화면마다 다른 이름으로 남는다.
+        return extract_stock_name(text)
 
     def _extract_order_callback_token(self, data: str) -> str | None:
         if data in {ORDER_CONFIRM_CALLBACK, ORDER_CANCEL_CALLBACK}:
@@ -1365,6 +1632,22 @@ class TelegramCommandHandler:
                     {"text": "🧾 매매", "callback_data": f"{TRADE_CALLBACK_PREFIX}menu"},
                     {"text": "🔎 조회", "callback_data": f"{LOOKUP_CALLBACK_PREFIX}menu"},
                 ],
+            ]
+        }
+
+    def _level_reply_markup(self) -> dict[str, Any]:
+        return {
+            "inline_keyboard": [
+                [
+                    {
+                        "text": "🌱 처음이에요",
+                        "callback_data": f"{LEVEL_CALLBACK_PREFIX}{LEVEL_BEGINNER}",
+                    },
+                    {
+                        "text": "📈 좀 해봤어요",
+                        "callback_data": f"{LEVEL_CALLBACK_PREFIX}{LEVEL_INTERMEDIATE}",
+                    },
+                ]
             ]
         }
 
@@ -1441,20 +1724,31 @@ class TelegramCommandHandler:
         action: str,
         chat_id: str,
         stock: str,
+        *,
+        detail_days: int = 0,
     ) -> dict[str, Any]:
         token = secrets.token_urlsafe(8)
         if len(self.market_callbacks) >= MARKET_CALLBACK_LIMIT:
             self.market_callbacks.pop(next(iter(self.market_callbacks)), None)
         self.market_callbacks[token] = (chat_id, stock)
+        quote_button = {
+            "text": "💵 현재가 보기",
+            "callback_data": f"{MARKET_QUOTE_CALLBACK}:{token}",
+        }
         if action == "quote":
+            return {"inline_keyboard": [[quote_button]]}
+        if action == "trend_detail":
+            # 수급 요약 아래에는 상세가 먼저다. 방금 받은 메시지에 이어지는 동작이라
+            # 다른 종류의 조회(현재가)보다 앞에 온다 (#297 검수 4차).
             return {
                 "inline_keyboard": [
                     [
                         {
-                            "text": "💵 현재가 보기",
-                            "callback_data": f"{MARKET_QUOTE_CALLBACK}:{token}",
+                            "text": trend_detail_button_text(detail_days),
+                            "callback_data": f"{MARKET_TREND_DETAIL_CALLBACK}:{token}",
                         }
-                    ]
+                    ],
+                    [quote_button],
                 ]
             }
         return {
@@ -1469,24 +1763,9 @@ class TelegramCommandHandler:
         }
 
     def _order_reply_markup(self, order: PendingOrder) -> dict[str, Any]:
-        return {
-            "inline_keyboard": [
-                [
-                    {
-                        "text": "✅ 확정",
-                        "callback_data": (
-                            f"{ORDER_CONFIRM_CALLBACK}:{order.callback_token}"
-                        ),
-                    },
-                    {
-                        "text": "❌ 취소",
-                        "callback_data": (
-                            f"{ORDER_CANCEL_CALLBACK}:{order.callback_token}"
-                        ),
-                    },
-                ]
-            ]
-        }
+        # 실제 조립은 trading_orders.order_reply_markup 하나뿐이다 (#314). 스케줄러의
+        # 자동 제안이 같은 버튼을 써야 해서 옮겼고, 여기서는 호출부 이름만 유지한다.
+        return order_reply_markup(order)
 
     def _format_order_prompt(
         self,
@@ -1509,20 +1788,33 @@ class TelegramCommandHandler:
                     f"주문금액: {amount:,}원",
                 ]
             )
+        elif order.price > 0:
+            # 시장가에도 참고단가가 잡히면서 금액을 셀 수 있게 됐다(#309). 돈이 나가는
+            # 확인 단계에서 금액만 빠져 있을 이유가 없다 — 일 거래대금 한도에 가산될
+            # 값도 이것이다. 체결가가 아니라 주문 시점 현재가 기준이므로 "예상"이고,
+            # 제안 경로의 승인 메시지도 같은 라벨을 쓴다 (PR #323 리뷰).
+            lines.append(f"예상 주문금액: {order.quantity * order.price:,}원")
 
-        current_price = self._first_line_containing(
-            str(quote_result),
-            ("현재가:", "price:", "Price:"),
-        )
-        if current_price:
-            lines.append(current_price)
+        # 기록용 참고단가와 **같은 파서**로 읽는다. 원문 줄을 그대로 집어 오면 표시와
+        # 기록이 서로 다른 라벨 집합을 보게 되고("price:"는 여기서만 매치된다), 라벨이
+        # 바뀌는 날 사용자는 확인 화면에서 현재가를 보는데 기록은 0("금액 모름")이 되는
+        # 어긋남이 생긴다. 하나로 묶어 두면 둘이 함께 사라진다 (PR #323 리뷰).
+        current_price = parse_current_price(str(quote_result))
+        if current_price is not None:
+            lines.append(f"현재가: {current_price:,}원")
 
         balance = self._first_line_containing(
             str(balance_result),
-            ("거래가능", "주문가능", "예수금", "총자산", "balance"),
+            # get_balance가 실제로 내는 라벨은 "예수금"이다(mcp-trading/balance.js).
+            # 나머지는 다른 잔고 응답이 섞여 들어올 때를 위한 방어선이다 — 이 프롬프트가
+            # 보여주는 것은 주문가능금액이 아니라 예수금이라는 점을 유의한다(#310).
+            ("주문가능", "예수금", "총자산", "balance"),
         )
         if balance:
-            lines.append(balance)
+            # mcp-trading은 목록 항목을 "- 라벨: 값"으로 낸다. 그 줄을 그대로 붙이면
+            # 직접 조립한 위 줄들(종목코드:, 수량:, 현재가: …)과 표기가 어긋난다.
+            # 접두사만 떼어 제안 경로의 승인 메시지와 같은 표기로 맞춘다 (PR #323 리뷰).
+            lines.append(balance.removeprefix("- "))
 
         # 미해석 에코(name == code)는 이제 주문 준비 단계에서 _is_unresolved_echo가
         # 끊으므로 여기까지 오지 않는다(#151). 마스터에 name == code인 항목이 생기는
@@ -1566,7 +1858,14 @@ class TelegramCommandHandler:
             return None
         return price_match.group(1).strip(), rate_match.group(1).strip()
 
-    async def _handle_trend(self, argument: str, chat_id: str) -> None:
+    async def _handle_trend(self, argument: str, chat_id: str, *, detail: bool = False) -> None:
+        """수급 조회. 기본은 요약, ``detail``이면 전체 일수를 세로로 (#297 검수 4차).
+
+        두 경로가 같은 MCP 호출을 각자 한 번씩 한다. 요약할 때 상세까지 만들어 들고 있지
+        않는 이유는, 그러려면 버튼을 누를 때까지 원문을 어딘가 보관해야 하고 그 저장소가
+        market_callbacks처럼 또 하나의 만료·용량 관리 대상이 되기 때문이다. 조회 버튼이
+        이미 재조회로 동작하고 있어(현재가·수급 버튼) 규칙도 그쪽과 같아진다.
+        """
         if not argument:
             await self._send_text_or_raise(TREND_COMMAND_HELP)
             return
@@ -1582,9 +1881,29 @@ class TelegramCommandHandler:
         except Exception as exc:
             await self._send_text_or_raise(f"조회 실패: {_short_error(exc)}")
             return
+
+        flows = _parse_investor_flows(str(result))
+        if not flows:
+            # 형식이 바뀌어 파싱이 깨졌다. 원문을 그대로 보내고 상세 버튼은 달지 않는다 —
+            # 눌러 봐야 같은 원문이 한 번 더 갈 뿐이다 (#297 검수 2차).
+            body = str(result)
+            markup = self._market_reply_markup("quote", chat_id, stock)
+        elif detail:
+            body = _format_trend_detail(stock, flows)
+            markup = self._market_reply_markup("quote", chat_id, stock)
+        else:
+            body = _format_trend_summary(stock, flows)
+            markup = self._market_reply_markup(
+                "trend_detail", chat_id, stock, detail_days=len(flows)
+            )
         await self._send_text_or_raise(
-            _telegram_text(str(result)),
-            reply_markup=self._market_reply_markup("quote", chat_id, stock),
+            render(
+                body,
+                KIND_QUOTE,
+                await self._current_level(),
+                question=argument,
+            ),
+            reply_markup=markup,
         )
 
     async def _handle_earnings(self, argument: str, chat_id: str) -> None:
@@ -1594,6 +1913,9 @@ class TelegramCommandHandler:
             return
 
         stock, period = parsed
+        # LLM 호출 전에 읽는다 — 뒤로 미루면 수십 초짜리 왕복이 끝난 다음 redis 왕복이
+        # 한 번 더 붙는다 (_handle_chat_fallback과 같은 이유).
+        level = await self._current_level()
         dart_arguments: dict[str, Any] = {"stock_name": stock}
         if period:
             dart_arguments["period"] = period
@@ -1616,7 +1938,12 @@ class TelegramCommandHandler:
         # LLM 호출이 끝난 뒤다 — 재실행은 DART·뉴스 조회와 LLM 호출을 그대로 반복해
         # 예산만큼 재과금된다 (#247).
         await self._send_text_settled(
-            _telegram_text(self._format_earnings_response(str(result)))
+            render(
+                self._format_earnings_response(str(result)),
+                KIND_ANALYSIS,
+                level,
+                question=argument,
+            )
         )
 
     def _parse_earnings_argument(self, argument: str) -> tuple[str, str | None] | None:
@@ -1661,7 +1988,12 @@ class TelegramCommandHandler:
         )
 
     def _format_earnings_response(self, text: str) -> str:
-        plain = self._telegram_plain_text(text)
+        # 출력 계층의 정리기를 쓴다. 예전에는 이 클래스가 자체 정리기(_telegram_plain_text)를
+        # 갖고 있었는데, 그쪽은 머리글·굵게·글머리표만 알아서 링크·기울임·취소선·이스케이프를
+        # 그대로 흘렸고 글머리표도 "•"로 바꿔 나머지 메시지와 어긋났다 (#297 자가리뷰).
+        # 판정 접두어를 붙이려면 정리된 첫 줄을 봐야 해서 render보다 먼저 한 번 부른다 —
+        # sanitize_markdown은 이미 정리된 문장에 다시 걸어도 같은 결과다.
+        plain = sanitize_markdown(text)
         verdict = self._earnings_verdict(plain)
         if plain.startswith(("🟢 호재", "🔴 악재", "⚪ 중립")):
             return plain
@@ -1689,16 +2021,6 @@ class TelegramCommandHandler:
             return "🟢 호재"
         return "⚪ 중립"
 
-    def _telegram_plain_text(self, text: str) -> str:
-        lines = []
-        for raw_line in text.splitlines():
-            line = raw_line.strip()
-            line = re.sub(r"^#{1,6}\s*", "", line)
-            line = re.sub(r"^[-*]\s+", "• ", line)
-            line = line.replace("**", "").replace("__", "").replace("`", "")
-            lines.append(line)
-        return "\n".join(lines).strip()
-
     async def _send_progress_message(self, text: str) -> int | None:
         """진행 메시지를 보내고 나중에 치울 message_id를 반환한다 (#260).
 
@@ -1712,7 +2034,12 @@ class TelegramCommandHandler:
         못 받는다 — 그래서 주입된 구현이 무엇이든 여기서 한 겹 감싼다.
         """
         try:
-            send_returning_id = getattr(self.notifier, "send_text_returning_id", None)
+            # notifier는 주입 가능하고 이 능력은 선택 사항이라, 선언 타입이 아니라
+            # 런타임 존재 여부로 판정한다. 선언 타입에 없는 속성이라 getattr의 결과는
+            # object로 추론되는데, 그러면 callable() 통과 뒤에도 await가 막힌다.
+            send_returning_id: Callable[..., Any] | None = getattr(
+                self.notifier, "send_text_returning_id", None
+            )
             if callable(send_returning_id):
                 return await send_returning_id(text)
             await self.notifier.send_text(text)
@@ -1736,11 +2063,18 @@ class TelegramCommandHandler:
         if message_id is None:
             return
 
-        delete_message = getattr(self.notifier, "delete_message", None)
+        # notifier는 주입 가능하고 이 능력은 선택 사항이라, 선언 타입이 아니라
+        # 런타임 존재 여부로 판정한다. 선언 타입에 없는 속성이라 getattr의 결과는
+        # object로 추론되는데, 그러면 callable() 통과 뒤에도 await가 막힌다.
+        delete_message: Callable[..., Any] | None = getattr(
+            self.notifier, "delete_message", None
+        )
         if callable(delete_message) and await delete_message(message_id):
             return
 
-        edit_message_text = getattr(self.notifier, "edit_message_text", None)
+        edit_message_text: Callable[..., Any] | None = getattr(
+            self.notifier, "edit_message_text", None
+        )
         if callable(edit_message_text) and await edit_message_text(message_id, PROGRESS_DONE_MESSAGE):
             return
 
@@ -1752,6 +2086,9 @@ class TelegramCommandHandler:
         # 접수 즉시 진행 메시지를 남기고, 응답이 오면 그 메시지를 치운 뒤 답변을
         # 새 메시지로 보낸다(편집은 푸시 알림을 발생시키지 않는다).
         progress_message_id = await self._send_progress_message(NAT_PROGRESS_MESSAGE)
+        # NAT 호출 전에 읽는다. 호출 뒤로 미루면 수십 초짜리 LLM 왕복이 끝난 다음에 redis
+        # 왕복이 한 번 더 붙어 진행 메시지가 그만큼 더 오래 남는다.
+        level = await self._current_level()
         try:
             result = await self.llm_runner(
                 "nat",
@@ -1767,8 +2104,10 @@ class TelegramCommandHandler:
         # LLM 호출이 끝난 뒤다. 재실행은 같은 conversation_id로 NAT를 다시 호출해 대화
         # 이력을 오염시키고 예산만큼 재과금된다 — 전송 실패 예산으로는 최대 10회다 (#247).
         await self._clear_progress_message(progress_message_id)
-        # _nat_answer_message가 각주 자리를 확보한 뒤 본문을 길이 한도에 맞춘다 (#260).
-        await self._send_text_settled(_nat_answer_message(result))
+        # _nat_answer_message(→ presentation.render)는 길이를 보지 않고 전체 문장을
+        # 조립하고, _send_text_settled가 상한에 맞춰 나눠 보낸다 (#260, #297, #313).
+        # 각주는 마지막 조각에 통째로 실린다 — render 독스트링 참조.
+        await self._send_text_settled(_nat_answer_message(result, level, text))
 
     @asynccontextmanager
     async def _state(self):
@@ -2155,14 +2494,21 @@ class TelegramCommandPoller:
         return time.monotonic()
 
     async def _setup_bot_profile(self) -> None:
-        load_bot_username = getattr(self.notifier, "load_bot_username", None)
+        # notifier는 주입 가능하고 이 능력은 선택 사항이라, 선언 타입이 아니라
+        # 런타임 존재 여부로 판정한다. 선언 타입에 없는 속성이라 getattr의 결과는
+        # object로 추론되는데, 그러면 callable() 통과 뒤에도 await가 막힌다.
+        load_bot_username: Callable[..., Any] | None = getattr(
+            self.notifier, "load_bot_username", None
+        )
         if callable(load_bot_username):
             try:
                 await load_bot_username()
             except Exception as exc:
                 logger.error("Telegram bot username setup failed: %s", exc)
 
-        set_bot_commands = getattr(self.notifier, "set_bot_commands", None)
+        set_bot_commands: Callable[..., Any] | None = getattr(
+            self.notifier, "set_bot_commands", None
+        )
         if callable(set_bot_commands):
             try:
                 await set_bot_commands(TELEGRAM_BOT_COMMANDS)

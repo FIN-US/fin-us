@@ -131,3 +131,58 @@ class CatalystEvent(SQLModel, table=True):
         default_factory=lambda: datetime.now(timezone.utc),
         description="생성 일시",
     )
+
+
+class FilteredSignal(SQLModel, table=True):
+    """임계값 미만이라 상세 분석까지 가지 않은 신호의 채점 결과 (#304).
+
+    AgentReport에는 |score| >= SIGNAL_SCORE_THRESHOLD인 신호만 남는다 — 미만이면
+    스케줄러가 상세 분석 자체를 건너뛰므로 리포트 행이 생기지 않는다. 임계값을
+    조정하려면 "지금 값에서 걸러지고 있는 쪽"의 분포가 필요한데, 그 데이터는
+    scheduler의 "유의미한 변화 없음(score=...)" 로그에만 있어 grep은 되지만 집계가
+    안 됐다. 이 테이블이 그 분포를 구조화해 남긴다.
+
+    AgentReport에 "분석 미실행" 행을 섞지 않고 별도 테이블로 둔 이유: 저쪽은
+    "행이 있다 = 상세 분석을 돌렸다"가 불변식이다. 분석 없는 행을 섞으면 그 테이블을
+    읽는 모든 경로(/api/v1/db/reports, 프론트, 텔레그램 트렌드 집계)가 그것을 걸러
+    내도록 바뀌어야 하고, 한 곳만 빠뜨려도 summary·decision이 빈 행이 리포트로
+    노출된다. 스키마도 갈라진다 — 저쪽의 provider/summary/reason은 여기서 채울 값이
+    없어 전부 빈 문자열이 된다.
+
+    signal 본문 원문은 남기지 않는다 (#304의 명시적 결정). 보존 비용과 개인정보 범위가
+    커지는 데 비해, 이 테이블의 목적인 점수 분포 집계에는 필요하지 않다. 본문이 필요한
+    작업(프롬프트 조정)은 평가셋(backend/scripts/build_signal_eval_set.py)의 몫이다.
+    """
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    # 감시 루프는 종목 코드를 모른 채 종목명으로 돈다. 코드를 채우려면 종목당 조회가
+    # 한 번씩 더 붙는데, 걸러진 신호는 알림도 리포트도 만들지 않는 값이라 그 비용을
+    # 낼 이유가 없다.
+    stock_name: str = Field(index=True, description="감시 대상 종목명")
+    source: str = Field(index=True, description="신호 출처 (news | disclosure)")
+    # AgentReport.signal_score와 달리 NOT NULL이다. 저쪽의 null은 "채점하지 못했다"
+    # (fail-open)인데, fail-open한 신호는 유의미로 통과해 상세 분석까지 가므로 애초에
+    # 이 테이블에 오지 않는다. 즉 여기 남는 행은 전부 "모델이 실제로 매긴 점수"이며,
+    # 그래서 집계에 null 분기가 필요 없다.
+    score: int = Field(index=True, description="신호 영향도 점수 (-3~+3 정수)")
+    # 기록 시점에 적용된 임계값. 이 값을 남기지 않으면 나중에 임계값을 바꾼 뒤
+    # 과거 행이 "왜 걸러졌는지"를 설명할 수 없다 — 같은 1점이 임계값 2에서는 걸러진
+    # 신호이고 1에서는 통과한 신호다.
+    threshold: int = Field(description="기록 시점의 SIGNAL_SCORE_THRESHOLD")
+    reason: Optional[str] = Field(
+        default=None, description="점수 근거 한 줄. 모델이 근거를 주지 않았으면 null."
+    )
+    uncertainty: Optional[float] = Field(
+        default=None,
+        description=(
+            "기사별 점수의 표준편차. 기사가 2건 미만이면 흩어짐을 정의할 수 없으므로 null "
+            "(0.0이 아니다 — 0.0은 '기사들이 완전히 일치했다'는 뜻)."
+        ),
+    )
+    # 보존 기간 정리(FILTERED_SIGNAL_RETENTION_DAYS)와 구간 집계가 모두 이 컬럼을
+    # 기준으로 도므로 인덱스를 건다. UTC로 저장한다.
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        index=True,
+        description="기록 일시 (UTC)",
+    )

@@ -10,6 +10,8 @@
 실 KIS·OpenAI 연결 없이 동작한다.
 """
 
+import logging
+
 import pytest
 from contextlib import asynccontextmanager
 from typing import TypedDict
@@ -30,7 +32,11 @@ from nat_finus_nat.agents import (
     MEMORY_PROMPT_PREFIX,
     FinusReasoningTraceAgentConfig,
     FinusSqliteTranscriptAgentConfig,
+    FinusSupervisorAgentConfig,
+    SupervisorBranch,
+    finus_supervisor_agent,
     _run_with_gate,
+    _trace_branch_answer,
     _trace_route,
     chat_response_plain_text,
     finus_reasoning_trace_agent,
@@ -328,6 +334,68 @@ def test_trace_route_is_noop_without_box():
 
 
 # ---------------------------------------------------------------------------
+# supervisor가 실제로 기록하는가 (생산 측)
+#
+# 위 두 테스트는 `_trace_route`/`_trace_branch_answer`를 직접 불러 박스 동작만
+# 고정한다. supervisor가 그것을 **부르는지**는 supervisor를 실제로 구동해야 드러난다
+# — 부르지 않으면 각주는 프로덕션에서만 조용히 사라지고 CI는 초록이다 (#273의 재현).
+# ---------------------------------------------------------------------------
+
+def _llm_choosing(branch_name: str) -> MagicMock:
+    """브랜치명 한 줄만 출력하는 가짜 supervisor LLM."""
+    llm = MagicMock()
+    llm.ainvoke = AsyncMock(return_value=MagicMock(content=branch_name))
+    return llm
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "branch_result,expected",
+    [
+        (ChatResponse.from_string("삼성전자 뉴스입니다.", usage=Usage()), "삼성전자 뉴스입니다."),
+        ("삼성전자 뉴스입니다.", "삼성전자 뉴스입니다."),
+    ],
+    ids=["branch_returns_chat_response", "branch_returns_str"],
+)
+async def test_supervisor_records_the_answer_it_returns(branch_result, expected):
+    """supervisor는 라우팅뿐 아니라 **돌려보내는 본문**도 박스에 남긴다 (#294).
+
+    이 기록이 없으면 `branch_answer`가 영영 None이라 최상위 부착 조건이 항상 거짓이 되고,
+    각주가 프로덕션에서 전부 사라진다. 브랜치가 str을 돌려주는 경로도 함께 고정한다 —
+    supervisor가 ChatResponse로 감싸므로, 기록해야 하는 것은 감싼 뒤의 본문이다.
+    """
+    config = FinusSupervisorAgentConfig(
+        llm_name="router_llm",
+        branches=[
+            SupervisorBranch(
+                name="news_agent", function_name="news_react_agent", description="뉴스 조회"
+            )
+        ],
+    )
+    async def branch_fn(_request):
+        return branch_result
+
+    builder = MagicMock()
+    builder.get_llm = AsyncMock(return_value=_llm_choosing("news_agent"))
+    builder.get_function = AsyncMock(return_value=_as_function(branch_fn))
+
+    trace = ReasoningTrace()
+    token = REASONING_TRACE.set(trace)
+    try:
+        async with finus_supervisor_agent(config, builder) as info:
+            result = await info.single_fn(
+                ChatRequestOrMessage(messages=[{"role": "user", "content": "삼성전자 뉴스"}])
+            )
+    finally:
+        REASONING_TRACE.reset(token)
+
+    assert trace.routed_agent == "news_agent"
+    assert trace.branch_answer == expected
+    # 기록한 본문과 실제로 돌려보낸 본문이 같아야 부착 조건이 성립한다.
+    assert chat_response_plain_text(result) == expected
+
+
+# ---------------------------------------------------------------------------
 # 응답 부착 — 기존 필드 불변
 # ---------------------------------------------------------------------------
 
@@ -340,6 +408,7 @@ def test_with_reasoning_trace_adds_fields_without_touching_existing_ones():
             ToolUse("finus_earnings_report", ok=True, empty=True),
             ToolUse("finus_account_balance", ok=False),
         ],
+        branch_answer="답변 본문",
     )
 
     updated = with_reasoning_trace(original, trace)
@@ -360,7 +429,7 @@ def test_with_reasoning_trace_adds_fields_without_touching_existing_ones():
 def test_with_reasoning_trace_emits_empty_tools_when_ledger_was_empty():
     """라우팅은 됐는데 도구가 하나도 실행되지 않은 경우는 빈 목록으로 드러낸다."""
     response = ChatResponse.from_string("답변", usage=Usage())
-    trace = ReasoningTrace(routed_agent="strategy_agent")
+    trace = ReasoningTrace(routed_agent="strategy_agent", branch_answer="답변")
 
     dumped = with_reasoning_trace(response, trace).model_dump()
 
@@ -373,6 +442,42 @@ def test_with_reasoning_trace_adds_nothing_when_nothing_observed():
     response = ChatResponse.from_string("답변", usage=Usage())
 
     dumped = with_reasoning_trace(response, ReasoningTrace()).model_dump()
+
+    assert "routed_agent" not in dumped
+    assert "tools_used" not in dumped
+
+
+def test_with_reasoning_trace_adds_nothing_when_body_is_not_the_branch_answer():
+    """본문이 브랜치가 만든 답변이 아니면 붙이지 않는다 (#294).
+
+    박스가 가득 차 있어도 마찬가지다 — vendor가 예외를 삼키고 오류 문자열을 답변으로
+    돌려주는 경로가 정확히 이 모습이다.
+    """
+    trace = ReasoningTrace(
+        routed_agent="news_agent",
+        tools_used=[ToolUse("finus_market_news", ok=True)],
+        branch_answer="삼성전자 뉴스입니다.",
+    )
+    error_body = ChatResponse.from_string("Connection refused: mem0", usage=Usage())
+
+    dumped = with_reasoning_trace(error_body, trace).model_dump()
+
+    assert "routed_agent" not in dumped
+    assert "tools_used" not in dumped
+    assert dumped["choices"][0]["message"]["content"] == "Connection refused: mem0"
+
+
+def test_with_reasoning_trace_adds_nothing_when_no_branch_answer_was_recorded():
+    """브랜치 답변 기록 자체가 없으면 붙이지 않는다 (#294).
+
+    브랜치가 예외로 죽으면 supervisor의 기록 지점에 도달하지 못한 채 ``routed_agent``만
+    남는다. "기록이 있다"가 아니라 "이 본문이 그 기록의 결과다"가 부착 조건이다.
+    """
+    trace = ReasoningTrace(routed_agent="news_agent")
+
+    dumped = with_reasoning_trace(
+        ChatResponse.from_string("boom", usage=Usage()), trace
+    ).model_dump()
 
     assert "routed_agent" not in dumped
     assert "tools_used" not in dumped
@@ -400,6 +505,7 @@ def test_extra_fields_survive_the_fastapi_response_model_boundary():
         ReasoningTrace(
             routed_agent="news_agent",
             tools_used=[ToolUse("finus_market_news", ok=True, empty=True)],
+            branch_answer="답변 본문",
         ),
     )
 
@@ -445,6 +551,8 @@ def _branch_recording(route: str, *tool_names: str, answer: str = "답변"):
         trace = REASONING_TRACE.get()
         assert trace is not None, "최상단이 박스를 심어 안쪽까지 전파돼야 한다"
         trace.record_ledger_tools(ledger)
+        # 실제 supervisor와 같이 돌려보내는 본문을 함께 기록한다 (#294).
+        _trace_branch_answer(answer)
         return ChatResponse.from_string(answer, usage=Usage())
 
     return inner_response
@@ -486,7 +594,7 @@ class _VendorState(TypedDict):
     text: str
 
 
-def _compiled_vendor_graph(transcript_fn):
+def _compiled_vendor_graph(transcript_fn, capture_error: Exception | None = None):
     """vendor가 안쪽을 부르는 방식(CompiledStateGraph.ainvoke)까지 재현한다.
 
     #273 수정은 두 가정 위에 서 있다.
@@ -515,15 +623,28 @@ def _compiled_vendor_graph(transcript_fn):
         # vendor는 마지막 메시지의 content(str)만 상태에 남긴다 — 필드 소실 지점.
         return {"text": chat_response_plain_text(result)}
 
+    async def capture_node(state: _VendorState) -> _VendorState:
+        """vendor `capture_ai_response_node` 자리 — 브랜치가 **성공한 뒤에** 돈다.
+
+        vendor 그래프 순서가 `inner_agent` → `capture_ai_response`이므로(agent.py:268),
+        여기서 `memory_editor.add_items()`가 터지면(Mem0 다운·타임아웃) 박스가 라우팅·
+        도구로 가득 찬 상태에서 예외가 `graph.ainvoke`를 뚫고 나간다 (#294).
+        """
+        if capture_error is not None:
+            raise capture_error
+        return state
+
     graph = StateGraph(_VendorState)
     graph.add_node("inner", inner_node)
+    graph.add_node("capture", capture_node)
     graph.add_edge(START, "inner")
-    graph.add_edge("inner", END)
+    graph.add_edge("inner", "capture")
+    graph.add_edge("capture", END)
     return graph.compile()
 
 
 @asynccontextmanager
-async def _memory_chain(tmp_path, inner_response_fn):
+async def _memory_chain(tmp_path, inner_response_fn, capture_error: Exception | None = None):
     """router.yml 체인: trace_agent → auto_memory_agent(vendor) → transcript_agent → 브랜치.
 
     가운데 vendor 흉내는 실제 `_response_fn(input_message: str) -> str` 시그니처와
@@ -532,6 +653,11 @@ async def _memory_chain(tmp_path, inner_response_fn):
     사라진다**. #273의 원인이 바로 이 지점이므로, 흉내를 느슨하게 만들면 회귀
     테스트가 아무것도 지키지 않는다. LangGraph 홉을 넣는 이유는
     :func:`_compiled_vendor_graph` 참고.
+
+    vendor `_response_fn`의 `except Exception: return str(ex)`(register.py:215-218,
+    `router.yml`이 `verbose: true`)까지 재현한다 — 실패가 예외가 아니라 **답변 문자열**로
+    올라오는 것이 #294의 전제다. *capture_error*를 주면 브랜치가 성공한 뒤 메모리 쓰기가
+    터지는 변종이 된다.
     """
     transcript_config = FinusSqliteTranscriptAgentConfig(
         inner_agent_name="router_supervisor_agent",
@@ -540,11 +666,14 @@ async def _memory_chain(tmp_path, inner_response_fn):
     async with finus_sqlite_transcript_agent(
         transcript_config, _builder_returning(_as_function(inner_response_fn))
     ) as transcript_info:
-        vendor_graph = _compiled_vendor_graph(transcript_info.single_fn)
+        vendor_graph = _compiled_vendor_graph(transcript_info.single_fn, capture_error)
 
         async def vendor_auto_memory(request):
             text = GlobalTypeConverter.get().convert(request, to_type=str)
-            result_state = await vendor_graph.ainvoke({"text": text})
+            try:
+                result_state = await vendor_graph.ainvoke({"text": text})
+            except Exception as ex:  # noqa: BLE001 — vendor가 삼키는 그 지점
+                return str(ex)
             return str(result_state["text"])
 
         async with finus_reasoning_trace_agent(
@@ -611,6 +740,72 @@ async def test_workflow_returns_plain_text_for_string_input(chain, _config_name,
         result = await response_fn(ChatRequestOrMessage(input_message="삼성전자 뉴스"))
 
     assert result == "삼성전자 뉴스입니다."
+
+
+# ---------------------------------------------------------------------------
+# vendor가 삼킨 실패에는 각주가 붙지 않는다 (#294)
+#
+# 두 변종 모두 사용자에게 보이는 모습은 같다 — 본문은 오류 문자열인데 그 아래
+# "담당: 뉴스 에이전트"가 정상 답변과 똑같이 달린다. 답변이 근거하지 않은 경로를
+# 근거로 제시하는 셈이라, 박스가 얼마나 차 있든 붙이지 않는 것이 계약이다.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_memory_mode_omits_footnote_when_the_branch_raises(tmp_path):
+    """변종 1: 브랜치가 예외로 죽는다 — 라우팅만 남고 도구 기록은 비어 있다.
+
+    supervisor는 브랜치를 부르기 **전에** `_trace_route()`를 부르므로, 브랜치가 터져도
+    `routed_agent`는 박스에 남는다. vendor가 그 예외를 삼켜 `str(ex)`를 답변으로
+    돌려주면 각주가 오류 문자열에 붙는다 — 그 경로를 막는다.
+    """
+    async def failing_branch(_request):
+        _trace_route("news_agent")
+        raise RuntimeError("news_agent가 터졌습니다")
+
+    async with _memory_chain(tmp_path, failing_branch) as response_fn:
+        result = await response_fn(
+            ChatRequestOrMessage(messages=[{"role": "user", "content": "삼성전자 뉴스"}])
+        )
+    dumped = result.model_dump()
+
+    assert "news_agent가 터졌습니다" in dumped["choices"][0]["message"]["content"]
+    assert "routed_agent" not in dumped
+    assert "tools_used" not in dumped
+
+
+@pytest.mark.asyncio
+async def test_memory_mode_omits_footnote_when_memory_write_fails_after_success(tmp_path, caplog):
+    """변종 2: 브랜치는 성공하고, 그 뒤 `capture_ai_response`의 Mem0 쓰기가 터진다.
+
+    변종 1보다 나쁘다 — 브랜치가 실제로 성공했으므로 박스에 `routed_agent`와
+    `tools_used`가 **가득 찬** 상태이고, 각주만 보면 정상 답변과 구분되지 않는다.
+    "브랜치가 성공했는가"를 기준으로 삼으면 이 변종을 못 막는다는 것이 A안이 아니라
+    A'안(본문 일치)을 고른 이유다.
+    """
+    async with _memory_chain(
+        tmp_path,
+        _branch_recording("news_agent", "finus_market_news", answer="삼성전자 뉴스입니다."),
+        capture_error=RuntimeError("Mem0 연결이 거부되었습니다"),
+    ) as response_fn:
+        with caplog.at_level(logging.WARNING, logger="nat_finus_nat.agents"):
+            result = await response_fn(
+                ChatRequestOrMessage(messages=[{"role": "user", "content": "삼성전자 뉴스"}])
+            )
+    dumped = result.model_dump()
+
+    body = dumped["choices"][0]["message"]["content"]
+    assert "Mem0 연결이 거부되었습니다" in body
+    assert body != "삼성전자 뉴스입니다.", "본문이 브랜치 답변이면 이 테스트는 변종을 재현하지 못한 것이다"
+    assert "routed_agent" not in dumped
+    assert "tools_used" not in dumped
+    # 생략을 조용히 하지 않는 것이 이 PR의 계약이다 — #273은 각주가 로그도 예외도 없이
+    # 사라져서 아무도 몰랐던 사고였다.
+    omitted = [
+        record for record in caplog.records
+        if record.levelno == logging.WARNING and "footnote omitted" in record.getMessage()
+    ]
+    assert len(omitted) == 1, "각주를 생략했으면 경고를 정확히 한 번 남긴다"
+    assert "routed_agent=news_agent" in omitted[0].getMessage()
 
 
 @pytest.mark.asyncio

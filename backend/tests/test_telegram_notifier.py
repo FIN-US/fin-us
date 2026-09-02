@@ -1,11 +1,13 @@
 import inspect
 import logging
 from pathlib import Path
+from typing import cast
 
 import httpx
 import pytest
 
 import backend.telegram_notifier
+from backend.presentation import SIGNAL_SCORE_LABEL, TELEGRAM_TRUNCATION_SUFFIX
 from backend.telegram_notifier import (
     TELEGRAM_MESSAGE_LIMIT,
     TelegramApiError,
@@ -59,11 +61,17 @@ def test_format_analysis_alert_uses_plain_text():
         },
     )
 
-    assert "[긴급] 삼성전자 / disclosure" in message
-    assert "Decision: HOLD (0.82)" in message
-    assert "Reason: 단기 변동성 확대 가능성" in message
-    assert "Urgency: critical - 대량보유 변동 공시" in message
-    assert "Summary: 대량보유 변동" in message
+    # 필드명도 값도 한국어다 (#297 검수 2). decision/urgency는 AgentReport의 정해진
+    # 값이라 출력 계층이 결정론적으로 번역한다 — LLM에게 시키면 매번 다른 말이 나온다.
+    # 제목은 목록 밖이고 값이 늘어선 줄만 "- " 표시를 받는다. 좁은 말풍선에서 줄이 접혀도
+    # 표시 없는 줄은 앞 줄의 계속이라는 뜻이 되므로 항목 경계가 유지된다 (#297 검수 3차).
+    assert message.splitlines() == [
+        "삼성전자 / 공시",
+        "- 판단: 보유 유지 (확신도 0.82)",
+        "- 이유: 단기 변동성 확대 가능성",
+        "- 긴급도: 매우 높음, 대량보유 변동 공시",
+        "- 요약: 대량보유 변동",
+    ]
 
 
 def test_format_analysis_alert_marks_only_actual_urgent_alerts():
@@ -82,8 +90,58 @@ def test_format_analysis_alert_marks_only_actual_urgent_alerts():
         },
     )
 
-    assert message.splitlines()[0] == "삼성전자 / news"
-    assert "긴급" not in message
+    assert message.splitlines()[0] == "삼성전자 / 뉴스"
+    # 긴급 여부는 이제 render가 붙이는 배너(🚨 긴급 알림)가 알린다. 제목의 "[긴급]"을
+    # 뺐으므로 이 본문에는 긴급도 라벨 말고 긴급이라는 말이 없어야 한다 (#297 검수 1).
+    assert "긴급도: 보통" in message
+    assert "🚨" not in message
+
+
+@pytest.mark.asyncio
+async def test_the_urgent_banner_follows_the_send_gate(monkeypatch):
+    """배너 판정과 전송 게이트가 따로 놀면 어긋난다 (#297 자가리뷰).
+
+    alert_mode="all"이면 telegram_alert=False인 분석도 나간다. 그때 배너가 urgency만 보고
+    🚨를 달면, 본문은 비긴급 사유("판단 사유 없음")를 달고 머리는 긴급이라고 외친다.
+    게이트가 대소문자를 접지 않는다는 차이까지 겹쳐 "High"에서 실제로 갈렸다.
+    """
+    notifier = TelegramNotifier("token", "123")
+    sent: list[str] = []
+
+    async def fake_post(text, **kwargs):
+        sent.append(text)
+
+    monkeypatch.setattr(notifier, "_post_message", fake_post)
+
+    await notifier.send_analysis_alert(
+        "삼성전자",
+        "news",
+        {"urgency": "High", "telegram_alert": False, "details": {}},
+        alert_mode="all",
+    )
+
+    assert sent
+    assert sent[0].startswith("🔔 알림")
+
+
+@pytest.mark.asyncio
+async def test_a_real_urgent_alert_still_gets_the_urgent_banner(monkeypatch):
+    notifier = TelegramNotifier("token", "123")
+    sent: list[str] = []
+
+    async def fake_post(text, **kwargs):
+        sent.append(text)
+
+    monkeypatch.setattr(notifier, "_post_message", fake_post)
+
+    await notifier.send_analysis_alert(
+        "삼성전자",
+        "disclosure",
+        {"urgency": "critical", "telegram_alert": True, "details": {}},
+    )
+
+    assert sent
+    assert sent[0].startswith("🚨 긴급 알림")
 
 
 def test_format_morning_briefing_uses_expected_sections():
@@ -389,7 +447,14 @@ def _api_error(status_code, body, *, method="sendMessage"):
 # ── #260: 진행 메시지 전송(message_id 확보) · 편집 ──────────────────────────
 
 
-def _fake_client_factory(calls, response):
+def _fake_client_factory(calls, response, *rest):
+    """응답을 순서대로 돌려준다. 마지막 응답은 이후 호출에서 계속 재사용된다.
+
+    응답이 하나면 예전과 똑같이 매 호출 같은 응답이다. 여럿 주면 분할 전송(#313)의
+    "n번째 조각에서 실패" 같은 순서 있는 시나리오를 세울 수 있다.
+    """
+    responses = [response, *rest]
+
     class FakeAsyncClient:
         def __init__(self, *, timeout):
             self.timeout = timeout
@@ -402,7 +467,7 @@ def _fake_client_factory(calls, response):
 
         async def post(self, url, *, json):
             calls.append((url, json))
-            return response
+            return responses[min(len(calls) - 1, len(responses) - 1)]
 
     return FakeAsyncClient
 
@@ -502,8 +567,8 @@ async def test_edit_message_text_posts_edit_payload(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_edit_message_text_truncates_to_the_telegram_limit(monkeypatch):
-    """공개 API이므로 한도를 넘는 본문이 들어와도 잘라 보낸다 (PR #263 리뷰 — 뮤테이션 생존).
+async def test_edit_message_text_clamps_to_the_telegram_limit(monkeypatch):
+    """편집은 메시지 하나를 고치는 조작이라 나눌 수 없다 — 대신 잘림이 보이게 자른다 (#313).
 
     현재 호출부는 짧은 종료 표시 하나뿐이라 절단이 발동하지 않지만, 넘겨 보내면
     텔레그램이 400으로 거부하고 진행 메시지가 '분석 중'인 채로 남는다.
@@ -517,11 +582,28 @@ async def test_edit_message_text_truncates_to_the_telegram_limit(monkeypatch):
 
     assert await notifier.edit_message_text(4242, "가" * (TELEGRAM_MESSAGE_LIMIT + 500)) is True
     assert len(calls[0][1]["text"]) == TELEGRAM_MESSAGE_LIMIT
+    assert calls[0][1]["text"].endswith(TELEGRAM_TRUNCATION_SUFFIX)
 
 
 @pytest.mark.asyncio
-async def test_send_text_truncates_to_the_telegram_limit(monkeypatch):
-    """sendMessage도 같은 한도로 자른다 — 각주 계산이 이 상수를 전제로 한다."""
+async def test_send_text_returning_id_clamps_to_the_telegram_limit(monkeypatch):
+    """식별자 하나로 다시 손댈 메시지 하나가 계약이라 나누지 않는다. 잘림은 보인다 (#313)."""
+    calls = []
+    monkeypatch.setattr(
+        "backend.telegram_notifier.httpx.AsyncClient",
+        _fake_client_factory(calls, _FakeResponse({"ok": True, "result": {"message_id": 7}})),
+    )
+    notifier = TelegramNotifier("token", "123")
+
+    assert await notifier.send_text_returning_id("다" * (TELEGRAM_MESSAGE_LIMIT + 500)) == 7
+    assert len(calls) == 1
+    assert len(calls[0][1]["text"]) == TELEGRAM_MESSAGE_LIMIT
+    assert calls[0][1]["text"].endswith(TELEGRAM_TRUNCATION_SUFFIX)
+
+
+@pytest.mark.asyncio
+async def test_send_text_splits_instead_of_truncating(monkeypatch):
+    """sendMessage는 자르지 않고 나눈다 — 잘려 사라지던 뒷부분이 다음 통으로 간다 (#313)."""
     calls = []
     monkeypatch.setattr(
         "backend.telegram_notifier.httpx.AsyncClient",
@@ -529,8 +611,106 @@ async def test_send_text_truncates_to_the_telegram_limit(monkeypatch):
     )
     notifier = TelegramNotifier("token", "123")
 
-    assert await notifier.send_text("나" * (TELEGRAM_MESSAGE_LIMIT + 500)) is True
-    assert len(calls[0][1]["text"]) == TELEGRAM_MESSAGE_LIMIT
+    body = "나" * (TELEGRAM_MESSAGE_LIMIT + 500)
+    assert await notifier.send_text(body) is True
+
+    texts = [call[1]["text"] for call in calls]
+    assert len(texts) > 1
+    assert all(len(text) <= TELEGRAM_MESSAGE_LIMIT for text in texts)
+    assert TELEGRAM_TRUNCATION_SUFFIX not in "".join(texts)
+    # 머리표 줄을 걷어내면 원문 그대로다.
+    assert "".join(text.split(chr(10), 1)[1] for text in texts) == body
+
+
+@pytest.mark.asyncio
+async def test_send_text_keeps_the_keyboard_on_the_last_part_only(monkeypatch):
+    """앞 조각에 버튼을 달면 본문이 끝나기 전에 답을 고르라고 재촉하는 꼴이 된다 (#313)."""
+    calls = []
+    monkeypatch.setattr(
+        "backend.telegram_notifier.httpx.AsyncClient",
+        _fake_client_factory(calls, _FakeResponse({"ok": True, "result": {"message_id": 1}})),
+    )
+    notifier = TelegramNotifier("token", "123")
+    markup = {"inline_keyboard": [[{"text": "상세", "callback_data": "x"}]]}
+
+    assert await notifier.send_text("라" * (TELEGRAM_MESSAGE_LIMIT + 500), reply_markup=markup) is True
+
+    markups = [call[1].get("reply_markup") for call in calls]
+    assert len(markups) > 1
+    assert markups[-1] == markup
+    assert all(value is None for value in markups[:-1])
+
+
+@pytest.mark.asyncio
+async def test_send_text_stops_at_the_failed_part(monkeypatch):
+    """도중에 실패하면 남은 조각을 보내지 않는다. 앞이 빠진 채 뒤만 도착하는 것보다 낫다 (#313)."""
+    calls = []
+    monkeypatch.setattr(
+        "backend.telegram_notifier.httpx.AsyncClient",
+        _fake_client_factory(
+            calls,
+            _FakeResponse({"ok": True, "result": {"message_id": 1}}),
+            _FakeResponse(error=httpx.HTTPError("boom")),
+        ),
+    )
+    notifier = TelegramNotifier("token", "123")
+
+    assert await notifier.send_text("마" * (TELEGRAM_MESSAGE_LIMIT * 2 + 10)) is False
+    # 첫 조각은 나갔고, 둘째에서 막힌 뒤 셋째는 시도하지 않는다.
+    assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_send_text_returns_false_when_splitting_itself_raises(monkeypatch):
+    """조립 단계의 예외도 False로 접는다 (PR #328 리뷰).
+
+    예전의 text[:LIMIT]은 던질 수 없어 "전송 실패는 False"라는 계약이 저절로 지켜졌다.
+    분할은 그렇지 않으므로 호출을 try 안에 두어 계약의 경계를 맞춘다 — 새 나가면
+    _send_text_or_raise가 아닌 지점에서 예외가 폴러까지 올라간다.
+    """
+    class Unprintable:
+        def __str__(self):
+            raise ValueError("cannot render")
+
+    calls = []
+    monkeypatch.setattr(
+        "backend.telegram_notifier.httpx.AsyncClient",
+        _fake_client_factory(calls, _FakeResponse({"ok": True, "result": {"message_id": 1}})),
+    )
+    notifier = TelegramNotifier("token", "123")
+
+    # cast: 타입상 불가능한 입력을 일부러 넣는 테스트다. 계약을 지키는 것은 타입 검사가
+    # 아니라 런타임이어야 한다 — 전송 계층은 서명을 신뢰할 수 없는 자리에 있다.
+    assert await notifier.send_text(cast(str, Unprintable())) is False
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_long_analysis_alert_is_split_not_truncated(monkeypatch):
+    """알림도 같은 분할 경로를 지난다 — format_analysis_alert는 더 이상 자르지 않는다 (#313)."""
+    calls = []
+    monkeypatch.setattr(
+        "backend.telegram_notifier.httpx.AsyncClient",
+        _fake_client_factory(calls, _FakeResponse({"ok": True, "result": {"message_id": 1}})),
+    )
+    notifier = TelegramNotifier("token", "123")
+    reason = "바" * (TELEGRAM_MESSAGE_LIMIT + 500)
+
+    sent = await notifier.send_analysis_alert(
+        "삼성전자",
+        "news",
+        {
+            "telegram_alert": True,
+            "urgency": "critical",
+            "details": {"decision": "BUY", "reason": reason},
+        },
+    )
+
+    assert sent is True
+    texts = [call[1]["text"] for call in calls]
+    assert len(texts) > 1
+    assert all(len(text) <= TELEGRAM_MESSAGE_LIMIT for text in texts)
+    assert reason in "".join(text.split(chr(10), 1)[1] for text in texts)
 
 
 @pytest.mark.asyncio
@@ -894,46 +1074,10 @@ async def test_send_text_publishes_and_clears_retry_after(monkeypatch):
     assert notifier.last_retry_after_seconds is None
 
 
-# --- #298: 신호 점수 표시 ---------------------------------------------------
-
-
-def test_format_signal_score_line_renders_score_and_reason():
-    line = backend.telegram_notifier.format_signal_score_line(-2, "주요 고객 이탈 보도")
-
-    assert line == "📊 영향도 -2 (주요 고객 이탈 보도)"
-
-
-def test_format_signal_score_line_marks_positive_scores_with_sign():
-    assert backend.telegram_notifier.format_signal_score_line(3, "대형 수주") == (
-        "📊 영향도 +3 (대형 수주)"
-    )
-    # 0은 "+0"이 어색하다. 그리고 0은 "모름"이 아니라 "중립으로 채점됨"이므로 표시한다.
-    assert backend.telegram_notifier.format_signal_score_line(0, "홍보성 기사") == (
-        "📊 영향도 0 (홍보성 기사)"
-    )
-
-
-def test_format_signal_score_line_appends_disagreement_note_when_uncertain():
-    line = backend.telegram_notifier.format_signal_score_line(
-        1, "평가 갈림", uncertainty=2.5
-    )
-
-    assert line == "📊 영향도 +1 (평가 갈림) · ⚠️ 기사 간 평가 엇갈림"
-
-
-def test_format_signal_score_line_omits_note_below_threshold():
-    line = backend.telegram_notifier.format_signal_score_line(
-        1, "일관된 평가", uncertainty=0.5
-    )
-
-    assert backend.telegram_notifier.SIGNAL_DISAGREEMENT_NOTE not in line
-
-
-def test_format_signal_score_line_returns_none_without_score():
-    """채점하지 못했으면 줄 자체가 없어야 한다 — 없는 점수를 0으로 그리지 않는다."""
-    assert backend.telegram_notifier.format_signal_score_line(None, "근거") is None
-    assert backend.telegram_notifier.format_signal_score_line("2") is None
-    assert backend.telegram_notifier.format_signal_score_line(True) is None
+# --- #298: 알림에 들어가는 신호 점수 줄 ---------------------------------------
+# 줄 자체를 만드는 format_signal_score_line은 출력 계층으로 옮겨졌다 (#308).
+# 문구 테스트는 test_presentation.py에 있고, 여기에는 그 줄이 알림의 어느 자리에
+# 놓이는지만 남긴다.
 
 
 def test_format_analysis_alert_includes_signal_score_line():
@@ -954,10 +1098,42 @@ def test_format_analysis_alert_includes_signal_score_line():
     )
 
     lines = message.split("\n")
-    assert lines[0] == "[긴급] 삼성전자 / news"
-    # 제목 바로 아래 — Decision보다 먼저 읽혀야 한다.
-    assert lines[1] == "📊 영향도 -2 (주요 고객 이탈 보도) · ⚠️ 기사 간 평가 엇갈림"
-    assert lines[2].startswith("Decision: SELL")
+    # 제목에서 "[긴급]"이 빠지고 source가 한국어가 된 것은 #297이다 — 긴급 배너는
+    # 이제 render가 붙인다. 점수 줄이 놓이는 자리(#298)는 그와 무관하게 그대로다.
+    assert lines[0] == "삼성전자 / 뉴스"
+    # 제목 바로 아래 — 판단보다 먼저 읽혀야 한다.
+    assert lines[1] == "- 📊 영향도 -2 (주요 고객 이탈 보도) · ⚠️ 기사 간 평가 엇갈림"
+    assert lines[2].startswith("- 판단: 매도")
+
+
+def test_format_analysis_alert_passes_the_configured_threshold(monkeypatch):
+    """알림이 넘기는 임계값이 설정값 그 자체인지 본다 (#308 리뷰).
+
+    위 테스트는 불확실도 1.5가 기본 임계값 1.0을 넘는지만 보므로, 호출부가 엉뚱한 상수를
+    넘겨도(0.5여도 1.5는 넘는다) 통과한다. 설정을 움직였을 때 같은 입력의 결과가 따라
+    움직이는지를 봐야 "설정값을 넘긴다"가 검증된다.
+    """
+    notifier = TelegramNotifier(bot_token="token", chat_id="chat")
+    monkeypatch.setattr(
+        backend.telegram_notifier, "SIGNAL_UNCERTAINTY_ALERT_THRESHOLD", 2.0
+    )
+
+    message = notifier.format_analysis_alert(
+        stock="삼성전자",
+        source="news",
+        analysis_data={
+            "summary": "요약",
+            "details": {"decision": "SELL", "confidence_score": 0.8, "reason": "고객 이탈"},
+            "urgency": "high",
+            "telegram_alert": True,
+            "signal_score": -2,
+            "signal_reason": "주요 고객 이탈 보도",
+            "signal_uncertainty": 1.5,
+        },
+    )
+
+    # 점수 줄은 그대로 있고 엇갈림 표시만 빠져야 한다 — 줄째로 사라지면 이 단언이 놓친다.
+    assert message.split("\n")[1] == "- 📊 영향도 -2 (주요 고객 이탈 보도)"
 
 
 def test_format_analysis_alert_without_signal_score_is_unchanged():
@@ -973,5 +1149,5 @@ def test_format_analysis_alert_without_signal_score_is_unchanged():
         stock="삼성전자", source="news", analysis_data=analysis_data
     )
 
-    assert backend.telegram_notifier.SIGNAL_SCORE_LABEL not in message
-    assert message.split("\n")[1].startswith("Decision: HOLD")
+    assert SIGNAL_SCORE_LABEL not in message
+    assert message.split("\n")[1].startswith("- 판단: 보유 유지")

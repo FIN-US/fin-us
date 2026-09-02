@@ -13,6 +13,12 @@ if TYPE_CHECKING:
     # import 시점을 바꾸지 않는다.
     from .trading_orders import PendingOrder
 
+from .presentation import (
+    DEFAULT_TELEGRAM_USER_LEVEL,
+    TELEGRAM_USER_LEVELS,
+    normalize_level,
+)
+
 logger = logging.getLogger(__name__)
 
 SIGNAL_HASH_TTL_SEC = 60 * 60 * 24 * 14
@@ -117,6 +123,23 @@ class RedisKeys:
     def telegram_poller_state(self) -> str:
         return f"{self.prefix}:telegram:poller_state"
 
+    def telegram_user_level(self) -> str:
+        # 알림 모드와 같은 네임스페이스에 둔다 — 둘 다 "이 채팅의 표시 설정"이고, 한쪽만
+        # 보고 다른 쪽을 놓치는 일이 없도록 KEYS finus:telegram:* 하나로 같이 잡힌다 (#297).
+        return f"{self.prefix}:telegram:user_level"
+
+    def order_proposal_cooldown(self, stock_code: str, rule_id: str | None) -> str:
+        """주문 보조(#299)의 재제안 냉각 키 — 종목코드+룰 단위.
+
+        룰이 없는 수동 요청(``/advise``)은 ``manual``로 묶는다. 룰 기반 자동 제안이
+        추가돼도(#314) 서로의 냉각을 잡아먹지 않는다.
+
+        첫 자리는 사용자가 친 문자열이 아니라 **해석된 종목코드**다. 입력 문자열을
+        키로 쓰면 "삼성전자"와 "005930"이 다른 키가 되어 같은 종목의 냉각이 별칭
+        한 번에 뚫린다. 호출부는 이 키를 만들기 전에 코드를 확정해야 한다.
+        """
+        return f"{self.prefix}:order_assist:cooldown:{stock_code}:{rule_id or 'manual'}"
+
 
 class RedisSchedulerState:
     def __init__(
@@ -205,6 +228,28 @@ class RedisSchedulerState:
         if mode not in TELEGRAM_ALERT_MODES:
             return False
         await self.redis.set(self.keys.telegram_alert_mode(), mode)
+        return True
+
+    async def get_telegram_user_level(self) -> str:
+        """저장된 사용자 수준. 없거나 알 수 없는 값이면 기본값(초보) (#297).
+
+        알 수 없는 값을 기본값으로 접는 것은 알림 모드와 같은 규칙이다. 저장된 값이 코드보다
+        오래 살기 때문에 — 수준 목록이 바뀌어도 redis에는 옛 값이 남는다 — 읽는 쪽이
+        방어해야 한다.
+        """
+        stored = self._decode(await self.redis.get(self.keys.telegram_user_level()))
+        return normalize_level(stored) or DEFAULT_TELEGRAM_USER_LEVEL
+
+    async def set_telegram_user_level(self, level: str) -> bool:
+        """사용자 수준을 저장한다. 해석할 수 없는 값이면 저장하지 않고 False.
+
+        별칭("초보")도 받아 정규값으로 접어 저장한다. 저장 시점에 정규화해야 redis에
+        표기가 여러 벌 쌓이지 않는다.
+        """
+        normalized = normalize_level(level)
+        if normalized is None or normalized not in TELEGRAM_USER_LEVELS:
+            return False
+        await self.redis.set(self.keys.telegram_user_level(), normalized)
         return True
 
 

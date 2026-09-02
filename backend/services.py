@@ -22,7 +22,7 @@ from .config import (
     NEWS_MCP_PARAMS, TRADING_MCP_PARAMS,
     SIGNAL_SCORE_MIN, SIGNAL_SCORE_MAX, SIGNAL_SCORE_THRESHOLD,
 )
-from .schemas import TradingSignal, AnalysisReport
+from .schemas import TradingSignal, AnalysisReport, UrgencyLevel
 from .models import AgentReport
 from .stock_code import (
     _STOCK_CODE_EXTRACT_RE,
@@ -31,6 +31,7 @@ from .stock_code import (
     _is_unresolved_echo,
     _looks_like_stock_code,
 )
+from .pii_mask import mask_pii, unmask_pii
 
 logger = logging.getLogger(__name__)
 _NAT_RESPONSE_LOG_PREVIEW_CHARS = 800
@@ -42,10 +43,21 @@ _NAT_RESPONSE_LOG_PREVIEW_CHARS = 800
 _DERIVED_PROVENANCE_FIELDS = frozenset({"provider", "provider_supports_tools"})
 
 # schemas.AnalysisReport.urgency의 Literal 값에서 파생 — 스키마와 두 곳이 갈라지는 것을 막는다.
-# AnalysisReport.urgency: Literal["low", "normal", "high", "critical"]
-_URGENCY_LEVELS: frozenset[str] = frozenset(
+# AnalysisReport.urgency: UrgencyLevel = Literal["low", "normal", "high", "critical"]
+# 원소 타입을 str이 아니라 UrgencyLevel로 선언해야 `raw in _URGENCY_LEVELS`가
+# 타입 체커에서도 좁히기로 작동한다 — get_args의 반환은 tuple[Any, ...]이라
+# 선언을 붙이지 않으면 frozenset[str]로 추론돼 아래 urgency가 Literal로 좁혀지지 않는다.
+_URGENCY_LEVELS: frozenset[UrgencyLevel] = frozenset(
     get_args(AnalysisReport.model_fields["urgency"].annotation)
 )
+
+# score_signal이 쓸 수 있는 provider — llm_chat의 str 반환 오버로드와 같은 집합이다.
+# "nat"은 여기 없다. NAT는 멀티에이전트 왕복이라 1차 필터의 전제(경량·저비용)를
+# 깨고, 반환값 NatAnswer가 str 서브클래스여서 파싱은 그대로 통과해 버린다 —
+# 즉 잘못 라우팅돼도 증상이 남지 않는다.
+_ScoringProvider = Literal["openai", "anthropic", "ollama"]
+_SCORING_PROVIDERS: frozenset[_ScoringProvider] = frozenset(get_args(_ScoringProvider))
+_DEFAULT_SCORING_PROVIDER: _ScoringProvider = "ollama"
 
 # _STOCK_CODE_EXTRACT_RE, _has_code_digit, _looks_like_stock_code → backend/stock_code.py (#140)
 
@@ -658,6 +670,11 @@ async def score_signal(
     로컬 초경량 모델(예: gemma4) 또는 경량 API 모델(예: gpt-5.4-mini)을 1차
     필터로 사용해 비용과 정확도의 균형을 맞춘다.
 
+    ``provider``는 ``_SCORING_PROVIDERS``의 값이어야 한다. 그 밖의 값은 경고를
+    남기고 기본값으로 되돌린다 — llm_chat은 매칭되지 않는 provider_key를 전부
+    NAT로 보내므로, 그대로 넘기면 오타 하나가 채점을 멀티에이전트 왕복으로
+    바꿔 놓는다.
+
     호출·파싱에 실패하면 예외를 올리지 않고 fail-open한다 — 유의미로 통과시키되
     점수는 null로 남긴다 (REQ-04 놓침 방지).
     """
@@ -669,9 +686,25 @@ async def score_signal(
 
     prompt = _build_signal_score_prompt(stock, source, _signal_snippet(signal_content))
 
+    # provider의 출처는 환경변수(scheduler.FILTER_PROVIDER)라 검증된 적이 없다.
+    # llm_chat의 마지막 줄은 catch-all이므로 매칭되지 않는 값은 전부 NAT로 떨어진다
+    # — 아래 fail-open은 호출이 실패했을 때의 장치이지 오라우팅을 막지 못한다.
+    # 계약 밖의 값은 여기서 기본값으로 되돌리고 로그를 남긴다.
+    if provider in _SCORING_PROVIDERS:
+        scoring_provider = provider
+    else:
+        logger.warning(
+            "signal 채점 provider=%r는 지원 목록 %s 밖입니다 — %r로 되돌립니다. "
+            "NEWS_FILTER_PROVIDER 설정을 확인하세요.",
+            provider,
+            sorted(_SCORING_PROVIDERS),
+            _DEFAULT_SCORING_PROVIDER,
+        )
+        scoring_provider = _DEFAULT_SCORING_PROVIDER
+
     try:
         # 설정된 provider(ollama, openai 등)에 따라 경량 모델 호출
-        raw = await llm_chat(provider, prompt)
+        raw = await llm_chat(scoring_provider, prompt)
     except Exception as e:
         logger.error(
             "signal 채점 호출 실패 (%s, %s, %s): %s — 유의미로 통과시킵니다(fail-open)",
@@ -1072,6 +1105,24 @@ async def run_mcp_tool(
         ) from exc
 
 
+def short_error(exc: BaseException) -> str:
+    """예외를 사용자 메시지에 넣을 수 있는 짧은 한 줄로 만든다.
+
+    ``run_mcp_tool``이 올리는 HTTPException은 사유가 ``detail``에 들어 있고, 그 값은
+    MCP 서브프로세스의 stderr까지 실려 수천 자가 되기도 한다. 그대로 사용자 메시지에
+    박으면 텔레그램 4096자 한도에 걸려 **거부 메시지 자체가 전송되지 않는다** — 가장
+    알려야 할 순간에 아무 말도 못 하게 되는 것이라 300자에서 자른다.
+
+    telegram_commands(주문·조회 명령)와 order_assist(주문 보조)가 함께 쓴다. 두 곳이
+    각자 자르면 한도가 갈라지므로 예외를 실제로 만들어 올리는 이 모듈에 둔다.
+    """
+    raw = getattr(exc, "detail", str(exc))
+    text = str(raw or "").strip()
+    if not text:
+        text = exc.__class__.__name__
+    return text[:300]
+
+
 def analysis_from_nat_text(raw: str, stock: str) -> dict[str, Any]:
     """Map NAT assistant output to AnalysisReport JSON for the reference React UI."""
     text = (raw or "").strip()
@@ -1178,13 +1229,28 @@ async def llm_chat(
     *,
     conversation_id: str | None = None,
 ) -> str:
+    """4개 provider 경로(OpenAI/Anthropic/Ollama/NAT)의 단일 진입점.
+
+    #230(F-17/NFR-05): 외부로 나가는 프롬프트는 반드시 이 함수를 거쳐야 마스킹된다.
+    _llm_openai_chat 등 provider별 구현을 직접 호출하는 새 경로가 생기면 마스킹
+    계층을 우회한다 — backend/tests/test_services.py의 회귀 테스트가 이를 잡는다.
+
+    mask_pii/unmask_pii는 이 함수 지역 변수(mapping)로만 존재한다. 요청마다 새로
+    만들어지므로, llm_chat이 asyncio.gather 등으로 동시에 여러 번 호출돼도 서로의
+    매핑을 덮어쓰지 않는다.
+    """
+    masked_msg, mapping = mask_pii(user_msg)
+
     if provider_key == "openai":
-        return await _llm_openai_chat(user_msg)
-    if provider_key == "anthropic":
-        return await _llm_anthropic_chat(user_msg)
-    if provider_key == "ollama":
-        return await _llm_ollama_chat(user_msg)
-    return await _llm_nat_chat(user_msg, conversation_id=conversation_id)
+        raw = await _llm_openai_chat(masked_msg)
+    elif provider_key == "anthropic":
+        raw = await _llm_anthropic_chat(masked_msg)
+    elif provider_key == "ollama":
+        raw = await _llm_ollama_chat(masked_msg)
+    else:
+        raw = await _llm_nat_chat(masked_msg, conversation_id=conversation_id)
+
+    return unmask_pii(raw, mapping)
 
 
 # llm_chat의 분기와 함께 유지한다: NAT처럼 도구(MCP/KIS/뉴스)를 호출할 수 있는 경로로

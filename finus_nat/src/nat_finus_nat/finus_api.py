@@ -145,6 +145,8 @@ class ReasoningTrace:
       허용 목록으로 정규화된 값이므로 임의 문자열이 들어올 수 없다.
     - ``tools_used`` — 도구 강제 원장(:class:`DataToolLedger`)에 기록된 도구.
       모든 Fin-Us 도구가 ``_record_to_ledger``를 거치므로 "실제로 실행된 도구"다.
+    - ``branch_answer`` — supervisor가 브랜치에서 받아 돌려보낸 답변 본문.
+      위 두 값이 **어느 텍스트에 대한 기록인지** 식별하는 값이다 (#294).
 
     LLM 출력 텍스트를 파싱해서 채우지 않는다. 파싱으로 만들면 "실행된 도구"가 아니라
     "모델이 실행했다고 주장하는 도구"가 되어, 근거로 보여주는 각주가 오히려 환각을
@@ -157,10 +159,35 @@ class ReasoningTrace:
 
     routed_agent: str | None = None
     tools_used: list[ToolUse] = field(default_factory=list)
+    branch_answer: str | None = None
 
     def record_route(self, branch_name: str) -> None:
         """supervisor가 고른 브랜치명을 기록한다 (마지막 라우팅이 최종 값)."""
         self.routed_agent = branch_name
+
+    def record_branch_answer(self, text: str) -> None:
+        """supervisor가 브랜치에서 받아 돌려보내는 답변 본문을 기록한다 (#294).
+
+        **각주 부착 조건의 정본이다** — 이 판정의 근거 설명은 여기 한 곳에 둔다.
+        (:func:`~nat_finus_nat.agents._trace_branch_answer`,
+        :func:`~nat_finus_nat.agents.with_reasoning_trace`가 이 설명을 참조한다.)
+
+        ``routed_agent``/``tools_used``는 브랜치를 **부르기 전후**로 채워지므로, 그
+        값이 있다는 사실만으로는 지금 돌려보내는 텍스트가 그 브랜치가 만든 답변이라는
+        보장이 되지 않는다. vendor ``auto_memory_agent``는 예외를 삼키고 ``str(ex)``를
+        답변으로 돌려주므로(``router.yml``이 ``verbose: true``), 박스가 채워진 채 본문만
+        오류 문자열로 바뀐 응답이 최상위까지 올라온다.
+
+        판정 기준이 "브랜치가 성공했는가"가 아닌 이유는 두 번째 변종 때문이다:
+        vendor 그래프는 ``inner_agent`` → ``capture_ai_response`` 순서라, 브랜치가
+        성공한 **뒤** 도는 기억 저장이 터지면 ``tools_used``까지 가득 찬 채로 본문만
+        오류 문자열이 된다. 브랜치는 실제로 성공했으므로 성공 여부로는 걸러지지 않는다.
+
+        본문을 함께 기록해 두면 최상위가 "이 텍스트가 브랜치가 만든 답변인가"를 직접
+        물어볼 수 있다 — vendor의 실패 문자열 형태를 알 필요가 없으므로 #273이
+        없애려던 vendor 결합이 되살아나지 않는다.
+        """
+        self.branch_answer = text
 
     def record_ledger_tools(self, ledger: "DataToolLedger") -> None:
         """*ledger*의 도구를 첫 호출 순서대로 병합한다 (도구명 기준 중복 제거).
@@ -269,7 +296,7 @@ def _record_to_ledger(tool_name: str, result: str) -> None:
     correct conservative behaviour.
 
     ``tool_name`` leaves this service: backend renders it in the reasoning
-    footnote through ``TOOL_LABELS`` (backend/telegram_commands.py, #260).
+    footnote through ``TOOL_LABELS`` (backend/presentation.py, #260).
     Renaming a tool without updating that map degrades gracefully — the raw
     internal name shows up instead of the Korean label — so the mismatch is
     caught by backend/tests/test_label_drift.py in CI (#282). Keep the name a

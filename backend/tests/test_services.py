@@ -1,5 +1,10 @@
+import ast
+import asyncio
 import inspect
 import logging
+import os
+import pathlib
+import re
 import typing
 from datetime import date
 from urllib.parse import quote
@@ -1717,6 +1722,399 @@ def test_morning_briefing_from_text_skips_non_briefing_candidates():
         "브리핑 키 없는 후보가 reversed 선두에 와도 건너뛰고 올바른 후보를 써야 한다"
     )
     assert result["watchlist"] == ["삼성전자"]
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# PII 마스킹 계층 통합 테스트 (#230, F-17/NFR-05)
+#
+# backend/pii_mask.py 자체의 recognizer/왕복 무손실 단위 테스트는
+# backend/tests/test_pii_mask.py에 있다. 여기서는 llm_chat()이 그 모듈을
+# 실제로 호출하는지 - 요청·응답 경계에서의 배선 - 만 확인한다.
+# ──────────────────────────────────────────────────────────────────────────
+
+# 자리표시자는 <KIND_{scope}_{n}> 형태이고 scope는 mask_pii 호출마다 새로 뽑는 6자리
+# hex nonce다(backend/pii_mask.py의 _Counter docstring 참고). 정확한 문자열을 단언할 수
+# 없으므로 nonce만 지워 <AMOUNT_1> 형태로 정규화한 뒤 단언한다.
+_SCOPED_PLACEHOLDER_RE = re.compile(r"<(ACCOUNT|AMOUNT|QTY)_[0-9a-f]{6}_(\d+)>")
+
+
+def _norm(text: str) -> str:
+    """자리표시자의 호출별 nonce를 지워 <AMOUNT_1> 형태로 정규화한다(단언 가독성 유지용)."""
+    return _SCOPED_PLACEHOLDER_RE.sub(r"<\1_\2>", text)
+
+
+@pytest.mark.asyncio
+async def test_llm_chat_masks_pii_before_dispatching_to_provider(monkeypatch):
+    """llm_chat이 provider 구현을 부르기 전에 mask_pii를 거쳐야 한다.
+
+    이 테스트가 잡는 mutation: llm_chat에서 mask_pii 호출을 제거. 제거하면
+    provider가 받는 문자열에 원본 계좌번호·금액·수량이 그대로 남는다.
+    """
+    captured: list[str] = []
+
+    async def fake_openai(user_msg):
+        captured.append(user_msg)
+        return "ok"
+
+    monkeypatch.setattr(services, "_llm_openai_chat", fake_openai)
+
+    pii_text = "12345678-01 계좌, 삼성전자 3주, 평가금액 12,345,000원"
+    await services.llm_chat("openai", pii_text)
+
+    assert len(captured) == 1
+    sent = captured[0]
+    assert "12345678-01" not in sent, "계좌번호가 마스킹되지 않고 그대로 전송됐다"
+    assert "12,345,000원" not in sent, "금액이 마스킹되지 않고 그대로 전송됐다"
+    normalized = _norm(sent)
+    assert "<ACCOUNT_1>" in normalized
+    assert "<AMOUNT_1>" in normalized
+    assert "<QTY_1>" in normalized
+
+
+@pytest.mark.asyncio
+async def test_llm_chat_unmasks_response_placeholders(monkeypatch):
+    """llm_chat이 provider 응답의 자리표시자를 원값으로 역치환해 반환해야 한다.
+
+    이 테스트가 잡는 mutation: llm_chat에서 unmask_pii 호출을 제거. 제거하면
+    호출자가 <AMOUNT_1> 같은 자리표시자를 그대로 받아 분석 결과에 노출된다.
+    """
+
+    async def fake_openai(user_msg):
+        # provider가 자리표시자를 그대로 되읊는 상황을 흉내낸다(상대 비교 답변 등).
+        # 자리표시자에는 호출별 nonce가 붙으므로 하드코딩하지 않고 받은 프롬프트에서
+        # 실제로 나간 자리표시자를 뽑아 되읊는다.
+        first, second = (m.group(0) for m in _SCOPED_PLACEHOLDER_RE.finditer(user_msg))
+        return f"요약: {first}은 {second}보다 작습니다."
+
+    monkeypatch.setattr(services, "_llm_openai_chat", fake_openai)
+
+    pii_text = "평가금액 12,345,000원, 총자산 45,678,000원"
+    result = await services.llm_chat("openai", pii_text)
+
+    assert result == "요약: 12,345,000원은 45,678,000원보다 작습니다."
+    assert "<AMOUNT" not in result
+
+
+@pytest.mark.asyncio
+async def test_llm_chat_unmask_fails_open_on_unknown_placeholder(monkeypatch):
+    """provider가 존재하지 않는 자리표시자를 지어내도 llm_chat이 예외 없이
+    나머지 원문을 최대한 살려 반환해야 한다.
+
+    이 테스트가 잡는 mutation: unmask_pii(또는 그 호출부)가 매핑에 없는 자리표시자를
+    만났을 때 예외를 던지도록 바뀌는 경우 - 그러면 이 테스트가 예외로 실패해야 한다.
+
+    두 갈래를 함께 넣는다:
+    - 형식은 유효하지만 매핑에 없는 자리표시자(<AMOUNT_deadbe_9> - scope가 이번 호출과 다름):
+      내부 토큰이 사용자에게 노출되지 않도록 _FALLBACK_LABEL 중립 문구로 치환된다.
+    - scope 없는 구형식(<AMOUNT_9>): _PLACEHOLDER_RE에 매치되지 않아 원문 그대로 남는다.
+    """
+
+    async def fake_openai(user_msg):
+        # 둘 다 이번 호출의 매핑에 없는 자리표시자다.
+        return "총자산은 <AMOUNT_deadbe_9>이고 예수금은 <AMOUNT_9>입니다."
+
+    monkeypatch.setattr(services, "_llm_openai_chat", fake_openai)
+
+    result = await services.llm_chat("openai", "평가금액 12,345,000원")
+
+    # <AMOUNT_deadbe_9>: 형식 유효, 매핑에 없음 -> 중립 문구로 치환
+    assert "(이전 금액 1)" in result
+    assert "<AMOUNT_deadbe_9>" not in result, "내부 토큰이 사용자 화면에 노출됐다"
+    # <AMOUNT_9>: _PLACEHOLDER_RE에 매치 안 됨 -> 원문 그대로
+    assert "<AMOUNT_9>" in result
+
+
+@pytest.mark.asyncio
+async def test_llm_chat_masking_does_not_leak_between_concurrent_calls():
+    """llm_chat을 asyncio.gather로 동시에 호출해도 서로 다른 PII 매핑이 섞이지 않아야 한다.
+
+    mask_pii/unmask_pii의 mapping이 모듈 전역이 아니라 llm_chat 호출마다 지역
+    변수로 생성된다는 것을 확인한다 - 스케줄러가 병렬로 llm_chat을 부르는 구조이므로
+    전역에 두면 동시 요청의 매핑이 서로 덮어써진다.
+    """
+
+    # 서로 다른 provider 함수를 붙여 두 호출을 구분한다(둘 다 openai를 쓰면 monkeypatch가
+    # 서로를 덮어써 어느 호출이 무엇을 받았는지 구분할 수 없다).
+    calls: dict[str, str] = {}
+
+    def make_capturing(name, delay):
+        async def _inner(user_msg):
+            await asyncio.sleep(delay)  # 다른 호출과 인터리빙되도록 강제로 양보한다
+            calls[name] = user_msg
+            return user_msg  # 받은 그대로 되돌려 마스킹된 텍스트를 관측한다
+
+        return _inner
+
+    from backend import services as services_module
+
+    orig_openai = services_module._llm_openai_chat
+    orig_anthropic = services_module._llm_anthropic_chat
+    try:
+        services_module._llm_openai_chat = make_capturing("a", 0.02)
+        services_module._llm_anthropic_chat = make_capturing("b", 0)
+
+        text_a = "평가금액 11,111,111원"
+        text_b = "평가금액 22,222,222원"
+
+        result_a, result_b = await asyncio.gather(
+            services_module.llm_chat("openai", text_a),
+            services_module.llm_chat("anthropic", text_b),
+        )
+
+        # 각 호출이 받은 마스킹된 텍스트에 서로의 원본 금액이 섞이지 않아야 한다.
+        assert "11,111,111원" not in calls["b"]
+        assert "22,222,222원" not in calls["a"]
+        # 각 호출의 최종 결과(역치환 후)는 자기 자신의 원본 금액으로 복원되어야 한다.
+        assert result_a == text_a
+        assert result_b == text_b
+    finally:
+        services_module._llm_openai_chat = orig_openai
+        services_module._llm_anthropic_chat = orig_anthropic
+
+
+@pytest.mark.asyncio
+async def test_placeholders_do_not_collide_across_calls_in_same_conversation(monkeypatch):
+    """같은 conversation_id로 연속 호출할 때 이전 턴 자리표시자가 현재 턴 값으로 복원되면 안 된다.
+
+    NAT 경로는 마스킹 매핑과 달리 대화 히스토리를 **호출을 넘어 서버 쪽에 유지**한다:
+    backend/services.py의 _llm_nat_chat이 messages에 현재 메시지 1건만 보내고
+    conversation-id 헤더로 세션을 식별하면, finus_nat/src/nat_finus_nat/agents.py의
+    _load_history()가 SQLite chat_messages에서 과거 턴을 읽어 오고 같은 파일의
+    finus_sqlite_transcript_agent가 `history + chat_request.messages`로 합쳐
+    라우터에 넘긴다(finus_nat/configs/router.yml의 max_history_messages: 30).
+    conversation_id는 호출 간 재사용된다(backend/telegram_commands.py의
+    f"telegram:{chat_id}"는 그 사용자의 모든 메시지가 같은 스레드).
+
+    따라서 NAT은 이전 턴의 자리표시자를 응답에 인용할 수 있다. 자리표시자 이름이
+    호출마다 <AMOUNT_1>부터 다시 시작하면 그 인용이 **현재 턴의 다른 값으로 조용히**
+    복원된다 - unmask_pii의 fail-open은 "매핑에 없는" 자리표시자만 보호하는데 이
+    케이스는 매핑에 "있으면서 값이 틀린" 경우라 방어선이 통하지 않는다.
+
+    이 테스트가 잡는 mutation: _Counter에서 scope(호출별 nonce)를 제거해 자리표시자를
+    다시 `<{kind}_{n}>` 형태로 되돌리는 변경. 그러면 아래 turn-1 자리표시자가 turn-2
+    매핑에 존재하게 되어 "5,000,000원"으로 복원되고 이 단언이 실패한다.
+    """
+    seen: list[str] = []
+
+    async def echo_prev(user_msg, *, conversation_id=None):
+        # 턴 1에서 NAT이 본 자리표시자를 턴 2 응답에서 그대로 인용하는 상황.
+        seen.append(user_msg)
+        # 자리표시자 형식과 무관하게(nonce 유무 모두) 턴 1의 자리표시자를 뽑는다 —
+        # nonce를 제거하는 mutation에서도 이 fake가 깨지지 않고 아래 단언이 red가 되도록.
+        turn1_placeholder = re.search(r"<AMOUNT[^>]*>", seen[0]).group(0)
+        return f"앞서 말씀하신 {turn1_placeholder} 기준으로는"
+
+    monkeypatch.setattr(services, "_llm_nat_chat", echo_prev)
+
+    await services.llm_chat("nat", "잔고 12,345,000원", conversation_id="telegram:1")
+    result = await services.llm_chat("nat", "5,000,000원 더", conversation_id="telegram:1")
+
+    assert "5,000,000원" not in result, "이전 턴 자리표시자가 현재 턴 값으로 잘못 복원됐다"
+    assert "12,345,000원" not in result, "이전 턴 매핑이 호출을 넘어 살아 있으면 안 된다"
+
+
+@pytest.mark.asyncio
+async def test_llm_chat_nat_answer_preserves_metadata_through_masking(monkeypatch):
+    """llm_chat("nat", ...)이 마스킹 계층을 거친 뒤에도 NatAnswer의 각주를 유지해야 한다.
+
+    services.NatAnswer는 str 서브클래스라 re.sub(= unmask_pii 내부)를 거치면 plain str이
+    된다. unmask_pii의 타입 보존 로직이 routed_agent/tools_used를 살린다는 것을 고정한다.
+
+    PII가 있는 경우(텍스트가 실제로 바뀌는 경로)와 없는 경우(mapping이 비어 있는 경로)
+    양쪽을 모두 단언한다 — 어느 경로에서도 각주가 사라지면 안 된다.
+
+    이 테스트가 잡는 mutation: unmask_pii 반환부의 str 서브클래스 보존 로직을 제거하고
+    plain str(restored)을 그대로 반환하도록 되돌리는 변경. 제거하면 isinstance 단언이
+    실패한다.
+    """
+    def make_fake_nat(pii_in_response: bool):
+        async def fake_nat(user_msg, *, conversation_id=None):
+            if pii_in_response:
+                # 자리표시자가 응답에 섞여 unmask_pii가 실제로 텍스트를 바꾸는 경로.
+                ph = next(iter(_SCOPED_PLACEHOLDER_RE.finditer(user_msg))).group(0)
+                text = f"잔고는 {ph}입니다."
+            else:
+                text = "잔고 정보가 없습니다."
+            return services.NatAnswer(
+                text,
+                routed_agent="trading_agent",
+                tools_used=(services.NatToolUse(name="kis-trading", ok=True, empty=False),),
+            )
+        return fake_nat
+
+    # 경로 1: PII 있음 — unmask_pii가 텍스트를 실제로 바꾼다.
+    monkeypatch.setattr(services, "_llm_nat_chat", make_fake_nat(pii_in_response=True))
+    result = await services.llm_chat("nat", "잔고 12,345,000원")
+
+    assert isinstance(result, services.NatAnswer), (
+        "PII 있는 경로: 마스킹 계층을 거치며 NatAnswer가 plain str로 벗겨졌다"
+    )
+    assert result.routed_agent == "trading_agent", "PII 있는 경로: routed_agent 소실"
+    assert len(result.tools_used) == 1 and result.tools_used[0].name == "kis-trading", (
+        "PII 있는 경로: tools_used 소실"
+    )
+    assert "12,345,000원" in result, "PII 있는 경로: 역치환이 실패했다"
+
+    # 경로 2: PII 없음 — mapping이 비어 unmask_pii가 텍스트를 바꾸지 않는다.
+    monkeypatch.setattr(services, "_llm_nat_chat", make_fake_nat(pii_in_response=False))
+    result2 = await services.llm_chat("nat", "그럼 팔까?")
+
+    assert isinstance(result2, services.NatAnswer), (
+        "PII 없는 경로: NatAnswer가 plain str로 벗겨졌다"
+    )
+    assert result2.routed_agent == "trading_agent", "PII 없는 경로: routed_agent 소실"
+    assert len(result2.tools_used) == 1, "PII 없는 경로: tools_used 소실"
+
+
+def test_no_bypass_of_llm_chat_masking_layer():
+    """마스킹 계층을 우회하는 새 호출 경로가 backend/ 안에 생기면 이 테스트가 실패한다.
+
+    두 가지를 함께 못 박는다.
+
+    1) provider별 구현(_llm_openai_chat/_llm_anthropic_chat/_llm_ollama_chat/
+       _llm_nat_chat)은 마스킹되지 않은 원문을 그대로 외부로 보낸다. 이 넷은
+       services.py의 llm_chat() 안에서만 참조돼야 한다.
+    2) 외부 LLM SDK 클라이언트 생성자(AsyncOpenAI/AsyncAnthropic)는 위 provider
+       함수들 안에서만 만들어져야 한다. 이 단언이 없으면 (1)의 하드코딩된 이름
+       목록을 그대로 빠져나가는 우회 경로 두 개가 열려 있다 — "새 provider 함수
+       (_llm_gemini_chat 등)를 추가한다"와 "다른 모듈에서 AsyncOpenAI(...)를 직접
+       만들어 부른다".
+
+       2026-08 시점 실제 위치(직접 grep으로 확인): services.py:758 AsyncOpenAI(
+       -> _llm_openai_chat, 752-767행), 774 AsyncAnthropic(-> _llm_anthropic_chat,
+       768-786행), 788 AsyncOpenAI(-> _llm_ollama_chat, 787-811행). 10·11행의
+       `from openai import AsyncOpenAI` 같은 import 문은 ast.Name이 아니라 alias
+       노드라 참조로 집계되지 않는다.
+
+    호출(ast.Call)뿐 아니라 **이름 참조(ast.Name)** 를 검사하므로 다음 우회 경로까지
+    잡는다:
+    - 별칭 대입: `_direct = _llm_openai_chat` 후 `await _direct(msg)`
+      (ast.Call의 함수명이 `_direct`라 호출만 보면 탐지되지 않는다)
+    - 콜백 전달: `dispatch(_llm_nat_chat)`처럼 호출하지 않고 넘기는 경우
+    - 모듈 최상위(함수 밖) 사용: func_stack이 비면 "<module>"로 기록해 llm_chat이
+      아닌 스코프로 잡힌다
+
+    ast.Attribute 분기(`services._llm_openai_chat()`처럼 속성 접근으로 부르는 형태)는
+    visit_Name으로 잡히지 않으므로 visit_Call에 남겨 둔다.
+
+    스코프는 `파일경로::함수명`으로 기록한다. 파일을 붙이지 않으면 다른 모듈에
+    llm_chat이라는 동명 함수를 만들어 그 안에서 provider를 부르는 우회가 통과한다.
+
+    스캔 범위: backend/ 이하 모든 .py를 **재귀** 스캔하되 아래 규칙으로 배제한다.
+    배제는 파일 하드코딩 나열이 아니라 "디렉터리 종류"에 대한 규칙이므로, 새로
+    생기는 디렉터리(backend/scripts/처럼)는 별도 조치 없이 자동으로 스캔에 들어온다:
+    - 점으로 시작하는 디렉터리(.venv/.pytest_cache): 서드파티 설치본과 캐시다.
+      스캔하면 수천 개 파일을 파싱하느라 테스트가 몇 분씩 걸리고 무관한 코드에서
+      오탐이 난다.
+    - __pycache__: 소스가 아니다.
+    - tests/: 테스트는 provider 함수를 의도적으로 monkeypatch·참조한다(이 테스트
+      자신과 형제 테스트를 포함해). 배제하지 않으면 자기 자신 때문에 실패한다.
+    배제 디렉터리는 os.walk에서 **내려가기 전에 가지치기**하므로 .venv 안의 파일은
+    열거조차 하지 않는다(속도). 배제된 디렉터리 이름 집합과 스캔 앵커 파일을 아래에서
+    단언해, 규칙이 망가지거나 새 디렉터리가 조용히 배제되면 red가 되게 한다.
+
+    넓힌 뒤에도 남는 사각지대(이 테스트가 잡지 못하는 것):
+    - backend/ 밖(예: mcp-trading/)에서의 참조
+    - import 시 이름을 바꾸는 경우: `from openai import AsyncOpenAI as _OAI`
+    - SDK를 쓰지 않고 httpx 등으로 provider HTTP API를 직접 때리는 코드
+      (감시 대상 이름이 소스에 나타나지 않는다)
+    - 동적 참조: `getattr(services, "_llm_openai_chat")`, importlib
+    """
+    backend_dir = pathlib.Path(inspect.getfile(services)).parent
+    provider_fns = {
+        "_llm_openai_chat",
+        "_llm_anthropic_chat",
+        "_llm_ollama_chat",
+        "_llm_nat_chat",
+    }
+    sdk_ctors = {"AsyncOpenAI", "AsyncAnthropic"}
+    watched = provider_fns | sdk_ctors
+    refs: dict[str, set[str]] = {name: set() for name in watched}
+
+    def _is_excluded_dir(name: str) -> bool:
+        """스캔에서 뺄 디렉터리 규칙. 여기 해당하지 않으면 전부 스캔한다."""
+        return name.startswith(".") or name in {"__pycache__", "tests"}
+
+    py_files: list[pathlib.Path] = []
+    excluded_dirs: set[str] = set()
+    for root, dirnames, filenames in os.walk(backend_dir):
+        for name in list(dirnames):
+            if _is_excluded_dir(name):
+                excluded_dirs.add(name)
+                dirnames.remove(name)  # 배제 디렉터리 안으로는 내려가지 않는다
+        py_files.extend(pathlib.Path(root, name) for name in filenames if name.endswith(".py"))
+
+    known_excluded = {".venv", ".pytest_cache", "__pycache__", "tests"}
+    assert excluded_dirs <= known_excluded, (
+        f"배제 규칙에 새 디렉터리 {sorted(excluded_dirs - known_excluded)}가 조용히 걸렸습니다. "
+        "의도한 배제라면 known_excluded에 추가하고, 아니라면 규칙을 고쳐 스캔 범위에 넣으세요."
+    )
+
+    scanned = {path.relative_to(backend_dir).as_posix() for path in py_files}
+    # 재귀 스캔이 깨지면(예: rglob -> glob 회귀) 조용히 통과하지 않도록 앵커를 못 박는다.
+    # scripts/는 과거 비재귀 glob("*.py") 시절의 실제 사각지대였다.
+    for anchor in ("services.py", "scripts/build_signal_eval_set.py"):
+        assert anchor in scanned, (
+            f"{anchor}이 스캔 범위에서 빠졌습니다 — backend/ 재귀 스캔이 깨졌습니다."
+        )
+
+    class _RefVisitor(ast.NodeVisitor):
+        def __init__(self):
+            self.rel = ""
+            self.func_stack: list[str] = []
+
+        def _enter(self, node):
+            self.func_stack.append(node.name)
+            self.generic_visit(node)
+            self.func_stack.pop()
+
+        def visit_FunctionDef(self, node):
+            self._enter(node)
+
+        def visit_AsyncFunctionDef(self, node):
+            self._enter(node)
+
+        def _record(self, name):
+            if name in watched:
+                scope = self.func_stack[-1] if self.func_stack else "<module>"
+                refs[name].add(f"{self.rel}::{scope}")
+
+        def visit_Name(self, node):
+            # 호출이 아닌 참조(별칭 대입·콜백 전달)도 우회 경로가 될 수 있다.
+            # 직접 호출 `_llm_openai_chat(...)`도 func가 ast.Name이라 여기서 잡힌다.
+            self._record(node.id)
+            self.generic_visit(node)
+
+        def visit_Call(self, node):
+            # `services._llm_openai_chat()`처럼 속성 접근으로 부르는 형태는 ast.Name이
+            # 아니므로 visit_Name이 잡지 못한다 - 이 분기를 남겨 둔다.
+            if isinstance(node.func, ast.Attribute):
+                self._record(node.func.attr)
+            self.generic_visit(node)
+
+    visitor = _RefVisitor()
+    for py_file in sorted(py_files):
+        visitor.rel = py_file.relative_to(backend_dir).as_posix()
+        visitor.visit(ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file)))
+
+    for fn_name in sorted(provider_fns):
+        assert refs[fn_name] == {"services.py::llm_chat"}, (
+            f"{fn_name}이 services.py의 llm_chat() 밖({sorted(refs[fn_name])})에서도 "
+            "참조/호출됩니다. 마스킹 계층(mask_pii/unmask_pii)을 우회하는 새 호출 경로가 "
+            "생긴 것으로 보입니다 — PII가 마스킹되지 않은 채 외부 LLM provider로 나갈 수 있습니다."
+        )
+
+    allowed_sdk_scopes = {f"services.py::{fn}" for fn in provider_fns}
+    for ctor in sorted(sdk_ctors):
+        assert refs[ctor], (
+            f"{ctor} 참조가 backend/ 어디에도 없습니다. SDK를 교체했다면 sdk_ctors를 "
+            "갱신하세요 — 그대로 두면 이 가드가 아무것도 검사하지 않습니다."
+        )
+        assert refs[ctor] <= allowed_sdk_scopes, (
+            f"{ctor}가 provider 함수 밖({sorted(refs[ctor] - allowed_sdk_scopes)})에서 "
+            "생성됩니다. llm_chat()의 마스킹을 거치지 않고 외부 LLM에 직접 붙는 경로입니다 — "
+            "새 provider는 llm_chat() 안에서 분기하도록 만들고 provider_fns에 등록하세요."
+        )
 
 
 # --- #298: 신호 유의성 점수화 -----------------------------------------------

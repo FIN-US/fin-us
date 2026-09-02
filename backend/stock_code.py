@@ -22,6 +22,25 @@ logger = logging.getLogger(__name__)
 # 숫자 불변식(_has_code_digit 적용)을 함께 거쳐야 최종 유효 코드로 인정한다.
 _STOCK_CODE_EXTRACT_RE = re.compile(r"\(([0-9A-Z]{6,}),")
 
+
+def extract_stock_name(resolved_text: str) -> str | None:
+    """resolve_stock_code 응답 ``"종목명 (코드, 시장)"``에서 종목명만 뽑는다.
+
+    코드 앵커 **앞부분 전체**가 종목명이다. ``split("(")[0]``으로 자르면 위 주석이
+    말하는 그 경우 — 이름 자체에 괄호가 든 종목 — 에서 이름이 잘려 나간다.
+    주문 가능 코드(6~7자리 숫자)만 세어도 mcp-trading/data/stocks.json에 178건이
+    해당한다(예: ``132030 KODEX 골드선물(H)`` → "KODEX 골드선물").
+
+    잘린 이름은 PendingOrder.stock_name → 승인 메시지 → TradeHistory.stock_name까지
+    그대로 간다. 주문 준비(telegram_commands)와 주문 보조(order_assist)가 같은 규칙을
+    쓰도록 여기 둔다 — 두 곳이 각자 자르면 같은 종목이 화면마다 다른 이름으로 남는다.
+    """
+    match = _STOCK_CODE_EXTRACT_RE.search(resolved_text or "")
+    if match is None:
+        return None
+    return resolved_text[: match.start()].strip() or None
+
+
 # ──────────────────────────────────────────────────────────────────────────
 # 입력이 이미 종목코드 형태인지 판정 (MCP 조회 생략 여부)
 # ──────────────────────────────────────────────────────────────────────────
@@ -169,7 +188,10 @@ def _is_known_master_code(code: str) -> bool:
     이전의 지름길 동작(검증 없이 통과)을 유지합니다.
     """
     codes = _load_master_codes()
-    if codes is _MASTER_LOAD_FAILED:
+    # _load_master_codes의 반환값은 frozenset 아니면 _MASTER_LOAD_FAILED뿐이라
+    # 이 판정은 `is _MASTER_LOAD_FAILED`와 대상 집합이 같다. 캐시 변수가 object로
+    # 선언돼 있어 센티널 비교로는 타입이 좁혀지지 않으므로 isinstance로 판정한다.
+    if not isinstance(codes, frozenset):
         return True
     return code in codes
 

@@ -1,3 +1,4 @@
+import asyncio
 import os
 import logging
 import re
@@ -7,16 +8,40 @@ from typing import Any, Callable
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from sqlmodel import Session, select
 from .catalyst_repo import CatalystEventInput, SqliteCatalystEventRepo
+from .filtered_signal_repo import SqliteFilteredSignalRepo
 from .ws_manager import manager
 from .database import engine
 from .config import (
     NEWS_MCP_PARAMS,
     TRADING_MCP_PARAMS,
     DART_MCP_PARAMS,
+    FILTERED_SIGNAL_RETENTION_DAYS,
     SIGNAL_SCORE_THRESHOLD,
 )
-from .redis_state import RedisSchedulerState, signal_hash, redis_state
+from .redis_state import (
+    PendingOrderStore,
+    RedisPendingOrderStore,
+    RedisSchedulerState,
+    create_redis_client,
+    signal_hash,
+    redis_state,
+)
+from .order_assist import OrderAssistResult, ProposalTrigger, run_order_assist
+from .order_rules import (
+    OrderAssistRule,
+    RuleMatch,
+    build_trigger_signal,
+    format_auto_message,
+    build_rule_scope,
+    load_rule,
+    match_rule,
+    most_urgent,
+    should_report_rejection,
+    should_run,
+)
+from .trading_orders import is_korean_market_open, order_reply_markup
 from .services import (
+    SignalScore,
     perform_stock_analysis,
     run_mcp_tool,
     score_signal,
@@ -25,8 +50,14 @@ from .services import (
 from .models import Portfolio
 from .timeutil import KST
 from .watchlist_repo import SqliteWatchlistRepo
+from .presentation import (
+    DEFAULT_TELEGRAM_USER_LEVEL,
+    KIND_ALERT,
+    KIND_BRIEFING,
+    render,
+)
 from .telegram_notifier import telegram_notifier
-from .telegram_notifier import should_send_telegram_alert
+from .telegram_notifier import send_text_settled, should_send_telegram_alert
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +117,17 @@ CATALYST_EVENT_LABELS = {
 _balance_failure_streak = 0
 _last_balance_error: str | None = None
 
+# 걸러진 신호 기록(#304)의 연속 실패 횟수. 위 잔고 카운터와 같은 문제를 같은 방식으로
+# 막는다 — 다만 이쪽이 더 시끄럽다. 잔고는 한 주기에 한 번 실패하지만 기록은
+# (종목 × 소스)마다 시도하므로, 억제가 없으면 DB 장애 한 번에 한 주기당 수십 건의
+# 동일한 error가 쌓인다. 주기(6회)로 세면 여전히 주기마다 여러 번 남으므로 20회로
+# 잡는다 — 종목 10개·소스 2개 기준으로 대략 한 주기에 한 번꼴이다.
+# 카운터는 프로세스마다 별개이고 정확도가 로그 억제에만 쓰이므로 동기화가 필요 없다.
+_filtered_signal_failure_streak = 0
+_last_filtered_signal_error: str | None = None
+# 첫 실패·원인 변경 이후로는 이 횟수마다 한 번만 error로 올린다.
+_FILTERED_SIGNAL_ERROR_LOG_PERIOD = 20
+
 
 def _default_watchlist_repo() -> SqliteWatchlistRepo:
     return SqliteWatchlistRepo(lambda: Session(engine))
@@ -93,6 +135,37 @@ def _default_watchlist_repo() -> SqliteWatchlistRepo:
 
 def _default_catalyst_repo() -> SqliteCatalystEventRepo:
     return SqliteCatalystEventRepo(lambda: Session(engine))
+
+
+def _default_filtered_signal_repo() -> SqliteFilteredSignalRepo:
+    return SqliteFilteredSignalRepo(lambda: Session(engine))
+
+
+# 자동 제안(#314)이 쓰는 대기 주문 저장소. 텔레그램 폴러가 만드는 것과 같은 클래스이고
+# 같은 redis 키(RedisKeys.pending_order)를 보므로, 여기서 저장한 대기 주문을 기존
+# _handle_confirm이 그대로 소비한다 — 확정 버튼 경로가 수동 /advise와 완전히 같다.
+#
+# 프로세스당 하나만 만든다. RedisPendingOrderStore는 클라이언트 하나를 쥐고 그 커넥션
+# 풀을 재사용하는데, 트리거마다 새로 만들면 풀이 쌓인다(telegram_commands의
+# _create_pending_order_store가 핸들러당 한 번만 불리는 것과 같은 이유다).
+_rule_pending_order_store: PendingOrderStore | None = None
+
+
+def _default_pending_order_store() -> PendingOrderStore:
+    global _rule_pending_order_store
+    if _rule_pending_order_store is None:
+        _rule_pending_order_store = RedisPendingOrderStore(create_redis_client())
+    return _rule_pending_order_store
+
+
+async def _sleep(seconds: float) -> None:
+    """테스트가 전역 ``asyncio.sleep`` 대신 이 모듈의 이름만 대체할 수 있게 하는 간접층.
+
+    telegram_commands._sleep과 같은 이유다 — 확정 전송의 재시도 백오프(최대 13초)를
+    실제로 기다리는 테스트는 그 시간을 그대로 벽시계로 문다.
+    """
+    await asyncio.sleep(seconds)
+
 
 # "- 종목명 (코드) ..." 형식의 잔고 종목 줄을 검증하는 정규식.
 # 줄에 "(코드)" 그룹이 없는 경우(예: "- 삼성전자 · 3주")를 계약 위반으로 거부한다.
@@ -450,12 +523,34 @@ async def _collect_catalyst_events(
             logger.error("[%s] 촉매 이벤트 수집 중 오류: %s", stock, e)
 
 
+async def _telegram_user_level(state: Any = None) -> str:
+    """설명 수준을 읽는다. 못 읽으면 기본값(초보) (#297 자가리뷰).
+
+    브리핑·촉매 알림이 이 함수를 쓰지 않고 기본값을 그대로 넘기고 있었다. 그래서 /level
+    중급으로 바꾼 사용자도 매 브리핑마다 용어 각주를 받았다 — 분석 알림만 수준을 읽고
+    나머지는 안 읽는, 사용자 눈에는 설명할 수 없는 차이였다.
+
+    ``state``가 있으면 그걸 쓰고(이미 열린 연결을 한 번 더 열 이유가 없다) 없으면 직접
+    연다. 실패는 삼킨다 — 수준은 다른 메시지의 곁다리 정보이고, 못 읽었다고 브리핑 자체를
+    거르면 부가 기능이 본 기능을 잡아먹는다 (telegram_commands._current_level과 같은 판단).
+    """
+    try:
+        if state is not None:
+            return await state.get_telegram_user_level()
+        async with redis_state() as opened:
+            return await opened.get_telegram_user_level()
+    except Exception as exc:
+        logger.warning("설명 수준을 읽지 못해 기본값을 씁니다: %s", exc)
+        return DEFAULT_TELEGRAM_USER_LEVEL
+
+
 async def _send_due_catalyst_alerts(
     watchlist: list[str],
     catalyst_repo: SqliteCatalystEventRepo,
     *,
     notifier: Any,
     today: date,
+    level: str = DEFAULT_TELEGRAM_USER_LEVEL,
 ) -> None:
     try:
         due_events = await catalyst_repo.list_due_for_notification(watchlist, today=today)
@@ -465,7 +560,9 @@ async def _send_due_catalyst_alerts(
 
     for event in due_events:
         try:
-            sent = await notifier.send_text(_format_catalyst_alert(event))
+            sent = await notifier.send_text(
+                render(_format_catalyst_alert(event), KIND_ALERT, level)
+            )
             if sent is True:
                 await catalyst_repo.mark_notification_sent(
                     event.id,
@@ -482,7 +579,14 @@ async def catalyst_calendar_task(
     notifier: Any = telegram_notifier,
     today_factory: Callable[[], date] | None = None,
     use_redis_lock: bool = True,
+    level: str | None = None,
 ) -> None:
+    """예정 촉매를 모으고 임박한 것을 알린다.
+
+    ``level``은 설명 수준이다. redis 잠금을 쓰는 바깥 호출이 이미 열린 연결로 읽어 안쪽
+    호출에 넘긴다 — "redis를 쓰지 않는다"고 한 경로(use_redis_lock=False)가 수준을 읽으려고
+    redis를 여는 것은 앞뒤가 맞지 않는다. 그 경로는 기본값으로 간다 (#297 자가리뷰).
+    """
     if use_redis_lock:
         try:
             async with redis_state() as state:
@@ -497,6 +601,7 @@ async def catalyst_calendar_task(
                         notifier=notifier,
                         today_factory=today_factory,
                         use_redis_lock=False,
+                        level=await _telegram_user_level(state),
                     )
                 finally:
                     await state.release_lock(
@@ -529,9 +634,13 @@ async def catalyst_calendar_task(
         catalyst_repo,
         notifier=notifier,
         today=today,
+        level=level or DEFAULT_TELEGRAM_USER_LEVEL,
     )
 
-async def monitor_market_task(watchlist_repo: SqliteWatchlistRepo | None = None):
+async def monitor_market_task(
+    watchlist_repo: SqliteWatchlistRepo | None = None,
+    filtered_signal_repo: SqliteFilteredSignalRepo | None = None,
+):
     """
     주기적으로 시장 상황을 모니터링합니다.
     """
@@ -545,7 +654,7 @@ async def monitor_market_task(watchlist_repo: SqliteWatchlistRepo | None = None)
 
             fallback_to_memory = False
             try:
-                await _monitor_market_task(state, watchlist_repo)
+                await _monitor_market_task(state, watchlist_repo, filtered_signal_repo)
             finally:
                 try:
                     await state.release_lock(state.keys.scheduler_lock("market_monitoring"), scheduler_token)
@@ -560,12 +669,13 @@ async def monitor_market_task(watchlist_repo: SqliteWatchlistRepo | None = None)
             "Redis 스케줄러 상태를 사용할 수 없어 인메모리 fallback으로 시장 모니터링을 실행합니다: %s",
             e,
         )
-        await _monitor_market_task(None, watchlist_repo)
+        await _monitor_market_task(None, watchlist_repo, filtered_signal_repo)
 
 
 async def _monitor_market_task(
     state: RedisSchedulerState | None,
     watchlist_repo: SqliteWatchlistRepo | None = None,
+    filtered_signal_repo: SqliteFilteredSignalRepo | None = None,
 ):
     global _balance_failure_streak, _last_balance_error
 
@@ -697,11 +807,28 @@ async def _monitor_market_task(
             logger.info("보유 종목 및 관심 종목이 없습니다. 기본 종목을 감시합니다.")
             stocks_to_monitor = DEFAULT_MONITOR_STOCKS
 
+        # 자동 제안(#314)은 감시가 끝난 뒤 한 번만 돈다. 감시 루프 안에서 바로 부르면
+        # 제안 왕복(기본 120초) + 검증 왕복이 나머지 종목의 감시를 그만큼 늦춘다.
+        # 룰이 꺼져 있으면 rule이 None이라 match_rule이 항상 None을 돌려주고, 아래
+        # 리스트는 빈 채로 남는다.
+        rule = load_rule()
+        # 룰 대상은 보유 종목 + 관심 종목뿐이다. stocks_to_monitor가
+        # DEFAULT_MONITOR_STOCKS로 떨어진 주기에는 이 집합과 겹치는 종목이 없다.
+        rule_scope = build_rule_scope(owned_stocks, watchlist)
+        rule_matches: list[RuleMatch] = []
+
         with Session(engine) as session:
             for stock in stocks_to_monitor:
+                stock_rule = rule if stock in rule_scope else None
                 for source in SIGNAL_SOURCES:
-                    await _monitor_signal(stock, source, session, state)
-                    
+                    match = await _monitor_signal(
+                        stock, source, session, state, filtered_signal_repo, rule=stock_rule
+                    )
+                    if match is not None:
+                        rule_matches.append(match)
+
+        await run_rule_triggered_proposal(rule_matches, state)
+
     except Exception as e:
         logger.error(f"모니터링 태스크 시작 중 오류: {e}")
 
@@ -716,14 +843,84 @@ async def _send_telegram_alert_if_needed(
         alert_mode = await state.get_telegram_alert_mode() if state is not None else "urgent"
         if not should_send_telegram_alert(analysis_data, alert_mode=alert_mode):
             return
+        # 알림 모드와 같은 저장소에서 같은 타이밍에 읽는다 (#297).
+        level = await _telegram_user_level(state)
         await telegram_notifier.send_analysis_alert(
             stock,
             source,
             analysis_data,
             alert_mode=alert_mode,
+            level=level,
         )
     except Exception as e:
         logger.error("[%s:%s] Telegram 알림 처리 중 오류: %s", source, stock, e)
+
+
+async def _record_filtered_signal(
+    repo: SqliteFilteredSignalRepo | None,
+    stock: str,
+    source: str,
+    signal_score: SignalScore,
+) -> None:
+    """걸러진 신호의 채점 결과를 남긴다 (#304). 실패해도 감시는 계속한다.
+
+    로그 한 줄로는 grep만 되고 집계가 안 돼서 임계값을 조정할 근거가 없었다. 기록이
+    실패했다고 감시 루프를 멈추지는 않는다 — 이 값은 사후 분석용이고, 여기서 예외를
+    올리면 DB 문제 하나가 다음 종목·소스의 감시까지 통째로 건너뛰게 만든다.
+    """
+    global _filtered_signal_failure_streak, _last_filtered_signal_error
+
+    if signal_score.score is None:
+        # 채점 자체가 없었던 경로(빈 본문·직전과 동일). repo.record도 같은 조건에서
+        # 걸러 내지만, 여기서 먼저 끊어 세션을 열지도 않는다.
+        return
+    try:
+        await (repo or _default_filtered_signal_repo()).record(
+            stock_name=stock,
+            source=source,
+            score=signal_score.score,
+            threshold=SIGNAL_SCORE_THRESHOLD,
+            reason=signal_score.reason,
+            uncertainty=signal_score.uncertainty,
+        )
+    except Exception as e:
+        signature = f"{type(e).__name__}:{e}"
+        _filtered_signal_failure_streak += 1
+        if (
+            _filtered_signal_failure_streak == 1
+            or signature != _last_filtered_signal_error
+            or _filtered_signal_failure_streak % _FILTERED_SIGNAL_ERROR_LOG_PERIOD == 0
+        ):
+            logger.error(
+                "[%s:%s] 걸러진 신호 점수 기록 실패(score=%s, %d건 연속): %s",
+                source,
+                stock,
+                signal_score.score,
+                _filtered_signal_failure_streak,
+                e,
+            )
+        else:
+            # 같은 원인의 반복 실패는 debug로 내린다. 기록이 비는 구간 자체는 위의
+            # error와 아래 복구 로그의 집계로 드러난다.
+            logger.debug(
+                "[%s:%s] 걸러진 신호 점수 기록 실패가 %d건 연속됩니다: %s",
+                source,
+                stock,
+                _filtered_signal_failure_streak,
+                e,
+            )
+        _last_filtered_signal_error = signature
+        return
+
+    if _filtered_signal_failure_streak:
+        # 복구 보고. 놓친 건수를 남기지 않으면 분포에 구멍이 뚫린 구간을 나중에
+        # 알아볼 방법이 없다 — 기록되지 않은 신호는 어디에도 흔적이 없기 때문이다.
+        logger.warning(
+            "걸러진 신호 점수 기록이 복구되었습니다. 직전까지 %d건을 기록하지 못했습니다.",
+            _filtered_signal_failure_streak,
+        )
+        _filtered_signal_failure_streak = 0
+        _last_filtered_signal_error = None
 
 
 async def _monitor_signal(
@@ -731,7 +928,16 @@ async def _monitor_signal(
     source: SignalSource,
     session: Session,
     state: RedisSchedulerState | None,
-):
+    filtered_signal_repo: SqliteFilteredSignalRepo | None = None,
+    *,
+    rule: OrderAssistRule | None = None,
+) -> RuleMatch | None:
+    """이 종목·소스를 한 번 감시한다.
+
+    ``rule``이 주어지고 분석 결과가 그 조건을 만족하면 :class:`RuleMatch`를 돌려준다 (#314).
+    **여기서 제안을 만들지는 않는다** — 판정만 하고 호출부가 주기 끝에 한 건만 태운다.
+    분석까지 가지 못한 모든 경로(동일 신호, cooldown, 유의미하지 않음, 예외)는 ``None``이다.
+    """
     analysis_token = None
     try:
         # 1. 최신 signal 수집
@@ -788,6 +994,9 @@ async def _monitor_signal(
                 signal_score.score,
                 SIGNAL_SCORE_THRESHOLD,
             )
+            await _record_filtered_signal(
+                filtered_signal_repo, stock, source.name, signal_score
+            )
             return
 
         # 3. 유의미한 변화가 있을 때만 고성능 에이전트 분석 실행
@@ -825,6 +1034,19 @@ async def _monitor_signal(
         })
         logger.info(f"[{source.name}:{stock}] 분석 결과 브로드캐스트 완료")
 
+        # 룰 판정은 감시가 할 일을 전부 마친 뒤에 한다. 앞의 알림·브로드캐스트는 이
+        # 판정 결과와 무관하게 나가야 하고, 판정은 순수 함수라 실패할 자리도 없다.
+        match = match_rule(rule, stock=stock, source=source.name, analysis_data=analysis_data)
+        if match is not None:
+            logger.info(
+                "[%s:%s] 자동 제안 룰 충족 (rule=%s, urgency=%s)",
+                source.name,
+                stock,
+                match.rule_id,
+                match.urgency,
+            )
+        return match
+
     except Exception as e:
         if state is not None and analysis_token is not None:
             await state.set_cooldown(source.name, stock, type(e).__name__)
@@ -835,6 +1057,128 @@ async def _monitor_signal(
                 await state.release_lock(state.keys.analysis_lock(source.name, stock), analysis_token)
             except Exception as e:
                 logger.error(f"[{source.name}:{stock}] Redis analysis lock 해제 중 오류: {e}")
+
+
+async def run_rule_triggered_proposal(
+    matches: list[RuleMatch],
+    state: RedisSchedulerState | None,
+    *,
+    pending_orders: PendingOrderStore | None = None,
+    notifier: Any = None,
+    now_factory: Callable[[], datetime] | None = None,
+    assist: Callable[..., Any] | None = None,
+) -> OrderAssistResult | None:
+    """룰을 만족한 신호 중 한 건으로 주문 제안을 만든다 (#314).
+
+    이 함수가 하는 일은 문턱 검사, 호출, 결과 전달이 전부다. 제안·한도 판정·검증·대기 주문
+    저장은 전부 order_assist.run_order_assist 안에 있다 — telegram_commands._handle_advise가
+    같은 이유로 그렇게 쓴다. 규칙이 두 파일에 나뉘면 "어느 쪽이 최종 판정인가"가 흐려진다.
+
+    **주문은 나가지 않는다.** 승인 결과로 만들어지는 것은 60초 확정 버튼이 달린 대기 주문
+    하나이고, 그 버튼을 소비하는 것은 기존 _handle_confirm이다. 자동 트리거라도 예외가 없다.
+
+    돌려주는 값은 실행한 :class:`OrderAssistResult`이고, 문턱에서 막혔으면 ``None``이다.
+    """
+    if not matches:
+        return None
+
+    notifier = notifier if notifier is not None else telegram_notifier
+    now_factory = now_factory or (lambda: datetime.now(KST))
+    assist = assist or run_order_assist
+
+    # ① 전달 경로 — 승인 결과를 보낼 수 없으면 제안을 만들지 않는다. 보내지 못할 대기
+    #    주문을 저장하면 슬롯만 잡히고, 그 슬롯을 공유하는 사용자의 /buy가 영문 모를
+    #    충돌로 막힌다.
+    chat_id = str(getattr(notifier, "chat_id", "") or "").strip()
+    if not getattr(notifier, "enabled", False) or not chat_id:
+        logger.info("Telegram 전달 경로가 없어 자동 제안을 건너뜁니다.")
+        return None
+
+    # ② 장 운영 시간 — run_order_assist도 같은 검사를 하지만 거기서 걸리면 '거부'가 되고,
+    #    감시는 24시간 도므로 사용자가 요청한 적도 없는 거부가 밤새 쌓인다. 자동 트리거는
+    #    장 밖에서 아예 돌지 않는다.
+    if not is_korean_market_open(now_factory()):
+        logger.debug("장 운영 시간이 아니어서 자동 제안을 건너뜁니다.")
+        return None
+
+    # ③ 알림 모드 — off면 트리거 자체를 돌리지 않는다(order_rules.should_run 참고).
+    #    모드를 읽지 못하면 진행하지 않는다. 확인하지 못한 상태를 '허용'으로 읽지 않는다.
+    try:
+        alert_mode = await state.get_telegram_alert_mode() if state is not None else "urgent"
+    except Exception as e:  # noqa: BLE001 — fail-closed
+        logger.error("알림 모드를 확인하지 못해 자동 제안을 건너뜁니다: %s", e)
+        return None
+    if not should_run(alert_mode):
+        logger.info("알림이 꺼져 있어 자동 제안을 건너뜁니다 (mode=%s).", alert_mode)
+        return None
+
+    match = most_urgent(matches)
+    if match is None:
+        return None
+    if len(matches) > 1:
+        # 나머지를 버렸다는 사실을 남긴다. 대기 주문 슬롯이 하나라 두 번째부터는 어차피
+        # conflict로 끝나지만, 로그가 없으면 "왜 저 종목은 제안이 안 왔지"에 답할 수 없다.
+        logger.info(
+            "이번 주기에 자동 제안 룰을 만족한 신호가 %d건이라 가장 긴급한 한 건만 진행합니다 "
+            "(선택=%s/%s, 나머지=%s).",
+            len(matches),
+            match.stock,
+            match.source,
+            [f"{m.stock}/{m.source}" for m in matches if m is not match],
+        )
+
+    trigger = ProposalTrigger(
+        source="scheduler_rule",
+        stock=match.stock,
+        chat_id=chat_id,
+        rule_id=match.rule_id,
+        # 수치가 아니라 "무엇을 확인하라"는 지시 문구다 (order_rules 모듈 docstring 3번).
+        trigger_signal=build_trigger_signal(match.source),
+    )
+    store = pending_orders if pending_orders is not None else _default_pending_order_store()
+    try:
+        result = await assist(trigger, pending_orders=store, now_factory=now_factory)
+    except Exception as e:  # noqa: BLE001 — 감시 주기를 여기서 끝내지 않는다.
+        logger.error("자동 제안 실행 중 오류 (stock=%s): %s", match.stock, e, exc_info=True)
+        return None
+
+    if result.order is not None:
+        # 승인은 알림 모드와 무관하게 보낸다. 확정 버튼이 필요할 뿐 아니라, 이 시점에는
+        # 이미 대기 주문 슬롯이 잡혀 있어 알리지 않으면 사용자의 다음 /buy가 막힌다.
+        #
+        # /advise와 같은 재시도를 쓴다 (PR #327 리뷰). 여기까지 온 제안은 제안 왕복
+        # (≤120초)·검증 왕복(≤40초)과 재제안 냉각을 이미 소비한 뒤라, 단발 전송으로 두면
+        # 일시적인 429 한 번에 그 전부가 버려지고 같은 종목은 냉각이 풀릴 때까지(기본
+        # 60분) 다시 시도되지도 않는다.
+        sent = await send_text_settled(
+            notifier,
+            format_auto_message(result.message),
+            reply_markup=order_reply_markup(result.order),
+            sleep=_sleep,
+        )
+        if not sent:
+            # /advise와 같은 처리다 (#247). 프롬프트가 끝내 안 나갔으면 사용자는 대기 주문의
+            # 존재를 모르고, 60초 안의 다음 명령이 영문 모를 충돌로 막힌다.
+            logger.error("자동 제안 프롬프트를 보내지 못해 대기 주문을 정리합니다 (stock=%s).", match.stock)
+            try:
+                await store.delete(chat_id)
+            except Exception as e:  # noqa: BLE001
+                logger.error("자동 제안 프롬프트 미전달 후 대기 주문 정리 실패: %s", e)
+        return result
+
+    # 거부·충돌. 사용자가 요청한 적 없는 시도라 all 모드에서만 알린다. 이쪽은 부수효과가
+    # 남지 않은 통지라 재시도 예산을 쓰지 않는다 — 못 보내면 로그로 남는 것이 전부다.
+    if should_report_rejection(alert_mode):
+        await notifier.send_text(format_auto_message(result.message))
+    else:
+        logger.info(
+            "자동 제안이 %s로 끝났습니다 (stock=%s, mode=%s). 사용자에게 보내지 않습니다: %s",
+            result.status,
+            match.stock,
+            alert_mode,
+            result.message,
+        )
+    return result
 
 
 async def _set_last_signal_state(
@@ -862,8 +1206,19 @@ async def ping_task():
     })
 
 
-async def morning_briefing_task(watchlist_repo: SqliteWatchlistRepo | None = None):
+async def morning_briefing_task(
+    watchlist_repo: SqliteWatchlistRepo | None = None,
+    *,
+    level: str | None = None,
+):
+    """모닝 브리핑. ``level``을 주지 않으면 저장된 설명 수준을 직접 읽는다.
+
+    cron으로 등록될 때는 인자가 없으므로 여기서 읽어야 한다 — 기본값을 그대로 쓰면 /level
+    설정이 브리핑에만 적용되지 않는다 (#297 자가리뷰).
+    """
     try:
+        if level is None:
+            level = await _telegram_user_level()
         if watchlist_repo is None:
             watchlist_repo = SqliteWatchlistRepo(lambda: Session(engine))
         try:
@@ -874,9 +1229,39 @@ async def morning_briefing_task(watchlist_repo: SqliteWatchlistRepo | None = Non
 
         briefing = await generate_morning_briefing(watchlist)
         message = telegram_notifier.format_morning_briefing(briefing)
-        await telegram_notifier.send_text(message)
+        await telegram_notifier.send_text(render(message, KIND_BRIEFING, level))
     except Exception as e:
         logger.error("모닝 브리핑 작업 중 오류: %s", e)
+
+
+async def purge_filtered_signals_task(
+    filtered_signal_repo: SqliteFilteredSignalRepo | None = None,
+) -> None:
+    """보존 기간이 지난 걸러진 신호 기록을 정리한다 (#304).
+
+    감시 루프가 종목·소스마다 10분 주기로 돌아 행이 빠르게 쌓이므로, 보존 정책을
+    두지 않으면 이 테이블이 SQLite 파일을 조용히 불린다. 하루 한 번 잘라 낸다.
+
+    monitor_market_task와 달리 Redis 스케줄러 락을 잡지 않는다. 워커가 둘 다 같은
+    조건으로 지우면 늦게 도착한 쪽이 0건을 지울 뿐이라 락으로 지킬 상태가 없다.
+    """
+    repo = filtered_signal_repo or _default_filtered_signal_repo()
+    try:
+        deleted = await repo.purge_expired(FILTERED_SIGNAL_RETENTION_DAYS)
+    except Exception as e:
+        # 정리 실패는 다음 주기에 다시 시도된다. 재시도하면 같은 조건으로 지우므로
+        # 이번에 못 지운 행도 함께 정리된다.
+        logger.error(
+            "걸러진 신호 기록 정리 실패 (보존 %d일): %s",
+            FILTERED_SIGNAL_RETENTION_DAYS,
+            e,
+        )
+        return
+    logger.info(
+        "걸러진 신호 기록 정리 완료: %d건 삭제 (보존 %d일)",
+        deleted,
+        FILTERED_SIGNAL_RETENTION_DAYS,
+    )
 
 
 def start_scheduler():
@@ -908,6 +1293,15 @@ def start_scheduler():
             hour=8,
             minute=30,
             id="morning_briefing",
+        )
+        # 걸러진 신호 기록 정리 (#304). 장 시작 전 한산한 시각에 돌려 감시 주기와
+        # DB 접근이 겹치지 않게 한다.
+        scheduler.add_job(
+            purge_filtered_signals_task,
+            "cron",
+            hour=4,
+            minute=10,
+            id="purge_filtered_signals",
         )
         
         scheduler.start()

@@ -27,7 +27,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from backend.telegram_commands import AGENT_LABELS, TOOL_LABELS
+from backend.presentation import AGENT_LABELS, TOOL_LABELS
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _FINUS_NAT_ROOT = _REPO_ROOT / "finus_nat"
@@ -199,7 +199,7 @@ def test_ledger_tool_names_are_covered_by_tool_labels():
     assert missing == [], (
         "finus_nat이 원장에 기록하는 다음 도구가 backend TOOL_LABELS에 없습니다. "
         "각주에 한국어 라벨 대신 내부 이름이 노출됩니다 — "
-        f"backend/telegram_commands.py의 TOOL_LABELS에 추가하세요: {missing}"
+        f"backend/presentation.py의 TOOL_LABELS에 추가하세요: {missing}"
     )
 
 
@@ -215,5 +215,5 @@ def test_router_branch_names_are_covered_by_agent_labels(config_path: Path):
     assert missing == [], (
         f"{config_path.name}의 다음 supervisor 브랜치가 backend AGENT_LABELS에 없습니다. "
         "각주에 한국어 라벨 대신 내부 이름이 노출됩니다 — "
-        f"backend/telegram_commands.py의 AGENT_LABELS에 추가하세요: {missing}"
+        f"backend/presentation.py의 AGENT_LABELS에 추가하세요: {missing}"
     )

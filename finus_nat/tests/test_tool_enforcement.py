@@ -864,7 +864,7 @@ def test_record_to_ledger_get_balance_no_holdings_still_counts_as_success():
     """무보유 잔고 응답은 '데이터 없음'이 아니라 '보유 0건이라는 실제 데이터'다.
 
     mcp-trading/balance.js 는 보유 목록이 비어도 [계좌 잔고 현황] 블록에
-    거래가능금액·정산예정금액 등 실제 KIS 수치를 그대로 포함한다.
+    예수금·정산예정금액 등 실제 KIS 수치를 그대로 포함한다.
     이를 빈 결과로 판정하면 예수금을 인용하는 정상 답변이 차단된다(오탐).
     balance-rlz-pl-report.js 와 문구가 같으므로 도구 이름 게이트가 필수다.
     """
@@ -873,7 +873,7 @@ def test_record_to_ledger_get_balance_no_holdings_still_counts_as_success():
     try:
         _record_to_ledger(
             "finus_mcp_trading_get_balance",
-            "[계좌 잔고 현황]\n- 총 평가금액: 0원\n- 거래가능금액: 1,250,000원\n"
+            "[계좌 잔고 현황]\n- 총 평가금액: 0원\n- 예수금: 1,250,000원\n"
             "- 익일 정산예정금액: 1,250,000원\n\n[보유 종목 리스트]\n보유 종목이 없습니다.",
         )
     finally:

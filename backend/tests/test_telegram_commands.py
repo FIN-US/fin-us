@@ -3,6 +3,7 @@ import asyncio
 import logging
 import socket
 import textwrap
+import time
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -16,6 +17,7 @@ from fastapi import HTTPException
 import backend.config as backend_config
 import backend.redis_state as redis_state_module
 import backend.telegram_commands as telegram_commands
+import backend.telegram_notifier as telegram_notifier_module
 from backend.config import DART_MCP_PARAMS, NEWS_MCP_PARAMS, TRADING_MCP_PARAMS
 from backend.telegram_commands import (
     BUY_COMMAND_HELP,
@@ -24,17 +26,22 @@ from backend.telegram_commands import (
     NAT_PROGRESS_MESSAGE,
     PROGRESS_DONE_MESSAGE,
     QUOTE_COMMAND_HELP,
-    REASONING_FOOTNOTE_SEPARATOR,
     TELEGRAM_INTERACTIVE_HELP,
     TRADE_COMMAND_HELP,
     LOOKUP_COMMAND_HELP,
-    TELEGRAM_MESSAGE_LIMIT,
-    TELEGRAM_TRUNCATION_SUFFIX,
     TREND_COMMAND_HELP,
     UNRESOLVED_STOCK_WARNING,
     TelegramCommandHandler,
     TelegramCommandPoller,
-    _reasoning_footnote,
+)
+# 길이 상한과 말줄임 규칙은 출력 계층이 정의한다. telegram_commands는 더 이상 그것을
+# 다시 내보내지 않는다 — 재수출만 남은 임포트는 이름이 두 곳에 있다는 착시를 만든다.
+from backend.presentation import (
+    REASONING_FOOTNOTE_MAX_CHARS,
+    REASONING_FOOTNOTE_SEPARATOR,
+    TELEGRAM_MESSAGE_LIMIT,
+    TELEGRAM_TRUNCATION_SUFFIX,
+    reasoning_footnote as _reasoning_footnote,
 )
 from backend.redis_state import (
     InMemoryPendingOrderStore,
@@ -450,7 +457,8 @@ def test_bot_command_menu_includes_all_user_commands():
 
     assert commands == [
         "help", "balance", "watch", "catalysts", "quote", "trend", "earnings",
-        "alerts", "visualize", "trade", "lookup", "buy", "sell", "confirm", "cancel",
+        "alerts", "level", "start", "visualize", "trade", "lookup", "advise", "buy", "sell",
+        "confirm", "cancel",
     ]
 
 
@@ -606,7 +614,8 @@ async def test_quote_result_trend_button_uses_same_stock_name():
         (TRADING_MCP_PARAMS, "get_investor_trading", {"stock_name": "삼성전자"}),
     ]
     assert notifier.callback_answers == [("trend-callback", None)]
-    assert notifier.messages[-1] == "수급 응답"
+    # 본문이 짧아도 "수급"은 사용자가 친 말이 아니므로 설명이 붙는다 (#297 검수 3).
+    assert notifier.messages[-1].startswith("수급 응답\n\nℹ️ 수급: ")
 
 
 @pytest.mark.asyncio
@@ -666,8 +675,17 @@ async def test_trend_command_calls_mcp_runner_with_stock_name():
         (TRADING_MCP_PARAMS, "get_investor_trading", {"stock_name": "삼성전자"})
     ]
     assert notifier.actions == ["typing"]
-    assert notifier.messages == ["수급 응답"]
-    assert notifier.reply_markups[-1]["inline_keyboard"][0][0]["text"] == "💵 현재가 보기"
+    assert len(notifier.messages) == 1
+    assert notifier.messages[0].startswith("수급 응답\n\nℹ️ 수급: ")
+    # 수급 요약 아래에는 상세가 먼저다 — 방금 받은 메시지에 이어지는 동작이라 다른
+    # 종류의 조회(현재가)보다 앞에 온다 (#297 검수 4차).
+    buttons = [
+        button
+        for row in notifier.reply_markups[-1]["inline_keyboard"]
+        for button in row
+    ]
+    # "수급 응답"은 파싱되지 않으므로 상세 버튼을 달지 않는다 (#297 검수 2차).
+    assert [button["text"] for button in buttons] == ["💵 현재가 보기"]
 
 
 @pytest.mark.asyncio
@@ -686,7 +704,13 @@ async def test_trend_result_quote_button_uses_same_stock_name():
     handler = TelegramCommandHandler(notifier=notifier, mcp_runner=mcp_runner)
 
     await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/trend 삼성전자"}})
-    callback_data = notifier.reply_markups[-1]["inline_keyboard"][0][0]["callback_data"]
+    # 자리가 아니라 콜백 접두어로 고른다. 버튼 순서는 이 테스트가 지킬 계약이 아니다.
+    callback_data = next(
+        button["callback_data"]
+        for row in notifier.reply_markups[-1]["inline_keyboard"]
+        for button in row
+        if button["callback_data"].startswith("market:quote:")
+    )
     await handler.handle_update(
         {
             "callback_query": {
@@ -747,7 +771,10 @@ async def test_earnings_command_combines_dart_news_and_nat_analysis():
     assert "Markdown 문법" in prompt
     assert "호재`, `악재`, `중립" in prompt
     assert notifier.actions == ["typing"]
-    assert notifier.messages == ["⚪ 중립\n실적 분석 응답"]
+    # /earnings도 출력 계층을 지난다 — 본문이 자유 형식 LLM 텍스트인 유일한 명령이라
+    # 마크다운 정리와 용어 각주가 특히 필요한 자리다 (#297 자가리뷰).
+    assert notifier.messages[-1].startswith("⚪ 중립\n실적 분석 응답")
+    assert "ℹ️ 실적: " in notifier.messages[-1]
 
 
 @pytest.mark.asyncio
@@ -784,9 +811,9 @@ async def test_earnings_command_sends_plain_text_with_verdict_emoji():
     assert "호재\n호재" not in message
     assert "#" not in message
     assert "*" not in message
-    assert "- " not in message
     assert "실적 요약" in message
-    assert "• 매출: 전년 대비 증가" in message
+    # 글머리표는 이 봇의 나열 표시로 통일된다(예전에는 이 명령만 "•"를 썼다).
+    assert "- 매출: 전년 대비 증가" in message
 
 
 @pytest.mark.asyncio
@@ -959,7 +986,7 @@ async def test_buy_command_includes_current_price_line_when_quote_has_header():
         if tool_name == "get_stock_quote":
             return "[삼성전자] 현재가 시세\n- 현재가: 354,000원\n- 전일 대비: +1,000 (0.28%)"
         if tool_name == "get_balance":
-            return "[계좌 잔고 현황]\n- 거래가능금액: 5,546,116원"
+            return "[계좌 잔고 현황]\n- 예수금: 5,546,116원"
         raise AssertionError(f"unexpected tool: {tool_name}")
 
     notifier = FakeNotifier()
@@ -974,8 +1001,9 @@ async def test_buy_command_includes_current_price_line_when_quote_has_header():
     )
 
     assert "[삼성전자] 현재가 시세" not in notifier.messages[-1]
-    assert "- 현재가: 354,000원" in notifier.messages[-1]
-    assert "- 거래가능금액: 5,546,116원" in notifier.messages[-1]
+    # 원문의 "- " 목록 접두사는 떼고 직접 조립한 줄들과 표기를 맞춘다.
+    assert "\n현재가: 354,000원" in notifier.messages[-1]
+    assert "\n예수금: 5,546,116원" in notifier.messages[-1]
 
 
 @pytest.mark.asyncio
@@ -1011,15 +1039,84 @@ async def test_buy_command_without_price_creates_market_order_and_prompts_confir
     assert "삼성전자 매수 주문 확인" in notifier.messages[-1]
     assert "주문유형: 시장가" in notifier.messages[-1]
     assert "지정가:" not in notifier.messages[-1]
-    assert "주문금액:" not in notifier.messages[-1]
+    # 체결가가 아니라 주문 시점 현재가 기준이므로 "예상"이다 (#309).
+    assert "예상 주문금액: 745,000원" in notifier.messages[-1]
     assert "/confirm" in notifier.messages[-1]
     assert "/cancel" in notifier.messages[-1]
     assert _orders(handler)["123"].stock_name == "삼성전자"
     assert _orders(handler)["123"].stock_code == "005930"
     assert _orders(handler)["123"].side == "BUY"
     assert _orders(handler)["123"].quantity == 10
+    # 지정가가 아니라 주문 시점 현재가다 — 표시·기록용이며 주문 조건이 아니다 (#309).
+    assert _orders(handler)["123"].price == 74500
+    assert _orders(handler)["123"].order_type == "MARKET"
+
+
+@pytest.mark.asyncio
+async def test_market_order_proceeds_without_reference_price_when_quote_is_unreadable(caplog):
+    """참고단가를 못 읽어도 주문은 막지 않는다 — 대신 단가 0이 그대로 남는다 (#309).
+
+    사용자가 명시적으로 낸 주문을 기록 사정으로 되돌리지는 않는다. 대가는
+    load_daily_usage가 그날 집계를 포기해 /advise가 막히는 것이고, 한도가 조용히
+    넓어지는 것보다 그쪽이 낫다는 것이 #309의 결론이다.
+    """
+
+    async def mcp_runner(server_params, tool_name, arguments):
+        if tool_name == "resolve_stock_code":
+            return "삼성전자 (005930, KOSPI)"
+        if tool_name == "get_stock_quote":
+            # 라벨이 바뀌어 현재가를 읽지 못하는 상황
+            return "시세 조회 중 에러 발생: upstream timeout"
+        if tool_name == "get_balance":
+            return "주문가능금액: 1,000,000원"
+        raise AssertionError(f"unexpected tool: {tool_name}")
+
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        mcp_runner=mcp_runner,
+        now_factory=lambda: datetime(2026, 5, 20, 10, 0, tzinfo=KST),
+    )
+
+    with caplog.at_level("WARNING"):
+        await handler.handle_update(
+            {"message": {"chat": {"id": 123}, "text": "/buy 삼성전자 10"}}
+        )
+
+    assert "삼성전자 매수 주문 확인" in notifier.messages[-1]
+    assert "예상 주문금액" not in notifier.messages[-1]
     assert _orders(handler)["123"].price == 0
     assert _orders(handler)["123"].order_type == "MARKET"
+    # 조용히 0으로 떨어지지 않는다 — 운영자가 알아야 그날 /advise가 막히는 이유를 안다.
+    assert "시장가 참고단가를 읽지 못했다" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_limit_order_keeps_the_typed_price_even_when_it_differs_from_the_quote():
+    """참고단가 주입은 시장가 전용이다 — 지정가를 현재가로 덮으면 주문 조건이 바뀐다."""
+
+    async def mcp_runner(server_params, tool_name, arguments):
+        if tool_name == "resolve_stock_code":
+            return "삼성전자 (005930, KOSPI)"
+        if tool_name == "get_stock_quote":
+            return "현재가: 74,500원"
+        if tool_name == "get_balance":
+            return "주문가능금액: 1,000,000원"
+        raise AssertionError(f"unexpected tool: {tool_name}")
+
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        mcp_runner=mcp_runner,
+        now_factory=lambda: datetime(2026, 5, 20, 10, 0, tzinfo=KST),
+    )
+
+    await handler.handle_update(
+        {"message": {"chat": {"id": 123}, "text": "/buy 삼성전자 10 70000"}}
+    )
+
+    assert _orders(handler)["123"].price == 70000
+    assert _orders(handler)["123"].order_type == "LIMIT"
 
 
 @pytest.mark.asyncio
@@ -1082,7 +1179,7 @@ async def test_natural_language_market_buy_creates_pending_order_without_nat():
     assert _orders(handler)["123"].stock_name == "삼성전자"
     assert _orders(handler)["123"].side == "BUY"
     assert _orders(handler)["123"].quantity == 1
-    assert _orders(handler)["123"].price == 0
+    assert _orders(handler)["123"].price == 74500
     assert _orders(handler)["123"].order_type == "MARKET"
 
 
@@ -1855,7 +1952,14 @@ async def test_mcp_failure_replies_with_short_failure_message():
 
 
 @pytest.mark.asyncio
-async def test_mcp_result_is_truncated_for_telegram_limit():
+async def test_a_long_mcp_result_reaches_the_send_layer_whole():
+    """조회 결과를 여기서 자르지 않는다. 상한 맞추기는 전송 계층의 분할이 한다 (#313).
+
+    재시도 가능한 경로(_send_text_or_raise)는 notifier.send_text에 통째로 넘기고,
+    나누는 일은 그 안에서 일어난다 — 이 테스트의 FakeNotifier는 나누지 않으므로
+    "잘리지 않은 채 전송 계층까지 갔다"까지가 여기서 볼 수 있는 것이다. 실제 분할은
+    test_telegram_notifier.py의 test_send_text_splits_instead_of_truncating이 고정한다.
+    """
     async def mcp_runner(server_params, tool_name, arguments):
         return "a" * (TELEGRAM_MESSAGE_LIMIT + 100)
 
@@ -1865,8 +1969,8 @@ async def test_mcp_result_is_truncated_for_telegram_limit():
     await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/balance"}})
 
     message = notifier.messages[-1]
-    assert len(message) == TELEGRAM_MESSAGE_LIMIT
-    assert message.endswith(TELEGRAM_TRUNCATION_SUFFIX)
+    assert len(message) == TELEGRAM_MESSAGE_LIMIT + 100
+    assert TELEGRAM_TRUNCATION_SUFFIX not in message
 
 
 @pytest.mark.asyncio
@@ -1883,18 +1987,23 @@ async def test_nat_failure_replies_with_short_failure_message():
 
 
 @pytest.mark.asyncio
-async def test_nat_response_is_truncated_for_telegram_limit():
+async def test_a_long_nat_response_is_split_instead_of_truncated():
+    """답변이 상한을 넘으면 뒤를 버리지 않고 여러 통으로 나눠 보낸다 (#313)."""
+    body = "나" * (TELEGRAM_MESSAGE_LIMIT + 100)
+
     async def fake_llm_runner(provider, text, *, conversation_id=None):
-        return "나" * (TELEGRAM_MESSAGE_LIMIT + 100)
+        return body
 
     notifier = FakeNotifier()
     handler = TelegramCommandHandler(notifier=notifier, llm_runner=fake_llm_runner)
 
     await handler.handle_update({"message": {"chat": {"id": 123}, "text": "긴 답변 줘"}})
 
-    message = notifier.messages[-1]
-    assert len(message) == TELEGRAM_MESSAGE_LIMIT
-    assert message.endswith(TELEGRAM_TRUNCATION_SUFFIX)
+    parts = [message for message in notifier.messages if message != NAT_PROGRESS_MESSAGE]
+    assert len(parts) > 1
+    assert all(len(part) <= TELEGRAM_MESSAGE_LIMIT for part in parts)
+    assert TELEGRAM_TRUNCATION_SUFFIX not in "".join(parts)
+    assert "".join(part.split(chr(10), 1)[1] for part in parts) == body
 
 
 @pytest.mark.asyncio
@@ -3589,18 +3698,19 @@ def test_reasoning_footnote_length_is_capped():
         tuple(NatToolUse("아주_긴_도구_이름_" * 5 + str(i), ok=True) for i in range(50)),
     )
 
-    assert 0 < len(footnote) <= telegram_commands.REASONING_FOOTNOTE_MAX_CHARS
+    assert 0 < len(footnote) <= REASONING_FOOTNOTE_MAX_CHARS
 
 
 @pytest.mark.asyncio
-async def test_footnote_survives_truncation_of_a_long_answer():
-    """긴 답변이 잘려도 각주는 남는다 — 각주 자리를 먼저 확보한 뒤 본문을 자른다."""
+async def test_a_long_answer_keeps_its_body_and_its_footnote():
+    """#260의 계약을 예산이 아니라 분할이 지킨다 — 본문도 각주도 잃지 않는다 (#313)."""
+    body = "가" * (TELEGRAM_MESSAGE_LIMIT * 2)
     notifier = ProgressFakeNotifier()
     handler = TelegramCommandHandler(
         notifier=notifier,
         llm_runner=_nat_runner(
             NatAnswer(
-                "가" * (TELEGRAM_MESSAGE_LIMIT * 2),
+                body,
                 routed_agent="news_agent",
                 tools_used=(NatToolUse("finus_market_news", ok=True),),
             )
@@ -3609,15 +3719,20 @@ async def test_footnote_survives_truncation_of_a_long_answer():
 
     await _ask(handler)
 
-    final_text = notifier.messages[-1]
-    assert len(final_text) <= TELEGRAM_MESSAGE_LIMIT
-    assert TELEGRAM_TRUNCATION_SUFFIX in final_text
-    assert final_text.endswith("🤖 뉴스 에이전트 · 📚 확인한 자료: 뉴스 검색")
+    parts = [message for message in notifier.messages if message != NAT_PROGRESS_MESSAGE]
+    assert len(parts) > 1
+    assert all(len(part) <= TELEGRAM_MESSAGE_LIMIT for part in parts)
+    assert TELEGRAM_TRUNCATION_SUFFIX not in "".join(parts)
+    assert body in "".join(part.split(chr(10), 1)[1] for part in parts)
+    assert parts[-1].endswith("🤖 뉴스 에이전트 · 📚 확인한 자료: 뉴스 검색")
 
 
 @pytest.mark.asyncio
-async def test_answer_stays_within_the_limit_even_with_a_maximal_footnote():
-    """각주가 상한까지 길어져도 본문이 통째로 사라지지 않는다."""
+async def test_a_maximal_footnote_rides_along_in_the_last_part():
+    """각주가 자체 상한까지 길어져도 마지막 조각에 통째로 실린다 (#260, #313).
+
+    각주가 본문 자리를 빼앗던 구조가 사라졌으므로 본문 첫머리도 그대로 남는다.
+    """
     notifier = ProgressFakeNotifier()
     handler = TelegramCommandHandler(
         notifier=notifier,
@@ -3634,9 +3749,85 @@ async def test_answer_stays_within_the_limit_even_with_a_maximal_footnote():
 
     await _ask(handler)
 
-    final_text = notifier.messages[-1]
-    assert len(final_text) <= TELEGRAM_MESSAGE_LIMIT
-    assert final_text.startswith("나" * 100)
+    parts = [message for message in notifier.messages if message != NAT_PROGRESS_MESSAGE]
+    assert all(len(part) <= TELEGRAM_MESSAGE_LIMIT for part in parts)
+    assert parts[0].split(chr(10), 1)[1].startswith("나" * 100)
+    assert REASONING_FOOTNOTE_SEPARATOR in parts[-1]
+    assert sum(REASONING_FOOTNOTE_SEPARATOR in part for part in parts) == 1
+
+
+@pytest.mark.asyncio
+async def test_settled_send_resumes_at_the_part_that_failed(monkeypatch):
+    """조각 단위로 재시도한다. 처음부터 다시 보내면 이미 도착한 조각이 한 벌 더 쌓인다 (#313)."""
+    notifier = ProgressFakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        llm_runner=_nat_runner(NatAnswer("다" * (TELEGRAM_MESSAGE_LIMIT * 2))),
+    )
+    _capture_settled_sleeps(monkeypatch, handler)
+
+    sent: list[str] = []
+    failures = {"left": 1}
+
+    async def flaky_send_text(text, *, reply_markup=None):
+        # 둘째 조각의 첫 시도만 실패시킨다.
+        if len(sent) == 1 and failures["left"] > 0:
+            failures["left"] -= 1
+            return False
+        sent.append(text)
+        return True
+
+    notifier.send_text = flaky_send_text
+
+    await _ask(handler)
+
+    assert len(sent) > 1
+    # 재시도가 첫 조각을 다시 보내지 않았다 — 조각 번호가 한 번씩만 나온다.
+    assert len(set(sent)) == len(sent)
+
+
+@pytest.mark.asyncio
+async def test_settled_send_returns_false_when_splitting_itself_raises():
+    """조립 단계의 예외가 폴러까지 올라가면 안 된다 (PR #328 리뷰).
+
+    이 경로는 부수효과가 확정된 뒤라 update를 재실행할 수 없다(#247). 예외가 새 나가면
+    폴러가 바로 그 재실행을 하므로, 전송 실패보다 나쁜 결과가 된다.
+    """
+    class Unprintable:
+        def __str__(self):
+            raise ValueError("cannot render")
+
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(notifier=notifier)
+
+    assert await handler._send_text_settled(Unprintable()) is False
+    assert notifier.messages == []
+
+
+@pytest.mark.asyncio
+async def test_settled_send_stops_at_the_part_it_could_not_deliver(monkeypatch):
+    """끝내 실패하면 남은 조각을 포기한다. 앞이 빠진 채 뒤만 도착하는 편이 더 나쁘다 (#313)."""
+    notifier = ProgressFakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        llm_runner=_nat_runner(NatAnswer("라" * (TELEGRAM_MESSAGE_LIMIT * 2))),
+    )
+    _capture_settled_sleeps(monkeypatch, handler)
+
+    attempts: list[str] = []
+
+    async def failing_after_the_first_part(text, *, reply_markup=None):
+        attempts.append(text)
+        return len(set(attempts)) == 1
+
+    notifier.send_text = failing_after_the_first_part
+
+    await _ask(handler)
+
+    delivered = [text for text in attempts if text == attempts[0]]
+    # 첫 조각은 한 번에 나갔고, 둘째 조각에서 재시도를 소진한 뒤 셋째는 시도조차 하지 않는다.
+    assert len(delivered) == 1
+    assert len(set(attempts)) == 2
 
 # ──────────────────────────────────────────────────────────────────────────
 # 부수효과 확정 뒤의 전송 실패 (#247) / 변환 경로의 전송 실패 삼킴 (#249)
@@ -3687,14 +3878,21 @@ async def test_settled_send_gives_up_at_the_wall_clock_bound(monkeypatch, caplog
 
     notifier = HangingNotifier()
     handler = TelegramCommandHandler(notifier=notifier)
-    monkeypatch.setattr(telegram_commands, "SETTLED_SEND_TIMEOUT_SECONDS", 0.05)
+    # 상한을 읽는 곳은 telegram_notifier다 (PR #327 리뷰). telegram_commands는 그 이름을
+    # 다시 내보내기만 하므로, 여기를 패치하면 상한은 실제 20초로 남고 테스트는 통과한 채
+    # 20초를 벽시계로 문다 — 아래 elapsed 단언이 그 어긋남을 실패로 만든다.
+    monkeypatch.setattr(telegram_notifier_module, "SETTLED_SEND_TIMEOUT_SECONDS", 0.05)
 
+    started_at = time.monotonic()
     with caplog.at_level(logging.ERROR):
         # 예외를 던지지 않는다는 것이 요지다 — settled 전송은 update를 재시도시키지 않는다.
         await handler._send_text_settled("확정된 결과")
+    elapsed = time.monotonic() - started_at
 
     assert hung == 1
     assert "벽시계 상한" in caplog.text
+    # 패치한 상한(0.05초)이 실제로 걸렸는지 본다. 패치 대상이 어긋나면 여기서 걸린다.
+    assert elapsed < 5.0
 
 
 @pytest.mark.asyncio

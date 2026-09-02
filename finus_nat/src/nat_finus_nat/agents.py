@@ -187,6 +187,17 @@ def _trace_route(branch_name: str) -> None:
         trace.record_route(branch_name)
 
 
+def _trace_branch_answer(text: str) -> None:
+    """브랜치가 만든 답변 본문을 현재 요청의 추론 기록에 남긴다 (#294).
+
+    최상위(:func:`with_reasoning_trace`)가 각주를 붙일지 판정하는 기준이다 —
+    근거는 :meth:`ReasoningTrace.record_branch_answer` 참고.
+    """
+    trace = REASONING_TRACE.get()
+    if trace is not None:
+        trace.record_branch_answer(text)
+
+
 async def _run_with_gate(
     *,
     inner: Any,
@@ -581,9 +592,11 @@ async def finus_supervisor_agent(config: FinusSupervisorAgentConfig, builder: Bu
         _trace_route(selected)  # #260: 라우팅 결과는 코드가 고른 값 — 각주의 담당 에이전트
         forward = chat_request.model_copy(update={"messages": messages_without_memory(chat_request.messages)})
         result = await branch_functions[selected].ainvoke(forward)
-        if isinstance(result, ChatResponse):
-            return result
-        return ChatResponse.from_string(str(result), usage=Usage())
+        response = result if isinstance(result, ChatResponse) else ChatResponse.from_string(str(result), usage=Usage())
+        # #294: 위 두 기록이 "어느 답변에 대한 것인지"를 남긴다. 브랜치가 예외로
+        # 죽으면 여기에 도달하지 않으므로, 기록 없이 올라간 텍스트에는 각주가 붙지 않는다.
+        _trace_branch_answer(chat_response_plain_text(response))
+        return response
 
     yield FunctionInfo.from_fn(_response_fn, description=config.description)
 
@@ -608,8 +621,28 @@ def with_reasoning_trace(response: ChatResponse, trace: ReasoningTrace) -> ChatR
     ``tools_used``는 ``[{"name": ..., "ok": ..., "empty": ...}]`` 형태다. 결과 상태를
     빼고 이름만 실어 보내면 소비자가 실패한 호출과 빈 결과까지 "확인한 자료"로
     표시하게 된다 — :class:`ToolUse` docstring 참고.
+
+    **본문이 브랜치가 만든 답변일 때만 붙인다 (#294)** — 기록이 있다는 것과 지금
+    돌려보내는 본문이 그 기록의 결과라는 것은 다르다. 왜 이 판정이 필요한지는
+    :meth:`ReasoningTrace.record_branch_answer` 참고.
     """
     if trace.routed_agent is None and not trace.tools_used:
+        return response
+    body = chat_response_plain_text(response)
+    if trace.branch_answer is None or body != trace.branch_answer:
+        # 기록은 있는데 본문이 브랜치 답변이 아니다. 각주를 생략하는 것만으로 사용자
+        # 피해는 막히지만, #273에서 각주가 "조용히" 사라진 것이 문제였으므로 남긴다.
+        # 두 길이를 함께 남기는 것은 "실패라서 다름"과 "vendor가 본문을 변형함"을 로그만으로
+        # 구분하기 위해서다 — 후자면 정상 경로의 각주가 전면 소실되는데 증상이 같다.
+        # 본문 자체는 싣지 않는다(운영 로그에 답변 전문이 흘러가지 않게).
+        logger.warning(
+            "Reasoning trace footnote omitted — response body is not the branch answer "
+            "(routed_agent=%s tools=%d body_len=%d recorded_len=%s)",
+            trace.routed_agent,
+            len(trace.tools_used),
+            len(body),
+            len(trace.branch_answer) if trace.branch_answer is not None else "none",
+        )
         return response
     return response.model_copy(
         update={
@@ -645,12 +678,10 @@ async def finus_reasoning_trace_agent(config: FinusReasoningTraceAgentConfig, bu
     시그니처에 의존하므로 NAT 업그레이드 때 같은 방식으로 다시 깨진다. 부착 지점을
     vendor 바깥으로 올리면 vendor가 무엇을 버리든 무관해진다.
 
-    **알려진 한계 (#273 리뷰):** vendor ``_response_fn``은 예외를 삼키고 ``str(ex)``를
-    답변으로 돌려준다(``router.yml``이 ``verbose: true``). supervisor는 브랜치를 부르기
-    **전에** ``_trace_route()``를 부르므로, 브랜치가 터지면 ``routed_agent``가 남은 채
-    에러 텍스트가 올라오고 여기서 그 텍스트에 각주가 붙는다. 메모리 모드는 여태 각주가
-    없었으니 이 PR로 새로 도달 가능해진 경로다. 막으려면 vendor의 실패 문자열을
-    알아봐야 하는데, 그게 바로 이 함수가 없애려던 결합이라 그대로 둔다.
+    **vendor가 삼킨 실패에는 붙지 않는다 (#294).** supervisor가 브랜치의 답변 본문을
+    박스에 함께 남기고(:func:`_trace_branch_answer`), :func:`with_reasoning_trace`가
+    본문이 그 기록과 같을 때만 붙인다. 그 판정이 왜 "브랜치가 성공했는가"가 아닌지는
+    :meth:`ReasoningTrace.record_branch_answer` 참고.
     """
     inner_agent = await builder.get_function(config.inner_agent_name)
 
