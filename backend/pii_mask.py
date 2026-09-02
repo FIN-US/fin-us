@@ -234,10 +234,36 @@ _AMOUNT_WON_RE = re.compile(r"(?<!\d)\d+(?:,\d{3})*(?:\.\d+)?원")
 # 과탐이다. lookbehind에 "제"를 넣는 것은 해법이 아니다 — "조"에 대해 위에서 기각한 그
 # 교환이 그대로 재현된다(실측: "제1조5000억원"이 "제1조<AMOUNT_1>"로 부분 마스킹되고
 # "제1조원"은 전량 평문이 된다). (회귀: test_masks_composite_big_unit_amount 대조군)
+#
+# 단위 없는 순수 숫자 꼬리 마디 — "1만5000원"의 "5000". (#333)
+# 마디는 수사 런이나 단위 중 하나를 요구하므로 "5000"처럼 둘 다 없는 꼬리는 마디가 될 수
+# 없고, 마디 연쇄는 "1만"에서 끝난 뒤 \s?원이 "5"에서 실패해 값 전체가 미매치가 된다.
+# 그래서 아래 mask_pii가 _AMOUNT_WON_RE를 먼저 돌리던 종전 순서에서는 "5000원"만
+# 자리표시자가 되고 앞자리 "1만"이 평문으로 남았다(부분 마스킹).
+#
+# 순서 교체와 이 꼬리 마디는 한 쌍이다. 어느 하나만으로는 결과가 그대로다(실측,
+# "1만5000원"): 순서만 뒤집으면 _AMOUNT_WON_RE가 여전히 먼저 꼬리를 잘라가고, 꼬리 마디만
+# 넣으면 _AMOUNT_UNIT_RE가 값 전체를 매치할 수 있게 돼도 그 앞에 도는 _AMOUNT_WON_RE가
+# "5000원"을 이미 자리표시자로 바꿔 놓아 볼 것이 남지 않는다 — 둘 다 "1만<AMOUNT_1>"이다.
+#
+# 꼬리를 마디 연쇄 **뒤 한 번**만, 그리고 optional로 두는 이유. 수사 런 갈래
+# ((?:[천백십]\d*)++)는 이미 \d*로 뒤따르는 숫자를 삼키므로("1천5000원"의 "5000"은
+# 마디 안에서 처리된다), 이 꼬리가 실제로 필요한 것은 마지막 마디가 조/억/만으로 끝나는
+# 형태뿐이다. 그런 마디는 정의상 하나뿐이고 그 뒤에는 \s?원만 올 수 있어 반복이 필요없다.
+# 숫자 모양을 마디 선두와 같은 \d+(?:,\d{3})*(?:\.\d+)?로 맞춰 "1만5,000원"·"1만5000.5원"도
+# 함께 받는다.
+#
+# 과탐이 늘지 않는 근거: 꼬리 자체는 마디가 하나 이상 성립한 뒤에만 붙고, 마디는 여전히
+# 수사나 단위를 요구한다. 즉 "5000원"·"1,234,567원"처럼 단위가 없는 표기는 이 패턴이
+# 계속 매치하지 않고 _AMOUNT_WON_RE가 가져간다. 꼬리에 공백을 허용하지 않는 것도 같은
+# 이유다 — "제3조 5000원"의 "5000"을 조 단위 값의 꼬리로 오인하지 않는다("조"/"억" 뒤에
+# 공백을 두는 표기는 docs/nfr-05-pii-masking.md 미적용 경로 5번에 그대로 남는다).
+# (회귀: test_masks_digit_tail_after_unit_marker)
 _HANGUL_DIGIT = r"[일이삼사오육칠팔구]"
 _AMOUNT_UNIT_RE = re.compile(
     r"(?<![\d,천백십일이삼사오육칠팔구])(?:"
     r"(?:\d+(?:,\d{3})*(?:\.\d+)?(?:(?:[천백십]\d*)++(?:조|억|만)?|(?:조|억|만))){1,4}"
+    r"(?:\d+(?:,\d{3})*(?:\.\d+)?)?"
     r"|" + _HANGUL_DIGIT + r"?(?:[천백십]" + _HANGUL_DIGIT + r"?\d*)+(?:조|억|만)?"
     r")\s?원"
 )
@@ -516,7 +542,20 @@ def mask_pii(text: str | None) -> tuple[str | None, dict[str, str]]:
         mapping[placeholder] = original
         return placeholder
 
-    # 순서: 금액(원/만원·억원 접미사) -> 라벨 기반 bare 숫자 -> 계좌번호(10자리) -> 수량.
+    # 순서: 금액(단위 표기 -> "원" 접미) -> 라벨 기반 bare 숫자 -> 계좌번호(10자리) -> 수량.
+    #
+    # 두 금액 정규식 사이에서는 _AMOUNT_UNIT_RE가 **먼저**여야 한다. (#333)
+    # mask_pii는 이미 치환된 텍스트를 다음 정규식에 넘기므로, 넓은 쪽(단위 표기 전체)을
+    # 좁은 쪽("원" 바로 앞 숫자)보다 뒤에 두면 좁은 쪽이 값의 꼬리만 잘라가고 앞자리가
+    # 평문으로 남는다 — 종전 순서에서 "1만5000원"이 "1만<AMOUNT_1>"(매핑 "5000원")이
+    # 되던 것이 그 형태다. 이 부분 마스킹은 #330의 조 단위 부분 마스킹과 같은 손실이고,
+    # "1만5000원"·"7만8000원"은 주가·체결가 표기로 흔해 _handle_chat_fallback이 넘기는
+    # 사용자 원문에 그대로 실린다(= F-17 보호 대상 금액의 앞자리가 실제로 나간다).
+    # 뒤집어도 안전한 이유는 _AMOUNT_UNIT_RE가 마디에 수사나 단위를 요구해서,
+    # _AMOUNT_WON_RE만의 영역("1,234,567원"·"15000원"처럼 단위 없는 표기)을 건드리지
+    # 않기 때문이다 — 겹치는 구간에서는 항상 단위 쪽이 더 긴 값을 가져간다.
+    # (실측 회귀: test_masks_digit_tail_after_unit_marker,
+    #             test_unit_and_bare_won_amounts_coexist_losslessly)
     #
     # 금액을 계좌번호보다 먼저 적용해야 한다. 콤마 없는 10자리 금액(예: "1234567890원")은
     # _ACCOUNT_RE의 "8자리+2자리=10자리" 모양과 겹치는데, 계좌번호 뒤에는 "원"이 붙을 수
@@ -539,8 +578,8 @@ def mask_pii(text: str | None) -> tuple[str | None, dict[str, str]]:
     # 반대로 계좌번호(하이픈 있거나 없는 순수 10자리, "원" 미접미, 금액 라벨 없음)는 이
     # 금액 정규식들과 겹치지 않으므로 순서를 바꿔도 영향받지 않는다. _QTY_RE는 앞
     # 단계에서 이미 자리표시자로 치환된 구간(숫자가 아님)을 다시 건드리지 않는다.
-    masked = _AMOUNT_WON_RE.sub(lambda m: _replace("AMOUNT", m), text)
-    masked = _AMOUNT_UNIT_RE.sub(lambda m: _replace("AMOUNT", m), masked)
+    masked = _AMOUNT_UNIT_RE.sub(lambda m: _replace("AMOUNT", m), text)
+    masked = _AMOUNT_WON_RE.sub(lambda m: _replace("AMOUNT", m), masked)
     masked = _LABELED_AMOUNT_RE.sub(_replace_labeled_amount, masked)
     masked = _ACCOUNT_RE.sub(lambda m: _replace("ACCOUNT", m), masked)
     masked = _QTY_RE.sub(_replace_qty, masked)
