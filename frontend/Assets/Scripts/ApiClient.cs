@@ -205,12 +205,12 @@ public class ApiClient
         }
 
         var errorDetail = string.IsNullOrWhiteSpace(request.error) ? request.result.ToString() : request.error;
-        return $"{fallbackPrefix}: {errorDetail}{DetailSuffix}url={request.url}, status={request.responseCode})";
+        return $"{fallbackPrefix}: {errorDetail}{DetailSuffix}{request.url}, status={request.responseCode})";
     }
 
     // 위 포맷이 붙이는 꼬리와, 아래에서 그것을 떼는 코드를 같은 자리에 둔다. 떨어져 있으면
     // 포맷만 바뀌었을 때 잘라내기가 조용히 실패해 내부 주소가 사용자 화면에 다시 샌다.
-    private const string DetailSuffix = " (";
+    private const string DetailSuffix = " (url=";
 
     // 배너처럼 사용자에게 보이는 자리에는 요약만 싣는다(#262 리뷰). 꼬리에는 백엔드 내부
     // 주소가 들어 있고, 원문은 호출부가 콘솔에 남긴다.
@@ -219,7 +219,7 @@ public class ApiClient
         if (string.IsNullOrEmpty(error))
             return error;
 
-        int tail = error.IndexOf(DetailSuffix + "url=", StringComparison.Ordinal);
+        int tail = error.IndexOf(DetailSuffix, StringComparison.Ordinal);
         return tail < 0 ? error : error.Substring(0, tail);
     }
 
