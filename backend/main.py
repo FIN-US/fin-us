@@ -4,7 +4,6 @@ from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta, timezone
 from typing import Literal
 from fastapi import FastAPI, HTTPException, Query, Depends, Request, WebSocket, WebSocketDisconnect, Body
-from fastapi.middleware.cors import CORSMiddleware
 from sqlmodel import Session, col, select
 
 from .config import (
@@ -61,16 +60,16 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# 번들이 상대 경로로 바뀌면(#246) 요청이 same-origin이 되어 이 미들웨어는 불필요해진다.
-# 다만 제거는 재빌드된 번들이 랜딩된 뒤로 미룬다 — 지금 걷어내면 아직 8000번을 직접
-# 호출하는 현행 번들이 곧바로 차단된다. 제거는 후속 PR에서 ALLOW_ORIGINS와 함께 한다.
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=ALLOW_ORIGINS,
-    allow_credentials=False,
-    allow_methods=["GET", "POST"],
-    allow_headers=["Content-Type"],
-)
+# CORSMiddleware는 제거했다(#246). #245로 nginx가 /api를 프록시하고 #262로 번들이
+# 상대 경로를 쓰도록 재빌드되면서, 브라우저 요청은 대시보드와 같은 오리진으로 나가
+# CORS 자체가 개입하지 않는다. 남겨 두면 이제 아무도 타지 않는 경로가 "동작 중인
+# 보호"처럼 보이고, 실제로는 응답을 *읽는* 것만 막을 뿐 요청 *실행*은 막지 못한다.
+# 오리진 단위로 실제 호출을 막는 것은 nginx 레이트리밋(#266 1단계, frontend/nginx.conf)과
+# 아직 도입 전인 API 인증(#266 2단계)의 몫이다.
+#
+# ALLOW_ORIGINS는 남는다 — 아래 is_allowed_ws_origin이 /api/v1/ws 핸드셰이크의 Origin
+# 허용목록으로 계속 쓴다(#256). CORSMiddleware는 애초에 WS 핸드셰이크에 적용되지 않아,
+# 이 미들웨어를 걷어내도 그쪽 검사는 그대로다.
 
 
 @app.get("/api/v1/news", response_model=CommonResponse, tags=["Market Data"])
@@ -442,10 +441,14 @@ async def health_check():
 def is_allowed_ws_origin(origin: str | None) -> bool:
     """WebSocket 핸드셰이크의 Origin이 허용 대상인지 판정합니다 (#256).
 
-    CORSMiddleware는 WebSocket 핸드셰이크에 적용되지 않는다. ALLOW_ORIGINS로 HTTP를
-    조여도 WS는 그대로 열려 있어, 임의 사이트에 심어 둔 new WebSocket(...)이 붙어
-    브로드캐스트를 수신할 수 있다(Cross-Site WebSocket Hijacking). 같은 목록을 WS
+    Starlette의 CORSMiddleware는 WebSocket 핸드셰이크에 적용되지 않는다. 그래서 HTTP를
+    아무리 조여도 WS는 그대로 열려 있고, 임의 사이트에 심어 둔 new WebSocket(...)이 붙어
+    브로드캐스트를 수신할 수 있다(Cross-Site WebSocket Hijacking). ALLOW_ORIGINS를 WS
     핸드셰이크에서도 직접 대조해 이 비대칭을 없앤다.
+
+    #246에서 CORSMiddleware를 걷어낸 뒤로는 이 함수가 ALLOW_ORIGINS의 **유일한**
+    소비자다. 목록을 지우면 화면은 뜨는데 실시간 알림만 403으로 끊기므로, 쓰이지 않는
+    설정으로 오해해 정리하지 말 것.
 
     Origin 헤더가 없으면 허용한다. Origin은 브라우저가 붙이는 헤더이고 CSWSH는 브라우저
     공격이다. curl·wscat·헬스체크 같은 비브라우저 클라이언트는 헤더를 보내지 않으므로,
@@ -455,8 +458,9 @@ def is_allowed_ws_origin(origin: str | None) -> bool:
     """
     if origin is None:
         return True
-    # CORSMiddleware가 "*"를 전체 허용으로 해석하므로 같은 목록을 읽는 여기서도 맞춘다.
-    # 두 곳의 해석이 갈리면 HTTP는 열려 있는데 WS만 막히는(또는 반대) 상태가 된다.
+    # "*"는 전체 허용이다. CORSMiddleware가 쓰던 관례를 그대로 따른다 — 그 미들웨어는
+    # #246에서 사라졌지만, .env.example과 문서가 이 목록을 그렇게 설명해 왔고 표기의
+    # 의미만 바꾸면 기존 .env가 조용히 다른 뜻이 된다.
     if "*" in ALLOW_ORIGINS:
         return True
     return origin in ALLOW_ORIGINS
