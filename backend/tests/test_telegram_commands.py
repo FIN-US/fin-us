@@ -537,6 +537,41 @@ async def test_balance_command_calls_mcp_runner():
 
 
 @pytest.mark.asyncio
+async def test_balance_ignores_updates_from_other_chats():
+    """다른 채팅의 /balance는 KIS 조회까지 가지 않는다 (#232, NFR-05).
+
+    잔고를 비식별화하지 않고 원값 그대로 Telegram에 보내도 된다는 근거는 "수신자가
+    계좌 소유자 본인 하나"라는 것 하나뿐이다(docs/nfr-05-pii-masking.md). 그 전제는
+    handle_update / _handle_callback_query의 chat_id 비교 두 줄에만 걸려 있어, 한쪽이
+    사라져도 정상 경로 테스트는 전부 통과한다. 문서가 아니라 여기서 지킨다.
+    """
+    calls = []
+
+    async def mcp_runner(server_params, tool_name, arguments):
+        calls.append((server_params, tool_name, arguments))
+        return "잔고 응답"
+
+    notifier = FakeNotifier(chat_id="123")
+    handler = TelegramCommandHandler(notifier=notifier, mcp_runner=mcp_runner)
+
+    await handler.handle_update({"message": {"chat": {"id": 999}, "text": "/balance"}})
+    await handler.handle_update(
+        {
+            "callback_query": {
+                "id": "balance-callback",
+                "data": "balance:refresh",
+                "message": {"chat": {"id": 999}},
+            }
+        }
+    )
+
+    assert calls == []
+    assert notifier.messages == []
+    assert notifier.callback_answers == []
+    assert notifier.actions == []
+
+
+@pytest.mark.asyncio
 async def test_balance_refresh_button_calls_mcp_runner():
     calls = []
 
