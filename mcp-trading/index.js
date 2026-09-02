@@ -8,7 +8,13 @@ import axios from "axios";
 import dotenv from "dotenv";
 import { z } from "zod";
 import { formatBalanceRlzPlReport } from "./balance-rlz-pl-report.js";
-import { buildBalanceParams, fetchAllBalance, fetchAllPaged, formatBalanceReport } from "./balance.js";
+import {
+  buildBalanceParams,
+  fetchAllBalance,
+  fetchAllPaged,
+  formatBalanceReport,
+  readPageDelayMsEnv,
+} from "./balance.js";
 import {
   formatPercent,
   formatQuantity,
@@ -61,11 +67,32 @@ const DAILY_CCLD_MAX_PAGES = 50;
 // 100 < 120이므로 상한 안에 안전하게 들어온다. 90초 초과가 이상 상황이라고 판단하기에
 // 충분하다고 본다. 실제 페이지당 지연 측정치가 확보되면 이 값을 재조정해야 한다.
 const DAILY_CCLD_TIME_BUDGET_MS = 90_000;
-// 이슈 #210: 페이지 간 대기(fetchAllPaged의 pageDelayMs). 값을 0으로 비워둔다 — KIS
-// 유량 제한의 실제 임계(초당 호출 수)를 아직 측정하지 못했다. backend/telegram_commands.py의
-// `/watch list`가 종목당 1.1초를 쓰지만 그 값의 근거도 확인되지 않았고, 애초에 다른 TR이라
-// 그대로 가져다 쓸 근거가 안 된다. 측정치가 나오면 이 값을 채운다(이슈 #210 조사 항목).
-const DAILY_CCLD_PAGE_DELAY_MS = 0;
+// 이슈 #210: 페이지 간 대기(fetchAllPaged의 pageDelayMs)를 env로 열어둔다 — 값이 코드에
+// 박혀 있으면 실측 자체가 매번 코드 변경 + 배포를 요구한다(PR #264 리뷰). 기본값은 0(대기
+// 없음) — KIS 유량 제한의 실제 임계(초당 호출 수)를 실계좌 없이는 실측할 수 없어 미확인이며,
+// 미확인 상태에서 기본값을 바꾸면 PR #200이 정한 "fetchAllBalance뿐 아니라 이 루프들의
+// 관측 가능한 동작도 조용히 바뀌면 안 된다"는 전제를 깬다.
+//
+// 공식 문서 조사(#210) 결과:
+// - 한국투자증권 공식 GitHub(koreainvestment/open-trading-api) README가 오류 코드
+//   EGW00201("초당 거래건수 초과")의 존재를 명시하고, "모의투자 계좌는 REST API 호출
+//   제한이 낮으니 연속 호출이 많으면 실전투자 계좌를 권장"한다고 정성적으로만 밝힌다 —
+//   공식 출처이나 구체적 TPS 수치는 없음.
+// - 같은 README가 접근토큰 재발급은 "1분당 1회"로 제한된다고 명시한다(공식, 수치 확인됨).
+//   페이지 간 대기와는 별개 제한이지만 토큰 캐시(token-cache.js)가 이미 이 제한을
+//   전제로 설계돼 있다는 근거다.
+// - 실전투자 "표준 20 TPS"라는 수치는 언론 보도(서울경제 영문판, KIS의 Open API 완화
+//   캠페인 관련 기사)에서만 확인했고 apiportal.koreainvestment.com 원문에서 직접
+//   인용하지 못했다 — 반공식, 페이지 간 대기 기본값을 바꿀 근거로 쓰기엔 부족하다고 판단.
+// - 모의투자의 구체적 TPS 수치, 제한 단위(계좌/앱키/TR ID 중 무엇인지)는 공식 문서에서
+//   끝내 확인하지 못했다 — 미확인.
+// backend/telegram_commands.py의 `/watch list`가 종목당 1.1초를 쓰지만 git blame(742fa8a,
+// 커밋 메시지·코드 모두)에도 그 값의 산출 근거가 없어 그대로 가져다 쓸 근거가 못 된다
+// (다른 TR이기도 하다) — 이 값도 미확인으로 남긴다.
+//
+// 결론: 근거가 정성적 수준이라 기본값 0을 유지한다. 실측치(또는 확정 TPS 문서)가 나오면
+// 이 env로 값만 바꿔 넣으면 된다(재배포는 여전히 필요하지만 코드 변경은 불필요).
+const DAILY_CCLD_PAGE_DELAY_MS = readPageDelayMsEnv("DAILY_CCLD_PAGE_DELAY_MS", 0);
 const BALANCE_RLZ_PL_PATH = "/uapi/domestic-stock/v1/trading/inquire-balance-rlz-pl";
 const BALANCE_RLZ_PL_TR_ID = (() => {
   const override = (process.env.KIS_TR_ID_BALANCE_RLZ_PL || process.env.FINUS_KIS_TR_ID_BALANCE_RLZ_PL || "").trim();
@@ -76,8 +103,8 @@ const BALANCE_RLZ_PL_MAX_PAGES = 50;
 // inquire-balance-rlz-pl 연속조회 전체 시간 예산. DAILY_CCLD_TIME_BUDGET_MS와 같은 근거.
 // 두 TR의 호출자·상한·요청당 타임아웃이 동일하므로 동일한 값을 쓴다.
 const BALANCE_RLZ_PL_TIME_BUDGET_MS = 90_000;
-// 이슈 #210: DAILY_CCLD_PAGE_DELAY_MS와 같은 이유로 0. 실측 전까지 비워둔다.
-const BALANCE_RLZ_PL_PAGE_DELAY_MS = 0;
+// 이슈 #210: DAILY_CCLD_PAGE_DELAY_MS와 같은 이유로 기본값 0, 같은 env 패턴으로 오버라이드.
+const BALANCE_RLZ_PL_PAGE_DELAY_MS = readPageDelayMsEnv("BALANCE_RLZ_PL_PAGE_DELAY_MS", 0);
 const PSBL_ORDER_PATH = "/uapi/domestic-stock/v1/trading/inquire-psbl-order";
 // 매수가능조회 TR ID. 연속조회가 없는 단건 조회라 페이지 상한·시간 예산이 없다.
 // 오버라이드 이름은 KIS_TR_ID_DAILY_CCLD / KIS_TR_ID_BALANCE_RLZ_PL과 같은 관례를 따른다
