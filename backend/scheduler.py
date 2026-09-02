@@ -396,8 +396,10 @@ def _sync_portfolio_from_balance(
     재파싱을 건너뜁니다. None이면 balance_text에서 직접 파싱합니다.
     잘림·마커 가드는 holdings 인자 유무에 관계없이 항상 balance_text를 검사합니다.
 
-    반환값(이슈 #229): 동기화를 실제로 수행했으면 삽입한 종목 수(int, 0 이상)를,
-    잘림·마커 부재로 건너뛰었으면 None을 반환합니다. bool 대신 개수를 반환하는 이유는
+    반환값(이슈 #229): 동기화를 실제로 수행했으면 동기화한 보유 종목 수(int, 0 이상)를,
+    잘림·마커 부재로 건너뛰었으면 None을 반환합니다. 이 값은 잔고 응답의 항목 수이지
+    테이블 행 수가 아닙니다 — upsert 후에는 삽입이 0건일 수 있고, 한 응답에 같은
+    코드가 두 번 오면 반환값이 행 수보다 큽니다. bool 대신 개수를 반환하는 이유는
     호출처(monitor_market_task)가 WebSocket으로 PORTFOLIO_UPDATE를 브로드캐스트할 때
     holdings_count를 함께 실어야 하는데, bool만으로는 호출처가 그 값을 얻기 위해
     holdings 리스트를 별도로 들고 있거나 다시 세야 하기 때문입니다. int 반환값 자체가
@@ -448,10 +450,7 @@ def _sync_portfolio_from_balance(
         if rows:
             row = rows[0]
             # 잔고 응답에서 온 필드만 갱신한다. current_price는 여기에 없으므로
-            # **건드리지 않는다** — 이것이 전량 교체 대신 upsert를 쓰는 이유다.
-            # 전량 교체였다면 이 이슈(#196)가 붙일 시세 조회 결과가 10분 주기마다
-            # null로 되돌아가고, PR #204가 도입한 price_known 플래그가 "시세를
-            # 채웠는데도 모름"으로 잘못 나가는 회귀가 된다.
+            # 건드리지 않는다 — 근거는 이 함수 docstring의 "upsert여야 하는 이유".
             row.stock_name = h.name
             row.quantity = h.quantity
             row.avg_price = h.avg_price
