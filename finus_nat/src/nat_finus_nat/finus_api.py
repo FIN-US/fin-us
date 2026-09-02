@@ -22,6 +22,14 @@ from nat.builder.builder import Builder
 from nat.builder.function_info import FunctionInfo
 from nat.cli.register_workflow import register_function
 from nat.data_models.function import FunctionBaseConfig
+from nat_finus_nat.pii import (
+    ACCOUNT_SCOPED_TOOLS,
+    PiiMaskUnavailableError,
+    kis_api_type_is_account_scoped,
+    mask_account_text,
+    masking_unavailable_error_json,
+    restore_outbound,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -328,6 +336,49 @@ def _record_to_ledger(tool_name: str, result: str) -> None:
     )
 
 
+# ---- PII 마스킹 경계 (#231) ----
+
+
+def _mask_account_tool_result(
+    tool_name: str,
+    result: str,
+    *,
+    account_scoped: bool | None = None,
+) -> str:
+    """계좌 범위 도구 결과를 LLM 컨텍스트에 넣기 전에 마스킹한다 (#231).
+
+    마스킹 대상 판정은 기본적으로 :data:`~nat_finus_nat.pii.ACCOUNT_SCOPED_TOOLS`
+    한 곳에서만 온다 — 호출부가 각자 판단하면 도구가 늘어날 때 한 곳만 빠뜨려도
+    조용히 평문이 나간다. *account_scoped*를 명시하는 것은 도구 이름만으로 정할 수
+    없는 KIS pass-through 하나뿐이다(api_type마다 계좌/시세가 갈린다).
+
+    **반드시 :func:`_record_to_ledger` 뒤에 부른다.** 원장은 원문으로 판정해야
+    #152/#209의 오류·빈 결과 리터럴 판정이 마스킹에 영향받지 않는다. 원장에 남는 것은
+    불리언 3개뿐이라 원문으로 판정해도 PII가 밖으로 새지 않는다.
+
+    마스킹 엔진을 쓸 수 없으면 **원본 대신 오류 JSON을 반환한다**(fail-closed).
+    유출보다 조회 실패가 낫다는 것이 F-17의 전제다. 이 오류는 원장에 기록하지 않는다 —
+    도구는 실제로 성공했고, 성공을 실패로 뒤집으면 도구 강제 게이트(#152)가 재시도를
+    유발해 같은 조회를 한 번 더 실행하게 된다.
+
+    자리표시자는 최상위 워크플로(`agents.finus_reasoning_trace_agent`)에서만 복원된다.
+    그 사이 구간(ReAct 컨텍스트, supervisor 히스토리, Mem0 저장, SQLite 대화 기록)은
+    전부 마스킹된 상태로 흐른다.
+    """
+    scoped = tool_name in ACCOUNT_SCOPED_TOOLS if account_scoped is None else account_scoped
+    if not scoped:
+        return result
+    try:
+        return mask_account_text(result)
+    except PiiMaskUnavailableError as exc:
+        logger.error(
+            "PII 마스킹 불가 — %s의 결과를 반환하지 않고 차단합니다(fail-closed): %s",
+            tool_name,
+            exc,
+        )
+        return masking_unavailable_error_json(tool_name, str(exc))
+
+
 # Remote MCP / doc 한도
 _MCP_DOC_MAX_CHARS = 14_000 #텍스트 최대 길이
 _MCP_LIST_TOOLS_GRACE_SEC = 10.0 #툴 호출 시 timeout 방지
@@ -498,12 +549,17 @@ async def _mcp_call_tool(
         cwd=str(server_dir),
     )
 
+    # LLM이 만든 인자에 자리표시자가 섞여 있으면 원값으로 되돌린다 (#231).
+    # 도구 인자는 사람이 읽는 문장이 아니라 실제 시스템에 나가는 값이다 — 자리표시자가
+    # 그대로 나가면 주문 파라미터나 매매일지 본문이 내부 토큰으로 저장된다.
+    call_arguments = restore_outbound(arguments)
+
     # 실제 stdio 세션 안에서 단일 tool 호출을 수행하는 inner.
     async def _inner() -> str:
         async with stdio_client(params) as (read, write):
             async with ClientSession(read, write) as session:
                 await session.initialize()
-                return _mcp_call_tool_first_text(await session.call_tool(tool_name, arguments))
+                return _mcp_call_tool_first_text(await session.call_tool(tool_name, call_arguments))
 
     return await _run_mcp_timed(_inner, tool_name=tool_name, timeout_sec=timeout_sec)
 
@@ -524,10 +580,13 @@ async def _mcp_call_tool_remote(
             hint="Set mcp_url on finus_account_balance (Kis Trading MCP) config.",
         )
 
+    # 자리표시자 복원 근거는 _mcp_call_tool 쪽 주석 참고 (#231).
+    call_arguments = restore_outbound(arguments)
+
     # 실제 원격 세션을 열고 단일 tool 호출을 수행하는 inner.
     async def _inner() -> str:
         async with _remote_mcp_session(transport=transport, url=url, operation_timeout=timeout_sec) as session:
-            return _mcp_call_tool_first_text(await session.call_tool(tool_name, arguments))
+            return _mcp_call_tool_first_text(await session.call_tool(tool_name, call_arguments))
 
     return await _run_mcp_timed(_inner, tool_name=tool_name, timeout_sec=timeout_sec)
 
@@ -997,10 +1056,14 @@ async def _call_kis_mcp_and_record(
     arguments: McpCallArguments,
     config: FinusAccountBalanceConfig,
 ) -> str:
-    """원격 MCP 호출 후 원장에 기록한다 — finus_account_balance·readonly 공유.
+    """원격 MCP 호출 후 원장에 기록하고, 계좌 TR이면 마스킹해 반환한다.
 
     두 래퍼가 개별로 _mcp_call_tool_remote + _record_to_ledger(_KIS_BALANCE_LEDGER_NAME)를
     중복 구현하는 것을 이 헬퍼 한 곳으로 모은다.
+
+    이 도구 하나가 계좌 TR(잔고·체결·주문가능금액)과 시세 TR(현재가·호가·순위)을 모두
+    태우므로, 마스킹 여부는 도구 이름이 아니라 ``api_type``으로 가른다 (#231).
+    판정은 fail-closed다 — 근거는 :func:`nat_finus_nat.pii.kis_api_type_is_account_scoped`.
     """
     result = await _mcp_call_tool_remote(
         transport=config.mcp_transport,
@@ -1010,7 +1073,11 @@ async def _call_kis_mcp_and_record(
         timeout_sec=config.timeout_sec,
     )
     _record_to_ledger(_KIS_BALANCE_LEDGER_NAME, result)
-    return result
+    return _mask_account_tool_result(
+        _KIS_BALANCE_LEDGER_NAME,
+        result,
+        account_scoped=kis_api_type_is_account_scoped(str(arguments.get("api_type", ""))),
+    )
 
 
 async def _build_kis_mcp_description(doc: str, config: FinusAccountBalanceConfig) -> str:
@@ -1200,7 +1267,7 @@ async def finus_mcp_trading_today_orders(config: FinusMcpTradingTodayOrdersConfi
             arguments=arguments,
         )
         _record_to_ledger("finus_mcp_trading_today_orders", result)
-        return result
+        return _mask_account_tool_result("finus_mcp_trading_today_orders", result)
 
     get_today_daily_orders.__doc__ = doc
     yield FunctionInfo.from_fn(
@@ -1226,7 +1293,7 @@ async def finus_mcp_trading_get_balance(config: FinusMcpTradingGetBalanceConfig,
             arguments={},
         )
         _record_to_ledger("finus_mcp_trading_get_balance", result)
-        return result
+        return _mask_account_tool_result("finus_mcp_trading_get_balance", result)
 
     get_balance.__doc__ = doc
     yield FunctionInfo.from_fn(
@@ -1256,7 +1323,7 @@ async def finus_mcp_trading_balance_rlz_pl(config: FinusMcpTradingBalanceRlzPlCo
             arguments=arguments,
         )
         _record_to_ledger("finus_mcp_trading_balance_rlz_pl", result)
-        return result
+        return _mask_account_tool_result("finus_mcp_trading_balance_rlz_pl", result)
 
     get_balance_rlz_pl.__doc__ = doc
     yield FunctionInfo.from_fn(
@@ -1281,8 +1348,11 @@ async def finus_save_diary(config: FinusSaveDiaryConfig, _builder: Builder):
         Returns:
             저장된 일지 메타데이터 JSON 문자열. 실패 시 ``error`` 필드를 가진 JSON.
         """
-        title = (inp.title or "").strip()
-        content = (inp.content or "").strip()
+        # 본문은 LLM이 마스킹된 관측(Observation)을 보고 쓴 것이라 자리표시자가 섞일 수
+        # 있다. DB에 그대로 저장하면 사용자가 나중에 읽는 일지가 내부 토큰이 된다 —
+        # 저장은 마스킹 경계 바깥이므로 여기서 원값으로 되돌린다 (#231).
+        title = restore_outbound((inp.title or "").strip())
+        content = restore_outbound((inp.content or "").strip())
         if not title:
             result = _err_json("diary_title_required", hint="Provide a non-empty title.")
             _record_to_ledger("finus_save_diary", result)
@@ -1318,7 +1388,7 @@ async def finus_save_diary(config: FinusSaveDiaryConfig, _builder: Builder):
             return result
         result = json.dumps(body.get("data"), ensure_ascii=False)
         _record_to_ledger("finus_save_diary", result)
-        return result
+        return _mask_account_tool_result("finus_save_diary", result)
 
     yield FunctionInfo.from_fn(
         save_trading_diary,
@@ -1364,7 +1434,7 @@ async def finus_list_diaries(config: FinusListDiariesConfig, _builder: Builder):
             return result
         result = json.dumps(body.get("data"), ensure_ascii=False)
         _record_to_ledger("finus_list_diaries", result)
-        return result
+        return _mask_account_tool_result("finus_list_diaries", result)
 
     yield FunctionInfo.from_fn(
         list_trading_diaries,
