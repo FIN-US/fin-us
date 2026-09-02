@@ -10,6 +10,9 @@
  * 요청당 타임아웃 8초 + 기동 오버헤드 2초를 빼면 ~110초 헤드룸.
  * 90 + 8 + 2 = 100 < 120이므로 상한 안에 안전하게 들어온다.
  * 실제 페이지당 지연 측정치가 없어 이 값은 검증 불가 — 소스 주석과 PR에 명시.
+ *
+ * 예외: 시간 예산 경계를 다루는 테스트(이슈 #307)는 가짜 시계로 예산 소진 시점을
+ * 짚어야 해서 90초 대신 짧은 예산(timeBudgetMs 1000)을 테스트별 지역 상수로 쓴다.
  */
 
 import assert from "node:assert/strict";
@@ -357,4 +360,148 @@ test("fetchAllPaged: pageDelayMs가 0이면 sleep을 주입해도 호출되지 �
 
   assert.equal(result.truncated, "no_cursor");
   assert.equal(sleepCallCount, 0);
+});
+
+// ─── 이슈 #307: pageDelayMs 대기 후 시간 예산 재확인 ─────────────────────────
+
+test("fetchAllPaged: pageDelayMs 대기 중 시간 예산이 소진되면 다음 요청을 내보내지 않는다 (이슈 #307)", async () => {
+  // PR #264 리뷰가 가짜 시계로 재현한 시나리오 그대로: timeBudgetMs 1000,
+  // pageDelayMs 400, 요청당 10ms. 재확인이 없으면 예산이 끝난 t=1230에 4번째 요청이
+  // 나가 가상 경과가 1240ms(초과분 240ms)까지 늘어난다.
+  const TIME_BUDGET = 1000;
+  const PAGE_DELAY = 400;
+  const REQUEST_MS = 10;
+
+  let clock = 0;
+  let callCount = 0;
+  const callClocks = [];
+  const sleepCalls = [];
+  const sleep = async (ms) => {
+    sleepCalls.push(ms);
+    clock += ms;
+  };
+  const fetchPage = async () => {
+    callCount += 1;
+    callClocks.push(clock);
+    clock += REQUEST_MS;
+    return {
+      body: {
+        output1: [{ pdno: String(callCount).padStart(6, "0") }],
+        output2: callCount === 1 ? [{ tot: "1" }] : [],
+        // 시간 예산 경로를 타려면 커서가 계속 있어야 한다 (없으면 no_cursor가 먼저 걸림)
+        ctx_area_fk100: `FK${callCount}`,
+        ctx_area_nk100: `NK${callCount}`,
+      },
+      trCont: "F",
+    };
+  };
+
+  const result = await fetchAllPaged(fetchPage, {
+    maxPages: MAX_PAGES,
+    timeBudgetMs: TIME_BUDGET,
+    now: () => clock,
+    pageDelayMs: PAGE_DELAY,
+    sleep,
+  });
+
+  // 1회: t=0 요청 → t=10
+  // 대기 400 → t=410, 재확인 410 < 1000 → 2회: t=410 요청 → t=420
+  // 대기 400 → t=820, 재확인 820 < 1000 → 3회: t=820 요청 → t=830
+  // 대기 400 → t=1230, 재확인 1230 >= 1000 → 4번째 요청 없이 break
+  assert.equal(callCount, 3, "예산 소진 후 추가 요청이 나가면 안 된다");
+  assert.deepEqual(callClocks, [0, 410, 820]);
+  assert.equal(result.pages, 3);
+  assert.equal(result.truncated, "time_budget");
+  // 부분 결과 보존: 기존 time_budget break와 동일한 반환 계약
+  assert.equal(result.rows.length, 3);
+  assert.deepEqual(result.summary, { tot: "1" });
+  // 마지막 요청이 나가지 않았으므로 가상 경과는 1240ms가 아니라 1230ms에서 멈춘다
+  assert.equal(clock, 1230);
+  // 재확인 break 이후에는 대기가 추가되지 않는다
+  assert.deepEqual(sleepCalls, [400, 400, 400]);
+});
+
+test("fetchAllPaged: 대기 후 경과가 정확히 timeBudgetMs면 중단한다 (진입 체크와 같은 >= 경계)", async () => {
+  // 경계 케이스: 재확인을 `>`로 두면 정확히 예산과 같은 시각에서 요청이 한 번 더 나가
+  // 루프 진입 시점 체크(`>=`)와 판단이 갈린다.
+  const TIME_BUDGET = 1000;
+  const PAGE_DELAY = 990;
+  let clock = 0;
+  let callCount = 0;
+  const sleep = async (ms) => {
+    clock += ms;
+  };
+  const fetchPage = async () => {
+    callCount += 1;
+    clock += 10;
+    return {
+      body: {
+        output1: [{ pdno: String(callCount).padStart(6, "0") }],
+        output2: [],
+        ctx_area_fk100: `FK${callCount}`,
+        ctx_area_nk100: `NK${callCount}`,
+      },
+      trCont: "F",
+    };
+  };
+
+  const result = await fetchAllPaged(fetchPage, {
+    maxPages: MAX_PAGES,
+    timeBudgetMs: TIME_BUDGET,
+    now: () => clock,
+    pageDelayMs: PAGE_DELAY,
+    sleep,
+  });
+
+  // 1회: t=0 요청 → t=10. 대기 990 → t=1000.
+  // now() - startedAt === 1000 === timeBudgetMs 이므로 >= 에서 중단된다.
+  assert.equal(clock, 1000);
+  assert.equal(callCount, 1, "경계에서 요청이 한 번 더 나가면 안 된다");
+  assert.equal(result.pages, 1);
+  assert.equal(result.truncated, "time_budget");
+  assert.equal(result.rows.length, 1);
+});
+
+test("fetchAllPaged: 루프 진입 시점 체크로 중단되면 그 반복에서는 대기하지 않는다 (마지막 페이지 뒤 대기 없음)", async () => {
+  // 재확인 로직을 넣은 뒤에도, 루프 진입 시점의 time_budget 체크로 빠져나가는 경로는
+  // sleep 지점을 지나기 전에 break하므로 마지막 페이지 뒤에 대기가 붙지 않는다.
+  const TIME_BUDGET = 1000;
+  const PAGE_DELAY = 100;
+
+  let clock = 0;
+  let callCount = 0;
+  const sleepCalls = [];
+  const sleep = async (ms) => {
+    sleepCalls.push(ms);
+    clock += ms;
+  };
+  const fetchPage = async () => {
+    callCount += 1;
+    clock += 600; // 요청 자체가 예산을 소진한다
+    return {
+      body: {
+        output1: [{ pdno: String(callCount).padStart(6, "0") }],
+        output2: [],
+        ctx_area_fk100: `FK${callCount}`,
+        ctx_area_nk100: `NK${callCount}`,
+      },
+      trCont: "F",
+    };
+  };
+
+  const result = await fetchAllPaged(fetchPage, {
+    maxPages: MAX_PAGES,
+    timeBudgetMs: TIME_BUDGET,
+    now: () => clock,
+    pageDelayMs: PAGE_DELAY,
+    sleep,
+  });
+
+  // 1회: t=0 요청 → t=600. 진입 체크 600 < 1000 → 대기 100 → t=700,
+  //      재확인 700 < 1000 → 2회: t=700 요청 → t=1300.
+  // 진입 체크 1300 >= 1000 → sleep 지점을 지나기 전에 break.
+  assert.equal(callCount, 2);
+  assert.equal(result.truncated, "time_budget");
+  // 대기는 페이지 사이 1회(= pages - 1)뿐. 마지막 페이지 뒤에는 대기가 없다.
+  assert.deepEqual(sleepCalls, [100]);
 });
