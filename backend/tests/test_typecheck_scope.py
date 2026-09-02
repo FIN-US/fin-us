@@ -60,12 +60,29 @@ def test_pyright_silences_no_file_and_no_rule_wholesale():
       잡은 초록불이고, 그 파일의 새 코드는 검사받지 않는다 — `exclude`와 구별되지
       않는 결과다. 게다가 설정 주석이 "파일 단위 제외 말고 줄 단위 ignore를 쓰라"고
       안내하므로 다음 사람이 손댈 자리가 오히려 이쪽이다.
-    - ``reportArgumentType = "none"``처럼 규칙 하나를 전역으로 끄는 것도 같다. #319가
-      걷어낸 오류의 대부분이 reportArgumentType이었으니, 그 한 줄이면 이 PR 전체가
-      되돌려진다.
+    - ``reportArgumentType``처럼 규칙 하나를 전역으로 낮추는 것도 같다. #319가 걷어낸
+      오류의 대부분이 reportArgumentType이었으니, 그 한 줄이면 이 PR 전체가 되돌려진다.
 
     둘 다 "정말 필요하면 그 줄에 `# pyright: ignore[규칙]`"라는 같은 대안을 갖는다.
     그쪽은 무엇을 왜 껐는지가 코드 옆에 남고, 그 줄만 꺼진다.
+
+    규칙 쪽은 **끄는 철자를 열거하지 않고 켜는 철자를 고정한다** (PR #337 2차 리뷰).
+    ``"none"``만 막으면 결과가 같은 두 철자가 그대로 남기 때문이다. 워크트리에서
+    reportArgumentType을 유발하는 오류를 심고 한 줄씩 넣어 실측한 결과다:
+
+        (없음)                            1 error   pyright exit 1  ← CI 빨간불
+        reportArgumentType = "none"       0 errors  exit 0
+        reportArgumentType = false        0 errors  exit 0
+        reportArgumentType = "warning"    0 errors, 1 warning, exit 0
+
+    마지막 것이 특히 눈에 띈다 — 진단은 남지만 CI 잡이 ``--warnings`` 없이 돌아
+    그대로 초록불이다. 그러니 이 잡에게 "warning"과 "off"는 같은 말이고, 통과시킬
+    값은 ``"error"``와 ``true`` 둘뿐이다. 규칙을 **조이는** 변경(basic이 끄고 있는
+    규칙을 "error"로 켜는 것)은 그대로 통과한다 — 막아야 할 것은 푸는 방향이다.
+
+    ``--warnings``를 CI에 붙여 warning도 빨간불로 만드는 길도 있다. 그러면 "warning"이
+    실제 의미를 갖지만, basic 모드가 다른 곳에서 내는 warning까지 함께 빨간불이 되므로
+    이 PR의 범위를 넘는다. 필요해지면 그때 이 단언과 함께 고칠 것.
     """
     config = _pyright_config()
 
@@ -75,15 +92,18 @@ def test_pyright_silences_no_file_and_no_rule_wholesale():
         "해당 줄의 `# pyright: ignore[규칙]`를 쓰세요."
     )
 
-    silenced = sorted(
-        key
+    # `value is not True`로 쓴다. `value != True`는 1도 통과시키는데, TOML에서 온
+    # 정수 1은 pyright 설정으로 유효하지 않으므로 통과시킬 이유가 없다.
+    loosened = sorted(
+        f"{key} = {value!r}"
         for key, value in config.items()
-        if key.startswith("report") and value == "none"
+        if key.startswith("report") and value != "error" and value is not True
     )
-    assert not silenced, (
-        f"전역으로 꺼진 진단 규칙이 있습니다: {silenced}. "
-        "규칙 하나를 레포 전체에서 끄면 그 규칙이 지키던 주입 지점이 통째로 열립니다 — "
-        "해당 줄의 `# pyright: ignore[규칙]`를 쓰세요."
+    assert not loosened, (
+        f"전역으로 낮춘 진단 규칙이 있습니다: {loosened}. "
+        "이 CI 잡은 --warnings 없이 돌므로 \"none\"·false·\"warning\"이 모두 같은 결과"
+        "(초록불)입니다 — 규칙 하나를 레포 전체에서 낮추면 그 규칙이 지키던 주입 지점이 "
+        "통째로 열립니다. 해당 줄의 `# pyright: ignore[규칙]`를 쓰세요."
     )
 
 
