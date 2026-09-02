@@ -21,7 +21,7 @@ erDiagram
         string stock_name "종목명"
         string trade_type "매매 구분 (BUY/SELL)"
         int quantity "매매 수량"
-        float price "매매 단가"
+        float price "매매 단가 (시장가는 주문 시점 현재가, #309)"
         datetime trade_date "매매 일시"
     }
     AgentReport {
@@ -34,6 +34,9 @@ erDiagram
         float confidence_score "신뢰도 점수"
         string reason "투자 결정 근거"
         boolean provider_supports_tools "provider가 도구 호출 가능 경로인지 (실제 호출 관측 아님, #162)"
+        int signal_score "신호 영향도 -3~+3 (채점 실패·필터 미경유 시 null, #298)"
+        string signal_reason "signal_score의 한 줄 근거 (#298)"
+        float signal_uncertainty "기사별 점수의 표준편차 (기사 2건 미만이면 null, #298)"
         datetime created_at "생성 일시"
     }
     Diary {
@@ -42,11 +45,28 @@ erDiagram
         string content "일지 내용"
         datetime created_at "작성 일시"
     }
+    FilteredSignal {
+        int id PK
+        string stock_name "감시 대상 종목명"
+        string source "신호 출처 (news | disclosure)"
+        int score "신호 영향도 -3~+3 (NOT NULL, #304)"
+        int threshold "기록 시점의 SIGNAL_SCORE_THRESHOLD"
+        string reason "점수 근거 한 줄 (모델이 안 주면 null)"
+        float uncertainty "기사별 점수의 표준편차 (기사 2건 미만이면 null)"
+        datetime created_at "기록 일시 (UTC)"
+    }
 ```
 
 ## 테이블 설명
 
 - **Portfolio**: 사용자의 현재 주식 잔고 정보를 관리합니다. 한국투자증권(KIS) API 데이터를 기준으로 동기화됩니다.
 - **TradeHistory**: 사용자의 매매 이력을 기록합니다.
+  - `price`는 지정가 주문이면 지정가, 시장가 주문이면 **주문 시점 현재가**입니다(#309). KIS 현금주문 응답(order-cash)에 체결가가 없어(`output`은 주문번호·주문시각뿐) 주문 시점에 얻을 수 있는 최선의 단가를 남깁니다 — 실제 체결가와는 호가 한두 틱만큼 어긋날 수 있습니다.
+  - `price = 0`은 "0원 거래"가 아니라 **금액을 모르는 거래**입니다. #309 이전에 시장가로 나간 주문이 남긴 행이거나, 시장가 주문 시점에 현재가마저 읽지 못한 행입니다(후자는 지금도 생길 수 있고, 기록 시점에 경고 로그가 남습니다). 어느 쪽이든 지우지 않고 그대로 둡니다. `order_assist.load_daily_usage`는 이런 행을 오늘 자로 만나면 일 거래대금 집계를 포기하고 `/advise`를 거부합니다 — 한도가 조용히 넓어지는 것보다 막히는 쪽이 낫기 때문입니다.
 - **AgentReport**: AI 에이전트가 생성한 종목 분석 결과 및 투자 의견을 저장합니다.
 - **Diary**: 사용자의 개인적인 투자 생각이나 일지를 기록합니다.
+- **FilteredSignal**: 2차 필터가 채점했지만 임계값(`SIGNAL_SCORE_THRESHOLD`)에 못 미쳐 상세 분석까지 가지 않은 신호를 남깁니다(#304). AgentReport에는 임계값 이상만 남으므로, 임계값을 조정하려면 걸러낸 쪽의 분포가 필요합니다.
+  - signal 본문 원문은 저장하지 않습니다 — 보존 비용과 개인정보 범위가 커지는 데 비해 점수 분포 집계에는 필요하지 않습니다.
+  - `score`는 NOT NULL입니다. 채점에 실패한 신호는 fail-open으로 통과해 상세 분석까지 가므로 이 테이블에 오지 않고, 본문이 비었거나 직전과 같아 채점을 건너뛴 신호는 기록하지 않습니다.
+  - `FILTERED_SIGNAL_RETENTION_DAYS`(기본 30일)가 지난 행은 매일 04:10(KST) `purge_filtered_signals` 잡이 지웁니다.
+  - 점수 구간별 건수는 `GET /api/v1/db/filtered-signals/histogram`으로 조회합니다(`source`·`stock_name`·`days` 필터).

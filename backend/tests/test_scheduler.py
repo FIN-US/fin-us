@@ -1,5 +1,6 @@
 import pytest
 import asyncio
+import json
 from contextlib import asynccontextmanager
 from datetime import date, datetime
 from types import SimpleNamespace
@@ -7,7 +8,57 @@ from fastapi.testclient import TestClient
 from unittest.mock import MagicMock
 from ..main import app
 from ..redis_state import RedisSchedulerState
+from ..services import SignalScore
 from .test_balance_parser import TRUNCATION_NOTES_BY_REASON
+
+
+class SessionUsedUnexpectedly(BaseException):
+    """UnusedSession이 실제로 불렸을 때 던지는 신호.
+
+    ``Exception``이 아니라 ``BaseException``을 상속하는 이유가 이 클래스의 존재
+    이유다 (PR #337 리뷰). 유일한 사용처인 :func:`_monitor_signal`은 본문 전체가
+    ``except Exception``으로 감싸여 있어, 평범한 ``AssertionError``를 던지면 로그
+    한 줄로 삼켜지고 테스트는 뒤쪽 단언이 어긋나서 **간접적으로만** red가 된다 —
+    그러면 실패 메시지가 "세션을 썼다"가 아니라 "알림이 안 나갔다"로 나온다.
+    ``BaseException``은 그 절을 지나가므로 원인이 그대로 올라온다.
+    """
+
+
+class UnusedSession:
+    """세션을 건드리지 않는 경로에 넘기는 자리표시자 (#319).
+
+    아래 _monitor_signal 테스트들은 perform_stock_analysis를 통째로 대체하므로 세션은
+    한 번도 쓰이지 않는다. 예전에는 ``object()``를 넘겼는데, 그러면 "쓰이지 않는다"가
+    아니라 "무엇이든 통과한다"가 되어 주입 지점의 계약이 이 호출들에서만 사라졌다.
+
+    세 메서드는 ReportSession 계약을 만족하되 불리면 실패한다 — 대체가 풀려 실제
+    저장 경로로 새는 날, 호출부의 ``except Exception``에 삼켜지지 않고 그대로
+    올라온다(:class:`SessionUsedUnexpectedly` 참고).
+    """
+
+    def add(self, instance: object, /) -> None:
+        raise SessionUsedUnexpectedly("이 경로는 세션을 쓰지 않아야 한다")
+
+    def commit(self) -> None:
+        raise SessionUsedUnexpectedly("이 경로는 세션을 쓰지 않아야 한다")
+
+    def refresh(self, instance: object, /) -> None:
+        raise SessionUsedUnexpectedly("이 경로는 세션을 쓰지 않아야 한다")
+
+
+def _scored(is_significant: bool, score: int | None = None) -> SignalScore:
+    """유의성 판정만 고정하는 SignalScore (#298).
+
+    2차 필터는 bool이 아니라 SignalScore를 돌려준다. 점수·근거를 함께 검증하는
+    테스트가 아니라면 판정만 지정하고 나머지는 "채점 정보 없음"(null)으로 둔다.
+    """
+    return SignalScore(
+        score=score,
+        reason=None,
+        uncertainty=None,
+        headline_scores=(),
+        is_significant=is_significant,
+    )
 
 
 def _resolved_broadcast_mock() -> MagicMock:
@@ -172,7 +223,9 @@ async def test_morning_briefing_task_sends_telegram_message(monkeypatch):
     monkeypatch.setattr("backend.scheduler.telegram_notifier.format_morning_briefing", mock_format)
     monkeypatch.setattr("backend.scheduler.telegram_notifier.send_text", mock_send)
 
-    await morning_briefing_task()
+    # 수준을 명시해 redis를 열지 않는다. 인자 없이 부를 때 저장된 수준을 읽는지는
+    # test_morning_briefing_reads_the_saved_level이 따로 고정한다 (#297 자가리뷰).
+    await morning_briefing_task(level="beginner")
 
     assert calls == [["삼성전자"]]
     mock_format.assert_called_once_with(briefing)
@@ -216,9 +269,9 @@ async def test_monitor_market_task_filtering(monkeypatch):
             return "[보유 종목 리스트]\n- 삼성전자 (005930): 10주\n- SK하이닉스 (000660): 2주\n- 현대차 (005380): 1주"
         return f"Latest news for {args['stock_name']}"
     
-    async def mock_check_significance(stock, current, last, *, source, provider):
+    async def mock_score_signal(stock, current, last, *, source, provider):
         _ = source
-        return current != last
+        return _scored(current != last)
 
     mock_perform_analysis = MagicMock(return_value=asyncio.Future())
     mock_perform_analysis.return_value.set_result({"summary": "Mocked", "details": {"decision": "BUY"}})
@@ -236,7 +289,7 @@ async def test_monitor_market_task_filtering(monkeypatch):
         "backend.scheduler.SIGNAL_SOURCES",
         [SignalSource(name="news", mcp_params=object(), tool_name="get_market_news")],
     )
-    monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
+    monkeypatch.setattr("backend.scheduler.score_signal", mock_score_signal)
     monkeypatch.setattr("backend.scheduler.perform_stock_analysis", mock_perform_analysis)
     monkeypatch.setattr("backend.scheduler.manager.broadcast", mock_broadcast)
     monkeypatch.setattr("backend.scheduler.redis_state", unavailable_redis_state)
@@ -337,9 +390,9 @@ async def test_monitor_signal_sends_telegram_for_urgent_analysis(monkeypatch):
         _ = params, name, args
         return "urgent signal"
 
-    async def mock_check_significance(stock, current, last, *, source, provider):
+    async def mock_score_signal(stock, current, last, *, source, provider):
         _ = stock, current, last, source, provider
-        return True
+        return _scored(True)
 
     async def mock_perform_analysis(*args, **kwargs):
         _ = args, kwargs
@@ -356,12 +409,12 @@ async def test_monitor_signal_sends_telegram_for_urgent_analysis(monkeypatch):
     mock_broadcast.return_value.set_result(None)
 
     monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
-    monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
+    monkeypatch.setattr("backend.scheduler.score_signal", mock_score_signal)
     monkeypatch.setattr("backend.scheduler.perform_stock_analysis", mock_perform_analysis)
     monkeypatch.setattr("backend.scheduler.telegram_notifier.send_analysis_alert", mock_telegram)
     monkeypatch.setattr("backend.scheduler.manager.broadcast", mock_broadcast)
 
-    await _monitor_signal("삼성전자", source, object(), state)
+    await _monitor_signal("삼성전자", source, UnusedSession(), state)
 
     mock_telegram.assert_called_once()
     mock_broadcast.assert_called_once()
@@ -379,9 +432,9 @@ async def test_monitor_signal_sends_telegram_for_all_mode_analysis(monkeypatch):
         _ = params, name, args
         return "normal signal"
 
-    async def mock_check_significance(stock, current, last, *, source, provider):
+    async def mock_score_signal(stock, current, last, *, source, provider):
         _ = stock, current, last, source, provider
-        return True
+        return _scored(True)
 
     async def mock_perform_analysis(*args, **kwargs):
         _ = args, kwargs
@@ -398,12 +451,12 @@ async def test_monitor_signal_sends_telegram_for_all_mode_analysis(monkeypatch):
     mock_broadcast.return_value.set_result(None)
 
     monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
-    monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
+    monkeypatch.setattr("backend.scheduler.score_signal", mock_score_signal)
     monkeypatch.setattr("backend.scheduler.perform_stock_analysis", mock_perform_analysis)
     monkeypatch.setattr("backend.scheduler.telegram_notifier.send_analysis_alert", mock_telegram)
     monkeypatch.setattr("backend.scheduler.manager.broadcast", mock_broadcast)
 
-    await _monitor_signal("삼성전자", source, object(), state)
+    await _monitor_signal("삼성전자", source, UnusedSession(), state)
 
     mock_telegram.assert_called_once()
 
@@ -420,9 +473,9 @@ async def test_monitor_signal_skips_telegram_when_alert_mode_off(monkeypatch):
         _ = params, name, args
         return "urgent signal"
 
-    async def mock_check_significance(stock, current, last, *, source, provider):
+    async def mock_score_signal(stock, current, last, *, source, provider):
         _ = stock, current, last, source, provider
-        return True
+        return _scored(True)
 
     async def mock_perform_analysis(*args, **kwargs):
         _ = args, kwargs
@@ -439,12 +492,12 @@ async def test_monitor_signal_skips_telegram_when_alert_mode_off(monkeypatch):
     mock_broadcast.return_value.set_result(None)
 
     monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
-    monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
+    monkeypatch.setattr("backend.scheduler.score_signal", mock_score_signal)
     monkeypatch.setattr("backend.scheduler.perform_stock_analysis", mock_perform_analysis)
     monkeypatch.setattr("backend.scheduler.telegram_notifier.send_analysis_alert", mock_telegram)
     monkeypatch.setattr("backend.scheduler.manager.broadcast", mock_broadcast)
 
-    await _monitor_signal("삼성전자", source, object(), state)
+    await _monitor_signal("삼성전자", source, UnusedSession(), state)
 
     mock_telegram.assert_not_called()
     mock_broadcast.assert_called_once()
@@ -461,9 +514,9 @@ async def test_monitor_signal_keeps_websocket_when_telegram_fails(monkeypatch):
         _ = params, name, args
         return "urgent signal"
 
-    async def mock_check_significance(stock, current, last, *, source, provider):
+    async def mock_score_signal(stock, current, last, *, source, provider):
         _ = stock, current, last, source, provider
-        return True
+        return _scored(True)
 
     async def mock_perform_analysis(*args, **kwargs):
         _ = args, kwargs
@@ -482,12 +535,12 @@ async def test_monitor_signal_keeps_websocket_when_telegram_fails(monkeypatch):
     mock_broadcast.return_value.set_result(None)
 
     monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
-    monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
+    monkeypatch.setattr("backend.scheduler.score_signal", mock_score_signal)
     monkeypatch.setattr("backend.scheduler.perform_stock_analysis", mock_perform_analysis)
     monkeypatch.setattr("backend.scheduler.telegram_notifier.send_analysis_alert", failing_telegram)
     monkeypatch.setattr("backend.scheduler.manager.broadcast", mock_broadcast)
 
-    await _monitor_signal("삼성전자", source, object(), state)
+    await _monitor_signal("삼성전자", source, UnusedSession(), state)
 
     mock_broadcast.assert_called_once()
 
@@ -514,9 +567,9 @@ async def test_monitor_market_task_uses_default_stocks_when_balance_empty(monkey
         monitored_stocks.append(args["stock_name"])
         return f"Latest news for {args['stock_name']}"
 
-    async def mock_check_significance(stock, current, last, *, source, provider):
+    async def mock_score_signal(stock, current, last, *, source, provider):
         _ = stock, current, last, source, provider
-        return False
+        return _scored(False)
 
     mock_perform_analysis = MagicMock(return_value=asyncio.Future())
     mock_perform_analysis.return_value.set_result({"summary": "Mocked"})
@@ -529,7 +582,7 @@ async def test_monitor_market_task_uses_default_stocks_when_balance_empty(monkey
         [SignalSource(name="news", mcp_params=object(), tool_name="get_market_news")],
     )
     monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
-    monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
+    monkeypatch.setattr("backend.scheduler.score_signal", mock_score_signal)
     monkeypatch.setattr("backend.scheduler.perform_stock_analysis", mock_perform_analysis)
     monkeypatch.setattr("backend.scheduler.manager.broadcast", mock_broadcast)
     # 이 테스트의 관심사는 기본 감시 종목 사용 여부이지 Portfolio 동기화가 아니다.
@@ -564,9 +617,9 @@ async def test_monitor_market_task_uses_redis_hash_to_skip_duplicate_news(monkey
             return "[보유 종목 리스트]\n- 삼성전자 (005930): 10주"
         return "Latest news for Samsung"
 
-    async def mock_check_significance(stock, current, last, *, source, provider):
+    async def mock_score_signal(stock, current, last, *, source, provider):
         _ = stock, current, last, source, provider
-        return True
+        return _scored(True)
 
     mock_perform_analysis = MagicMock(return_value=asyncio.Future())
     mock_perform_analysis.return_value.set_result({"summary": "Mocked"})
@@ -579,7 +632,7 @@ async def test_monitor_market_task_uses_redis_hash_to_skip_duplicate_news(monkey
         [SignalSource(name="news", mcp_params=object(), tool_name="get_market_news")],
     )
     monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
-    monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
+    monkeypatch.setattr("backend.scheduler.score_signal", mock_score_signal)
     monkeypatch.setattr("backend.scheduler.perform_stock_analysis", mock_perform_analysis)
     monkeypatch.setattr("backend.scheduler.manager.broadcast", mock_broadcast)
     # 이 테스트의 관심사는 Redis 해시로 뉴스 중복을 걸러내는지이지 Portfolio 동기화가
@@ -620,9 +673,9 @@ async def test_monitor_market_task_processes_multiple_signal_sources_independent
             return "[보유 종목 리스트]\n- 삼성전자 (005930): 10주"
         return f"{name}: {args['stock_name']}"
 
-    async def mock_check_significance(stock, current, last, *, source, provider):
+    async def mock_score_signal(stock, current, last, *, source, provider):
         _ = stock, current, last, source, provider
-        return True
+        return _scored(True)
 
     mock_perform_analysis = MagicMock(return_value=asyncio.Future())
     mock_perform_analysis.return_value.set_result({"summary": "Mocked"})
@@ -632,7 +685,7 @@ async def test_monitor_market_task_processes_multiple_signal_sources_independent
     monkeypatch.setattr("backend.scheduler.SIGNAL_SOURCES", sources)
     monkeypatch.setattr("backend.scheduler.redis_state", fake_redis_state)
     monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
-    monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
+    monkeypatch.setattr("backend.scheduler.score_signal", mock_score_signal)
     monkeypatch.setattr("backend.scheduler.perform_stock_analysis", mock_perform_analysis)
     monkeypatch.setattr("backend.scheduler.manager.broadcast", mock_broadcast)
 
@@ -652,6 +705,79 @@ async def test_monitor_market_task_processes_multiple_signal_sources_independent
         if call.args[0].get("type") == "AGENT_ANALYSIS"
     ]
     assert [payload["source"] for payload in analysis_broadcasts] == ["news", "sns"]
+
+
+@pytest.mark.asyncio
+async def test_agent_analysis_broadcast_carries_no_analysis_body(monkeypatch):
+    """#256: AGENT_ANALYSIS는 갱신 신호만 싣고 분석 전문은 싣지 않습니다.
+
+    WebSocket에는 인증이 없다(#266). Origin 허용목록 검사(#256)로 브라우저발 CSWSH는 막지만
+    Origin 헤더를 보내지 않는 비브라우저 클라이언트는 여전히 붙을 수 있으므로,
+    PORTFOLIO_UPDATE(#229)와 같이 신호만 보내고 클라이언트가 /api/v1/db/reports를
+    재조회하게 한다.
+
+    이 테스트가 잡는 mutation: payload에 "data": analysis_data를 되살리는 회귀.
+    키 이름만 보지 않고 분석 본문 문자열이 payload 어디에도 없는지까지 확인해,
+    "content" 등 다른 키로 같은 내용을 실어 보내는 변형도 함께 잡는다.
+    """
+    from ..scheduler import SignalSource, monitor_market_task
+
+    state = RedisSchedulerState(FakeRedis())
+    secret = "이 문장은 WebSocket으로 나가면 안 됩니다"
+
+    @asynccontextmanager
+    async def fake_redis_state():
+        yield state
+
+    async def mock_run_mcp_tool(params, name, args):
+        if name == "get_balance":
+            return "[보유 종목 리스트]\n- 삼성전자 (005930): 10주"
+        return f"{name}: {args['stock_name']}"
+
+    async def mock_score_signal(stock, current, last, *, source, provider):
+        _ = stock, current, last, source, provider
+        return _scored(True)
+
+    mock_perform_analysis = MagicMock(return_value=asyncio.Future())
+    mock_perform_analysis.return_value.set_result({"summary": secret})
+    mock_broadcast = MagicMock(return_value=asyncio.Future())
+    mock_broadcast.return_value.set_result(None)
+
+    monkeypatch.setattr(
+        "backend.scheduler.SIGNAL_SOURCES",
+        [SignalSource(name="news", mcp_params=object(), tool_name="get_market_news")],
+    )
+    monkeypatch.setattr("backend.scheduler.redis_state", fake_redis_state)
+    monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
+    monkeypatch.setattr("backend.scheduler.score_signal", mock_score_signal)
+    monkeypatch.setattr("backend.scheduler.perform_stock_analysis", mock_perform_analysis)
+    monkeypatch.setattr("backend.scheduler.manager.broadcast", mock_broadcast)
+    # 텔레그램 알림에는 분석 전문이 그대로 가야 한다 — 인증된 채널이고, 이 이슈가 좁힌
+    # 것은 WS payload뿐이다. 실제 전송만 막고 인자는 아래에서 확인한다.
+    mock_alert = MagicMock(return_value=asyncio.Future())
+    mock_alert.return_value.set_result(None)
+    monkeypatch.setattr("backend.scheduler._send_telegram_alert_if_needed", mock_alert)
+
+    await monitor_market_task(watchlist_repo=FakeWatchlistRepo())
+
+    analysis_broadcasts = [
+        call.args[0] for call in mock_broadcast.call_args_list
+        if call.args[0].get("type") == "AGENT_ANALYSIS"
+    ]
+    assert len(analysis_broadcasts) == 1
+    payload = analysis_broadcasts[0]
+
+    assert payload == {
+        "type": "AGENT_ANALYSIS",
+        "stock": "삼성전자",
+        "source": "news",
+        "reason": "significant_change_detected",
+    }
+    assert secret not in json.dumps(payload, ensure_ascii=False)
+
+    # 분석 전문 자체는 계속 만들어져 텔레그램 알림으로 전달된다. 이 단언이 없으면
+    # perform_stock_analysis 호출을 통째로 지워도 위 단언들이 그대로 통과한다.
+    assert mock_alert.call_args.args[2] == {"summary": secret}
 
 
 @pytest.mark.asyncio
@@ -697,9 +823,9 @@ async def test_concurrent_monitor_market_task_runs_once_with_scheduler_lock(monk
             return "[보유 종목 리스트]\n- 삼성전자 (005930): 10주"
         return "Latest news for Samsung"
 
-    async def mock_check_significance(stock, current, last, *, source, provider):
+    async def mock_score_signal(stock, current, last, *, source, provider):
         _ = stock, current, last, source, provider
-        return True
+        return _scored(True)
 
     mock_perform_analysis = MagicMock(return_value=asyncio.Future())
     mock_perform_analysis.return_value.set_result({"summary": "Mocked"})
@@ -712,7 +838,7 @@ async def test_concurrent_monitor_market_task_runs_once_with_scheduler_lock(monk
         [SignalSource(name="news", mcp_params=object(), tool_name="get_market_news")],
     )
     monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
-    monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
+    monkeypatch.setattr("backend.scheduler.score_signal", mock_score_signal)
     monkeypatch.setattr("backend.scheduler.perform_stock_analysis", mock_perform_analysis)
     monkeypatch.setattr("backend.scheduler.manager.broadcast", mock_broadcast)
     # 이 테스트의 관심사는 스케줄러 락에 의한 동시 실행 방지이지 Portfolio 동기화가
@@ -756,8 +882,8 @@ async def test_monitor_market_task_includes_watchlist_stocks(monkeypatch):
         monitored_stocks.append(args["stock_name"])
         return f"news for {args['stock_name']}"
 
-    async def mock_check_significance(stock, current, last, *, source, provider):
-        return False
+    async def mock_score_signal(stock, current, last, *, source, provider):
+        return _scored(False)
 
     monkeypatch.setattr("backend.scheduler.redis_state", fake_redis_state)
     monkeypatch.setattr(
@@ -765,7 +891,7 @@ async def test_monitor_market_task_includes_watchlist_stocks(monkeypatch):
         [SignalSource(name="news", mcp_params=object(), tool_name="get_market_news")],
     )
     monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
-    monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
+    monkeypatch.setattr("backend.scheduler.score_signal", mock_score_signal)
     monkeypatch.setattr("backend.scheduler.manager.broadcast", _resolved_broadcast_mock())
 
     await monitor_market_task(watchlist_repo=FakeWatchlistRepo(["NAVER"]))
@@ -793,8 +919,8 @@ async def test_monitor_market_task_continues_owned_stock_when_watchlist_fails(mo
         monitored_stocks.append(args["stock_name"])
         return "news"
 
-    async def mock_check_significance(stock, current, last, *, source, provider):
-        return False
+    async def mock_score_signal(stock, current, last, *, source, provider):
+        return _scored(False)
 
     monkeypatch.setattr("backend.scheduler.redis_state", fake_redis_state)
     monkeypatch.setattr(
@@ -802,7 +928,7 @@ async def test_monitor_market_task_continues_owned_stock_when_watchlist_fails(mo
         [SignalSource(name="news", mcp_params=object(), tool_name="get_market_news")],
     )
     monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
-    monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
+    monkeypatch.setattr("backend.scheduler.score_signal", mock_score_signal)
     monkeypatch.setattr("backend.scheduler.manager.broadcast", _resolved_broadcast_mock())
 
     await monitor_market_task(watchlist_repo=FailingWatchlistRepo())
@@ -829,8 +955,8 @@ async def test_monitor_market_task_deduplicates_watchlist_and_owned_stocks(monke
         monitored_stocks.append(args["stock_name"])
         return "news"
 
-    async def mock_check_significance(stock, current, last, *, source, provider):
-        return False
+    async def mock_score_signal(stock, current, last, *, source, provider):
+        return _scored(False)
 
     monkeypatch.setattr("backend.scheduler.redis_state", fake_redis_state)
     monkeypatch.setattr(
@@ -838,7 +964,7 @@ async def test_monitor_market_task_deduplicates_watchlist_and_owned_stocks(monke
         [SignalSource(name="news", mcp_params=object(), tool_name="get_market_news")],
     )
     monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
-    monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
+    monkeypatch.setattr("backend.scheduler.score_signal", mock_score_signal)
     monkeypatch.setattr("backend.scheduler.manager.broadcast", _resolved_broadcast_mock())
 
     await monitor_market_task(watchlist_repo=FakeWatchlistRepo(["삼성전자"]))
@@ -865,8 +991,8 @@ async def test_monitor_market_task_uses_default_stocks_only_when_both_empty(monk
         monitored_stocks.append(args["stock_name"])
         return "news"
 
-    async def mock_check_significance(stock, current, last, *, source, provider):
-        return False
+    async def mock_score_signal(stock, current, last, *, source, provider):
+        return _scored(False)
 
     monkeypatch.setattr("backend.scheduler.redis_state", fake_redis_state)
     monkeypatch.setattr(
@@ -874,7 +1000,7 @@ async def test_monitor_market_task_uses_default_stocks_only_when_both_empty(monk
         [SignalSource(name="news", mcp_params=object(), tool_name="get_market_news")],
     )
     monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
-    monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
+    monkeypatch.setattr("backend.scheduler.score_signal", mock_score_signal)
     monkeypatch.setattr("backend.scheduler.manager.broadcast", _resolved_broadcast_mock())
 
     await monitor_market_task(watchlist_repo=FakeWatchlistRepo())
@@ -901,8 +1027,8 @@ async def test_monitor_market_task_watchlist_alone_skips_default_fallback(monkey
         monitored_stocks.append(args["stock_name"])
         return "news"
 
-    async def mock_check_significance(stock, current, last, *, source, provider):
-        return False
+    async def mock_score_signal(stock, current, last, *, source, provider):
+        return _scored(False)
 
     monkeypatch.setattr("backend.scheduler.redis_state", fake_redis_state)
     monkeypatch.setattr(
@@ -910,7 +1036,7 @@ async def test_monitor_market_task_watchlist_alone_skips_default_fallback(monkey
         [SignalSource(name="news", mcp_params=object(), tool_name="get_market_news")],
     )
     monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
-    monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
+    monkeypatch.setattr("backend.scheduler.score_signal", mock_score_signal)
     monkeypatch.setattr("backend.scheduler.manager.broadcast", _resolved_broadcast_mock())
 
     await monitor_market_task(watchlist_repo=FakeWatchlistRepo(["카카오"]))
@@ -1099,8 +1225,8 @@ async def test_monitor_market_task_logs_warning_when_balance_truncated(monkeypat
             return TRUNCATED_BALANCE_TEXT
         return "news"
 
-    async def mock_check_significance(stock, current, last, *, source, provider):
-        return False
+    async def mock_score_signal(stock, current, last, *, source, provider):
+        return _scored(False)
 
     monkeypatch.setattr("backend.scheduler.redis_state", fake_redis_state)
     monkeypatch.setattr(
@@ -1108,7 +1234,7 @@ async def test_monitor_market_task_logs_warning_when_balance_truncated(monkeypat
         [SignalSource(name="news", mcp_params=object(), tool_name="get_market_news")],
     )
     monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
-    monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
+    monkeypatch.setattr("backend.scheduler.score_signal", mock_score_signal)
     monkeypatch.setattr("backend.scheduler.manager.broadcast", _resolved_broadcast_mock())
 
     with caplog.at_level(logging.WARNING, logger=scheduler_module.logger.name):
@@ -1142,8 +1268,8 @@ async def test_monitor_market_task_no_warning_when_balance_not_truncated(monkeyp
         monitored_stocks.append(args["stock_name"])
         return "news"
 
-    async def mock_check_significance(stock, current, last, *, source, provider):
-        return False
+    async def mock_score_signal(stock, current, last, *, source, provider):
+        return _scored(False)
 
     monkeypatch.setattr("backend.scheduler.redis_state", fake_redis_state)
     monkeypatch.setattr(
@@ -1151,7 +1277,7 @@ async def test_monitor_market_task_no_warning_when_balance_not_truncated(monkeyp
         [SignalSource(name="news", mcp_params=object(), tool_name="get_market_news")],
     )
     monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
-    monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
+    monkeypatch.setattr("backend.scheduler.score_signal", mock_score_signal)
     monkeypatch.setattr("backend.scheduler.manager.broadcast", _resolved_broadcast_mock())
 
     with caplog.at_level(logging.WARNING, logger=scheduler_module.logger.name):
@@ -1185,8 +1311,8 @@ async def test_monitor_market_task_still_watches_stocks_returned_despite_truncat
         monitored_stocks.append(args["stock_name"])
         return "news"
 
-    async def mock_check_significance(stock, current, last, *, source, provider):
-        return False
+    async def mock_score_signal(stock, current, last, *, source, provider):
+        return _scored(False)
 
     monkeypatch.setattr("backend.scheduler.redis_state", fake_redis_state)
     monkeypatch.setattr(
@@ -1194,7 +1320,7 @@ async def test_monitor_market_task_still_watches_stocks_returned_despite_truncat
         [SignalSource(name="news", mcp_params=object(), tool_name="get_market_news")],
     )
     monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
-    monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
+    monkeypatch.setattr("backend.scheduler.score_signal", mock_score_signal)
     monkeypatch.setattr("backend.scheduler.manager.broadcast", _resolved_broadcast_mock())
 
     await monitor_market_task(watchlist_repo=FakeWatchlistRepo())
@@ -1223,8 +1349,8 @@ def _make_balance_failure_mocks(monkeypatch, mock_run_mcp_tool_fn):
     async def fake_redis_state():
         yield state
 
-    async def mock_check_significance(stock, current, last, *, source, provider):
-        return False
+    async def mock_score_signal(stock, current, last, *, source, provider):
+        return _scored(False)
 
     monkeypatch.setattr("backend.scheduler.redis_state", fake_redis_state)
     monkeypatch.setattr(
@@ -1232,7 +1358,7 @@ def _make_balance_failure_mocks(monkeypatch, mock_run_mcp_tool_fn):
         [SignalSource(name="news", mcp_params=object(), tool_name="get_market_news")],
     )
     monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool_fn)
-    monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
+    monkeypatch.setattr("backend.scheduler.score_signal", mock_score_signal)
     monkeypatch.setattr("backend.scheduler.manager.broadcast", _resolved_broadcast_mock())
 
     return state
@@ -1611,8 +1737,8 @@ async def test_monitor_market_task_syncs_portfolio_when_balance_succeeds(monkeyp
     def mock_sync_portfolio(balance_text, session, **kwargs):
         sync_calls.append(balance_text)
 
-    async def mock_check_significance(stock, current, last, *, source, provider):
-        return False
+    async def mock_score_signal(stock, current, last, *, source, provider):
+        return _scored(False)
 
     monkeypatch.setattr("backend.scheduler.redis_state", fake_redis_state)
     monkeypatch.setattr(
@@ -1621,7 +1747,7 @@ async def test_monitor_market_task_syncs_portfolio_when_balance_succeeds(monkeyp
     )
     monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
     monkeypatch.setattr("backend.scheduler._sync_portfolio_from_balance", mock_sync_portfolio)
-    monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
+    monkeypatch.setattr("backend.scheduler.score_signal", mock_score_signal)
     monkeypatch.setattr("backend.scheduler.manager.broadcast", _resolved_broadcast_mock())
 
     await monitor_market_task(watchlist_repo=FakeWatchlistRepo())
@@ -1654,8 +1780,8 @@ async def test_monitor_market_task_does_not_sync_when_balance_fails(monkeypatch)
     def mock_sync_portfolio(balance_text, session, **kwargs):
         sync_calls.append(balance_text)
 
-    async def mock_check_significance(stock, current, last, *, source, provider):
-        return False
+    async def mock_score_signal(stock, current, last, *, source, provider):
+        return _scored(False)
 
     monkeypatch.setattr("backend.scheduler.redis_state", fake_redis_state)
     monkeypatch.setattr(
@@ -1664,7 +1790,7 @@ async def test_monitor_market_task_does_not_sync_when_balance_fails(monkeypatch)
     )
     monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
     monkeypatch.setattr("backend.scheduler._sync_portfolio_from_balance", mock_sync_portfolio)
-    monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
+    monkeypatch.setattr("backend.scheduler.score_signal", mock_score_signal)
     monkeypatch.setattr("backend.scheduler.manager.broadcast", _resolved_broadcast_mock())
 
     await monitor_market_task(watchlist_repo=FakeWatchlistRepo(["카카오"]))
@@ -1703,8 +1829,8 @@ async def test_monitor_market_task_broadcasts_portfolio_update_on_sync_success(m
     def mock_sync_portfolio(balance_text, session, **kwargs):
         return 3
 
-    async def mock_check_significance(stock, current, last, *, source, provider):
-        return False
+    async def mock_score_signal(stock, current, last, *, source, provider):
+        return _scored(False)
 
     mock_broadcast = MagicMock(return_value=asyncio.Future())
     mock_broadcast.return_value.set_result(None)
@@ -1716,7 +1842,7 @@ async def test_monitor_market_task_broadcasts_portfolio_update_on_sync_success(m
     )
     monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
     monkeypatch.setattr("backend.scheduler._sync_portfolio_from_balance", mock_sync_portfolio)
-    monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
+    monkeypatch.setattr("backend.scheduler.score_signal", mock_score_signal)
     monkeypatch.setattr("backend.scheduler.manager.broadcast", mock_broadcast)
 
     await monitor_market_task(watchlist_repo=FakeWatchlistRepo())
@@ -1727,7 +1853,7 @@ async def test_monitor_market_task_broadcasts_portfolio_update_on_sync_success(m
     assert payload["holdings_count"] == 3
     # broadcast_at은 ISO 8601로 파싱 가능해야 한다.
     datetime.fromisoformat(payload["broadcast_at"])
-    # 보유 내역 원본(종목명·수량 등)은 인증 없는 WebSocket으로 나가면 안 된다(#65).
+    # 보유 내역 원본(종목명·수량 등)은 인증 없는 WebSocket으로 나가면 안 된다(#266).
     assert "holdings" not in payload
     assert "stocks" not in payload
 
@@ -1758,8 +1884,8 @@ async def test_monitor_market_task_broadcasts_portfolio_update_when_holdings_bec
     def mock_sync_portfolio(balance_text, session, **kwargs):
         return 0
 
-    async def mock_check_significance(stock, current, last, *, source, provider):
-        return False
+    async def mock_score_signal(stock, current, last, *, source, provider):
+        return _scored(False)
 
     mock_broadcast = MagicMock(return_value=asyncio.Future())
     mock_broadcast.return_value.set_result(None)
@@ -1771,7 +1897,7 @@ async def test_monitor_market_task_broadcasts_portfolio_update_when_holdings_bec
     )
     monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
     monkeypatch.setattr("backend.scheduler._sync_portfolio_from_balance", mock_sync_portfolio)
-    monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
+    monkeypatch.setattr("backend.scheduler.score_signal", mock_score_signal)
     monkeypatch.setattr("backend.scheduler.manager.broadcast", mock_broadcast)
 
     await monitor_market_task(watchlist_repo=FakeWatchlistRepo())
@@ -1809,8 +1935,8 @@ async def test_monitor_market_task_no_portfolio_broadcast_when_balance_truncated
             return truncated_text
         return "news"
 
-    async def mock_check_significance(stock, current, last, *, source, provider):
-        return False
+    async def mock_score_signal(stock, current, last, *, source, provider):
+        return _scored(False)
 
     mock_broadcast = MagicMock(return_value=asyncio.Future())
     mock_broadcast.return_value.set_result(None)
@@ -1821,7 +1947,7 @@ async def test_monitor_market_task_no_portfolio_broadcast_when_balance_truncated
         [SignalSource(name="news", mcp_params=object(), tool_name="get_market_news")],
     )
     monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
-    monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
+    monkeypatch.setattr("backend.scheduler.score_signal", mock_score_signal)
     monkeypatch.setattr("backend.scheduler.manager.broadcast", mock_broadcast)
 
     await monitor_market_task(watchlist_repo=FakeWatchlistRepo())
@@ -1849,8 +1975,8 @@ async def test_monitor_market_task_no_portfolio_broadcast_when_marker_absent(mon
             return "응답을 가져왔지만 종목 섹션이 없습니다."
         return "news"
 
-    async def mock_check_significance(stock, current, last, *, source, provider):
-        return False
+    async def mock_score_signal(stock, current, last, *, source, provider):
+        return _scored(False)
 
     mock_broadcast = MagicMock(return_value=asyncio.Future())
     mock_broadcast.return_value.set_result(None)
@@ -1861,7 +1987,7 @@ async def test_monitor_market_task_no_portfolio_broadcast_when_marker_absent(mon
         [SignalSource(name="news", mcp_params=object(), tool_name="get_market_news")],
     )
     monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
-    monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
+    monkeypatch.setattr("backend.scheduler.score_signal", mock_score_signal)
     monkeypatch.setattr("backend.scheduler.manager.broadcast", mock_broadcast)
 
     await monitor_market_task(watchlist_repo=FakeWatchlistRepo())
@@ -1878,8 +2004,8 @@ async def test_monitor_market_task_survives_portfolio_broadcast_failure(monkeypa
     예외도 격리해야 한다. 이 테스트가 잡는 mutation: 브로드캐스트 예외를 격리하지 않으면
     monitor_market_task가 예외를 전파해 await 자체가 실패한다.
 
-    참고: 현재 ConnectionManager.broadcast는 커넥션별 send_json을 각각 try/except로
-    삼켜(ws_manager.py:26-32) 스스로 예외를 던지지 않으므로, 이 시나리오는 실제
+    참고: 현재 ConnectionManager.broadcast는 커넥션별 send_text를 루프 안 try/except로
+    삼켜 스스로 예외를 던지지 않으므로, 이 시나리오는 실제
     운영 경로에서는 아직 발생할 수 없다. 이 테스트는 monitor_market_task 쪽 방어
     코드가 지키는 계약을 문서화하는 성격이며, ws_manager의 예외 처리가 바뀌면
     (예: 커넥션이 아니라 broadcast 자체가 실패를 전파하도록 바뀌면) 실효를 갖는다.
@@ -1899,8 +2025,8 @@ async def test_monitor_market_task_survives_portfolio_broadcast_failure(monkeypa
     def mock_sync_portfolio(balance_text, session, **kwargs):
         return 1
 
-    async def mock_check_significance(stock, current, last, *, source, provider):
-        return False
+    async def mock_score_signal(stock, current, last, *, source, provider):
+        return _scored(False)
 
     async def failing_broadcast(payload):
         raise RuntimeError("websocket down")
@@ -1912,7 +2038,7 @@ async def test_monitor_market_task_survives_portfolio_broadcast_failure(monkeypa
     )
     monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
     monkeypatch.setattr("backend.scheduler._sync_portfolio_from_balance", mock_sync_portfolio)
-    monkeypatch.setattr("backend.scheduler.check_signal_significance", mock_check_significance)
+    monkeypatch.setattr("backend.scheduler.score_signal", mock_score_signal)
     monkeypatch.setattr("backend.scheduler.manager.broadcast", failing_broadcast)
 
     # 예외 없이 완료되어야 한다.
@@ -2086,3 +2212,517 @@ def test_portfolio_endpoint_includes_price_known_flag(client):
             for row in session.exec(select(Portfolio)).all():
                 session.delete(row)
             session.commit()
+
+# --- #298: 신호 점수가 분석까지 흘러가는지 ---------------------------------
+
+
+@pytest.mark.asyncio
+async def test_monitor_signal_passes_signal_score_to_analysis(monkeypatch):
+    """2차 필터가 매긴 점수가 perform_stock_analysis까지 도달해야 한다.
+
+    스케줄러가 score_signal의 결과를 그대로 넘기지 않으면 점수는 로그에만 남고
+    DB·알림에서 사라진다. 여기서는 필터를 monkeypatch하지 않고 llm_chat만
+    갈아끼워 실제 채점 경로를 태운다.
+    """
+    from backend import services
+    from ..scheduler import SignalSource, monitor_market_task
+
+    state = RedisSchedulerState(FakeRedis())
+
+    @asynccontextmanager
+    async def fake_redis_state():
+        yield state
+
+    async def mock_run_mcp_tool(params, name, args):
+        if name == "get_balance":
+            return "[보유 종목 리스트]\n- 삼성전자 (005930): 10주"
+        return "삼성전자, 대형 수주 공시\n증권가 목표주가 상향"
+
+    async def fake_llm_chat(provider, prompt, *, conversation_id=None):
+        return '{"score": 3, "reason": "대형 수주 공시", "headline_scores": [3, 2]}'
+
+    monkeypatch.setattr(services, "llm_chat", fake_llm_chat)
+
+    mock_perform_analysis = MagicMock(return_value=asyncio.Future())
+    mock_perform_analysis.return_value.set_result({"summary": "Mocked"})
+    mock_broadcast = MagicMock(return_value=asyncio.Future())
+    mock_broadcast.return_value.set_result(None)
+
+    monkeypatch.setattr("backend.scheduler.redis_state", fake_redis_state)
+    monkeypatch.setattr(
+        "backend.scheduler.SIGNAL_SOURCES",
+        [SignalSource(name="news", mcp_params=object(), tool_name="get_market_news")],
+    )
+    monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
+    monkeypatch.setattr("backend.scheduler.perform_stock_analysis", mock_perform_analysis)
+    monkeypatch.setattr("backend.scheduler.manager.broadcast", mock_broadcast)
+    monkeypatch.setattr(
+        "backend.scheduler._sync_portfolio_from_balance",
+        lambda balance_text, session, **kwargs: None,
+    )
+
+    await monitor_market_task(watchlist_repo=FakeWatchlistRepo())
+
+    assert mock_perform_analysis.call_count == 1
+    passed = mock_perform_analysis.call_args.kwargs["signal_score"]
+    assert passed is not None
+    assert passed.score == 3
+    assert passed.reason == "대형 수주 공시"
+    assert passed.headline_scores == (3, 2)
+    assert passed.uncertainty == 0.5
+
+
+@pytest.mark.asyncio
+async def test_monitor_signal_passes_none_when_scoring_fails_open(monkeypatch):
+    """채점에 실패하면 분석은 계속하되(fail-open) 점수는 null로 넘어가야 한다.
+
+    실패를 0점으로 넘기면 "모델이 중립이라고 판단함"이라는 없던 사실이 DB에 남는다.
+    """
+    from backend import services
+    from ..scheduler import SignalSource, monitor_market_task
+
+    state = RedisSchedulerState(FakeRedis())
+
+    @asynccontextmanager
+    async def fake_redis_state():
+        yield state
+
+    async def mock_run_mcp_tool(params, name, args):
+        if name == "get_balance":
+            return "[보유 종목 리스트]\n- 삼성전자 (005930): 10주"
+        return "삼성전자 관련 뉴스"
+
+    async def exploding_llm_chat(provider, prompt, *, conversation_id=None):
+        raise RuntimeError("ollama 연결 실패")
+
+    monkeypatch.setattr(services, "llm_chat", exploding_llm_chat)
+
+    mock_perform_analysis = MagicMock(return_value=asyncio.Future())
+    mock_perform_analysis.return_value.set_result({"summary": "Mocked"})
+    mock_broadcast = MagicMock(return_value=asyncio.Future())
+    mock_broadcast.return_value.set_result(None)
+
+    monkeypatch.setattr("backend.scheduler.redis_state", fake_redis_state)
+    monkeypatch.setattr(
+        "backend.scheduler.SIGNAL_SOURCES",
+        [SignalSource(name="news", mcp_params=object(), tool_name="get_market_news")],
+    )
+    monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
+    monkeypatch.setattr("backend.scheduler.perform_stock_analysis", mock_perform_analysis)
+    monkeypatch.setattr("backend.scheduler.manager.broadcast", mock_broadcast)
+    monkeypatch.setattr(
+        "backend.scheduler._sync_portfolio_from_balance",
+        lambda balance_text, session, **kwargs: None,
+    )
+
+    await monitor_market_task(watchlist_repo=FakeWatchlistRepo())
+
+    # fail-open: 분석은 수행된다
+    assert mock_perform_analysis.call_count == 1
+    passed = mock_perform_analysis.call_args.kwargs["signal_score"]
+    assert passed is not None
+    assert passed.is_significant is True
+    assert passed.score is None
+
+
+class FakeFilteredSignalRepo:
+    """걸러진 신호 기록을 메모리에 모으는 repo (#304)."""
+
+    def __init__(self, fail: bool = False):
+        self.recorded = []
+        self.purged = []
+        self._fail = fail
+
+    async def record(self, **kwargs):
+        # 진짜 repo와 같이 아무것도 돌려주지 않는다 — 반환값에 기대는 호출부가
+        # 생기면 fake만 통과하고 프로덕션에서 None이 되는 차이가 난다.
+        if self._fail:
+            raise RuntimeError("filtered signal db unavailable")
+        self.recorded.append(kwargs)
+
+    async def purge_expired(self, retention_days, *, now=None):
+        if self._fail:
+            raise RuntimeError("filtered signal db unavailable")
+        self.purged.append(retention_days)
+        return 7
+
+
+def _filtered_scored(score: int, reason: str | None = None, uncertainty=None) -> SignalScore:
+    """임계값 미만으로 걸러진 채점 결과."""
+    return SignalScore(
+        score=score,
+        reason=reason,
+        uncertainty=uncertainty,
+        headline_scores=(),
+        is_significant=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_monitor_signal_records_filtered_score(monkeypatch):
+    """임계값 미만으로 걸러진 신호의 점수가 구조화돼 남아야 한다 (#304).
+
+    이 값이 로그에만 남으면 grep은 되지만 집계가 안 돼 임계값을 조정할 근거가 없다.
+    """
+    from ..config import SIGNAL_SCORE_THRESHOLD
+    from ..scheduler import SignalSource, monitor_market_task
+
+    state = RedisSchedulerState(FakeRedis())
+
+    @asynccontextmanager
+    async def fake_redis_state():
+        yield state
+
+    async def mock_run_mcp_tool(params, name, args):
+        if name == "get_balance":
+            return "[보유 종목 리스트]\n- 삼성전자 (005930): 10주"
+        return "삼성전자 관련 뉴스"
+
+    async def mock_score_signal(stock, current, last, *, source, provider):
+        return _filtered_scored(1, reason="단순 시황 나열", uncertainty=0.5)
+
+    mock_perform_analysis = MagicMock()
+    monkeypatch.setattr("backend.scheduler.redis_state", fake_redis_state)
+    monkeypatch.setattr(
+        "backend.scheduler.SIGNAL_SOURCES",
+        [SignalSource(name="news", mcp_params=object(), tool_name="get_market_news")],
+    )
+    monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
+    monkeypatch.setattr("backend.scheduler.score_signal", mock_score_signal)
+    monkeypatch.setattr("backend.scheduler.perform_stock_analysis", mock_perform_analysis)
+    monkeypatch.setattr("backend.scheduler.manager.broadcast", _resolved_broadcast_mock())
+    monkeypatch.setattr(
+        "backend.scheduler._sync_portfolio_from_balance",
+        lambda balance_text, session, **kwargs: None,
+    )
+
+    repo = FakeFilteredSignalRepo()
+    await monitor_market_task(
+        watchlist_repo=FakeWatchlistRepo(), filtered_signal_repo=repo
+    )
+
+    assert mock_perform_analysis.call_count == 0
+    assert repo.recorded == [
+        {
+            "stock_name": "삼성전자",
+            "source": "news",
+            "score": 1,
+            "threshold": SIGNAL_SCORE_THRESHOLD,
+            "reason": "단순 시황 나열",
+            "uncertainty": 0.5,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_monitor_signal_does_not_record_passing_score(monkeypatch):
+    """통과한 신호는 이 테이블이 아니라 AgentReport에 남는다 — 두 번 세면 안 된다."""
+    from ..scheduler import SignalSource, monitor_market_task
+
+    state = RedisSchedulerState(FakeRedis())
+
+    @asynccontextmanager
+    async def fake_redis_state():
+        yield state
+
+    async def mock_run_mcp_tool(params, name, args):
+        if name == "get_balance":
+            return "[보유 종목 리스트]\n- 삼성전자 (005930): 10주"
+        return "삼성전자 대형 수주"
+
+    async def mock_score_signal(stock, current, last, *, source, provider):
+        return _scored(True, score=3)
+
+    mock_perform_analysis = MagicMock(return_value=asyncio.Future())
+    mock_perform_analysis.return_value.set_result({"summary": "Mocked"})
+
+    monkeypatch.setattr("backend.scheduler.redis_state", fake_redis_state)
+    monkeypatch.setattr(
+        "backend.scheduler.SIGNAL_SOURCES",
+        [SignalSource(name="news", mcp_params=object(), tool_name="get_market_news")],
+    )
+    monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
+    monkeypatch.setattr("backend.scheduler.score_signal", mock_score_signal)
+    monkeypatch.setattr("backend.scheduler.perform_stock_analysis", mock_perform_analysis)
+    monkeypatch.setattr("backend.scheduler.manager.broadcast", _resolved_broadcast_mock())
+    monkeypatch.setattr(
+        "backend.scheduler._sync_portfolio_from_balance",
+        lambda balance_text, session, **kwargs: None,
+    )
+
+    repo = FakeFilteredSignalRepo()
+    await monitor_market_task(
+        watchlist_repo=FakeWatchlistRepo(), filtered_signal_repo=repo
+    )
+
+    assert mock_perform_analysis.call_count == 1
+    assert repo.recorded == []
+
+
+@pytest.mark.asyncio
+async def test_monitor_signal_does_not_record_unscored_signal(monkeypatch):
+    """채점 자체가 없었던 신호(빈 본문·직전과 동일)는 기록하지 않는다.
+
+    점수 없는 행은 분포에 보탤 정보가 없는데, 감시 루프가 10분마다 도는 탓에
+    그런 행만으로 테이블이 가득 찬다.
+    """
+    from ..scheduler import SignalSource, monitor_market_task
+
+    state = RedisSchedulerState(FakeRedis())
+
+    @asynccontextmanager
+    async def fake_redis_state():
+        yield state
+
+    async def mock_run_mcp_tool(params, name, args):
+        if name == "get_balance":
+            return "[보유 종목 리스트]\n- 삼성전자 (005930): 10주"
+        return "삼성전자 관련 뉴스"
+
+    async def mock_score_signal(stock, current, last, *, source, provider):
+        return _scored(False)
+
+    monkeypatch.setattr("backend.scheduler.redis_state", fake_redis_state)
+    monkeypatch.setattr(
+        "backend.scheduler.SIGNAL_SOURCES",
+        [SignalSource(name="news", mcp_params=object(), tool_name="get_market_news")],
+    )
+    monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
+    monkeypatch.setattr("backend.scheduler.score_signal", mock_score_signal)
+    monkeypatch.setattr("backend.scheduler.manager.broadcast", _resolved_broadcast_mock())
+    monkeypatch.setattr(
+        "backend.scheduler._sync_portfolio_from_balance",
+        lambda balance_text, session, **kwargs: None,
+    )
+
+    repo = FakeFilteredSignalRepo()
+    await monitor_market_task(
+        watchlist_repo=FakeWatchlistRepo(), filtered_signal_repo=repo
+    )
+
+    assert repo.recorded == []
+
+
+@pytest.mark.asyncio
+async def test_monitor_signal_continues_when_recording_fails(monkeypatch):
+    """기록이 실패해도 감시는 다음 종목까지 계속돼야 한다.
+
+    이 값은 사후 분석용이다. 여기서 예외가 올라오면 DB 문제 하나가 그 주기의 감시를
+    통째로 멈춘다 — 놓침 방지(REQ-04)와 정면으로 충돌한다.
+    """
+    from .. import scheduler as scheduler_module
+    from ..scheduler import SignalSource, monitor_market_task
+
+    # 이 테스트는 기록을 실패시키므로 연속 실패 카운터를 올린다. monkeypatch로 깔아 두면
+    # 종료 시 원래 값으로 되돌아가, 뒤에 도는 억제·복구 테스트가 이 테스트의 잔재를
+    # 물려받지 않는다 (실행 순서에 의존하는 상태를 남기지 않는다).
+    monkeypatch.setattr(scheduler_module, "_filtered_signal_failure_streak", 0)
+    monkeypatch.setattr(scheduler_module, "_last_filtered_signal_error", None)
+
+    state = RedisSchedulerState(FakeRedis())
+
+    @asynccontextmanager
+    async def fake_redis_state():
+        yield state
+
+    monitored_stocks = []
+
+    async def mock_run_mcp_tool(params, name, args):
+        if name == "get_balance":
+            return "[보유 종목 리스트]\n- 삼성전자 (005930): 10주"
+        monitored_stocks.append(args["stock_name"])
+        return f"{args['stock_name']} 관련 뉴스"
+
+    async def mock_score_signal(stock, current, last, *, source, provider):
+        return _filtered_scored(0, reason="중립")
+
+    monkeypatch.setattr("backend.scheduler.redis_state", fake_redis_state)
+    monkeypatch.setattr(
+        "backend.scheduler.SIGNAL_SOURCES",
+        [SignalSource(name="news", mcp_params=object(), tool_name="get_market_news")],
+    )
+    monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
+    monkeypatch.setattr("backend.scheduler.score_signal", mock_score_signal)
+    monkeypatch.setattr("backend.scheduler.manager.broadcast", _resolved_broadcast_mock())
+    monkeypatch.setattr(
+        "backend.scheduler._sync_portfolio_from_balance",
+        lambda balance_text, session, **kwargs: None,
+    )
+
+    await monitor_market_task(
+        watchlist_repo=FakeWatchlistRepo(["NAVER"]),
+        filtered_signal_repo=FakeFilteredSignalRepo(fail=True),
+    )
+
+    assert monitored_stocks == ["삼성전자", "NAVER"]
+
+
+@pytest.mark.asyncio
+async def test_purge_filtered_signals_task_deletes_expired_rows():
+    from ..config import FILTERED_SIGNAL_RETENTION_DAYS
+    from ..scheduler import purge_filtered_signals_task
+
+    repo = FakeFilteredSignalRepo()
+
+    await purge_filtered_signals_task(filtered_signal_repo=repo)
+
+    assert repo.purged == [FILTERED_SIGNAL_RETENTION_DAYS]
+
+
+@pytest.mark.asyncio
+async def test_purge_filtered_signals_task_swallows_failure():
+    """정리 실패가 스케줄러 잡을 죽이지 않는다 — 다음 주기에 같은 조건으로 다시 지운다."""
+    from ..scheduler import purge_filtered_signals_task
+
+    await purge_filtered_signals_task(
+        filtered_signal_repo=FakeFilteredSignalRepo(fail=True)
+    )
+
+
+def test_start_scheduler_registers_purge_job(monkeypatch):
+    """정리 잡이 등록되지 않으면 보존 정책이 조용히 사라진다."""
+    from .. import scheduler as scheduler_module
+
+    registered = []
+
+    class FakeScheduler:
+        running = False
+        timezone = scheduler_module.scheduler.timezone
+
+        def add_job(self, func, trigger, **kwargs):
+            registered.append(kwargs.get("id"))
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(scheduler_module, "scheduler", FakeScheduler())
+    scheduler_module.start_scheduler()
+
+    assert "purge_filtered_signals" in registered
+
+
+@pytest.mark.asyncio
+async def test_monitor_signal_records_through_real_repo(monkeypatch):
+    """덕타이핑 fake가 아니라 실제 repo에 넣어 행이 실제로 생기는지 본다 (#304 리뷰).
+
+    _record_filtered_signal은 기록 실패를 삼키고 로그만 남긴다. 그래서 호출 계약이
+    어긋나면(키워드 이름 하나만 달라져도 TypeError다) fake만 쓰는 테스트는 초록인 채
+    프로덕션만 조용히 무기록이 된다. 이 테스트만 그 간극을 덮는다.
+    """
+    from sqlmodel import SQLModel, Session, create_engine, select
+    from sqlmodel.pool import StaticPool
+
+    from ..config import SIGNAL_SCORE_THRESHOLD
+    from ..filtered_signal_repo import SqliteFilteredSignalRepo
+    from ..models import FilteredSignal
+    from ..scheduler import SignalSource, monitor_market_task
+
+    engine = create_engine(
+        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
+    )
+    SQLModel.metadata.create_all(engine)
+    repo = SqliteFilteredSignalRepo(lambda: Session(engine))
+
+    state = RedisSchedulerState(FakeRedis())
+
+    @asynccontextmanager
+    async def fake_redis_state():
+        yield state
+
+    async def mock_run_mcp_tool(params, name, args):
+        if name == "get_balance":
+            return "[보유 종목 리스트]\n- 삼성전자 (005930): 10주"
+        return "삼성전자 관련 뉴스"
+
+    async def mock_score_signal(stock, current, last, *, source, provider):
+        return _filtered_scored(1, reason="단순 시황 나열", uncertainty=0.5)
+
+    monkeypatch.setattr("backend.scheduler.redis_state", fake_redis_state)
+    monkeypatch.setattr(
+        "backend.scheduler.SIGNAL_SOURCES",
+        [SignalSource(name="news", mcp_params=object(), tool_name="get_market_news")],
+    )
+    monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
+    monkeypatch.setattr("backend.scheduler.score_signal", mock_score_signal)
+    monkeypatch.setattr("backend.scheduler.manager.broadcast", _resolved_broadcast_mock())
+    monkeypatch.setattr(
+        "backend.scheduler._sync_portfolio_from_balance",
+        lambda balance_text, session, **kwargs: None,
+    )
+
+    await monitor_market_task(
+        watchlist_repo=FakeWatchlistRepo(), filtered_signal_repo=repo
+    )
+
+    with Session(engine) as session:
+        rows = session.exec(select(FilteredSignal)).all()
+    assert len(rows) == 1
+    assert rows[0].stock_name == "삼성전자"
+    assert rows[0].source == "news"
+    assert rows[0].score == 1
+    assert rows[0].threshold == SIGNAL_SCORE_THRESHOLD
+    assert rows[0].reason == "단순 시황 나열"
+    assert rows[0].uncertainty == 0.5
+
+
+@pytest.mark.asyncio
+async def test_repeated_recording_failures_are_logged_once_per_period(monkeypatch, caplog):
+    """같은 원인의 기록 실패는 첫 건과 주기마다만 error로 남는다 (#304 리뷰).
+
+    기록은 (종목 × 소스)마다 시도하므로, 억제가 없으면 DB 장애 하나가 한 주기에
+    수십 건의 동일한 error를 쌓아 정작 중요한 장애를 묻는다 — 잔고 조회 실패(#185)가
+    이미 같은 이유로 카운터를 두고 있다.
+    """
+    import logging
+
+    from .. import scheduler as scheduler_module
+    from ..scheduler import _record_filtered_signal
+
+    monkeypatch.setattr(scheduler_module, "_filtered_signal_failure_streak", 0)
+    monkeypatch.setattr(scheduler_module, "_last_filtered_signal_error", None)
+
+    repo = FakeFilteredSignalRepo(fail=True)
+    scored = _filtered_scored(1, reason="중립")
+
+    with caplog.at_level(logging.DEBUG, logger="backend.scheduler"):
+        for _ in range(scheduler_module._FILTERED_SIGNAL_ERROR_LOG_PERIOD):
+            await _record_filtered_signal(repo, "삼성전자", "news", scored)
+
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    # 첫 실패 1건 + 주기(20회)째 1건.
+    assert len(errors) == 2
+    assert scheduler_module._filtered_signal_failure_streak == (
+        scheduler_module._FILTERED_SIGNAL_ERROR_LOG_PERIOD
+    )
+
+
+@pytest.mark.asyncio
+async def test_recording_recovery_reports_missed_count(monkeypatch, caplog):
+    """복구되면 그동안 몇 건을 놓쳤는지 남긴다.
+
+    기록되지 않은 신호는 어디에도 흔적이 없다. 놓친 건수를 남기지 않으면 나중에
+    분포에 구멍이 뚫린 구간을 알아볼 방법이 없다.
+    """
+    import logging
+
+    from .. import scheduler as scheduler_module
+    from ..scheduler import _record_filtered_signal
+
+    monkeypatch.setattr(scheduler_module, "_filtered_signal_failure_streak", 0)
+    monkeypatch.setattr(scheduler_module, "_last_filtered_signal_error", None)
+
+    scored = _filtered_scored(1, reason="중립")
+    for _ in range(3):
+        await _record_filtered_signal(
+            FakeFilteredSignalRepo(fail=True), "삼성전자", "news", scored
+        )
+
+    with caplog.at_level(logging.WARNING, logger="backend.scheduler"):
+        await _record_filtered_signal(
+            FakeFilteredSignalRepo(), "삼성전자", "news", scored
+        )
+
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "3건" in warnings[0].getMessage()
+    assert scheduler_module._filtered_signal_failure_streak == 0

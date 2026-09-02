@@ -1,10 +1,17 @@
 import asyncio
 import os
+from typing import Awaitable, cast
 from uuid import uuid4
 
 import pytest
 
-from backend.redis_state import RedisKeys, RedisSchedulerState, signal_hash
+from backend.redis_state import (
+    RedisKeys,
+    RedisSchedulerState,
+    RedisTelegramPollerStore,
+    TelegramPollerState,
+    signal_hash,
+)
 
 
 pytestmark = pytest.mark.asyncio
@@ -22,10 +29,22 @@ async def _redis_client():
 
     client = Redis.from_url(url, decode_responses=True)
     try:
-        await client.ping()
+        # redis-py는 동기·비동기 클라이언트가 명령 시그니처를 공유하느라
+        # ping()을 Awaitable[bool] | bool로 선언한다. 비동기 클라이언트에서는
+        # 항상 앞쪽이지만 체커는 그것을 알 수 없다.
+        await cast(Awaitable[bool], client.ping())
     except Exception as exc:
         await client.aclose()
-        pytest.skip(f"Redis integration server unavailable: {exc}")
+        # 접속 실패를 skip으로 넘기면, CI에서 서비스 컨테이너가 죽거나 주소가 어긋난
+        # 순간 이 파일 전체가 조용히 사라지고 잡은 초록불로 끝난다 — #267이 없애려는
+        # "실 redis 커버리지 0" 상태로 아무 신호 없이 되돌아간다. URL을 준 것은
+        # "여기 redis가 있다"는 선언이므로, 없으면 skip이 아니라 실패다.
+        #
+        # URL 값 자체는 찍지 않는다. redis://user:pass@host 형태면 credential이 그대로
+        # 나가는데 이 레포는 public이라 Actions 로그가 공개다. 지금 CI 값에는
+        # credential이 없지만 나중에 관리형 redis를 secret으로 물리는 순간 샌다.
+        # 진단에 필요한 host:port는 redis-py 예외 메시지가 이미 갖고 있어 잃는 것도 없다.
+        pytest.fail(f"REDIS_INTEGRATION_URL 로 지정한 redis에 접속하지 못했습니다: {exc}")
     return client
 
 
@@ -76,4 +95,31 @@ async def test_real_redis_allows_only_one_concurrent_analysis_lock_holder():
         keys = await redis.keys(f"{prefix}:*")
         if keys:
             await redis.delete(*keys)
+        await redis.aclose()
+
+
+async def test_real_redis_poller_state_survives_a_new_store_instance():
+    """폴러 상태가 실제 redis를 통해 새 인스턴스로 넘어간다 (#248).
+
+    인스턴스 교체 = 프로세스 재시작. FakeRedis는 JSON 왕복과 TTL 적용을 흉내만 내므로
+    실제 서버에서 한 번 확인한다.
+    """
+    redis = await _redis_client()
+    prefix = f"finus:test:{uuid4().hex}"
+    keys = RedisKeys(prefix=prefix)
+
+    try:
+        writer = RedisTelegramPollerStore(redis, keys=keys)
+        await writer.save(TelegramPollerState(offset=44, handled_ahead=frozenset({42, 43})))
+
+        reader = RedisTelegramPollerStore(redis, keys=keys)
+        loaded = await reader.load()
+
+        assert loaded.offset == 44
+        assert loaded.handled_ahead == frozenset({42, 43})
+        assert await redis.ttl(keys.telegram_poller_state()) > 0
+    finally:
+        stale = await redis.keys(f"{prefix}:*")
+        if stale:
+            await redis.delete(*stale)
         await redis.aclose()

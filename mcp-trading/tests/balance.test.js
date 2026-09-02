@@ -88,6 +88,74 @@ test("fetchAllBalance concatenates holdings across multiple continuation pages",
   assert.deepEqual(calls[1], { ctxAreaFk100: "FK1", ctxAreaNk100: "NK1", trCont: "N" });
 });
 
+// 이슈 #210: fetchAllPaged에 pageDelayMs 옵션이 생겼지만 fetchAllBalance는 이를 넘기지
+// 않는다(기본값 0 유지) — PR #200의 수용 기준("fetchAllBalance의 관측 가능한 동작이
+// 전부 불변일 것")을 이어받는 이 작업의 핵심 조건.
+//
+// 이슈 #306: 원래 이 가드는 5페이지의 벽시계 시간이 500ms 미만인지로 판정했지만,
+// 5페이지는 페이지 간격이 4번뿐이라 125ms 미만을 하드코딩하면 총 대기가 임계 아래에
+// 머물러 그대로 통과했다(PR #264 리뷰에서 pageDelayMs: 100 → elapsed=440ms로 재현).
+// 반대로 부하 걸린 CI에서는 지연이 없는데도 500ms를 넘겨 오탐할 여지도 있었다.
+//
+// fetchAllBalance는 pageDelayMs/sleep을 주입받을 방법이 없어 sleep을 직접 스파이할 수
+// 없다. 대신 fetchAllPaged의 기본 sleep이 `(ms) => new Promise((resolve) =>
+// setTimeout(resolve, ms))`라서 호출 시점에 전역 setTimeout을 조회한다는 점(balance.js)을
+// 이용해, 전역 setTimeout을 스파이하고 "스케줄된 지연이 하나도 없다"를 단언한다.
+// pageDelayMs가 0이면 sleep 자체가 호출되지 않으므로, 이 단언은 지연 값의 크기와
+// 무관하게 하드코딩을 잡는다 — 1ms여도 실패한다. 벽시계를 재지 않으니 오탐도 없다.
+//
+// node:test는 한 프로세스에서 여러 테스트가 전역을 공유하므로, 스파이는 반드시
+// try/finally로 원복해 다른 테스트로 새지 않게 한다.
+test("fetchAllBalance schedules no page-to-page delay across multiple pages (regression guard for issues #210, #306)", async () => {
+  const totalPages = 5;
+  let calls = 0;
+  const fetchPage = async () => {
+    calls += 1;
+    return {
+      body: {
+        output1: [{ prdt_name: `종목${calls}`, pdno: String(calls).padStart(6, "0") }],
+        output2: calls === 1 ? [{ tot_evlu_amt: "1" }] : [],
+        ctx_area_fk100: calls < totalPages ? `FK${calls}` : "",
+        ctx_area_nk100: calls < totalPages ? `NK${calls}` : "",
+      },
+      trCont: "F",
+    };
+  };
+
+  // 스파이 구간은 await 하나뿐이지만, 전역 교체이므로 그 사이에 프로세스에서 발생한
+  // setTimeout 호출은 출처와 무관하게 전부 수집된다. 여기서는 fetchPage가 타이머를
+  // 쓰지 않고 node:test의 톱레벨 테스트도 순차 실행이라 fetchAllBalance 외의 타이머가
+  // 낄 여지가 없지만, 나중에 이 테스트에 비동기 요소를 더한다면 무관한 타이머가
+  // "페이지 간 지연"으로 오탐될 수 있다. 같은 이유로 스파이는 원본의
+  // Symbol(nodejs.util.promisify.custom)을 옮기지 않는다 — 현재 이 경로에는
+  // util.promisify(setTimeout)을 쓰는 코드가 없어 문제되지 않는다.
+  const originalSetTimeout = globalThis.setTimeout;
+  const scheduledDelays = [];
+  let result;
+
+  globalThis.setTimeout = function spySetTimeout(handler, delay, ...args) {
+    scheduledDelays.push(delay);
+    return originalSetTimeout.call(this, handler, delay, ...args);
+  };
+
+  try {
+    result = await fetchAllBalance(fetchPage, { maxPages: 20, timeBudgetMs: 60_000 });
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
+
+  assert.equal(calls, totalPages);
+  assert.equal(result.pages, totalPages);
+  assert.equal(result.truncated, "no_cursor");
+  // 누군가 fetchAllBalance에 pageDelayMs를 하드코딩하면 기본 sleep이 그 값으로
+  // setTimeout을 걸고, 그 값이 그대로 여기에 기록된다.
+  assert.deepEqual(
+    scheduledDelays,
+    [],
+    `페이지 간 지연이 하나도 스케줄되지 않아야 함 — 관측된 지연: ${util.inspect(scheduledDelays)}`,
+  );
+});
+
 test("fetchAllBalance stops and reports truncation when the page cap is hit", async () => {
   let calls = 0;
   const fetchPage = async () => {
@@ -564,7 +632,7 @@ test("formatBalanceReport displays unsettled cash fields and account return rate
 - 총 평가금액: 1,210,000원
 - 순자산금액: 1,210,000원
 - 총 손익: 9,000원 (수익률: 🔴 ▲ +2.23%)
-- 거래가능금액: 1,000,000원
+- 예수금: 1,000,000원
 - 정산중 금액(가수도): 1,009,000원
 - 익일 정산예정금액: 790,000원
 - 금일 매수/매도: 210,000원 / 0원
@@ -682,7 +750,7 @@ test("formatBalanceReport highlights negative return rates", () => {
 - 총 평가금액: 1,190,000원
 - 순자산금액: 1,190,000원
 - 총 손익: -10,000원 (수익률: 🔵 ▼ -5.00%)
-- 거래가능금액: 1,000,000원
+- 예수금: 1,000,000원
 - 정산중 금액(가수도): -
 - 익일 정산예정금액: -
 - 금일 매수/매도: - / -

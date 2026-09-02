@@ -59,7 +59,13 @@ services:
       context: .
       dockerfile: finus_nat/Dockerfile
     ports:
-      - "8001:8000"
+      # 무인증 `/v1/chat/completions`를 그대로 받는 LLM 호출 경로라 127.0.0.1에만
+      # 바인딩한다(#285). 전 인터페이스에 열어 두면 #258이 다루는 `/api/v1/analyze`
+      # 레이트리밋을 8001 직접 호출로 우회할 수 있다. 컴포즈 내부에서는 backend가
+      # `NAT_BASE_URL: http://finus-nat:8000` 네트워크 별칭으로 부르므로 영향이 없다.
+      # 게시를 남겨 두는 것은 수동 디버깅과, 호스트에서 백엔드만 띄울 때 쓰는
+      # `.env.example`의 `NAT_BASE_URL=http://127.0.0.1:8001`을 위해서다.
+      - "127.0.0.1:8001:8000"
     volumes:
       - .:/workspace
       # 이미지 빌드 시 설치한 node_modules·venv가 bind mount에 가려지지 않도록 보존
@@ -88,7 +94,13 @@ services:
   redis:
     image: redis:7-alpine
     ports:
-      - "6379:6379"
+      # 인증(`requirepass`)이 없는 인스턴스이고, 대기 주문(`RedisPendingOrderStore`)과
+      # 폴러 offset·`_handled_ahead`(#248), 스케줄러 락처럼 금전 경로의 상태가 들어
+      # 있으므로 127.0.0.1에만 바인딩한다(#285). 게시 자체를 없애지 않는 이유는
+      # 호스트에서 `uvicorn --reload`로 백엔드만 띄우는 흐름이 `.env.example`의
+      # `REDIS_URL=redis://127.0.0.1:6379/0`에 의존하기 때문이다. 컴포즈 내부 통신은
+      # `redis:6379` 별칭을 쓴다.
+      - "127.0.0.1:6379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s

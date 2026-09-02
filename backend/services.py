@@ -3,7 +3,8 @@ import httpx
 import logging
 import re
 from datetime import date
-from typing import Any, Literal, Optional, get_args
+from statistics import pstdev
+from typing import Any, Literal, NamedTuple, Optional, Protocol, Sequence, get_args, overload
 from urllib.parse import quote as _url_quote
 from fastapi import HTTPException
 from anthropic import AsyncAnthropic
@@ -12,15 +13,15 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 from pydantic import ValidationError
-from sqlmodel import Session
 from .config import (
     OPENAI_API_KEY, OPENAI_CHAT_MODEL,
     ANTHROPIC_API_KEY, ANTHROPIC_CHAT_MODEL,
     OLLAMA_API_KEY, OLLAMA_MODEL, OLLAMA_BASE_URL,
     NAT_BASE_URL, NAT_CHAT_MODEL, NAT_CONVERSATION_ID,
     NEWS_MCP_PARAMS, TRADING_MCP_PARAMS,
+    SIGNAL_SCORE_MIN, SIGNAL_SCORE_MAX, SIGNAL_SCORE_THRESHOLD,
 )
-from .schemas import TradingSignal, AnalysisReport
+from .schemas import TradingSignal, AnalysisReport, UrgencyLevel
 from .models import AgentReport
 from .stock_code import (
     _STOCK_CODE_EXTRACT_RE,
@@ -29,6 +30,7 @@ from .stock_code import (
     _is_unresolved_echo,
     _looks_like_stock_code,
 )
+from .pii_mask import mask_pii, unmask_pii
 
 logger = logging.getLogger(__name__)
 _NAT_RESPONSE_LOG_PREVIEW_CHARS = 800
@@ -40,10 +42,21 @@ _NAT_RESPONSE_LOG_PREVIEW_CHARS = 800
 _DERIVED_PROVENANCE_FIELDS = frozenset({"provider", "provider_supports_tools"})
 
 # schemas.AnalysisReport.urgency의 Literal 값에서 파생 — 스키마와 두 곳이 갈라지는 것을 막는다.
-# AnalysisReport.urgency: Literal["low", "normal", "high", "critical"]
-_URGENCY_LEVELS: frozenset[str] = frozenset(
+# AnalysisReport.urgency: UrgencyLevel = Literal["low", "normal", "high", "critical"]
+# 원소 타입을 str이 아니라 UrgencyLevel로 선언해야 `raw in _URGENCY_LEVELS`가
+# 타입 체커에서도 좁히기로 작동한다 — get_args의 반환은 tuple[Any, ...]이라
+# 선언을 붙이지 않으면 frozenset[str]로 추론돼 아래 urgency가 Literal로 좁혀지지 않는다.
+_URGENCY_LEVELS: frozenset[UrgencyLevel] = frozenset(
     get_args(AnalysisReport.model_fields["urgency"].annotation)
 )
+
+# score_signal이 쓸 수 있는 provider — llm_chat의 str 반환 오버로드와 같은 집합이다.
+# "nat"은 여기 없다. NAT는 멀티에이전트 왕복이라 1차 필터의 전제(경량·저비용)를
+# 깨고, 반환값 NatAnswer가 str 서브클래스여서 파싱은 그대로 통과해 버린다 —
+# 즉 잘못 라우팅돼도 증상이 남지 않는다.
+_ScoringProvider = Literal["openai", "anthropic", "ollama"]
+_SCORING_PROVIDERS: frozenset[_ScoringProvider] = frozenset(get_args(_ScoringProvider))
+_DEFAULT_SCORING_PROVIDER: _ScoringProvider = "ollama"
 
 # _STOCK_CODE_EXTRACT_RE, _has_code_digit, _looks_like_stock_code → backend/stock_code.py (#140)
 
@@ -313,13 +326,34 @@ def _analysis_from_toolless_text(raw: str) -> dict[str, Any]:
     ).model_dump()
 
 
+class ReportSession(Protocol):
+    """perform_stock_analysis가 세션에 요구하는 전부 (#319).
+
+    이 함수가 세션으로 하는 일은 리포트 한 행을 넣고 커밋한 뒤 새로 읽는 것뿐이다.
+    선언 타입이 sqlmodel ``Session``이면 질의·트랜잭션 API 전체가 계약이 되어, 세 메서드만
+    갖춘 대역이 주입 지점을 통과하지 못한다 — 그 대역을 통과시키려고 호출부가 cast를 쓰면
+    저장 경로 자체가 검사 밖으로 나간다.
+
+    인자를 위치 전용(``/``)으로 선언한다. 호출부가 전부 위치 인자로 부르므로 이름은
+    계약이 아니고, 이름까지 고정하면 대역이 ``report`` 같은 자기 도메인 이름을 쓰지
+    못한다.
+    """
+
+    def add(self, instance: object, /) -> None: ...
+
+    def commit(self) -> None: ...
+
+    def refresh(self, instance: object, /) -> None: ...
+
+
 async def perform_stock_analysis(
     stock: str,
     provider: str,
-    session: Session,
+    session: ReportSession,
     *,
     trigger_source: str | None = None,
     trigger_signal: str | None = None,
+    signal_score: "SignalScore | None" = None,
     conversation_id: str | None = None,
 ) -> dict[str, Any]:
     """
@@ -331,6 +365,10 @@ async def perform_stock_analysis(
 
     provider=openai/anthropic/ollama: 도구 없이 일반 배경 설명만 생성한다.
     decision·confidence_score는 저장하지 않는다 (DB와 API 응답 모두 null).
+
+    signal_score: 감시 파이프라인의 2차 필터가 매긴 채점 결과 (#298). 필터를 거치지
+    않은 경로(수동 분석, API 직접 호출)는 None이며, 이때 신호 점수 세 필드는 모두
+    null로 남는다 — 0으로 채우지 않는다.
     """
     key = normalize_llm_provider(provider)
     supports_tools = provider_supports_tools(key)
@@ -366,6 +404,15 @@ async def perform_stock_analysis(
     data["provider"] = key
     data["provider_supports_tools"] = supports_tools
 
+    # #298: 2차 필터의 채점 결과도 같은 자리에서 응답·DB 양쪽에 붙인다. 알림
+    # 포매터(telegram_notifier.format_analysis_alert)는 이 세 키만 보고 영향도 줄을
+    # 만들므로, 여기서 빠지면 알림에서 조용히 사라진다.
+    data["signal_score"] = signal_score.score if signal_score is not None else None
+    data["signal_reason"] = signal_score.reason if signal_score is not None else None
+    data["signal_uncertainty"] = (
+        signal_score.uncertainty if signal_score is not None else None
+    )
+
     # 분석 리포트를 데이터베이스에 자동으로 저장
     try:
         stock_code = await _resolve_stock_code(stock)
@@ -378,6 +425,9 @@ async def perform_stock_analysis(
             confidence_score=confidence_score,
             reason=reason,
             provider_supports_tools=supports_tools,
+            signal_score=data["signal_score"],
+            signal_reason=data["signal_reason"],
+            signal_uncertainty=data["signal_uncertainty"],
         )
         session.add(report)
         session.commit()
@@ -473,6 +523,242 @@ def _string_list(value: Any) -> list[str]:
     return []
 
 
+class SignalScore(NamedTuple):
+    """2차 필터가 signal 하나에 대해 내린 채점 결과 (#298).
+
+    ``score``/``reason``/``uncertainty``가 None인 것과 0/""인 것은 다른 상태다.
+    None은 "채점하지 못했다", 0은 "무관/중립이라고 채점했다"이다 (#122·#162).
+    """
+
+    score: Optional[int]
+    reason: Optional[str]
+    uncertainty: Optional[float]
+    headline_scores: tuple[int, ...]
+    is_significant: bool
+
+
+# 채점에 실패했을 때의 결과. is_significant=True가 핵심이다 (REQ-04 fail-open):
+# 경량 LLM이 죽었다고 상세 분석까지 건너뛰면 진짜 대형 악재를 통째로 놓친다.
+# 점수는 null로 남겨 "통과시켰지만 몇 점인지는 모른다"를 사후에 구분할 수 있게 한다.
+_FAIL_OPEN_SIGNAL_SCORE = SignalScore(None, None, None, (), True)
+# 채점 이전에 걸러진 signal(빈 내용, 직전과 동일 내용). LLM을 부르지도 않았으므로 점수가 없다.
+_SKIPPED_SIGNAL_SCORE = SignalScore(None, None, None, (), False)
+
+# reason은 알림 한 줄에 들어간다. 모델이 장문을 뱉으면 잘라 쓴다.
+_SIGNAL_REASON_MAX_CHARS = 120
+# 채점 프롬프트에 넣는 signal 본문 상한 (기존 YES/NO 필터와 동일하게 유지).
+_SIGNAL_SNIPPET_CHARS = 1000
+
+def _coerce_signal_score(value: Any) -> Optional[int]:
+    """임의의 JSON 값을 -3~+3 정수로 좁힌다. 숫자로 볼 수 없으면 None.
+
+    소수(2.5)는 반올림한다 — 프롬프트는 정수를 요구하지만 경량 모델은 자주 어긴다.
+    레인지를 벗어난 값(7, -9)은 버리지 않고 끝값으로 자른다: "아주 큰 호재"라는
+    방향 정보 자체는 유효하고, 이걸 파싱 실패로 처리하면 하필 대형 신호에서만
+    fail-open이 잦아진다. bool은 int의 하위형이라 True가 1점으로 새는 것을 막는다.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, str):
+        try:
+            value = float(value.strip())
+        except ValueError:
+            return None
+    if not isinstance(value, (int, float)):
+        return None
+    if value != value or value in (float("inf"), float("-inf")):  # NaN/±inf
+        return None
+    return max(SIGNAL_SCORE_MIN, min(SIGNAL_SCORE_MAX, int(round(value))))
+
+
+def signal_score_uncertainty(headline_scores: Sequence[int]) -> Optional[float]:
+    """기사별 점수의 표준편차. 기사가 2건 미만이면 None.
+
+    LLM에게 확신도를 직접 묻지 않고 코드로 계산한다. headline_scores도 결국 같은
+    모델의 자기보고이므로 이것이 "객관적 사실"이 되는 것은 아니다 — 다만 항목별로
+    따로 받은 점수의 흩어짐은 한 번에 물어본 확신도보다 다루기 쉽다. 계산 규칙이
+    코드에 고정돼 있어 프롬프트가 바뀌어도 일관되고, 사람이 같은 기사에 매긴 점수로
+    똑같이 계산해 대조할 수 있다.
+
+    모집단 표준편차(pstdev)를 쓴다: 이 기사 묶음은 더 큰 모집단에서 뽑은 표본이
+    아니라 판단에 실제로 쓴 전부다. 1건이면 0.0이 아니라 None이다 — 0.0은
+    "기사들이 완전히 일치했다"는 뜻이고, 1건은 흩어짐을 정의할 수 없는 상태다.
+    """
+    if len(headline_scores) < 2:
+        return None
+    return pstdev(headline_scores)
+
+
+def parse_signal_score(raw: str) -> Optional[SignalScore]:
+    """채점 응답 텍스트에서 SignalScore를 뽑는다. 실패하면 None.
+
+    None은 호출부에서 fail-open(유의미 취급)으로 이어진다. 그래서 "적당히 넘겨
+    짚기"보다 명확히 실패로 떨어뜨리는 편이 안전하다 — 점수를 지어내면 그 값이
+    DB와 평가셋에 그대로 남지만, 실패는 null로 남아 구분된다.
+    """
+    for data in _json_objects_from_text(raw or ""):
+        score = _coerce_signal_score(data.get("score"))
+        if score is None:
+            continue
+
+        raw_reason = data.get("reason")
+        reason: Optional[str] = None
+        if isinstance(raw_reason, str):
+            # 알림 한 줄에 들어가므로 줄바꿈을 접는다.
+            collapsed = " ".join(raw_reason.split())
+            reason = collapsed[:_SIGNAL_REASON_MAX_CHARS] or None
+
+        raw_headlines = data.get("headline_scores")
+        headline_scores: tuple[int, ...] = ()
+        if isinstance(raw_headlines, list):
+            # 숫자로 볼 수 없는 원소는 버린다. 개수가 기사 수와 어긋날 수 있지만,
+            # 표준편차는 "실제로 채점된 기사들"의 흩어짐이면 충분하다.
+            headline_scores = tuple(
+                coerced
+                for coerced in (_coerce_signal_score(item) for item in raw_headlines)
+                if coerced is not None
+            )
+
+        return SignalScore(
+            score=score,
+            reason=reason,
+            uncertainty=signal_score_uncertainty(headline_scores),
+            headline_scores=headline_scores,
+            is_significant=abs(score) >= SIGNAL_SCORE_THRESHOLD,
+        )
+    return None
+
+
+def _signal_snippet(signal_content: str) -> str:
+    """채점에 넣을 본문을 상한까지 자르되, 잘려 나간 마지막 줄은 버린다.
+
+    signal은 기사 한 건이 한 줄이다. 상한에서 반토막 난 줄을 남기면 모델은 그것을
+    온전한 기사 1건으로 세어 점수를 매기고, 그 값이 headline_scores를 거쳐
+    signal_uncertainty(표준편차)까지 오염시킨다.
+
+    상한 안에 줄바꿈이 하나도 없으면 통째로 한 기사이므로 자른 그대로 쓴다 —
+    이때는 버릴 온전한 줄이 없어서, 버리면 채점할 내용 자체가 사라진다.
+    """
+    if len(signal_content) <= _SIGNAL_SNIPPET_CHARS:
+        return signal_content
+
+    truncated = signal_content[:_SIGNAL_SNIPPET_CHARS]
+    head, separator, _partial = truncated.rpartition("\n")
+    return head if separator else truncated
+
+
+def _build_signal_score_prompt(stock: str, source: str, snippet: str) -> str:
+    """채점 프롬프트. 단계별 기준을 모두 적어 모델이 축을 스스로 상상하지 않게 한다.
+
+    레인지를 -3~+3으로 좁게 잡은 것은 의도다. 0~100 같은 넓은 축에서 경량 모델은
+    같은 기사에 매번 다른 점수를 준다 — 좁은 축은 재현성을 사고, 잃는 해상도는
+    이 필터가 애초에 필요로 하지 않는다.
+    """
+    headline_count = len([line for line in snippet.splitlines() if line.strip()])
+    return (
+        f"당신은 전문 주식 분석가입니다. 다음은 '{stock}' 종목에 대한 최신 외부 signal입니다.\n"
+        f"signal 출처: {source}\n\n"
+        f"--- signal 내용 ---\n{snippet}\n"
+        "------------------\n\n"
+        f"이 signal이 '{stock}'의 투자 판단에 미치는 영향을 아래 기준으로 채점하십시오.\n"
+        "+3: 실적 서프라이즈, 대형 수주·계약, M&A 등 명확한 대형 호재\n"
+        "+2: 방향이 분명한 호재 (신규 대형 고객사, 의미 있는 가이던스 상향 등)\n"
+        "+1: 약한 호재 또는 우호적인 분위기\n"
+        " 0: 투자 판단과 무관하거나 중립 (홍보성 기사, 단순 시황 나열, 반복되는 내용)\n"
+        "-1: 약한 악재\n"
+        "-2: 방향이 분명한 악재 (가이던스 하향, 주요 고객 이탈 등)\n"
+        "-3: 실적 쇼크, 대형 소송·제재, 회계 이슈 등 명확한 대형 악재\n\n"
+        f"signal 내용은 기사 {headline_count}건이 줄 단위로 이어져 있습니다. "
+        "headline_scores에는 각 기사를 같은 기준으로 따로 채점한 정수를 원문 순서대로 담으십시오.\n\n"
+        "반드시 아래 JSON 객체 하나만 출력하고 다른 설명은 붙이지 마십시오.\n"
+        '{"score": <-3~3 정수>, "reason": "<점수 근거 한 줄, 40자 이내>", '
+        '"headline_scores": [<-3~3 정수>, ...]}'
+    )
+
+
+async def score_signal(
+    stock: str,
+    signal_content: str,
+    last_signal_content: Optional[str] = None,
+    *,
+    source: str = "signal",
+    provider: str = "ollama",
+) -> SignalScore:
+    """외부 signal을 -3~+3으로 채점한다 (#298).
+
+    로컬 초경량 모델(예: gemma4) 또는 경량 API 모델(예: gpt-5.4-mini)을 1차
+    필터로 사용해 비용과 정확도의 균형을 맞춘다.
+
+    ``provider``는 ``_SCORING_PROVIDERS``의 값이어야 한다. 그 밖의 값은 경고를
+    남기고 기본값으로 되돌린다 — llm_chat은 매칭되지 않는 provider_key를 전부
+    NAT로 보내므로, 그대로 넘기면 오타 하나가 채점을 멀티에이전트 왕복으로
+    바꿔 놓는다.
+
+    호출·파싱에 실패하면 예외를 올리지 않고 fail-open한다 — 유의미로 통과시키되
+    점수는 null로 남긴다 (REQ-04 놓침 방지).
+    """
+    if not signal_content:
+        return _SKIPPED_SIGNAL_SCORE
+
+    if signal_content == last_signal_content:
+        return _SKIPPED_SIGNAL_SCORE
+
+    prompt = _build_signal_score_prompt(stock, source, _signal_snippet(signal_content))
+
+    # provider의 출처는 환경변수(scheduler.FILTER_PROVIDER)라 검증된 적이 없다.
+    # llm_chat의 마지막 줄은 catch-all이므로 매칭되지 않는 값은 전부 NAT로 떨어진다
+    # — 아래 fail-open은 호출이 실패했을 때의 장치이지 오라우팅을 막지 못한다.
+    # 계약 밖의 값은 여기서 기본값으로 되돌리고 로그를 남긴다.
+    if provider in _SCORING_PROVIDERS:
+        scoring_provider = provider
+    else:
+        logger.warning(
+            "signal 채점 provider=%r는 지원 목록 %s 밖입니다 — %r로 되돌립니다. "
+            "NEWS_FILTER_PROVIDER 설정을 확인하세요.",
+            provider,
+            sorted(_SCORING_PROVIDERS),
+            _DEFAULT_SCORING_PROVIDER,
+        )
+        scoring_provider = _DEFAULT_SCORING_PROVIDER
+
+    try:
+        # 설정된 provider(ollama, openai 등)에 따라 경량 모델 호출
+        raw = await llm_chat(scoring_provider, prompt)
+    except Exception as e:
+        logger.error(
+            "signal 채점 호출 실패 (%s, %s, %s): %s — 유의미로 통과시킵니다(fail-open)",
+            source,
+            stock,
+            provider,
+            e,
+        )
+        return _FAIL_OPEN_SIGNAL_SCORE
+
+    parsed = parse_signal_score(str(raw))
+    if parsed is None:
+        logger.warning(
+            "signal 채점 응답을 파싱하지 못했습니다 [%s:%s] (Provider: %s) — "
+            "유의미로 통과시킵니다(fail-open)",
+            source,
+            stock,
+            provider,
+        )
+        return _FAIL_OPEN_SIGNAL_SCORE
+
+    logger.info(
+        "signal 채점 [%s:%s] (Provider: %s): score=%s, 유의미=%s, 기사별=%s, 흩어짐=%s, 근거=%s",
+        source,
+        stock,
+        provider,
+        parsed.score,
+        parsed.is_significant,
+        list(parsed.headline_scores),
+        parsed.uncertainty,
+        parsed.reason,
+    )
+    return parsed
+
+
 async def check_signal_significance(
     stock: str,
     signal_content: str,
@@ -481,46 +767,23 @@ async def check_signal_significance(
     source: str = "signal",
     provider: str = "ollama"
 ) -> bool:
-    """
-    외부 signal을 분석하여 투자 관점에서 유의미한 변화가 있는지 판단합니다.
-    로컬 초경량 모델(예: gemma4) 또는 경량 API 모델(예: gpt-5.4-mini)을 
-    1차 필터로 사용하여 비용과 정확도의 균형을 맞출 수 있습니다.
-    """
-    if not signal_content:
-        return False
-    
-    if signal_content == last_signal_content:
-        return False
+    """외부 signal이 투자 관점에서 유의미한 변화인지 판단합니다.
 
-    # signal 텍스트 상단 1000자 사용
-    snip_content = signal_content[:1000]
+    판정은 :func:`score_signal`의 점수를 ``|score| >= SIGNAL_SCORE_THRESHOLD``로
+    환산한 것이다 (#298 이전에는 경량 LLM에 YES/NO를 직접 물었다).
 
-    prompt = (
-        f"당신은 전문 주식 분석가입니다. 다음은 '{stock}' 종목에 대한 최신 외부 signal입니다.\n"
-        f"signal 출처: {source}\n\n"
-        f"--- signal 내용 ---\n{snip_content}\n"
-        "------------------\n\n"
-        "이 signal이 기존 상황을 바꿀 만큼 유의미한 새로운 투자 정보"
-        "(실적 발표, 계약, M&A, 수급 변화, 평판 리스크, 급격한 여론 변화 등)를 포함하고 있습니까?\n"
-        "중요한 변화가 있다면 'YES', 사소하거나 반복되는 signal이라면 'NO'라고만 답하세요.\n"
-        "답변은 반드시 다른 설명 없이 'YES' 또는 'NO' 중 하나로만 대답하십시오."
+    점수·근거·불확실성까지 필요한 호출부는 :func:`score_signal`을 직접 쓴다 —
+    감시 파이프라인(scheduler)이 그렇게 한다. 이 함수는 "유의미한가"만 알면 되는
+    호출부를 위한 얇은 래퍼다.
+    """
+    scored = await score_signal(
+        stock,
+        signal_content,
+        last_signal_content,
+        source=source,
+        provider=provider,
     )
-
-    try:
-        # 설정된 provider(ollama, openai 등)에 따라 경량 모델 호출
-        result = await llm_chat(provider, prompt)
-        is_significant = "YES" in result.upper()
-        logger.info(
-            "signal 유의미성 확인 [%s:%s] (Provider: %s): %s",
-            source,
-            stock,
-            provider,
-            is_significant,
-        )
-        return is_significant
-    except Exception as e:
-        logger.error(f"signal 유의미성 확인 중 오류 발생 ({source}, {stock}, {provider}): {e}")
-        return True
+    return scored.is_significant
 
 
 async def check_news_significance(
@@ -597,6 +860,126 @@ async def _llm_ollama_chat(user_msg: str) -> str:
     return (choice or "").strip()
 
 
+class NatToolUse(NamedTuple):
+    """각주에 실을 도구 한 건 — 도구명과 결과 상태 (#260).
+
+    finus_nat이 도구 강제 원장에서 만들어 보내는
+    ``{"name": ..., "ok": ..., "empty": ...}``에 대응한다.
+
+    ``ok=False``는 도구를 호출했지만 오류 응답을 받았다는 뜻이고,
+    ``ok=True, empty=True``는 호출은 성공했지만 결과 집합이 비었다는 뜻이다(#209).
+    셋 다 각주에서 구분해 표시해야 한다 — 실패나 빈 결과를 그냥 "확인한 자료"로
+    보여주면 사용자는 답변이 그 데이터에 근거했다고 읽지만 실제로는 아니다.
+
+    ``empty``에 기본값이 있는 이유: 이 필드를 싣지 않는 구버전 finus_nat과 섞일 수
+    있다. 기본값 ``False``는 "빈 결과라는 관측이 없음"이지 "데이터가 있었음"이 아니다.
+    """
+
+    name: str
+    ok: bool
+    empty: bool = False
+
+
+class NatAnswer(str):
+    """NAT 답변 텍스트 + 추론 메타데이터 (#260).
+
+    ``str`` 서브클래스인 이유: ``llm_chat("nat", ...)``의 반환값은 scheduler의
+    ``analysis_from_nat_text``, Telegram ``/earnings`` 핸들러 등 여러 곳에서 이미
+    문자열로 소비된다. 별도 타입을 새로 반환하면 그 호출부를 전부 고쳐야 하고,
+    "기존 응답 파서를 건드리지 않는다"는 이 작업의 전제가 깨진다. ``str``을
+    상속하면 기존 호출부는 그대로 동작하고, 각주가 필요한 호출부만 두 속성을 읽는다.
+
+    두 속성은 NAT 응답 페이로드의 **최상위 필드**에서 그대로 온다 — 답변 텍스트
+    (``choices[0].message.content``)를 파싱해 만들지 않는다 (#129와 같은 원칙).
+
+    **주의 — 이 타입은 문자열 연산 한 번이면 소실된다.** ``str`` 서브클래스라
+    ``strip()``·``re.sub()``·f-string 등의 결과는 전부 plain ``str``이다. 답변
+    텍스트를 가공하는 계층이 ``llm_chat`` 경계 안에 새로 생기면
+    :meth:`with_text`로 갈아끼워야 한다. 그냥 반환하면 backend는 각주를 **조용히**
+    생략하도록 설계돼 있어(로그도 예외도 없다) 기능만 사라진다.
+    """
+
+    routed_agent: str | None
+    tools_used: tuple[NatToolUse, ...]
+
+    def __new__(
+        cls,
+        text: str,
+        *,
+        routed_agent: str | None = None,
+        tools_used: tuple[NatToolUse, ...] = (),
+    ) -> "NatAnswer":
+        answer = super().__new__(cls, text)
+        answer.routed_agent = routed_agent
+        answer.tools_used = tuple(tools_used)
+        return answer
+
+    def with_text(self, text: str) -> "NatAnswer":
+        """텍스트만 교체하고 추론 메타데이터를 유지한다 (#260).
+
+        ``llm_chat`` 안에서 응답 텍스트를 가공하는 계층(#230 PII 역치환 등)이 추가될 때
+        ``return transform(raw)``로 끝내면 서브클래스가 소실된다. 그 자리에
+        ``raw.with_text(transform(raw))``를 쓰면 각주가 살아남는다.
+        """
+        return NatAnswer(text, routed_agent=self.routed_agent, tools_used=self.tools_used)
+
+
+# 각주에 실을 도구 개수 상한. tools_used는 다른 서비스(NAT)가 보내는 값이라
+# 개수·길이가 backend에서 보장되지 않는다 — 비정상적으로 긴 목록이 텔레그램 메시지의
+# 본문 자리를 밀어내지 않도록 파싱 단계에서 잘라 둔다.
+NAT_MAX_TOOLS_USED = 16
+
+
+def _nat_reasoning_trace_from_payload(
+    payload: dict[str, Any],
+) -> tuple[str | None, tuple[NatToolUse, ...]]:
+    """NAT 응답 최상위의 ``routed_agent``/``tools_used``를 읽는다 (#260).
+
+    두 필드는 finus_nat이 supervisor의 라우팅 결과와 도구 강제 원장에서 만들어
+    실어 보내는 값이다. 여기서는 **읽기만** 한다 — 답변 텍스트를 뒤져서 도구명이나
+    에이전트명을 추측하지 않는다.
+
+    ``tools_used``는 ``[{"name": str, "ok": bool, "empty": bool}]`` 형태다
+    (``empty``는 구버전 finus_nat에는 없다). 필드가 없거나 타입이
+    어긋나면 조용히 비운다. 두 필드를 싣지 않는 구버전 finus_nat과 혼용될 수 있고,
+    각주는 답변에 덧붙는 부가 정보이므로 없다고 해서 응답 자체를 실패로 만들 이유가
+    없다. 개수는 :data:`NAT_MAX_TOOLS_USED`로 자른다.
+    """
+    routed_raw = payload.get("routed_agent")
+    routed_agent = routed_raw.strip() if isinstance(routed_raw, str) else ""
+
+    tools_raw = payload.get("tools_used")
+    tools_used: list[NatToolUse] = []
+    seen: set[str] = set()
+    if isinstance(tools_raw, list):
+        for item in tools_raw:
+            if not isinstance(item, dict):
+                continue
+            name = item.get("name")
+            if not isinstance(name, str) or not name.strip():
+                continue
+            name = name.strip()
+            # 호출 순서 유지 + 중복 제거. finus_nat이 이미 그렇게 보내지만,
+            # 신뢰 경계 밖의 값이므로 backend에서도 같은 불변식을 세운다.
+            if name in seen:
+                continue
+            seen.add(name)
+            # ok/empty가 빠졌거나 bool이 아니면 각각 실패·비어있지 않음으로 본다.
+            # ok는 근거를 과장하지 않는 쪽으로 기울고, empty는 관측이 없다는 뜻이므로
+            # ok=False와 겹쳐 "실패인데 빈 결과"가 되지 않도록 ok일 때만 읽는다.
+            ok = item.get("ok") is True
+            tools_used.append(NatToolUse(name, ok, ok and item.get("empty") is True))
+            if len(tools_used) >= NAT_MAX_TOOLS_USED:
+                logger.warning(
+                    "NAT tools_used가 %d개를 넘어 잘라냅니다 (수신 %d개)",
+                    NAT_MAX_TOOLS_USED,
+                    len(tools_raw),
+                )
+                break
+
+    return (routed_agent or None), tuple(tools_used)
+
+
 def _nat_message_from_payload(payload: dict[str, Any]) -> str:
     if "error" in payload:
         err = payload["error"]
@@ -632,7 +1015,7 @@ def _log_nat_response(resp: httpx.Response) -> None:
         )
 
 
-async def _llm_nat_chat(user_msg: str, *, conversation_id: str | None = None) -> str:
+async def _llm_nat_chat(user_msg: str, *, conversation_id: str | None = None) -> NatAnswer:
     url = f"{NAT_BASE_URL}/v1/chat/completions"
     cid = (conversation_id or NAT_CONVERSATION_ID).strip()
     headers = {
@@ -681,7 +1064,7 @@ async def _llm_nat_chat(user_msg: str, *, conversation_id: str | None = None) ->
         raise HTTPException(status_code=502, detail="NAT 응답이 JSON 객체가 아닙니다.")
 
     try:
-        return _nat_message_from_payload(payload)
+        message = _nat_message_from_payload(payload)
     except (KeyError, IndexError, TypeError) as exc:
         body_snip = resp.text[:1200] if resp.text else ""
         raise HTTPException(
@@ -691,6 +1074,11 @@ async def _llm_nat_chat(user_msg: str, *, conversation_id: str | None = None) ->
                 f"body[:1200]={body_snip!r}"
             ),
         ) from exc
+
+    # #260: 답변 텍스트는 위에서 기존 파서가 그대로 뽑았고, 여기서는 추론 메타데이터만
+    # 덧붙인다. NatAnswer는 str이므로 이 반환값을 문자열로 쓰는 기존 호출부는 불변이다.
+    routed_agent, tools_used = _nat_reasoning_trace_from_payload(payload)
+    return NatAnswer(message, routed_agent=routed_agent, tools_used=tools_used)
 
 
 async def run_mcp_tool(
@@ -734,6 +1122,24 @@ async def run_mcp_tool(
             status_code=500,
             detail=f"데이터 공급원({tool_name}) 연결 실패: {exc}",
         ) from exc
+
+
+def short_error(exc: BaseException) -> str:
+    """예외를 사용자 메시지에 넣을 수 있는 짧은 한 줄로 만든다.
+
+    ``run_mcp_tool``이 올리는 HTTPException은 사유가 ``detail``에 들어 있고, 그 값은
+    MCP 서브프로세스의 stderr까지 실려 수천 자가 되기도 한다. 그대로 사용자 메시지에
+    박으면 텔레그램 4096자 한도에 걸려 **거부 메시지 자체가 전송되지 않는다** — 가장
+    알려야 할 순간에 아무 말도 못 하게 되는 것이라 300자에서 자른다.
+
+    telegram_commands(주문·조회 명령)와 order_assist(주문 보조)가 함께 쓴다. 두 곳이
+    각자 자르면 한도가 갈라지므로 예외를 실제로 만들어 올리는 이 모듈에 둔다.
+    """
+    raw = getattr(exc, "detail", str(exc))
+    text = str(raw or "").strip()
+    if not text:
+        text = exc.__class__.__name__
+    return text[:300]
 
 
 def analysis_from_nat_text(raw: str, stock: str) -> dict[str, Any]:
@@ -814,19 +1220,56 @@ def normalize_llm_provider(
     )
 
 
+# provider별 반환 타입 오버로드 (#260): "nat"만 추론 메타데이터를 실은 NatAnswer를
+# 돌려준다. NatAnswer는 str 서브클래스라 단순 유니온(`str | NatAnswer`)으로는 타입
+# 체커에게 아무 정보도 못 준다 — str로 접히기 때문이다. Literal 오버로드로 갈라야
+# routed_agent/tools_used를 읽는 호출부가 체커의 도움을 받는다.
+@overload
+async def llm_chat(
+    provider_key: Literal["nat"],
+    user_msg: str,
+    *,
+    conversation_id: str | None = None,
+) -> NatAnswer: ...
+
+
+@overload
+async def llm_chat(
+    provider_key: Literal["openai", "anthropic", "ollama"],
+    user_msg: str,
+    *,
+    conversation_id: str | None = None,
+) -> str: ...
+
+
 async def llm_chat(
     provider_key: Literal["openai", "anthropic", "nat", "ollama"],
     user_msg: str,
     *,
     conversation_id: str | None = None,
 ) -> str:
+    """4개 provider 경로(OpenAI/Anthropic/Ollama/NAT)의 단일 진입점.
+
+    #230(F-17/NFR-05): 외부로 나가는 프롬프트는 반드시 이 함수를 거쳐야 마스킹된다.
+    _llm_openai_chat 등 provider별 구현을 직접 호출하는 새 경로가 생기면 마스킹
+    계층을 우회한다 — backend/tests/test_services.py의 회귀 테스트가 이를 잡는다.
+
+    mask_pii/unmask_pii는 이 함수 지역 변수(mapping)로만 존재한다. 요청마다 새로
+    만들어지므로, llm_chat이 asyncio.gather 등으로 동시에 여러 번 호출돼도 서로의
+    매핑을 덮어쓰지 않는다.
+    """
+    masked_msg, mapping = mask_pii(user_msg)
+
     if provider_key == "openai":
-        return await _llm_openai_chat(user_msg)
-    if provider_key == "anthropic":
-        return await _llm_anthropic_chat(user_msg)
-    if provider_key == "ollama":
-        return await _llm_ollama_chat(user_msg)
-    return await _llm_nat_chat(user_msg, conversation_id=conversation_id)
+        raw = await _llm_openai_chat(masked_msg)
+    elif provider_key == "anthropic":
+        raw = await _llm_anthropic_chat(masked_msg)
+    elif provider_key == "ollama":
+        raw = await _llm_ollama_chat(masked_msg)
+    else:
+        raw = await _llm_nat_chat(masked_msg, conversation_id=conversation_id)
+
+    return unmask_pii(raw, mapping)
 
 
 # llm_chat의 분기와 함께 유지한다: NAT처럼 도구(MCP/KIS/뉴스)를 호출할 수 있는 경로로

@@ -134,17 +134,26 @@ backend를 기다리지 않아도 됩니다. backend가 없는 동안에는 `/ap
 `depends_on`을 뺀 위 설계가 그대로 무효가 됩니다.
 
 `/api/v1/ws`(WebSocket)는 `map $http_upgrade $connection_upgrade`로 업그레이드 헤더를
-조건부 중계합니다. `/api/v1/analyze`는 LLM 호출로 오래 걸려 `proxy_read_timeout`을 300s로
+조건부 중계합니다. **nginx 중계가 정상이어도 backend가 403을 줄 수 있습니다** — backend는
+핸드셰이크의 `Origin`을 `ALLOW_ORIGINS`와 대조하고 불일치 시 연결을 거부합니다(#256, 아래
+참고). nginx는 `Origin`을 그대로 넘기므로 브라우저가 보낸 페이지 오리진이 그대로 검사
+대상이 됩니다. `/api/v1/analyze`는 LLM 호출로 오래 걸려 `proxy_read_timeout`을 300s로
 올려 뒀습니다.
 
-> **CORS 설정은 아직 남겨 둡니다.** `ApiClient`가 베이스 URL 없이 상대 경로(`/api/v1/...`)로
-> 요청하므로 재빌드된 번들부터는 브라우저가 항상 대시보드와 같은 오리진을 부르고, `backend`의
-> `CORSMiddleware`·`ALLOW_ORIGINS`는 불필요해집니다. 다만 제거는 **재빌드가 랜딩된 뒤 후속
-> PR**로 뺐습니다 — 지금 걷어내면 아직 8000번을 직접 호출하는 현행 번들이 곧바로 차단됩니다.
-> 같은 이유로 `backend`의 8000 포트를 호스트 루프백에만 바인딩하는 것도 후속 PR입니다.
-> 그전까지는 backend의 허용 오리진에 `http://localhost:8080`이 포함돼야 하고
+> **`CORSMiddleware`는 아직 남겨 둡니다 — 단 `ALLOW_ORIGINS`는 그 뒤에도 계속 필요합니다.**
+> `ApiClient`가 베이스 URL 없이 상대 경로(`/api/v1/...`)로 요청하므로 재빌드된 번들부터는
+> 브라우저가 항상 대시보드와 같은 오리진을 부르고, **HTTP 쪽** CORS 부담은 사라집니다. 다만
+> `CORSMiddleware` 제거는 **재빌드가 랜딩된 뒤 후속 PR**로 뺐습니다 — 지금 걷어내면 아직
+> 8000번을 직접 호출하는 현행 번들이 곧바로 차단됩니다.
+>
+> **`ALLOW_ORIGINS`는 #246 이후에도 지우면 안 됩니다.** WebSocket(`/api/v1/ws`) 핸드셰이크의
+> Origin 허용목록을 겸하기 때문입니다(#256). `CORSMiddleware`는 WebSocket 핸드셰이크에
+> 적용되지 않아, 이 검사가 없으면 임의 사이트가 브로드캐스트를 수신할 수 있습니다
+> (Cross-Site WebSocket Hijacking). 따라서 `http://localhost:8080`은 계속 포함돼야 하고
 > (`backend/config.py`의 `ALLOW_ORIGINS` 기본값, `.env.example` 참고), 다른 호스트(예:
-> Tailscale 주소)로 시연할 때는 해당 오리진을 `ALLOW_ORIGINS`에 추가하세요.
+> Tailscale 주소)로 시연할 때는 해당 오리진을 `ALLOW_ORIGINS`에 추가해야 합니다. **#246
+> 작업 시 이 변수를 정리 대상으로 삼지 마세요** — 지우면 화면은 정상적으로 뜨는데 실시간
+> 알림 연결만 403으로 죽어서 원인을 찾기 어렵습니다.
 >
 > 베이스 URL을 상대 경로로 두면 포트를 고정하는 오리진 해석(`{Scheme}://{Host}:8000`)과 달리
 > 443 뒤에서도 깨지지 않습니다. 다만 선행 슬래시가 붙은 root-relative 경로라 **서브패스까지
@@ -155,8 +164,10 @@ backend를 기다리지 않아도 됩니다. backend가 없는 동안에는 `/ap
 > `ApiClient.DefaultBaseUrl`은 에디터에서만 `http://localhost:8000`으로 폴백합니다 —
 > 에디터로 테스트하려면 backend를 호스트에서 8000번으로 띄워 두세요.
 >
-> `backend`의 8000 포트는 호스트 루프백에만 바인딩됩니다(`docker-compose.yml`). 브라우저는
-> 8080 프록시로, nginx는 compose 내부 네트워크로 backend에 닿으므로 기능 영향은 없습니다.
+> `backend`의 8000 포트는 **아직 전 인터페이스에 게시돼 있습니다**(`docker-compose.yml`).
+> 호스트 루프백으로 좁히는 것도 재빌드가 랜딩된 뒤 후속 PR입니다 — 현행 번들의 8000번 직접
+> 호출에 원격 시연이 기대고 있어서입니다. 좁힌 뒤에도 브라우저는 8080 프록시로, nginx는
+> compose 내부 네트워크로 backend에 닿으므로 기능 영향은 없습니다.
 
 현재 번들은 비압축입니다(`Build/`에 `.br`·`.gz` 산출물 없음).
 

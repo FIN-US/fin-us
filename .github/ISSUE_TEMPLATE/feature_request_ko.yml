@@ -1,7 +1,7 @@
 name: "✨ 기능 요청"
 description: "새로운 기능이나 아이디어를 제안해 주세요."
 title: "[FEAT] "
-labels: ["enhancement"]
+labels: ["유형: 기능"]
 assignees: []
 
 body:
@@ -37,3 +37,16 @@ body:
     attributes:
       label: "대안 (선택 사항)"
       description: "고려해 보신 다른 대안이 있다면 설명해 주세요."
+  - type: dropdown
+    id: priority
+    attributes:
+      label: "우선순위"
+      description: "판단이 서지 않으면 P2를 선택해 주세요. 선택값은 본문에만 남으므로, `우선순위: Px` 라벨은 별도로 붙여 주세요."
+      options:
+        - "P0 (긴급)"
+        - "P1 (높음)"
+        - "P2 (보통)"
+        - "P3 (낮음)"
+      default: 2
+    validations:
+      required: true

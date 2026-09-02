@@ -53,7 +53,11 @@ Thumbs.db
 # coding agent specific
 AGENTS.md
 .gemini/
-.claude/
+# .claude/ 자체는 무시하되 skills만 추적한다. 스킬은 팀이 공유해야 하고, 설정
+# (settings.local.json 등)은 개인 것이라 올라가면 안 된다.
+# 부모 디렉토리가 제외되면 하위를 되살릴 수 없으므로 `.claude/`가 아니라 `.claude/*`다.
+.claude/*
+!.claude/skills/
 .cursor/
 .codex/
 *.db

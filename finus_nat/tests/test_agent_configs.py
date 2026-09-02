@@ -168,8 +168,8 @@ def test_system_prompt_only_names_real_tools(config_path: Path, function_name: s
 # system_prompt를 의도적으로 바이트 단위로 동일하게 유지한다.
 # #66 수정으로 strategy_agent는 kis-trading-mcp-tool-readonly를 tool_names에 쓰게 되어
 # system_prompt가 이 둘과 분기했으므로 비교 대상에서 제외한다.
-# 파일이 나뉘어 있어 YAML 앵커로 공유할 수 없으니 복제 자체는 불가피하지만, 한 파일만
-# 고치고 나머지를 빠뜨리는 드리프트는 이 테스트가 잡는다.
+# #284 이후로는 둘 다 configs/prompts/react_kis_full.md 하나를 file://로 참조하므로 복제가
+# 사라졌고, 이 동일성은 구조적으로 보장된다 - 아래 테스트는 그래서 지금은 실패할 수 없다.
 _IDENTICAL_SYSTEM_PROMPT_AGENTS = [
     ("monitoring_agent.yml", "monitoring_agent"),
     ("trading_agent.yml", "trading_agent_react"),
@@ -474,8 +474,57 @@ def test_readonly_config_accepts_asset_classes(name: str):
     assert config.trading_tool_name == name
 
 
+# ---------------------------------------------------------------------------
+# #273 회귀 가드 — 두 라우터의 최상위 workflow가 각주 부착 지점을 공유하는지
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("config_path", _ROUTER_PATHS, ids=[p.name for p in _ROUTER_PATHS])
+def test_router_workflow_is_the_reasoning_trace_agent(config_path: Path):
+    """#273: 두 라우터 모두 최상위 workflow가 finus_reasoning_trace_agent여야 한다.
+
+    각주(#260)는 이 한 지점에서만 붙는다. 위에 다른 래퍼를 얹으면 — 특히 vendor
+    ``auto_memory_agent``처럼 ``(input_message: str) -> str`` 시그니처인 래퍼를 —
+    ``routed_agent``/``tools_used``가 그 경계에서 버려지고, backend는 필드가 없으면
+    각주를 **조용히** 생략한다. 관측 형태가 "각주가 안 나온다"뿐이라 런타임에는
+    드러나지 않으므로 config 모양을 여기서 고정한다.
+    """
+    import nat_finus_nat.register  # noqa: F401 - 등록 트리거만 필요
+    from nat.runtime.loader import load_config
+    from nat_finus_nat.agents import FinusReasoningTraceAgentConfig
+
+    workflow = load_config(config_path).workflow
+    assert isinstance(workflow, FinusReasoningTraceAgentConfig), (
+        f"{config_path.name}: 최상위 workflow는 finus_reasoning_trace_agent여야 합니다. "
+        f"실제 타입: {type(workflow).__name__}"
+    )
+
+
+def test_memory_router_wraps_the_transcript_agent_below_the_trace_agent():
+    """#273: router.yml의 auto_memory_agent는 workflow가 아니라 그 아래 함수여야 한다.
+
+    체인은 finus_reasoning_trace_agent → auto_memory_agent → finus_sqlite_transcript_agent다.
+    auto_memory_agent가 다시 최상위로 올라가면 각주가 그 str 경계에서 사라진다.
+    """
+    import nat_finus_nat.register  # noqa: F401 - 등록 트리거만 필요
+    from nat.runtime.loader import load_config
+
+    config = load_config(CONFIGS_ROOT / "router.yml")
+    assert str(config.workflow.inner_agent_name) == "memory_router_agent"
+
+    memory_agent = config.functions["memory_router_agent"]
+    assert type(memory_agent).static_type() == "auto_memory_agent"
+    assert str(memory_agent.inner_agent_name) == "transcript_router_agent"
+
+
 def test_kis_agents_share_identical_system_prompt():
-    """monitoring/strategy/trading 프롬프트는 의도적으로 동일하다 - 한 곳만 수정되는 드리프트를 막는다."""
+    """monitoring/trading의 최종 system_prompt는 의도적으로 바이트 동일하다.
+
+    #284로 둘 다 같은 configs/prompts/react_kis_full.md를 참조하게 되면서 이 테스트는 현재
+    실패할 수 없다 - 참조가 갈라지는 시나리오는 test_agent_references_expected_prompt_file이
+    먼저 잡는다. 그래도 남겨 두는 이유는 이 테스트만이 "파일 참조"가 아니라 **로드된 최종
+    문자열**을 비교하기 때문이다: 프롬프트를 다시 블록 스칼라로 인라인하거나 두 에이전트를
+    서로 다른 파일로 갈라 놓는 변경이 오면, 그 결과가 실제로 달라졌는지를 여기서 확인한다.
+    """
     import nat_finus_nat.register  # noqa: F401 - 등록 트리거만 필요
     from nat.runtime.loader import load_config
 
@@ -486,3 +535,62 @@ def test_kis_agents_share_identical_system_prompt():
     baseline_name, baseline_prompt = next(iter(prompts.items()))
     diverged = [name for name, prompt in prompts.items() if prompt != baseline_prompt]
     assert not diverged, f"{baseline_name} 기준으로 프롬프트가 분기한 에이전트: {diverged}"
+
+
+# ---------------------------------------------------------------------------
+# #284 회귀 가드 — 프롬프트 파일의 존재와 에이전트별 참조 대상을 고정
+# ---------------------------------------------------------------------------
+
+PROMPTS_DIR = CONFIGS_ROOT / "prompts"
+
+# (yaml 파일명, 그 안의 react_agent 함수, 참조해야 하는 프롬프트 파일명).
+# trading/monitoring이 react_kis_full.md를 공유하는 것이 바로 위
+# test_kis_agents_share_identical_system_prompt가 지키는 "바이트 동일"의 구조적 근거다 -
+# 둘 중 하나가 다른 파일을 가리키게 바뀌면 여기서 먼저 잡힌다.
+_AGENT_PROMPT_FILES = [
+    ("trading_agent.yml", "trading_agent_react", "react_kis_full.md"),
+    ("monitoring_agent.yml", "monitoring_agent", "react_kis_full.md"),
+    ("strategy_agent.yml", "strategy_agent", "react_kis_readonly.md"),
+    ("news_agent.yml", "news_agent", "react_news.md"),
+    ("recommend_agent.yml", "recommend_agent", "react_recommend.md"),
+    ("diary_agent.yml", "diary_agent", "react_diary.md"),
+]
+_AGENT_PROMPT_FILE_IDS = [f"{yml}::{fn}::{md}" for yml, fn, md in _AGENT_PROMPT_FILES]
+
+_EXPECTED_PROMPT_FILES = {md for _, _, md in _AGENT_PROMPT_FILES}
+
+
+def test_prompt_files_exist_and_are_not_empty():
+    """#284: 참조 대상 프롬프트 파일 5개가 실재하고 비어 있지 않아야 한다.
+
+    파일이 없으면 load_config가 FileNotFoundError로 죽으므로 다른 테스트도 red가 되지만,
+    그때 실패 메시지는 "어느 파일이 왜 없는지"를 가리키지 않는다. 여기서 먼저 잡는다.
+    `configs/prompts/`에 참조되지 않는 고아 파일이 남는 것도 함께 막는다.
+    """
+    actual = {p.name for p in PROMPTS_DIR.glob("*.md")}
+    assert actual == _EXPECTED_PROMPT_FILES, (
+        f"configs/prompts/*.md 목록이 기대와 다릅니다. "
+        f"누락={sorted(_EXPECTED_PROMPT_FILES - actual)} 고아={sorted(actual - _EXPECTED_PROMPT_FILES)}"
+    )
+    empty = [name for name in sorted(actual) if not (PROMPTS_DIR / name).read_text(encoding="utf-8").strip()]
+    assert not empty, f"내용이 빈 프롬프트 파일: {empty}"
+
+
+@pytest.mark.parametrize("yaml_name,function_name,prompt_file", _AGENT_PROMPT_FILES, ids=_AGENT_PROMPT_FILE_IDS)
+def test_agent_references_expected_prompt_file(yaml_name: str, function_name: str, prompt_file: str):
+    """#284: 각 에이전트 YAML의 `system_prompt`가 의도한 프롬프트 파일을 `file://`로 참조해야 한다.
+
+    `load_config`는 `file://`를 이미 내용으로 치환해 돌려주므로 참조 자체를 볼 수 없다 - 그래서
+    로더를 거치지 않고 `yaml.safe_load`로 원문을 읽는다. 이 검사가 없으면 프롬프트를 다시
+    블록 스칼라로 인라인해 되돌리거나(A-2 되돌리기), readonly 에이전트가 실수로
+    `react_kis_full.md`(전체 권한 도구 이름을 안내하는 프롬프트)를 가리키게 바뀌어도
+    - 두 프롬프트 모두 그 자체로는 유효하므로 - 다른 테스트가 전부 green이다.
+    """
+    import yaml
+
+    raw = yaml.safe_load((AGENTS_DIR / yaml_name).read_text(encoding="utf-8"))
+    system_prompt = raw["functions"][function_name]["system_prompt"]
+    assert system_prompt == f"file://../prompts/{prompt_file}", (
+        f"{yaml_name}::{function_name}: system_prompt는 'file://../prompts/{prompt_file}' 여야 합니다. "
+        f"실제: {system_prompt!r}"
+    )

@@ -1,10 +1,26 @@
 import importlib
+import logging
 from pathlib import Path
 
 import pytest
 
+from mcp import StdioServerParameters
+
 import backend.config as config
 from backend.config import DART_MCP_PARAMS, NEWS_MCP_PARAMS, TRADING_MCP_PARAMS, _stdio_server_params
+
+
+def child_env(params: StdioServerParameters) -> dict[str, str]:
+    """자식 프로세스에 넘어가는 환경을 꺼낸다 (#319).
+
+    ``StdioServerParameters.env``의 선언 타입은 ``dict[str, str] | None``이고,
+    _stdio_server_params는 항상 dict를 채운다. 아래 단언들은 그 사실에 기대 곧바로
+    첨자를 붙이는데, 그러면 검사기에게는 매번 None 첨자로 보인다. 여기서 한 번
+    좁혀 두면 아래가 읽기 그대로 남는다 — env가 None이 되는 것 자체가 회귀이므로
+    그때는 이 단언이 실패하는 것이 옳다.
+    """
+    assert params.env is not None
+    return params.env
 
 
 def test_mcp_stdio_params_pass_filtered_environment_to_child_processes():
@@ -27,13 +43,13 @@ def test_mcp_stdio_params_do_not_pass_parent_only_secrets(monkeypatch):
 
     params = _stdio_server_params(Path("/tmp/mcp-news"))
 
-    assert params.env["NAVER_CLIENT_ID"] == "naver-id"
-    assert params.env["KIS_API_KEY"] == "kis-key"
-    assert params.env["DART_API_KEY"] == "dart-key"
-    assert params.env["FIN_US_TRACE_ID"] == "trace-id"
-    assert "DATABASE_URL" not in params.env
-    assert "OPENAI_API_KEY" not in params.env
-    assert "TELEGRAM_BOT_TOKEN" not in params.env
+    assert child_env(params)["NAVER_CLIENT_ID"] == "naver-id"
+    assert child_env(params)["KIS_API_KEY"] == "kis-key"
+    assert child_env(params)["DART_API_KEY"] == "dart-key"
+    assert child_env(params)["FIN_US_TRACE_ID"] == "trace-id"
+    assert "DATABASE_URL" not in child_env(params)
+    assert "OPENAI_API_KEY" not in child_env(params)
+    assert "TELEGRAM_BOT_TOKEN" not in child_env(params)
 
 
 def test_mcp_stdio_params_pass_order_dedup_ledger_settings(monkeypatch):
@@ -42,8 +58,8 @@ def test_mcp_stdio_params_pass_order_dedup_ledger_settings(monkeypatch):
 
     params = _stdio_server_params(Path("/opt/mcp-trading"))
 
-    assert params.env["KIS_ORDER_DEDUP_PATH"] == "/var/lib/finus/kis-order-dedup.json"
-    assert params.env["KIS_ORDER_DEDUP_TTL_MS"] == "120000"
+    assert child_env(params)["KIS_ORDER_DEDUP_PATH"] == "/var/lib/finus/kis-order-dedup.json"
+    assert child_env(params)["KIS_ORDER_DEDUP_TTL_MS"] == "120000"
 
 
 def test_mcp_stdio_params_pass_kis_token_cache_and_tr_id_overrides(monkeypatch):
@@ -56,9 +72,9 @@ def test_mcp_stdio_params_pass_kis_token_cache_and_tr_id_overrides(monkeypatch):
 
     params = _stdio_server_params(Path("/opt/mcp-trading"))
 
-    assert params.env["KIS_TOKEN_CACHE_PATH"] == "/var/lib/finus/kis-token-cache.json"
-    assert params.env["KIS_TR_ID_DAILY_CCLD"] == "TTTC0081R"
-    assert params.env["KIS_TR_ID_BALANCE_RLZ_PL"] == "TTTC8494R"
+    assert child_env(params)["KIS_TOKEN_CACHE_PATH"] == "/var/lib/finus/kis-token-cache.json"
+    assert child_env(params)["KIS_TR_ID_DAILY_CCLD"] == "TTTC0081R"
+    assert child_env(params)["KIS_TR_ID_BALANCE_RLZ_PL"] == "TTTC8494R"
 
 
 def test_mcp_stdio_params_pass_real_order_enabled_and_fail_closed_when_unset(monkeypatch):
@@ -69,11 +85,11 @@ def test_mcp_stdio_params_pass_real_order_enabled_and_fail_closed_when_unset(mon
     # 전달되지 않아 fail-closed(주문 차단)가 유지되어야 한다.
     monkeypatch.setenv("KIS_REAL_ORDER_ENABLED", "true")
     params_enabled = _stdio_server_params(Path("/opt/mcp-trading"))
-    assert params_enabled.env["KIS_REAL_ORDER_ENABLED"] == "true"
+    assert child_env(params_enabled)["KIS_REAL_ORDER_ENABLED"] == "true"
 
     monkeypatch.delenv("KIS_REAL_ORDER_ENABLED", raising=False)
     params_unset = _stdio_server_params(Path("/opt/mcp-trading"))
-    assert "KIS_REAL_ORDER_ENABLED" not in params_unset.env
+    assert "KIS_REAL_ORDER_ENABLED" not in child_env(params_unset)
 
 
 def test_mcp_stdio_params_pass_finus_kis_tr_id_overrides_but_not_other_finus_vars(monkeypatch):
@@ -88,9 +104,9 @@ def test_mcp_stdio_params_pass_finus_kis_tr_id_overrides_but_not_other_finus_var
 
     params = _stdio_server_params(Path("/opt/mcp-trading"))
 
-    assert params.env["FINUS_KIS_TR_ID_DAILY_CCLD"] == "TTTC0081R"
-    assert params.env["FINUS_KIS_TR_ID_BALANCE_RLZ_PL"] == "TTTC8494R"
-    assert "FINUS_BACKEND_URL" not in params.env
+    assert child_env(params)["FINUS_KIS_TR_ID_DAILY_CCLD"] == "TTTC0081R"
+    assert child_env(params)["FINUS_KIS_TR_ID_BALANCE_RLZ_PL"] == "TTTC8494R"
+    assert "FINUS_BACKEND_URL" not in child_env(params)
 
 
 def test_mcp_stdio_params_forward_any_kis_prefixed_variable_by_mechanism(monkeypatch):
@@ -106,7 +122,7 @@ def test_mcp_stdio_params_forward_any_kis_prefixed_variable_by_mechanism(monkeyp
 
     params = _stdio_server_params(Path("/opt/mcp-trading"))
 
-    assert params.env["KIS_FUTURE_VARIABLE_NOT_YET_INVENTED"] == "future-value"
+    assert child_env(params)["KIS_FUTURE_VARIABLE_NOT_YET_INVENTED"] == "future-value"
 
 
 @pytest.mark.parametrize(
@@ -143,7 +159,7 @@ def test_mcp_stdio_params_forward_kis_real_order_enabled_raw_value_unchanged(mon
 
     params = _stdio_server_params(Path("/opt/mcp-trading"))
 
-    assert params.env["KIS_REAL_ORDER_ENABLED"] == "true"
+    assert child_env(params)["KIS_REAL_ORDER_ENABLED"] == "true"
 
 
 def test_mcp_stdio_params_forward_non_true_spelling_unchanged_and_blocked_on_both_sides(monkeypatch):
@@ -156,7 +172,7 @@ def test_mcp_stdio_params_forward_non_true_spelling_unchanged_and_blocked_on_bot
 
     params = _stdio_server_params(Path("/opt/mcp-trading"))
 
-    assert params.env["KIS_REAL_ORDER_ENABLED"] == "yes"
+    assert child_env(params)["KIS_REAL_ORDER_ENABLED"] == "yes"
     assert config._is_truthy_flag("yes") is False
 
 
@@ -166,3 +182,132 @@ def test_visualization_url_is_trimmed_and_trailing_slash_preserved(monkeypatch):
     reloaded = importlib.reload(config)
 
     assert reloaded.VISUALIZATION_URL == "https://finus-visual.example/portfolio/"
+
+
+# --- #298: 신호 점수 임계값 -------------------------------------------------
+
+
+@pytest.fixture
+def restore_config():
+    """env를 바꿔 config를 reload한 테스트가 끝나면 원래 env로 되돌린다.
+
+    importlib.reload는 모듈 객체를 제자리에서 바꾸므로, 되돌리지 않으면 뒤따르는
+    테스트가 이 테스트의 env로 계산된 상수를 보게 된다.
+    """
+    yield
+    importlib.reload(config)
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("1", 1),
+        ("3", 3),
+        (" 2 ", 2),
+    ],
+)
+def test_signal_score_threshold_reads_valid_env(monkeypatch, restore_config, raw, expected):
+    monkeypatch.setenv("SIGNAL_SCORE_THRESHOLD", raw)
+
+    assert importlib.reload(config).SIGNAL_SCORE_THRESHOLD == expected
+
+
+@pytest.mark.parametrize("raw", ["0", "4", "-2", "높음", "1.5", ""])
+def test_signal_score_threshold_falls_back_to_default_on_bad_env(
+    monkeypatch, restore_config, raw
+):
+    """범위를 벗어난 임계값은 조용히 파이프라인을 망가뜨린다.
+
+    0이면 모든 signal이 유의미해져 2차 필터가 사라지고(비용 폭증), 4 이상이면 어떤
+    점수도 통과하지 못해 감시가 영구히 침묵한다(놓침). 둘 다 사고이므로 기본값 2로
+    되돌린다.
+    """
+    monkeypatch.setenv("SIGNAL_SCORE_THRESHOLD", raw)
+
+    assert importlib.reload(config).SIGNAL_SCORE_THRESHOLD == 2
+
+
+def test_signal_score_threshold_defaults_to_two_when_unset(monkeypatch, restore_config):
+    monkeypatch.delenv("SIGNAL_SCORE_THRESHOLD", raising=False)
+
+    assert importlib.reload(config).SIGNAL_SCORE_THRESHOLD == 2
+
+
+def test_signal_uncertainty_alert_threshold_rejects_negative_and_garbage(
+    monkeypatch, restore_config
+):
+    monkeypatch.setenv("SIGNAL_UNCERTAINTY_ALERT_THRESHOLD", "-1")
+    assert importlib.reload(config).SIGNAL_UNCERTAINTY_ALERT_THRESHOLD == 1.0
+
+    monkeypatch.setenv("SIGNAL_UNCERTAINTY_ALERT_THRESHOLD", "높음")
+    assert importlib.reload(config).SIGNAL_UNCERTAINTY_ALERT_THRESHOLD == 1.0
+
+    monkeypatch.setenv("SIGNAL_UNCERTAINTY_ALERT_THRESHOLD", "0.75")
+    assert importlib.reload(config).SIGNAL_UNCERTAINTY_ALERT_THRESHOLD == 0.75
+
+
+@pytest.mark.parametrize("raw", ["inf", "-inf", "nan"])
+def test_signal_uncertainty_alert_threshold_rejects_non_finite(monkeypatch, restore_config, raw):
+    """float()가 받아 주는 inf/nan을 통과시키면 안 된다.
+
+    inf면 "기사 간 평가 엇갈림"이 어떤 표준편차로도 표시되지 않아 기능 하나가 조용히
+    꺼진다. nan은 모든 비교가 False라 같은 결과다.
+    """
+    monkeypatch.setenv("SIGNAL_UNCERTAINTY_ALERT_THRESHOLD", raw)
+
+    assert importlib.reload(config).SIGNAL_UNCERTAINTY_ALERT_THRESHOLD == 1.0
+
+
+# ---------------------------------------------------------------------------
+# 한도 env (#299) — #298 임계값과 **같은** 파서를 쓴다
+#
+# 병합 과정에서 _float_env가 두 벌이 되어 뒤엣것이 앞엣것을 가린 적이 있다. 그때
+# ORDER_* 실수 설정만 isfinite·음수 가드를 잃었고, 어느 쪽이 걸리는지가 정의 순서에
+# 좌우됐다. 두 쓰임이 같은 가드를 받는다는 것을 여기서 고정한다.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("raw", ["inf", "-inf", "nan", "-0.5", "20%", ""])
+def test_order_ratio_limits_fall_back_on_unusable_values(monkeypatch, restore_config, raw):
+    """비율 한도에 inf나 음수가 들어가면 그 한도가 사실상 사라진다.
+
+    inf면 어떤 비중도 초과가 아니고, 음수면 반대로 모든 주문이 걸린다. 둘 다
+    "설정이 조용히 한도 하나를 끄는" 유형이라 기본값으로 되돌린다.
+    """
+    monkeypatch.setenv("ORDER_MAX_POSITION_RATIO", raw)
+
+    assert importlib.reload(config).ORDER_MAX_POSITION_RATIO == 0.20
+
+
+def test_order_ratio_limit_accepts_a_normal_value(monkeypatch, restore_config):
+    monkeypatch.setenv("ORDER_MAX_POSITION_RATIO", "0.35")
+
+    assert importlib.reload(config).ORDER_MAX_POSITION_RATIO == 0.35
+
+
+def test_order_amount_limit_falls_back_on_a_thousands_separator(monkeypatch, restore_config):
+    """쉼표를 넣으면 int()가 실패해 기본값 — 즉 의도한 한도의 두 배가 걸린다."""
+    monkeypatch.setenv("ORDER_MAX_ORDER_AMOUNT", "500,000")
+
+    assert importlib.reload(config).ORDER_MAX_ORDER_AMOUNT == 1_000_000
+
+
+def test_bad_limit_env_is_logged_not_silent(monkeypatch, restore_config, caplog):
+    """한도에서는 기본값이 곧 가장 넓은 값이라, 되돌아간 사실이 조용하면 안 된다."""
+    monkeypatch.setenv("ORDER_MAX_ORDER_AMOUNT", "500,000")
+
+    with caplog.at_level(logging.WARNING, logger=config.__name__):
+        importlib.reload(config)
+
+    assert any("ORDER_MAX_ORDER_AMOUNT" in record.message for record in caplog.records)
+
+
+def test_bad_signal_threshold_env_is_logged_too(monkeypatch, restore_config, caplog):
+    """같은 경고 경로를 #298 임계값도 쓴다 — 파서가 하나이기 때문이다."""
+    monkeypatch.setenv("SIGNAL_SCORE_THRESHOLD", "9")
+
+    with caplog.at_level(logging.WARNING, logger=config.__name__):
+        reloaded = importlib.reload(config)
+
+    assert reloaded.SIGNAL_SCORE_THRESHOLD == 2
+    assert any("SIGNAL_SCORE_THRESHOLD" in record.message for record in caplog.records)

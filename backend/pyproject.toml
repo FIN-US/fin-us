@@ -22,7 +22,41 @@ dependencies = [
 dev = [
   "pytest>=9.0,<10",
   "pytest-asyncio>=1.3,<2",
+  # 타입 체커 (#292). CI의 "Backend 타입 체크" 잡이 이 핀을 쓴다 — 버전을 고정하지
+  # 않으면 pyright 상류가 새 진단을 켜는 날 관련 없는 PR이 빨간불이 된다.
+  "pyright==1.1.411",
 ]
 
 [tool.uv]
 package = false
+
+# 타입 체크 설정 (#292). CI 잡과 에디터가 같은 것을 보도록 여기 한 곳에 둔다.
+[tool.pyright]
+# basic으로 시작한다. #271이 Protocol로 좁힌 주입 지점을 지키는 데는 이 수준이면 충분하고,
+# standard 이상은 도입 시점에 정리해야 할 오류가 크게 늘어 잡 도입 자체가 막힌다.
+typeCheckingMode = "basic"
+# 위 requires-python과 맞춘다. 어긋나면 로컬과 CI가 다른 문법·스텁을 보게 된다.
+pythonVersion = "3.13"
+# uv sync --project backend가 만드는 backend/.venv. 이게 없으면 fastapi·sqlmodel 같은
+# 서드파티가 전부 unresolved가 되어 오류 수 자체가 무의미해진다.
+venvPath = "."
+venv = ".venv"
+# 테스트와 프로덕션 코드가 모두 `backend.xxx`로 절대 import한다. 설정이 backend/에
+# 있으면 실행 루트도 backend/라 그 이름이 풀리지 않으므로 레포 루트를 검색 경로에 얹는다.
+extraPaths = [".."]
+# 값을 주면 pyright의 기본 exclude가 대체되므로 기본 세 개를 함께 적는다.
+#
+# #292가 남겼던 네 파일(test_telegram_commands·test_scheduler·test_services·
+# test_config, 도입 시점 278건)은 #319에서 비웠다. 이제 backend/ 아래에 검사를
+# 벗어난 파이썬 파일은 없다.
+#
+# **여기에 소스 파일을 추가하지 않는다.** 제외된 파일에 들어가는 새 코드는 이 잡이
+# 보지 않으며, 그것은 가정이 아니라 관측된 사실이다 — #299 병합에서 test_config.py에
+# 56줄이 한 줄도 검사되지 않은 채 들어왔고, 무해했다는 사실은 #319를 쓰려고 사람이
+# 손으로 재 보고서야 알았다. 목록을 늘려야 할 상황이면 그 오류를 고치거나, 정 안 되면
+# 파일이 아니라 해당 줄에 이유를 적은 `# pyright: ignore[...]`를 붙인다.
+exclude = [
+  "**/node_modules",
+  "**/__pycache__",
+  "**/.*",
+]

@@ -1,12 +1,23 @@
 import os
 import logging
 from contextlib import asynccontextmanager
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
+from typing import Literal
 from fastapi import FastAPI, HTTPException, Query, Depends, Request, WebSocket, WebSocketDisconnect, Body
 from fastapi.middleware.cors import CORSMiddleware
-from sqlmodel import Session, select
+from sqlmodel import Session, col, select
 
-from .config import NEWS_MCP_PARAMS, TRADING_MCP_PARAMS, DART_MCP_PARAMS, ALLOW_ORIGINS
+from .config import (
+    NEWS_MCP_PARAMS,
+    TRADING_MCP_PARAMS,
+    DART_MCP_PARAMS,
+    ALLOW_ORIGINS,
+    FILTERED_SIGNAL_RETENTION_DAYS,
+    SIGNAL_SCORE_MAX,
+    SIGNAL_SCORE_MIN,
+    SIGNAL_SCORE_THRESHOLD,
+)
+from .filtered_signal_repo import fill_score_axis, score_histogram
 from .ws_manager import manager
 from .scheduler import start_scheduler, stop_scheduler
 from .telegram_commands import start_telegram_commands, stop_telegram_commands
@@ -217,14 +228,14 @@ async def get_db_trades(session: Session = Depends(get_session)):
 @app.get("/api/v1/db/reports", response_model=CommonResponse, tags=["Database"])
 async def get_db_reports(session: Session = Depends(get_session)):
     """저장된 에이전트 리포트 목록을 조회합니다."""
-    reports = session.exec(select(AgentReport).order_by(AgentReport.created_at.desc())).all()
+    reports = session.exec(select(AgentReport).order_by(col(AgentReport.created_at).desc())).all()
     return {"status": "success", "data": reports}
 
 
 @app.get("/api/v1/db/diary", response_model=CommonResponse, tags=["Database"])
 async def get_db_diary(session: Session = Depends(get_session)):
     """저장된 투자 일지 목록을 조회합니다."""
-    diaries = session.exec(select(Diary).order_by(Diary.created_at.desc())).all()
+    diaries = session.exec(select(Diary).order_by(col(Diary.created_at).desc())).all()
     return {"status": "success", "data": diaries}
 
 
@@ -323,9 +334,9 @@ async def get_db_catalysts(
     # event_date만으로는 동일 날짜 이벤트 간 순서가 SQL상 보장되지 않아 limit 절단이
     # 비결정적일 수 있다. event_type, id까지 더해 완전히 결정적으로 정렬한다.
     query = query.order_by(
-        CatalystEvent.event_date,
-        CatalystEvent.event_type,
-        CatalystEvent.id,
+        col(CatalystEvent.event_date),
+        col(CatalystEvent.event_type),
+        col(CatalystEvent.id),
     ).limit(limit + 1)
 
     rows = session.exec(query).all()
@@ -334,6 +345,76 @@ async def get_db_catalysts(
         "status": "success",
         "data": rows[:limit],
         "message": "truncated" if truncated else None,
+    }
+
+
+# 걸러진 신호 조회의 출처 필터가 받는 값. scheduler.SIGNAL_SOURCES의 name과 같아야
+# 하며, 어긋나면 test_filtered_signal.py의 드리프트 테스트가 깨진다. 자유 문자열로 두면
+# 오타가 422가 아니라 "total: 0"인 정상 응답으로 돌아와, 임계값 조정 근거를 읽는 쪽에서
+# "걸러진 게 없다"와 "필터를 잘못 썼다"가 구분되지 않는다.
+#
+# 저장 컬럼(FilteredSignal.source)은 좁히지 않는다. 출처 목록이 나중에 바뀌어도 이미
+# 쌓인 행은 그대로 남아야 하고, 그 행들을 읽는 것은 필터 없는 전체 조회로 가능하다.
+SignalSourceName = Literal["news", "disclosure"]
+
+
+@app.get(
+    "/api/v1/db/filtered-signals/histogram",
+    response_model=CommonResponse,
+    tags=["Database"],
+)
+async def get_filtered_signal_histogram(
+    source: SignalSourceName | None = Query(
+        None, description="신호 출처 필터 (news | disclosure). 생략 시 전체."
+    ),
+    stock_name: str | None = Query(
+        None, min_length=1, description="종목명 정확 일치 필터. 생략 시 전체 종목."
+    ),
+    days: int | None = Query(
+        None,
+        ge=1,
+        le=365,
+        description="최근 N일(UTC 기준)만 집계. 생략 시 보관 중인 전체 구간.",
+    ),
+    session: Session = Depends(get_session),
+):
+    """임계값 미만으로 걸러진 신호를 점수 구간별로 집계합니다 (#304).
+
+    임계값(SIGNAL_SCORE_THRESHOLD)을 조정할 때 "지금 값에서 걸러지고 있는 신호가
+    점수대별로 몇 건인지"를 로그 grep 없이 확인하는 경로다. 통과한 쪽의 점수는 이
+    테이블이 아니라 AgentReport.signal_score에 있다.
+
+    buckets는 -3~+3 전 구간을 0으로 채워 돌려준다. 이 응답은 사람이 임계값을 정하려고
+    읽는 표라서, "그 점수를 한 건도 못 봤다"가 빈 칸이 아니라 0으로 보여야 한다.
+
+    recorded_thresholds에 값이 둘 이상이면 집계 구간 중간에 임계값이 바뀐 것이다.
+    그때 buckets는 서로 다른 설정에서 걸러진 신호가 섞인 분포이므로 한 덩어리로
+    읽으면 안 된다 — days를 좁혀 다시 조회해야 한다.
+    """
+    since = (
+        datetime.now(timezone.utc) - timedelta(days=days) if days is not None else None
+    )
+    histogram = score_histogram(
+        session, source=source, stock_name=stock_name, since=since
+    )
+    return {
+        "status": "success",
+        "data": {
+            "threshold": SIGNAL_SCORE_THRESHOLD,
+            "retention_days": FILTERED_SIGNAL_RETENTION_DAYS,
+            "window_days": days,
+            "since": since.isoformat() if since is not None else None,
+            "total": histogram.total,
+            "buckets": [
+                {"score": bucket.score, "count": bucket.count}
+                for bucket in fill_score_axis(
+                    histogram.buckets, SIGNAL_SCORE_MIN, SIGNAL_SCORE_MAX
+                )
+            ],
+            "recorded_thresholds": list(histogram.thresholds),
+            "oldest": histogram.oldest,
+            "newest": histogram.newest,
+        },
     }
 
 
@@ -358,11 +439,41 @@ async def health_check():
     return {"status": "alive"}
 
 
+def is_allowed_ws_origin(origin: str | None) -> bool:
+    """WebSocket 핸드셰이크의 Origin이 허용 대상인지 판정합니다 (#256).
+
+    CORSMiddleware는 WebSocket 핸드셰이크에 적용되지 않는다. ALLOW_ORIGINS로 HTTP를
+    조여도 WS는 그대로 열려 있어, 임의 사이트에 심어 둔 new WebSocket(...)이 붙어
+    브로드캐스트를 수신할 수 있다(Cross-Site WebSocket Hijacking). 같은 목록을 WS
+    핸드셰이크에서도 직접 대조해 이 비대칭을 없앤다.
+
+    Origin 헤더가 없으면 허용한다. Origin은 브라우저가 붙이는 헤더이고 CSWSH는 브라우저
+    공격이다. curl·wscat·헬스체크 같은 비브라우저 클라이언트는 헤더를 보내지 않으므로,
+    없음을 거부로 취급하면 막으려는 위협은 그대로 둔 채 운영 도구만 끊긴다. 그 결과 남는
+    잔여 위험(Origin을 보내지 않는 클라이언트는 여전히 붙는다)은 #266이 추적한다 — API
+    전역에 인증이 없어 이 엔드포인트에만 토큰을 도입하면 일관성이 깨지므로 유보 중이다.
+    """
+    if origin is None:
+        return True
+    # CORSMiddleware가 "*"를 전체 허용으로 해석하므로 같은 목록을 읽는 여기서도 맞춘다.
+    # 두 곳의 해석이 갈리면 HTTP는 열려 있는데 WS만 막히는(또는 반대) 상태가 된다.
+    if "*" in ALLOW_ORIGINS:
+        return True
+    return origin in ALLOW_ORIGINS
+
+
 @app.websocket("/api/v1/ws")
 async def websocket_endpoint(websocket: WebSocket):
     """
     실시간 알림을 위한 WebSocket 엔드포인트입니다.
     """
+    origin = websocket.headers.get("origin")
+    if not is_allowed_ws_origin(origin):
+        # accept() 전에 close()하면 핸드셰이크가 완성되지 않고 HTTP 403으로 끝난다.
+        # accept() 후에 끊으면 그사이 브로드캐스트 1건이 나갈 수 있으므로 순서가 중요하다.
+        logger.warning("WebSocket 연결 거부 — 허용되지 않은 Origin: %s", origin)
+        await websocket.close(code=1008)
+        return
     await manager.connect(websocket)
     try:
         while True:

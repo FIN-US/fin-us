@@ -7,9 +7,10 @@
 // 옮기고 kisAxios 인스턴스를 주입받게 해서, 실제 네트워크 없이 세 갈래 분류를 테스트할 수
 // 있게 한다.
 //
-// getAccessToken(토큰 캐시 포함, index.js)은 kisGet/kisApiGet 조회 경로와도 공유되고 파일
-// 캐시라는 별개 관심사를 안고 있어 여기로 옮기지 않고 함수로 주입받는다 — 이 경계가 실제로
-// 신경 쓰는 것은 "pre-flight가 실패했는가"이지 "왜 실패했는가"가 아니다.
+// getAccessToken(index.js, 캐시·발급 직렬화는 token-cache.js)은 kisGet/kisApiGet 조회
+// 경로와도 공유되고 파일 캐시라는 별개 관심사를 안고 있어 여기로 옮기지 않고 함수로
+// 주입받는다 — 이 경계가 실제로 신경 쓰는 것은 "pre-flight가 실패했는가"이지
+// "왜 실패했는가"가 아니다.
 
 async function createKisHashKey({ kisAxios, kisUrl, appKey, appSecret, body }) {
   const response = await kisAxios.post(`${kisUrl}/uapi/hashkey`, body, {
