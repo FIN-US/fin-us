@@ -34,6 +34,7 @@ from nat_finus_nat.finus_api import (
     DataToolLedger,
     ReasoningTrace,
 )
+from nat_finus_nat.pii import PII_SESSION, PiiSession
 
 logger = logging.getLogger(__name__)
 
@@ -655,6 +656,34 @@ def with_reasoning_trace(response: ChatResponse, trace: ReasoningTrace) -> ChatR
     )
 
 
+def without_pii_placeholders(response: ChatResponse, session: PiiSession) -> ChatResponse:
+    """응답 본문의 PII 자리표시자를 원값으로 되돌린다 (#231).
+
+    **:func:`with_reasoning_trace` 뒤에 부른다.** 각주 부착 판정은 본문과
+    ``trace.branch_answer``를 문자열 비교하는데, 기록된 쪽은 마스킹된 텍스트다.
+    먼저 복원하면 두 값이 달라져 정상 경로의 각주가 통째로 사라진다(#294 경고 로그가
+    "vendor가 본문을 변형함"으로 오인식된다).
+
+    ``model_copy``로 갈아끼우므로 ``extra="allow"``로 실린 ``routed_agent``/
+    ``tools_used``(#260)는 그대로 남는다. 바뀐 것이 없으면 원본 객체를 그대로 돌려준다.
+    """
+    restored_choices = []
+    changed = False
+    for choice in response.choices:
+        content = choice.message.content
+        if isinstance(content, str):
+            restored = session.unmask(content)
+            if restored != content:
+                changed = True
+                choice = choice.model_copy(
+                    update={"message": choice.message.model_copy(update={"content": restored})}
+                )
+        restored_choices.append(choice)
+    if not changed:
+        return response
+    return response.model_copy(update={"choices": restored_choices})
+
+
 class FinusReasoningTraceAgentConfig(FunctionBaseConfig, name="finus_reasoning_trace_agent"):
     inner_agent_name: FunctionRef = Field(..., description="Agent/workflow to invoke with a reasoning-trace box installed.")
     description: str = Field(default="Fin-Us agent that attaches the reasoning trace footnote (#260)")
@@ -690,11 +719,21 @@ async def finus_reasoning_trace_agent(config: FinusReasoningTraceAgentConfig, bu
         # ContextVar.set()은 LangGraph의 copy_context() 경계를 넘어 바깥으로 전파되지
         # 않기 때문이다(DataToolLedger와 동일). 반대 방향(바깥→안쪽)은 전파되므로
         # vendor auto_memory_agent가 중간에 끼어 있어도 안쪽이 같은 박스를 본다.
+        #
+        # #231: PII 마스킹 세션 상자도 같은 자리에서 심는다. 안쪽 도구가 계좌 데이터를
+        # 마스킹하며 이 상자에 매핑을 쌓고, 여기가 그 매핑으로 복원하는 **유일한**
+        # 지점이다 — 이 함수가 두 라우터 config의 최상위 workflow이므로, 자리표시자가
+        # 이 경계를 넘어 사용자에게 나가는 경로는 없다. 반대로 이 안쪽(ReAct 컨텍스트,
+        # supervisor 히스토리, Mem0, SQLite 대화 기록, api.openai.com)은 전부 마스킹된
+        # 상태로만 계좌 데이터를 본다.
         trace = ReasoningTrace()
+        pii_session = PiiSession()
         trace_token = REASONING_TRACE.set(trace)
+        pii_token = PII_SESSION.set(pii_session)
         try:
             result = await inner_agent.ainvoke(chat_request_or_message)
         finally:
+            PII_SESSION.reset(pii_token)
             REASONING_TRACE.reset(trace_token)
 
         # 문자열 입력(`nat run --input`)은 평문으로 돌려준다 — 각주를 실을 곳이 없다.
@@ -705,12 +744,15 @@ async def finus_reasoning_trace_agent(config: FinusReasoningTraceAgentConfig, bu
         # 여기서는 검사 순서를 뒤집어 그 의도를 실제로 실행한다. HTTP 경로(backend·
         # scheduler)는 messages를 보내므로 영향받지 않는다.
         if chat_request_or_message.is_string:
-            return chat_response_plain_text(result)
+            return pii_session.unmask(chat_response_plain_text(result))
         if isinstance(result, ChatResponse):
-            return with_reasoning_trace(result, trace)
+            return without_pii_placeholders(with_reasoning_trace(result, trace), pii_session)
         # vendor auto_memory_agent는 str을 돌려준다 — 여기서 ChatResponse로 만들며
         # 각주를 붙이므로, 안쪽에서 무엇이 버려졌는지와 무관하게 필드가 실린다.
-        return with_reasoning_trace(ChatResponse.from_string(str(result), usage=Usage()), trace)
+        return without_pii_placeholders(
+            with_reasoning_trace(ChatResponse.from_string(str(result), usage=Usage()), trace),
+            pii_session,
+        )
 
     yield FunctionInfo.from_fn(_response_fn, description=config.description)
 
