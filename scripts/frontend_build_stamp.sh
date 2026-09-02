@@ -125,7 +125,10 @@ write_stamp() {
     prev_build=$(recorded_field "$BUILD_KEY")
     if [ -n "$prev_build" ] && [ "$prev_build" = "$build_tree" ]; then
       err "지난 스탬프 이후 $BUILD_DIR/ 가 전혀 바뀌지 않았습니다. 재빌드 없이 스탬프만 갱신하면 어긋난 상태에 도장을 찍는 것이라 검사가 무의미해집니다. Unity WebGL 재빌드를 먼저 하세요."
-      printf '  소스를 고쳤는데 번들 바이트가 정말 동일하게 나온 경우에만: %s write --force\n' "$0" >&2
+      # 경로는 $0가 아니라 리터럴로 쓴다. $0는 호출한 디렉터리 기준이라 그 자리에서
+      # 붙여넣으면 동작하지만, 이 스크립트의 다른 안내는 전부 레포 루트 기준이라
+      # 한 메시지만 상대 경로가 튀어나오면 기준이 뒤섞인다.
+      printf '  소스를 고쳤는데 번들 바이트가 정말 동일하게 나온 경우에만: scripts/frontend_build_stamp.sh write --force\n' >&2
       return 1
     fi
   fi
