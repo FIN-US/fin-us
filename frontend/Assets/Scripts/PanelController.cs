@@ -133,7 +133,7 @@ public class PanelController : MonoBehaviour
     public bool ShowSampleDataNotice(string error)
     {
         isSampleData = true;
-        return SetDataSourceMessage($"⚠ 실데이터 연결 실패 — 아래는 실제 자산이 아닌 샘플 데이터입니다\n{error}");
+        return SetDataSourceMessage($"⚠ 실데이터 연결 실패 — 이 화면은 실제 자산이 아닌 샘플 데이터입니다\n{error}");
     }
 
     // 샘플조차 없어 아무것도 그리지 못한 경우.
