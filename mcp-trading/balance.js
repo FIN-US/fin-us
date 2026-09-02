@@ -1,3 +1,63 @@
+// 이슈 #210: fetchAllPaged의 pageDelayMs(페이지 간 대기)를 env로 설정 가능하게 만드는
+// 공용 파서. index.js가 아니라 여기 두는 이유는 index.js 상단 주석과 같다 — index.js는
+// import 시점에 StdioServerTransport를 연결하는 부작용이 있어 단독 유닛 테스트로
+// import할 수 없다(tests/mcp-server.test.js가 자식 프로세스로만 접근하는 이유이기도
+// 하다). KIS_TR_ID_*(index.js) 오버라이드와 같은 두 접두사(KIS_/FINUS_KIS_) 관례를 쓴다.
+// 미설정·빈 문자열이면 fallback을 그대로 쓴다 — 즉 아무것도 설정하지 않으면 이전과 동일한
+// 동작이다(기본값 자체는 index.js가 0으로 넘긴다 — fetchAllBalance/daily-ccld/balance-rlz-pl
+// 세 루프 모두 이 PR 전과 동일하게 동작해야 한다는 PR #200 수용 기준을 승계). 값이 있는데
+// 숫자가 아니거나 음수면(PR #264 리뷰 지적) 설정 오류로 보고 fallback으로 되돌리며 stderr에
+// 경고를 남긴다 — 조용히 무시하면 오탈자 설정이 "지연 없음"으로 읽혀 유량 제한을 넘기는
+// 실패가 배포 후에야 드러난다.
+//
+// 두 접두사는 "trim 후 비어 있지 않은 첫 키"로 고른다. `KIS_ || FINUS_KIS_`로 쓰면 KIS_ 쪽이
+// 공백만인 값일 때 truthy로 통과해 FINUS_KIS_ 값을 가린 채 "숫자가 아님" 경고만 남긴다.
+// (KIS_TR_ID_* 오버라이드에도 같은 성질이 남아 있지만 그쪽은 이 PR 범위가 아니다.)
+// 경고에는 name이 아니라 실제로 읽은 키 전체(KIS_.../FINUS_KIS_...)를 찍는다 — 운영자가
+// 설정한 문자열과 로그의 문자열이 같아야 grep으로 찾을 수 있다.
+export const SET_TIMEOUT_MAX_MS = 2_147_483_647;
+
+// 상한(maxMs)을 넘는 값도 설정 오류로 보고 fallback으로 되돌린다. 두 갈래로 "지연을 늘리려던
+// 설정"이 정반대로 동작하기 때문이다.
+// (a) 호출 루프의 시간 예산 이상이면 첫 페이지 직후 budgetExhausted()가 걸려 항상 1페이지만
+//     돌아온다(truncated="time_budget"). 유량 제한을 위해 늘린 값이 연속조회 자체를 없앤다.
+// (b) Node setTimeout은 2^31-1ms를 넘는 지연을 오버플로 경고와 함께 1ms로 접는다. 즉 지연이
+//     사실상 사라진다 — (a)와 정반대 방향이지만 결과는 똑같이 의도와 어긋난다.
+// 그래서 호출자는 자기 루프의 timeBudgetMs를 maxMs로 넘긴다(index.js). maxMs를 넘기지 않는
+// 호출자에게도 (b)만은 항상 걸리도록 기본값을 setTimeout 상한으로 둔다. 경계는 `>= maxMs`다 —
+// 예산과 정확히 같은 지연은 (a)를 그대로 일으키고, setTimeout 상한과 정확히 같은 값은
+// 실무상 의미가 없어 굳이 두 연산자를 섞지 않는다.
+// 상한 초과를 clamp가 아니라 fallback으로 되돌리는 이유: 조용히 잘라 쓰면 로그의 값과 실제
+// 동작이 갈라진다. NaN·음수와 같은 취급(경고 + 기본값)으로 통일한다.
+export function readPageDelayMsEnv(name, fallback, { maxMs = SET_TIMEOUT_MAX_MS } = {}) {
+  let key = null;
+  let raw = "";
+  for (const candidate of [`KIS_${name}`, `FINUS_KIS_${name}`]) {
+    const value = (process.env[candidate] || "").trim();
+    if (value) {
+      key = candidate;
+      raw = value;
+      break;
+    }
+  }
+  if (!raw) return fallback;
+
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    console.error(
+      `${key} 환경변수 값이 올바르지 않습니다(${JSON.stringify(raw)}) — 0 이상의 숫자여야 합니다. 기본값 ${fallback}ms를 사용합니다.`,
+    );
+    return fallback;
+  }
+  if (parsed >= maxMs) {
+    console.error(
+      `${key} 환경변수 값이 너무 큽니다(${JSON.stringify(raw)}) — ${maxMs}ms 미만이어야 합니다. 기본값 ${fallback}ms를 사용합니다.`,
+    );
+    return fallback;
+  }
+  return parsed;
+}
+
 // 연속조회 페이지 상한. inquire-balance-rlz-pl 등 다른 조회의 BALANCE_RLZ_PL_MAX_PAGES(mcp-trading/index.js)
 // 명명 관례를 따른다. 실제로는 아래 BALANCE_TIME_BUDGET_MS가 먼저 걸리는 경우가 대부분이며,
 // 이 값은 KIS가 tr_cont를 계속 "F"/"M"으로 응답하는 이상 상황에 대한 2차 안전장치다.
