@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readPageDelayMsEnv } from "../balance.js";
+import { SET_TIMEOUT_MAX_MS, readPageDelayMsEnv } from "../balance.js";
 
 // 이슈 #210: readPageDelayMsEnv는 fetchAllPaged의 pageDelayMs를 재배포 없이 실측치로
 // 채울 수 있도록 KIS_<name>/FINUS_KIS_<name> env를 읽는 공용 파서다(balance.js). 여기서는
@@ -29,6 +29,24 @@ function withEnv(t, values) {
       }
     }
   });
+}
+
+// console.error/log를 가로채고 t.after로 되돌린다. 경고는 stderr로만 나가야 한다 —
+// console.log(stdout)는 MCP stdio JSON-RPC 채널이라 한 줄만 새도 프로토콜이 깨진다.
+function captureConsole(t) {
+  const originalConsoleError = console.error;
+  const originalConsoleLog = console.log;
+  const errorCalls = [];
+  console.error = (...args) => errorCalls.push(args.join(" "));
+  console.log = (...args) => {
+    originalConsoleError("unexpected console.log:", ...args);
+    assert.fail("readPageDelayMsEnv must not write to console.log (MCP stdio JSON-RPC channel)");
+  };
+  t.after(() => {
+    console.error = originalConsoleError;
+    console.log = originalConsoleLog;
+  });
+  return errorCalls;
 }
 
 test("readPageDelayMsEnv returns the fallback when neither env var is set (regression guard: unset must not change behavior)", (t) => {
@@ -93,4 +111,69 @@ test("readPageDelayMsEnv rejects a negative value and falls back to the default"
 test("readPageDelayMsEnv rejects Infinity/NaN-producing input", (t) => {
   withEnv(t, { [KIS_KEY]: "Infinity" });
   assert.equal(readPageDelayMsEnv(TEST_ENV_NAME, 5), 5);
+});
+
+test("readPageDelayMsEnv does not let a whitespace-only KIS_ value mask the FINUS_KIS_ override", (t) => {
+  // `KIS_ || FINUS_KIS_`로 고르면 공백만인 KIS_ 값이 truthy라 FINUS_KIS_를 가린 채
+  // trim 결과가 빈 문자열이 되어 fallback으로 떨어진다(빈 문자열일 때는 통과한다).
+  withEnv(t, { [KIS_KEY]: "   ", [FINUS_KIS_KEY]: "70" });
+  assert.equal(readPageDelayMsEnv(TEST_ENV_NAME, 0), 70);
+});
+
+test("readPageDelayMsEnv names the KIS_-prefixed key in the warning, not the bare name", (t) => {
+  // 운영자가 설정한 문자열과 로그의 문자열이 같아야 grep으로 찾을 수 있다.
+  withEnv(t, { [KIS_KEY]: "nope" });
+  const errorCalls = captureConsole(t);
+  assert.equal(readPageDelayMsEnv(TEST_ENV_NAME, 0), 0);
+  assert.equal(errorCalls.length, 1);
+  assert.ok(
+    errorCalls[0].includes(KIS_KEY),
+    `warning must name the resolved key ${KIS_KEY}, got: ${errorCalls[0]}`,
+  );
+});
+
+test("readPageDelayMsEnv names the FINUS_KIS_-prefixed key in the warning when that is the one it read", (t) => {
+  withEnv(t, { [FINUS_KIS_KEY]: "nope" });
+  const errorCalls = captureConsole(t);
+  assert.equal(readPageDelayMsEnv(TEST_ENV_NAME, 0), 0);
+  assert.equal(errorCalls.length, 1);
+  assert.ok(
+    errorCalls[0].includes(FINUS_KIS_KEY),
+    `warning must name the resolved key ${FINUS_KIS_KEY}, got: ${errorCalls[0]}`,
+  );
+});
+
+test("readPageDelayMsEnv rejects a delay equal to maxMs and falls back (would truncate every fetch to one page)", (t) => {
+  // 시간 예산 이상의 지연은 첫 페이지 직후 budgetExhausted()를 걸어 연속조회를 항상
+  // 1페이지로 잘라버린다 — 유량 제한을 위해 늘린 값이 정반대로 동작한다.
+  withEnv(t, { [KIS_KEY]: "90000" });
+  const errorCalls = captureConsole(t);
+  assert.equal(readPageDelayMsEnv(TEST_ENV_NAME, 0, { maxMs: 90_000 }), 0);
+  assert.equal(errorCalls.length, 1);
+  assert.ok(errorCalls[0].includes(KIS_KEY), errorCalls[0]);
+  assert.match(errorCalls[0], /90000ms/);
+});
+
+test("readPageDelayMsEnv rejects a delay above maxMs and falls back", (t) => {
+  withEnv(t, { [KIS_KEY]: "120000" });
+  const errorCalls = captureConsole(t);
+  assert.equal(readPageDelayMsEnv(TEST_ENV_NAME, 0, { maxMs: 90_000 }), 0);
+  assert.equal(errorCalls.length, 1);
+});
+
+test("readPageDelayMsEnv accepts a delay just below maxMs", (t) => {
+  withEnv(t, { [KIS_KEY]: "89999" });
+  const errorCalls = captureConsole(t);
+  assert.equal(readPageDelayMsEnv(TEST_ENV_NAME, 0, { maxMs: 90_000 }), 89_999);
+  assert.equal(errorCalls.length, 0);
+});
+
+test("readPageDelayMsEnv rejects setTimeout-overflowing values even without an explicit maxMs", (t) => {
+  // Node setTimeout은 2^31-1ms를 넘는 지연을 오버플로 경고와 함께 1ms로 접는다 —
+  // 상한이 없으면 "지연을 크게 키운" 설정이 사실상 "지연 없음"이 된다.
+  withEnv(t, { [KIS_KEY]: String(SET_TIMEOUT_MAX_MS + 1) });
+  const errorCalls = captureConsole(t);
+  assert.equal(readPageDelayMsEnv(TEST_ENV_NAME, 0), 0);
+  assert.equal(errorCalls.length, 1);
+  assert.ok(errorCalls[0].includes(KIS_KEY), errorCalls[0]);
 });
