@@ -73,6 +73,11 @@ export async function fetchAllPaged(fetchPage, {
   let pages = 0;
   let truncated = null;
   const startedAt = now();
+  // 시간 예산 소진 판정. 루프 진입 시점과 pageDelayMs 대기 직후 두 곳이 같은 술어를
+  // 공유한다 — 판정을 복제해 두면 한쪽 경계 연산자만 바뀌었을 때 경과가 정확히
+  // timeBudgetMs인 시각에서 두 체크의 판단이 갈리는데, 그걸 주석 규약이 아니라 구조로
+  // 막는다. 대기 직후 지점은 `pages > 0`이 이미 참이므로 술어를 공유해도 의미가 같다.
+  const budgetExhausted = () => pages > 0 && now() - startedAt >= timeBudgetMs;
   // 지금까지 받아본 연속조회 커서 전체를 기억해 둔다. 직전 값하고만 비교하면
   // A,B,A,B처럼 주기 2 이상으로 순환하는 커서를 놓치고 상한까지 같은
   // 데이터를 계속 중복 조회하게 된다.
@@ -83,7 +88,7 @@ export async function fetchAllPaged(fetchPage, {
       truncated = "max_pages";
       break;
     }
-    if (pages > 0 && now() - startedAt >= timeBudgetMs) {
+    if (budgetExhausted()) {
       truncated = "time_budget";
       break;
     }
@@ -109,14 +114,12 @@ export async function fetchAllPaged(fetchPage, {
     // 바뀐 것은 "예산을 언제 보는가"다(이슈 #307). 위쪽 체크는 대기가 시작되기 전 시각을
     // 기준으로 하므로, 그 시점에는 예산이 남아 있었더라도 대기 중에 소진되면 예산이 끝난
     // 상태로 다음 요청이 나가고 그 응답까지 기다리게 된다(초과분 ≈ pageDelayMs). 그래서
-    // 대기가 끝난 뒤 같은 조건을 한 번 더 본다. 비교 연산자는 위쪽 체크와 똑같이 `>=`로
-    // 맞춘다 — 한쪽만 `>`로 두면 정확히 경계인 시각에서 두 체크의 판단이 갈린다.
-    // 재확인에서 break하면 truncated/pages/rows가 위쪽 time_budget break와 완전히 같은
-    // 상태로 수렴한다(지금까지 받은 부분 결과는 그대로 보존된다).
+    // 대기가 끝난 뒤 budgetExhausted를 한 번 더 본다. 재확인에서 break하면
+    // truncated/pages/rows가 위쪽 time_budget break와 완전히 같은 상태로 수렴한다
+    // (지금까지 받은 부분 결과는 그대로 보존된다).
     if (pageDelayMs > 0 && pages > 0) {
       await sleep(pageDelayMs);
-      // 이 블록은 `pages > 0`일 때만 실행되므로 위쪽 체크의 `pages > 0` 조건은 이미 참이다.
-      if (now() - startedAt >= timeBudgetMs) {
+      if (budgetExhausted()) {
         truncated = "time_budget";
         break;
       }
