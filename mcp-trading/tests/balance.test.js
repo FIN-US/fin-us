@@ -122,6 +122,13 @@ test("fetchAllBalance schedules no page-to-page delay across multiple pages (reg
     };
   };
 
+  // 스파이 구간은 await 하나뿐이지만, 전역 교체이므로 그 사이에 프로세스에서 발생한
+  // setTimeout 호출은 출처와 무관하게 전부 수집된다. 여기서는 fetchPage가 타이머를
+  // 쓰지 않고 node:test의 톱레벨 테스트도 순차 실행이라 fetchAllBalance 외의 타이머가
+  // 낄 여지가 없지만, 나중에 이 테스트에 비동기 요소를 더한다면 무관한 타이머가
+  // "페이지 간 지연"으로 오탐될 수 있다. 같은 이유로 스파이는 원본의
+  // Symbol(nodejs.util.promisify.custom)을 옮기지 않는다 — 현재 이 경로에는
+  // util.promisify(setTimeout)을 쓰는 코드가 없어 문제되지 않는다.
   const originalSetTimeout = globalThis.setTimeout;
   const scheduledDelays = [];
   let result;
