@@ -312,10 +312,9 @@ def is_placeholder_secret(value: str | None) -> bool:
 
 # CORS 설정
 # 기본값은 docker-compose의 frontend(nginx)가 Unity WebGL 번들을 서빙하는 8080 오리진이다.
-# #245로 nginx가 /api를 backend로 프록시하고 #246으로 번들 소스가 상대 경로를 쓰게 됐으므로,
-# 재빌드된 번들이 랜딩되면 브라우저 요청은 same-origin이 되어 CORS 자체가 개입하지 않는다.
-# 그때 제거하는 것은 CORSMiddleware뿐이다(#246 후속 PR). 현행 번들은 아직 8000번을 직접
-# 호출한다.
+# #245로 nginx가 /api를 backend로 프록시하고 #246·#262로 번들이 상대 경로를 쓰도록
+# 재빌드됐으므로, 브라우저 요청은 same-origin이 되어 CORS 자체가 개입하지 않는다.
+# 이제 제거할 수 있는 것은 CORSMiddleware뿐이고(#246 후속 PR), 아래 이유로 이 목록은 남는다.
 # 또한 CORSMiddleware는 WebSocket 핸드셰이크에 적용되지 않으므로, /api/v1/ws가 이 목록을
 # 직접 읽어 Origin을 대조한다(#256, main.py is_allowed_ws_origin). 즉 #246 이후 HTTP 쪽
 # 필요가 사라져도 이 목록은 WS 허용목록으로 남는다.
