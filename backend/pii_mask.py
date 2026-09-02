@@ -1,0 +1,600 @@
+"""외부 LLM 호출 직전 PII 마스킹 계층 (#230, F-17 / NFR-05).
+
+`backend/services.py`의 `llm_chat()`이 4개 provider 경로(OpenAI/Anthropic/Ollama/NAT)의
+단일 진입점이므로, 마스킹은 거기서 이 모듈의 `mask_pii`/`unmask_pii`를 호출하는
+방식으로 끼운다. 이 모듈 자체는 provider를 모르고 순수 텍스트 변환만 담당한다.
+
+## 방식: (a) 자리표시자 + 매핑 복원
+
+    보내는 프롬프트: "<ACCOUNT_9f2a1c_1> 계좌, 삼성전자 <QTY_9f2a1c_1>주, 평가금액 <AMOUNT_9f2a1c_1>"
+    응답 수신 후   : <AMOUNT_9f2a1c_1> -> 12,345,000원 로 역치환
+
+가운데 "9f2a1c"는 mask_pii 호출마다 새로 뽑는 nonce(scope)다. 이유는 `_Counter` docstring 참고.
+
+상대 비교(AMOUNT_2 > AMOUNT_1처럼 "총자산이 평가금액보다 큰가")는 자리표시자만으로도
+LLM이 수행할 수 있어 유지되지만, **절대 금액 기반 판단**("이 종목 비중이 1천만원으로
+과도하다")은 원값이 프롬프트에 없으므로 LLM이 할 수 없다. 이것은 이 설계의 알려진 한계이며,
+정밀한 절대 판단이 필요해지면 (b) 비율·구간 변환(예: "포트폴리오 대비 12%")을 별도 이슈로
+검토해야 한다 — 변환 규칙·구간 경계 설계 비용이 이 이슈 범위를 넘어 채택하지 않았다.
+
+## 왜 정규식이고 Presidio가 아닌가 (#230 착수 시 판단, 이슈 코멘트에도 근거를 남김)
+
+대상 3종(한국 계좌번호/원화 금액/보유 수량)은 모두 정규식으로 충분히 식별 가능한
+구조화된 패턴이다. 이 계층에는 자유 입력 경로가 실제로 존재한다 —
+`backend/telegram_commands.py`의 `_handle_chat_fallback`은 텔레그램 사용자
+원문을 가공 없이 `llm_chat`으로 넘기고, `backend/services.py`의
+`check_signal_significance`는 외부 뉴스 원문 1000자를 프롬프트에 넣는다. 다만 F-17이
+정의한 대상 3종은 그 자유 입력 안에서도 정규식으로 충분히 식별되며, 한국어 인명·연락처
+등 NER이 필요한 대상은 이번 이슈(#230) 범위 밖이다. presidio-analyzer는 spaCy NER 모델
+다운로드가 Docker 이미지·CI 시간에 얹히는 비용이 있어, 이 범위에서는 이점 없이 비용만
+발생한다.
+
+## 미적용 경로 (이 모듈이 막지 못하는 것)
+
+- NAT 멀티에이전트가 자체적으로 MCP 도구(KIS 잔고 등)를 호출해 만드는 프롬프트 조각은
+  backend가 보지 못하므로 이 계층 밖이다 (#231에서 다룬다).
+- Telegram 경로 중 **LLM을 아예 거치지 않고 원값을 그대로 사용자에게 표시하는** 것들
+  (예: `/balance`)은 이 계층이 손댈 지점이 없다 (#232에서 다룬다). 반대로
+  `telegram_commands.py`의 `_handle_chat_fallback`과 `/earnings`(`_handle_earnings`)는
+  둘 다 `llm_runner("nat", ...)`를 부르고, `llm_runner`의 기본값이 `services.llm_chat`
+  이므로(`TelegramCommandHandler.__init__`의 기본 인자) 이 계층을 탄다 —
+  "Telegram 명령은 이 경로를 타지 않는다"는 진술은 사실이 아니다.
+- 정규식 기반이므로 위 3종 패턴에서 벗어난 표기(예: 계좌번호를 자릿수가 다른 증권사
+  형식으로 표기)는 놓칠 수 있다. `_ACCOUNT_RE`는 KIS_ACCOUNT_NO 형식(CANO 8자리 +
+  상품코드 2자리, 총 10자리, 하이픈 유무 무관)만 다룬다(mcp-trading/index.js의
+  KIS_ACCOUNT_NO 검증, mcp-trading/balance.js의 buildBalanceParams() 기준).
+"""
+from __future__ import annotations
+
+import logging
+import re
+import secrets
+from typing import overload
+
+logger = logging.getLogger(__name__)
+
+# ──────────────────────────────────────────────────────────────────────────
+# 커스텀 recognizer 3종
+# ──────────────────────────────────────────────────────────────────────────
+
+# 한국 계좌번호 — KIS_ACCOUNT_NO 형식: CANO(8자리) + ACNT_PRDT_CD(2자리) = 10자리,
+# 하이픈 유무 모두 허용한다(.env.example: KIS_ACCOUNT_NO=1234567801,
+# 사람이 읽는 표기는 보통 "12345678-01"). 앞뒤로 숫자가 더 이어지면(전화번호·긴 ID 등과의
+# 오탐 방지) 매치하지 않는다.
+_ACCOUNT_RE = re.compile(r"(?<!\d)(\d{8})-?(\d{2})(?!\d)")
+
+# 원화 금액 — "1,234,567원" / "1234567원" (콤마 없이 원만 붙는 경우) 모두 커버한다.
+# 콤마가 있으면 3자리씩 끊긴 형태만 인정해(오탐 방지) 임의의 콤마 위치는 매치하지 않는다.
+# 선두 \d+는 콤마를 만나면 자연히 멈추므로 "1,234,567"처럼 정상적으로 3자리씩
+# 끊긴 표기와 "1234567"처럼 끊기지 않은 표기를 하나의 패턴으로 함께 다룰 수 있다.
+#
+# (?<!\d) — 형제인 _AMOUNT_UNIT_RE의 (?<![\d,])보다 좁다. 비정상 콤마 표기
+# ("1,23원")에서 차이가 드러난다: (?<![\d,])이었다면 매치 자체가 없어("1,23원" 전체가
+# 원문에 남는다), (?<!\d)는 "23원"부터 잡아 앞자리 "1,"이 원문에 남는다. 두 방향 모두
+# 비정상 콤마 표기에서는 무손실이 아니다 — 정상 3자리 표기(실제 운용 경로)에는 어느 쪽도
+# 영향을 주지 않으므로 통일하지 않는다.
+_AMOUNT_WON_RE = re.compile(r"(?<!\d)\d+(?:,\d{3})*(?:\.\d+)?원")
+
+# "123만원" / "1.5억원" / "3,000만원" / "3천만원" / "1천5백만원" 처럼 단위가 붙는 표기.
+#
+# _QTY_RE가 이미 고친 것과 같은 결함이 기존 `(?<!\d)`에 존재했다:
+# "3,000만원"처럼 콤마가 들어간 표기에서 매치가 콤마 **뒤**("000만원")부터
+# 시작돼 앞자리 "3,"가 원문에 남은 채 외부 LLM으로 나간다.
+# (?<![\d,]) + (?:,\d{3})* 조합이 이를 막는다: lookbehind로 콤마 중간 시작을
+# 차단하고, (?:,\d{3})*로 3자리씩 끊긴 콤마 표기를 통째로 매치한다.
+#
+# (?:[천백십]\d*)+ — 숫자와 만/억 사이에 낀 한글 수사. 이 갈래가 없으면 "3천만원"이
+# 세 금액 정규식 중 **어느 것에도** 걸리지 않아 값 전체가 평문으로 외부 LLM에 나간다:
+# _AMOUNT_WON_RE는 숫자 바로 뒤에 "원"을 요구해 "3천…"에서 멈추고, 이 패턴은 숫자
+# 바로 뒤에 만/억을 요구해 "천"에서 멈춘다. "3,000만원" 앞자리 유출(위 문단)과 같은
+# 자리·같은 근거인데, 부분 유출이 아니라 **전량** 유출이라 방향이 더 나쁘다.
+# 한국어 구어와 증권 기사에서 "3천만원"은 "3,000만원"보다 흔한 표기이며, 이 계층이
+# 지키려는 자유 입력 경로 두 곳(_handle_chat_fallback의 사용자 원문,
+# check_signal_significance의 뉴스 원문 1000자)이 정확히 그 표기를 실어 나른다.
+#
+# 두 갈래(수사 체인 | 만·억)로 나누는 이유: 수사도 만/억도 없는 형태까지 \s?원으로
+# 삼키지 않기 위해서다. 하나로 합쳐 (?:만|억)?로 느슨하게 두면 "제1 원칙"이
+# "제<AMOUNT_1>칙"으로 깨진다.
+# (회귀: test_masks_korean_numeral_unit_amount,
+#        test_does_not_mask_ordinal_before_won_syllable)
+#
+# 세 번째 갈래(_HANGUL_DIGIT 체인 단독) — 선행 아라비아 숫자가 **아예 없는** 표기.
+# 위 두 갈래는 선두 \d+로 숫자를 강제하므로 "천만원"·"삼천만원"·"백만원"·"천억원"이
+# 세 금액 정규식 중 어느 것에도 걸리지 않아 값 **전량**이 평문으로 나갔다 —
+# "3천만원"(위 문단)과 같은 자리·같은 근거이고, 자유 입력에서는 오히려 더 흔한 표기다
+# ("천만원 정도 있는데 어디 투자할까요?"). 실측으로 신규 커버 11건(천만원·백만원·
+# 십만원·천억원·삼천만원·오천만원·이천만원·오천원·구십원 및 문장 안 표기 2건)이
+# 전부 <AMOUNT_1>로 바뀌고 왕복 무손실, 대조군 19건은 불변인 것을 확인했다.
+#
+# 갈래를 **추가**하고 선두 \d+를 옵션화하지 않은 이유: \d+를 통째로 (?:\d+)?로 만들면
+# 두 번째 갈래의 (?:만|억)이 숫자 없이도 발동해 "지금만 원하는 것은"이
+# "지금<AMOUNT_1>하는 것은"으로 깨진다. 수사([천백십])가 실재할 때만 숫자를 생략하도록
+# 갈라 그 경로를 닫는다. 미매치 확인: "지금만 원하는 것은"·"그것만 원칙대로"·
+# "제3 원칙"·"천천히 원상복구"·"10년 뒤 원금".
+#
+# 남는 오탐 1건: "이백 원자재 가격" -> "<AMOUNT_1>자재 가격". 왕복 무손실이라
+# 사용자에게 보이는 값은 그대로이고, 이 모듈이 _QTY_RE의 관용구 배제에서 이미
+# 택한 우선순위(과탐은 품질 문제, 과소탐은 유출)와 같은 방향이라 감수한다.
+# (회귀: test_masks_amount_with_korean_numerals_only)
+#
+# lookbehind에 수사([천백십])와 한글 수사를 함께 넣는 것은 성능 요건이다. 콤마만 막던
+# (?<![\d,])로 두면 수사 런의 **모든 위치**에서 매치 시작이 허용되고, 각 시작마다 런
+# 전체를 소비했다가 \s?원에서 실패해 +를 되감으므로 O(n) 시작 x O(n) 되감기 = O(n²)가
+# 된다. 세 번째 갈래는 선행 숫자를 요구하지 않아 시작 위치가 숫자로 한정되지 않으므로
+# 이 갈래를 추가한 시점에 비로소 성립하는 문제다. mask_pii는 async llm_chat 안의 동기
+# CPU 작업이라 그 시간만큼 이벤트 루프 전체가 멈추고, _handle_chat_fallback은 텔레그램
+# 원문(최대 4096자)을 가공 없이 넘기므로 봇에 접근 가능한 누구나 발동시킬 수 있다.
+# 실측('오천백십' 반복 입력):
+#     4096자   555.75 ms -> 0.92 ms
+#     8192자  3551.95 ms -> 4.16 ms   (선형 회복)
+#     일반 한국어 4096자은 양쪽 모두 0.3 ms대로 영향 없음
+# 근거는 기존 (?<![\d,])가 콤마에 대해 하는 것과 같다 — 런 중간에서 매치를 시작하지
+# 않는다. 런당 시작 위치가 O(n)에서 1로 줄어 전체가 선형으로 돌아온다.
+# 소유 수량자((?:...)++)로 되감기만 없애는 방향은 시작 위치 수가 그대로라 4096자에서
+# 250 ms에 그쳐 채택하지 않았다.
+# 단위를 추가할 때(예: "조") 이 문자 집합에도 함께 넣어야 같은 O(n²)가 재발하지 않는다.
+# (회귀: test_korean_numeral_run_does_not_blow_up)
+#
+# 그 대가로 **수사가 바로 앞에 붙은 금액은 매치하지 않는다**. lookbehind는 12자
+# ([천백십일이삼사오육칠팔구]) 바로 뒤에서의 매치 **시작**을 막는데, 대부분은 한 칸 앞
+# 위치에서 더 긴 매치가 잡혀 무해하다("이천만원과 삼천만원" -> 둘 다 마스킹). 그러나
+# 앞 위치의 매치가 실패하는 형태에서는 어느 위치도 시작할 수 없어 값 전체가 평문으로
+# 나간다. 실측(구 = 콤마만 막던 (?<![\d,]), 신 = 현재):
+#     "회사이천만원 대출 받았습니다"        구: "회사<AMOUNT_1> 대출 …"   신: 전량 평문
+#     "월급이삼백만원인데 어디에 투자할까요"  구: "월급이<AMOUNT_1>인데 …"  신: 전량 평문
+#     "오구백만원"                        구: "오<AMOUNT_1>"           신: 전량 평문
+#     "3삼천만원"                         구: "3삼<AMOUNT_1>"          신: 전량 평문
+# 선행 표기 24종(수사 12 + 아라비아 숫자 10 + "회사"·"월급이") x 금액표현 17종 =
+# 408조합 스윕에서 신규 미탐 252건, 신규 **과탐 0건**.
+#
+# 감수하는 근거 두 가지.
+# (1) 노출 조건이 좁다. 금액 바로 앞 문자가 그 12자 중 하나일 때뿐이고, 조사·명사가
+#     앞에 오거나 공백이 정상적으로 들어간 표기는 그대로 마스킹된다 — 실측으로
+#     "월급이 삼백만원"·"회사 이천만원"·"자산은오천만원"·"잔고이천만원"·"연구비오백만원"
+#     모두 정상("은"/"고"/"비"는 수사가 아니다). 자유 입력의 자연스러운 표기는 대부분
+#     이쪽이고, 위 미탐 형태는 띄어쓰기가 빠진 붙임 표기에 몰려 있다.
+# (2) 이번 수정의 회귀가 **아니다**. 3방향 대조(d9ac287 / 6차 / 현재) 실측 결과 위
+#     네 케이스는 6차 이전 d9ac287에서도 전부 마스킹되지 않았다(d9ac287의 패턴은 선두
+#     \d+를 강제해 수사 단독 표기를 아예 잡지 못했다). 6차에서 새로 얻은 커버리지의
+#     일부를 되돌린 것이고, main 대비 나빠진 케이스는 0건이다.
+# 즉 "과탐은 품질 문제, 과소탐은 유출"이라는 이 모듈의 우선순위상 바람직하지 않지만,
+# 대안(lookbehind 축소)은 봇 접근자 누구나 이벤트 루프를 초 단위로 멈출 수 있는 DoS를
+# 되살리므로 채택하지 않았다. 두 갈래를 모두 얻으려면 lookbehind가 아니라 매치 후
+# 후보정(예: 시작 위치가 수사 런 중간이면 런 선두로 확장)이 필요하고, 그것은 이 PR의
+# 범위를 넘는다.
+# (정상 경로 회귀: test_masks_amount_with_korean_numerals_only —
+#  "자산이 천만원입니다"처럼 공백·조사가 앞에 오는 표기를 고정한다.)
+_HANGUL_DIGIT = r"[일이삼사오육칠팔구]"
+_AMOUNT_UNIT_RE = re.compile(
+    r"(?<![\d,천백십일이삼사오육칠팔구])(?:"
+    r"\d+(?:,\d{3})*(?:\.\d+)?(?:(?:[천백십]\d*)+(?:만|억)?|(?:만|억))"
+    r"|" + _HANGUL_DIGIT + r"?(?:[천백십]" + _HANGUL_DIGIT + r"?\d*)+(?:만|억)?"
+    r")\s?원"
+)
+
+# _QTY_RE가 실제로 "보유 수량"으로 인정하는 "주" 접미 조건. 아래 _QTY_RE와
+# _LABELED_AMOUNT_RE의 배제 lookahead가 이 하나를 **같이** 쓴다. 두 곳이 갈라지면
+# _LABELED_AMOUNT_RE는 배제했는데 _QTY_RE도 잡지 못하는 구멍이 생기고, 그 숫자는 어느
+# 자리표시자도 받지 못한 채 평문으로 나간다(=유출). 각 조건의 근거는 _QTY_RE 주석 참고.
+_QTY_UNIT_SUFFIX = r"주(?!일|째|차|간|년|기|당)(?![ \t]*(?:신고가|신저가|최고가|최저가))"
+
+# 금액 라벨(잔고 리포트·프롬프트에서 실제로 쓰이는 어휘) 바로 뒤에 "원" 접미사 없이
+# 나오는 숫자 — 원화 금액 표기 편차("1234567"처럼 단위 없이 그대로 나오는 값)를 위해
+# 라벨 컨텍스트로 한정한다. 라벨 없는 bare 숫자는 종목코드·날짜 등과 구분할 수 없어
+# 일부러 매치하지 않는다(과탐 방지가 F-17 취지보다 우선하지 않도록, 실제 마스킹
+# 대상은 KIS 잔고 리포트 어휘에 고정한다). 콤마 형식(1,234,567)이거나, 콤마 없이도
+# 4자리 이상 이어지는 숫자(1234567)만 금액으로 인정한다 — 1~3자리 bare 숫자까지
+# 잡으면 라벨 인근의 사소한 숫자(예: 순번)까지 마스킹 대상이 되어 과탐이 커진다.
+_LABELED_AMOUNT_RE = re.compile(
+    r"(?:금액|잔고|자산|예수금|손익|투자금)\s*[:：]?\s*"
+    # (?!-\d{2}(?!\d)) : "잔고 12345678-01"처럼 라벨 뒤에 하이픈 계좌 표기가 오는 경우는
+    #                    소비하지 않고 아래 _ACCOUNT_RE로 넘긴다. 이 배제가 없으면
+    #                    "12345678"만 AMOUNT로 잘라먹고 "-01"이 원문에 남는다.
+    # (?![\d,]*\d(?:\.\d+)?{QTY}) : 라벨 뒤 숫자가 실은 보유 수량인 경우("잔고 1,234주")
+    #                    소비하지 않고 아래 _QTY_RE로 넘긴다. 이 배제가 없으면 콤마가
+    #                    들어가거나 4자리 이상인 수량이 AMOUNT로 먹혀
+    #                    "잔고 <AMOUNT_1>주"가 된다. 왕복은 무손실이지만, 이 설계가
+    #                    유일하게 보존한다고 선언한 능력(자리표시자끼리의 상대 비교,
+    #                    모듈 docstring "## 방식" 절)이 깨진다 — 주식 수가 금액 이름공간에
+    #                    끼어들어 AMOUNT_2 > AMOUNT_1 비교가 서로 다른 종류의 값을
+    #                    비교하게 된다. 3자리 수량("보유 잔고 500주")은 라벨 정규식이
+    #                    애초에 4자리 이상만 인정해 이미 정상 동작한다.
+    #
+    #                    리뷰 제안대로 amount 그룹 **끝**에 (?!\s*주)를 다는 형태는
+    #                    쓰지 않았다. 두 지점 모두에서 유출이 생기는 것을 실측했다:
+    #                      (a) \s*는 개행을 넘는다. "예수금 1,234,567\n주식 평가액"에서
+    #                          배제가 잘못 발동한다.
+    #                      (b) 끝에 두면 (?:,\d{3})+가 되감기해 배제를 우회한다. (a)에서
+    #                          "1,234,567"이 거부되면 "1,234"로 짧게 다시 매치돼
+    #                          "예수금 <AMOUNT_1>,567"이 되고 ",567"은 _QTY_RE의
+    #                          (?<![\d,])에 막혀 평문으로 남는다.
+    #                    그래서 배제를 amount **시작** 위치의 lookahead로 두고(되감기와
+    #                    무관해진다), 공백을 넘지 않는 [\d,]*\d(?:\.\d+)?로 숫자 런 전체를
+    #                    본 뒤 _QTY_UNIT_SUFFIX를 그대로 재사용한다. 그래서 이 배제가
+    #                    발동하는 문자열은 정의상 _QTY_RE가 반드시 받는다 —
+    #                    "잔고 1234주일"처럼 _QTY_RE가 거부할 형태는 배제도 발동하지 않아
+    #                    종전대로 AMOUNT로 남는다(구멍 없음).
+    #
+    #                    숫자 런의 끝을 \d로 강제하는 것이 그 "구멍 없음"의 전제다.
+    #                    [\d,]*만 쓰면 배제는 콤마로 끝나는 런도 받는데 _QTY_RE의
+    #                    \d(?:[\d,]*\d)?는 숫자로 끝나야 해서 두 조건이 어긋난다.
+    #                    실측한 반례: "잔고 1,234,주" -> 라벨 정규식은 배제로 소비를
+    #                    포기하고 _QTY_RE는 (?=주)에서 실패해, "1,234"가 어느
+    #                    자리표시자도 받지 못한 채 평문으로 나갔다(= 유출).
+    #                    끝을 \d로 강제하면 배제가 발동하지 않아 종전대로 AMOUNT가
+    #                    가져간다("잔고 <AMOUNT_1>,주"). 후행 콤마는 정상 표기가 아니라
+    #                    재현성이 낮지만, 이 주석이 불변식으로 단언하는 문장이라
+    #                    조건을 실제로 일치시키는 쪽을 택했다.
+    #                    (회귀: test_labeled_number_with_trailing_comma_is_not_leaked)
+    r"(?P<amount>(?<!\d)(?![\d,]*\d(?:\.\d+)?" + _QTY_UNIT_SUFFIX + r")"
+    r"(?:\d{1,3}(?:,\d{3})+|\d{4,})(?!\d)(?!-\d{2}(?!\d)))"
+)
+
+# 보유 수량 — 잔고 리포트의 "{qty}주" 표기(mcp-trading/balance.js formatQuantity 결과).
+# 자리표시자는 숫자만 대체하고 "주"는 원문 그대로 남긴다 — 이 모듈의 다른
+# recognizer(금액)와 달리 단위 문자를 프롬프트에 남겨 LLM이 "이 값은 수량"이라는
+# 문맥을 잃지 않게 한다.
+#
+# 각 구성 요소의 근거:
+# - (?<![\d,]) : 콤마 중간에서 매치가 시작되지 않게 한다. 이게 없으면 "12,345주"에서
+#                "345"부터 매치가 시작돼 앞자리 "12,"가 마스킹되지 않고 새어 나간다.
+# - \d(?:[\d,]*\d)? : formatQuantity()가 toLocaleString("ko-KR")을 쓰므로 1,000주
+#                이상은 콤마가 들어간다(mcp-trading/balance.js의 formatQuantity()).
+#                같은 사실을 이미 반영한 선례가 backend/scheduler.py의 _QTY_RE
+#                (r"\)\s*·\s*([\d,]+)주")다.
+#                끝을 숫자로 강제해 "1,234," 같은 후행 콤마를 삼키지 않는다.
+# - (?:\.\d+)? : 소수 표기 수량("0.5주"). 이 갈래가 없으면 정수부가 남는다 —
+#                (?<![\d,])는 소수점을 배제하지 않으므로 매치가 소수점 **뒤**에서
+#                시작돼 "0.<QTY_1>주"(매핑 "5")가 되고 "0."이 평문으로 나간다.
+#                _AMOUNT_WON_RE·_AMOUNT_UNIT_RE는 이미 같은 (?:\.\d+)?를 갖고 있어
+#                수량만 이 처리를 빠뜨린 상태였다. 반대로 lookbehind에 "."을 더해
+#                (?<![\d,.])로 막는 방향은 택하지 않았다 — 그러면 "0.5주"가 **통째로**
+#                미매치가 되어 부분 유출이 전량 유출로 나빠진다. 정규식이 왼쪽부터
+#                훑으므로 이 갈래가 있으면 "0"에서 시작한 매치가 ".5"까지 삼켜
+#                소수점 뒤에서 다시 시작할 일이 없다.
+#                KIS 국내 잔고에는 소수점 수량이 없지만 이 계층이 지키는 자유 입력
+#                경로(_handle_chat_fallback)에는 해외주식 소수점 매수 문의가 들어온다.
+#                (회귀: test_masks_fractional_quantity_entirely)
+# - (?!일|째|차|간|년|기|당) : "주" 뒤에 붙어 기간·단가를 만드는 접미 음절만 배제한다
+#                ("3주일", "3주째", "2주차", "3주간", "3주년", "주기", "1주당").
+#                한글 전체를 배제(?![가-힣])하면 조사가 붙은 형태("3주를", "3주도",
+#                "3주만", "3주보유중")까지 놓쳐, _handle_chat_fallback의 자유 입력
+#                경로에서 실제 보유 수량이 그대로 나간다 — 앵커링을 포기하면서까지
+#                지키려던 경로가 바로 거기다. 한국어는 수량 명사 뒤에 조사가 곧바로
+#                붙는 쪽이 더 일반적이므로 한글 전체 배제는 과소탐(=유출) 장치가 된다.
+#                (회귀: test_masks_quantity_with_attached_korean_particle)
+# - (?![ \t]*(?:신고가|...)) : "52주 신고가"처럼 공백을 두고 이어지는 기간 관용구.
+#                이것은 열거식 휴리스틱이라 완전하지 않다 — 목록에 없는 새 관용구가
+#                등장하면 다시 과탐한다. 다만 과탐은 왕복 무손실(마스킹 후 역치환되어
+#                사용자에게 보이는 값은 그대로)이라 품질 문제일 뿐 유출이 아니므로,
+#                불완전한 배제 목록을 감수하고 과소탐(=유출) 쪽을 막는 데 무게를 둔다.
+#                **그 우선순위 때문에 목록에 넣을 수 있는 어휘도 제한된다.** 배제 목록
+#                자체가 과소탐 장치이므로, "52주"하고만 결합하는 기간 관용구
+#                (신고가/신저가/최고가/최저가)만 넣는다. "평균"·"연속"은 실제 보유 수량
+#                뒤에도 자연스럽게 오므로("1,234주 평균 매입단가", "5주 연속 매수")
+#                넣으면 그 자리에서 유출이 된다 — 반대로 "5주 연속 상승"을 과탐해도
+#                왕복 무손실이라 사용자에게 보이는 값은 그대로다.
+#                (회귀: test_masks_quantity_before_average_and_streak_words)
+#                공백 문자를 \s*가 아니라 [ \t]*로 한정하는 것이 중요하다. \s*는 개행을
+#                넘으므로, 잔고 리포트처럼 수량이 줄 끝에 오는 여러 줄 텍스트에서
+#                다음 줄이 배제 목록 단어로 시작하면 배제가 잘못 발동해 수량이 통째로
+#                마스킹되지 않는다(= 유출). 실측:
+#                  "- 삼성전자 (005930) · 1,234주\n  신고가 갱신"
+#                  \s*  -> 1,234가 마스킹되지 않음
+#                  [ \t]* -> 1,234 정상 마스킹
+#                관용구 배제는 어디까지나 같은 줄의 후속 어절을 보려는 것이므로
+#                줄을 넘지 않게 한정한다. (회귀: test_qty_at_line_end_is_masked_when_
+#                next_line_starts_with_excluded_word)
+#
+# 리뷰에서 제안된 "잔고 리포트의 '· ' 앵커링"(즉 "\)\s*·\s*[\d,]+주"만 마스킹)은
+# 채택하지 않았다. 보유 수량이 프롬프트에 들어가는 경로가 잔고 리포트 하나가 아니기
+# 때문이다 — backend/telegram_commands.py의 _handle_chat_fallback은 텔레그램
+# 사용자 원문("삼성전자 3주 보유중인데 팔아야 할까요?")을 가공 없이 llm_chat으로 보내며,
+# 앵커링은 이 경로의 실제 보유 수량을 통째로 놓친다. F-17의 취지상 유출을 만드는
+# 과소탐보다 품질 문제에 그치는 과탐을 택한다.
+_QTY_RE = re.compile(
+    r"(?<![\d,])\d(?:[\d,]*\d)?(?:\.\d+)?"
+    r"(?=" + _QTY_UNIT_SUFFIX + r")"
+)
+
+# 매핑에 없는 자리표시자(다른 대화 턴의 scope를 가진 것 포함)의 폴백 레이블.
+# 사용자 화면에 내부 토큰(<AMOUNT_xxx_1> 등)이 그대로 노출되는 대신 중립적인
+# 자연어로 대체한다 — 값을 지어내지 않으면서 토큰 노출을 막는 균형점이다.
+# 종류를 추가할 때 여기만 수정하면 아래 _PLACEHOLDER_RE 얼터네이션이 자동으로 맞춰진다.
+#
+# 값이 짧은 명사인 것과 _restore가 "(이전 {명사} {n})" 꼴로 감싸는 것은 한 쌍이다.
+# 근거 둘:
+#   1. 서수 n이 없으면 한 응답에 인용된 서로 다른 자리표시자가 전부 같은 문자열로
+#      접힌다. "지난달 <AMOUNT_..._1>에서 이번 달 <AMOUNT_..._2>로 늘었고"가
+#      "지난달 이전에 언급된 금액에서 이번 달 이전에 언급된 금액로 늘었고"가 되어,
+#      **서로 다른 두 값이 같아 보인다** — 토큰 노출을 막으려다 없던 오정보를 만든다.
+#      이 치환이 도입된 목적("값을 지어내지 않으면서 토큰 노출만 막는다")과 정면으로
+#      어긋나는 자리라, 등장 순서대로 종류별 서수를 붙여 구분한다.
+#   2. 괄호가 없으면 조사가 깨진다. 자리표시자는 원래 단위·조사 바로 앞에 놓이는
+#      토큰이라("<AMOUNT_..._1>로", "<QTY_..._1>주") 그 자리에 자연어 명사를 그대로
+#      넣으면 "금액로", "수량주입니다"가 된다. 괄호는 이 자리가 값이 아니라 **참조**
+#      라는 신호도 겸한다.
+# (회귀: test_distinct_unknown_placeholders_restore_to_distinct_phrases)
+_FALLBACK_LABEL: dict[str, str] = {
+    "ACCOUNT": "계좌",
+    "AMOUNT": "금액",
+    "QTY": "수량",
+}
+
+# 자리표시자 형식: <KIND_{scope}_{n}> — scope는 mask_pii 호출마다 새로 뽑는 6자리 hex.
+# scope가 없으면(구형식 <AMOUNT_1>) 이 정규식에 매치되지 않아 unmask_pii의 fail-open
+# 경로로 떨어진다. _Counter의 docstring에 그 이유를 적었다.
+# 얼터네이션은 _FALLBACK_LABEL.keys()에서 조립한다 — 종류 추가 시 _Counter.values와
+# _FALLBACK_LABEL만 고치면 이 정규식도 자동으로 확장된다. _restore의 .get() 기본값은
+# 얼터네이션이 _FALLBACK_LABEL 키와 정확히 같아 실제로는 도달하지 않지만,
+# 미래 드리프트 방어로 남긴다.
+_PLACEHOLDER_RE = re.compile(
+    r"<(" + "|".join(_FALLBACK_LABEL) + r")_[0-9a-f]{6}_(\d+)>"
+)
+
+
+class _Counter:
+    """마스킹 1회 호출 동안만 사는 타입별 자리표시자 카운터 + 호출별 이름공간(scope).
+
+    llm_chat() 호출마다 새로 만들어 반환하는 mapping과 함께 지역 변수로만 존재한다.
+    모듈 전역에 두면 동시 요청(asyncio.gather로 병렬 호출되는 llm_chat들)이 서로의
+    카운터를 공유해 자리표시자 번호가 요청을 넘나들며 섞인다 — 그 자체로 매핑 오염은
+    아니지만 굳이 그런 결합을 만들 이유가 없다. mapping은 항상 함수 지역 dict다.
+
+    ## 왜 번호만으로는 부족하고 호출별 nonce(scope)가 필요한가
+
+    카운터가 호출마다 0에서 다시 시작하므로 모든 호출이 항상 <AMOUNT_1>부터 쓴다.
+    그런데 NAT 경로의 대화 히스토리는 **호출을 넘어 서버 쪽에 유지**된다:
+
+    - backend/services.py의 _llm_nat_chat() — backend는 messages에 현재 메시지 1건만
+      보내고, conversation-id 헤더로 세션을 식별한다.
+    - finus_nat/src/nat_finus_nat/agents.py의 `_load_history()` — SQLite
+      chat_messages에서 `WHERE conversation_id = ?`로 과거 메시지를 로드한다.
+    - finus_nat/src/nat_finus_nat/agents.py의 `finus_sqlite_transcript_agent()` — 그 안
+      `_response_fn`이 `forward_messages = history + chat_request.messages`로 과거 턴과
+      현재 턴을 합쳐 내부 라우터에 넘긴다.
+    - finus_nat/configs/router.yml의 `transcript_router_agent`에
+      `max_history_messages: 30`으로 실제 배선됨(같은 파일 `router_supervisor_agent`
+      쪽의 6과 다른 값이라 키 이름만으로는 구분되지 않는다).
+    - conversation_id는 호출 간 재사용된다: backend/services.py의
+      `_nat_conversation_id`는 "{trigger_source}:{stock}:{today}"(하루에 같은 종목을
+      여러 번 분석하면 동일), backend/telegram_commands.py의 `_handle_chat_fallback`은
+      f"telegram:{chat_id}"(그 사용자의 모든 메시지가 영구히 같은 스레드).
+
+    따라서 nonce가 없으면 다음이 성립한다:
+
+        턴 1 "잔고 12,345,000원인데 어때?" -> NAT이 보는 것: "잔고 <AMOUNT_1>인데 어때?"
+        턴 2 "5,000,000원 더 넣으면?"      -> NAT이 보는 것: "<AMOUNT_1> 더 넣으면?"
+        턴 2 응답 "앞서 말씀하신 <AMOUNT_1> 기준으로는 …"  (히스토리의 턴 1 자리표시자 인용)
+        unmask_pii(응답, 턴 2 매핑) -> "앞서 말씀하신 5,000,000원 기준으로는 …"
+
+    <AMOUNT_1>이 가리키던 값은 턴 1의 12,345,000원인데 턴 2의 매핑으로 복원되어 **경고
+    한 줄 없이 틀린 금액**이 사용자에게 나간다. unmask_pii의 fail-open 방어선은 "매핑에
+    **없는** 자리표시자"만 보호하는데, 이 케이스는 매핑에 **있으면서 값이 틀린** 경우라
+    그 방어선이 통하지 않는다.
+
+    scope를 붙이면 이전 턴의 자리표시자는 현재 턴 매핑에 존재하지 않으므로 기존
+    fail-open 경로(원문 유지 + 경고 로그)로 떨어진다 — 조용한 오답이 관측 가능한
+    경고로 바뀐다.
+
+    ## 왜 secrets이고 왜 6자리인가
+
+    예측 가능한 값(전역 카운터·시각·`random`)을 쓰면 서로 다른 호출이 같은 scope를
+    뽑아 위 충돌이 그대로 재발할 수 있다 — `random`은 프로세스 재시작 시 같은 시드에서
+    같은 수열을 낼 수 있고, 전역 카운터는 프로세스가 다르면(워커 여러 개) 겹친다.
+    `secrets.token_hex(3)`은 CSPRNG에서 6자리 hex(16^6 ≈ 1,678만 가지)를 뽑는다.
+    한 conversation_id의 히스토리 창은 30 메시지(router.yml의 transcript_router_agent)
+    이므로 충돌 확률은 무시할 수 있고, 설령 충돌해도 결과는 nonce 이전 상태와 같을 뿐
+    더 나빠지지 않는다.
+    """
+
+    def __init__(self) -> None:
+        self.values: dict[str, int] = {"ACCOUNT": 0, "AMOUNT": 0, "QTY": 0}
+        self.scope = secrets.token_hex(3)  # 예: "9f2a1c" (_PLACEHOLDER_RE의 [0-9a-f]{6})
+
+    def next_placeholder(self, kind: str) -> str:
+        self.values[kind] += 1
+        return f"<{kind}_{self.scope}_{self.values[kind]}>"
+
+
+@overload
+def mask_pii(text: str) -> tuple[str, dict[str, str]]: ...
+
+
+@overload
+def mask_pii(text: None) -> tuple[None, dict[str, str]]: ...
+
+
+# 아래 docstring이 명시하듯 None도 받는다(빈 입력 가드). 구현부만 `str`로 적으면
+# 그 계약이 타입에서 사라져 backend/tests/test_pii_mask.py의 빈 입력 테스트가
+# 타입 오류가 된다. 반대로 구현부만 `str | None`으로 넓히면 이번엔 반환값도
+# `str | None`이 되어, user_msg가 항상 str인 services.llm_chat 호출부가
+# _llm_openai_chat 등에 `str | None`을 넘기는 오류로 번진다. 오버로드는 그
+# "들어온 것과 같은 것이 나간다"를 그대로 표현해 양쪽을 모두 만족시킨다.
+def mask_pii(text: str | None) -> tuple[str | None, dict[str, str]]:
+    """계좌번호·원화 금액·보유 수량을 자리표시자로 치환한다.
+
+    반환된 mapping은 이 호출 전용이다 — 호출자(services.llm_chat)가 요청 스코프
+    지역 변수로만 들고 있어야 하며, 모듈 전역에 저장하면 동시 요청의 매핑이
+    서로 덮어써진다.
+
+    text가 비어 있으면(None/빈 문자열) 아무것도 마스킹하지 않고 그대로 반환한다 —
+    LLM에 보낼 내용이 없으니 마스킹할 것도 없다.
+    """
+    if not text:
+        return text, {}
+
+    counter = _Counter()
+    mapping: dict[str, str] = {}
+
+    def _replace(kind: str, match: re.Match[str]) -> str:
+        original = match.group(0)
+        placeholder = counter.next_placeholder(kind)
+        mapping[placeholder] = original
+        return placeholder
+
+    def _replace_labeled_amount(match: re.Match[str]) -> str:
+        original = match.group("amount")
+        placeholder = counter.next_placeholder("AMOUNT")
+        mapping[placeholder] = original
+        # 라벨 텍스트는 그대로 두고 숫자 부분만 자리표시자로 바꾼다.
+        return match.group(0)[: match.start("amount") - match.start(0)] + placeholder
+
+    def _replace_qty(match: re.Match[str]) -> str:
+        original = match.group(0)
+        placeholder = counter.next_placeholder("QTY")
+        mapping[placeholder] = original
+        return placeholder
+
+    # 순서: 금액(원/만원·억원 접미사) -> 라벨 기반 bare 숫자 -> 계좌번호(10자리) -> 수량.
+    #
+    # 금액을 계좌번호보다 먼저 적용해야 한다. 콤마 없는 10자리 금액(예: "1234567890원")은
+    # _ACCOUNT_RE의 "8자리+2자리=10자리" 모양과 겹치는데, 계좌번호 뒤에는 "원"이 붙을 수
+    # 없으므로 "원"/"만원"/"억원" 접미사가 있는 값은 정의상 계좌번호가 아니다. 이 접미사가
+    # 계좌번호 후보를 배제하는 판별자 역할을 한다 - 먼저 금액으로 소비해 버리면 뒤의
+    # _ACCOUNT_RE가 볼 숫자가 남지 않아 오분류가 원천적으로 불가능해진다.
+    # (실측 회귀: TestAmountRecognizer.test_ten_digit_amount_is_not_misclassified_as_account)
+    #
+    # **금액 라벨도 정확히 같은 판별자다.** "예수금 1234567890"의 10자리 숫자는 "원"이
+    # 없을 뿐 계좌번호가 아니다 — "예수금"/"잔고"/"총자산" 뒤에 오는 숫자는 정의상
+    # 금액이기 때문이다. 그래서 _LABELED_AMOUNT_RE도 _ACCOUNT_RE보다 **앞**에 둔다.
+    # 뒤에 두면 "예수금 1234567890"이 <ACCOUNT_...>로 오분류되어, 이미 고친
+    # "1234567890원" 케이스와 똑같은 결함이 라벨 경로로 남는다.
+    # (실측 회귀: test_labeled_ten_digit_amount_is_not_misclassified_as_account)
+    # 라벨 뒤에 하이픈 계좌 표기가 오는 경우("잔고 12345678-01")는 _LABELED_AMOUNT_RE의
+    # 배제 lookahead가 소비를 포기해 _ACCOUNT_RE로 넘어간다. 같은 방식으로 라벨 뒤가
+    # 보유 수량인 경우("잔고 1,234주")도 소비를 포기해 마지막 _QTY_RE로 넘어간다.
+    # (실측 회귀: test_labeled_quantity_is_not_misclassified_as_amount)
+    #
+    # 반대로 계좌번호(하이픈 있거나 없는 순수 10자리, "원" 미접미, 금액 라벨 없음)는 이
+    # 금액 정규식들과 겹치지 않으므로 순서를 바꿔도 영향받지 않는다. _QTY_RE는 앞
+    # 단계에서 이미 자리표시자로 치환된 구간(숫자가 아님)을 다시 건드리지 않는다.
+    masked = _AMOUNT_WON_RE.sub(lambda m: _replace("AMOUNT", m), text)
+    masked = _AMOUNT_UNIT_RE.sub(lambda m: _replace("AMOUNT", m), masked)
+    masked = _LABELED_AMOUNT_RE.sub(_replace_labeled_amount, masked)
+    masked = _ACCOUNT_RE.sub(lambda m: _replace("ACCOUNT", m), masked)
+    masked = _QTY_RE.sub(_replace_qty, masked)
+
+    return masked, mapping
+
+
+@overload
+def unmask_pii(text: str, mapping: dict[str, str]) -> str: ...
+
+
+@overload
+def unmask_pii(text: None, mapping: dict[str, str]) -> None: ...
+
+
+# mask_pii와 같은 이유로 오버로드다. 빈 입력 가드가 None을 그대로 돌려주는 것이
+# 계약이고, services.llm_chat의 `return unmask_pii(raw, mapping)`은 `-> str`을
+# 유지해야 한다.
+def unmask_pii(text: str | None, mapping: dict[str, str]) -> str | None:
+    """자리표시자를 원값으로 역치환한다.
+
+    LLM 응답에서 자리표시자가 변형되거나(예: <AMOUNT_9f2a1c_1> -> <AMOUNT1>) 존재하지
+    않는 자리표시자가 지어질 수 있다(예: <AMOUNT_9f2a1c_9>). 이 함수는 어떤 경우에도
+    예외를 던지지 않는다 — 역치환 실패가 분석 결과 전체를 죽이면 안 되므로, 실패한
+    자리표시자는 _FALLBACK_LABEL의 중립 문구로 치환하고 경고 로그만 남긴다(fail-open).
+    내부 토큰이 사용자 화면에 그대로 노출되는 것을 막기 위함이다.
+
+    두 갈래로 갈린다: (1) 형식은 맞지만 매핑에 없는 자리표시자(다른 호출의 scope를 가진
+    것 포함)는 중립 문구로 치환 + 경고 로그, (2) _PLACEHOLDER_RE에 아예 매치되지 않는 변형
+    (<AMOUNT1>, scope 없는 구형식 <AMOUNT_1> 등)은 손대지 않아 자연히 원문이 유지된다.
+
+    입력이 str 서브클래스면 반환값도 같은 타입·같은 인스턴스 속성으로 유지한다
+    (복원이 불가능한 서브클래스일 때만 plain str). 자세한 근거는 아래 반환부 주석 참고.
+    """
+    if not text:
+        return text
+    # mapping이 비어도 _PLACEHOLDER_RE.sub를 통과시킨다 — 이전 턴 자리표시자를
+    # 중립 문구로 치환하는 fail-open 경로가 발동해야 하고, str 서브클래스의 타입·속성
+    # 보존도 일관되게 적용돼야 하기 때문이다. _PLACEHOLDER_RE.sub는 텍스트 길이에
+    # 비례해(매핑 크기와 무관) 동작하므로 전형적인 LLM 응답(~수KB)에서 비용은 무시할 수 있다.
+
+    missing: list[str] = []
+    # 같은 자리표시자가 응답에 여러 번 나오면 같은 서수를 유지하고, 서로 다른
+    # 자리표시자에는 종류별로 1부터 새 번호를 준다 — "(이전 금액 1)", "(이전 금액 2)",
+    # "(이전 수량 1)". 종류를 가로질러 한 카운터를 쓰면 두 번째 종류의 첫 인용이
+    # "(이전 수량 3)"이 되어 있지도 않은 앞선 수량 둘을 암시한다.
+    ordinals: dict[str, int] = {}
+    kind_counts: dict[str, int] = {}
+
+    def _restore(match: re.Match[str]) -> str:
+        placeholder = match.group(0)
+        value = mapping.get(placeholder)
+        if value is not None:
+            return value
+        missing.append(placeholder)
+        # 내부 토큰을 그대로 돌려주면 텔레그램 메시지에 "<AMOUNT_xxx_1>"이
+        # 노출된다. 값을 지어내는 대신 중립 문구로 대체해 토큰 노출만 막는다.
+        # match.group(1)은 _PLACEHOLDER_RE의 첫 캡처 그룹(ACCOUNT/AMOUNT/QTY).
+        kind = match.group(1)
+        ordinal = ordinals.get(placeholder)
+        if ordinal is None:
+            ordinal = kind_counts.get(kind, 0) + 1
+            kind_counts[kind] = ordinal
+            ordinals[placeholder] = ordinal
+        # .get()의 기본값 "값"은 얼터네이션이 _FALLBACK_LABEL 키와 정확히 같아
+        # 실제로는 도달하지 않지만, _Counter.values에만 종류를 추가하는 드리프트에서
+        # KeyError가 나지 않도록 남긴다(_PLACEHOLDER_RE 주석과 같은 근거).
+        return f"(이전 {_FALLBACK_LABEL.get(kind, '값')} {ordinal})"
+
+    try:
+        restored = _PLACEHOLDER_RE.sub(_restore, text)
+    except Exception:
+        # 비문자열 입력 방어(TypeError). _PLACEHOLDER_RE.sub은 순수 문자열 연산이라
+        # 정규식 자체가 실패할 일은 없지만, provider 구현이 str이 아닌 값을 반환하면
+        # (예: dict/None이 아닌 객체) 여기서 TypeError가 난다. 그 경우에도 예외를
+        # 밖으로 던지지 않고 받은 값을 그대로 돌려준다 — 역치환이 분석을 막아서는 안 된다.
+        logger.exception("PII 자리표시자 역치환 중 예상치 못한 오류가 발생했습니다.")
+        return text
+
+    if missing:
+        logger.warning(
+            "LLM 응답에서 매핑에 없는 PII 자리표시자를 발견해 중립 문구로 치환했습니다: %s",
+            missing,
+        )
+
+    # 입력이 str 서브클래스면 그 타입과 인스턴스 속성을 유지해 돌려준다. re.sub은 항상
+    # plain str을 반환하므로, 호출자가 str을 상속해 메타데이터를 얹은 값을 넘기면
+    # (#260의 services.NatAnswer — 답변 텍스트에 routed_agent/tools_used를 얹어 각주를
+    # 만든다) 역치환을 통과하는 순간 그 메타데이터가 조용히 사라진다.
+    #
+    # #263이 먼저 머지됐다. services.NatAnswer.with_text()는 유지된다 —
+    # llm_chat의 `return unmask_pii(raw, mapping)` 경로에서 이 제네릭 복원이
+    # routed_agent/tools_used를 보존한다. with_text()의 제거 여부는 이 PR(#230)이
+    # 결정하지 않으며 #263 후속에서 다룬다.
+    #
+    # mapping이 비어도 이 보존 로직을 거친다 — 위의 `not mapping` 조기 반환을 없앤
+    # 이유다. 조기 반환이 있으면 "PII가 있는 질의에서만 메타데이터가 사라지는"
+    # 재현하기 어려운 형태가 되고, 이전 턴 자리표시자를 중립 문구로 치환하는
+    # fail-open 경로도 발동하지 않는다.
+    #
+    # 재생성에 `type(text)(restored)`가 아니라 `str.__new__` + `__dict__` 복사를 쓴다.
+    # 서브클래스 생성자를 다시 부르면 **타입만 살고 속성은 기본값으로 리셋**되기
+    # 때문이다. NatAnswer가 정확히 그 모양이라(routed_agent/tools_used가 기본값 있는
+    # 키워드 인자) 생성자 호출은 예외 없이 성공하면서 각주 데이터만 조용히 비운다 —
+    # 고치려던 결함이 형태만 바꿔 그대로 남는다. 실측:
+    #   type(text)(restored)          -> NatAnswer | routed_agent=None,  tools_used=()
+    #   str.__new__ + __dict__ 복사   -> NatAnswer | routed_agent='trading_agent', ...
+    # 부수적으로 생성자가 추가 인자를 요구하는 서브클래스도 이 방식이면 복원된다.
+    if restored == text:
+        return text
+    if type(text) is not str:
+        try:
+            revived = str.__new__(type(text), restored)
+            state = getattr(text, "__dict__", None)
+            if state:
+                revived.__dict__.update(state)
+            return revived
+        except Exception:
+            # 어떤 서브클래스가 올지는 이 모듈이 알 수 없다(__slots__ 사용, __dict__
+            # 접근 차단 등). 이 함수는 어떤 경우에도 예외를 밖으로 던지지 않으므로
+            # (fail-open), 타입을 포기하고 역치환된 plain str을 돌려준다 —
+            # 값의 정확성이 타입 보존보다 우선이다.
+            logger.warning(
+                "역치환 결과를 원래 타입(%s)으로 되돌리지 못해 str로 반환합니다.",
+                type(text).__name__,
+            )
+    return restored
