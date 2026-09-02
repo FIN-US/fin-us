@@ -1,0 +1,4 @@
+# frontend/Assets/의 git 트리 해시 — 이 번들이 어느 소스에서 나왔는지 적어 둔 기록입니다.
+# scripts/frontend_build_stamp.sh 가 씁니다. 손으로 고치지 마세요.
+# 갱신 시점: Unity WebGL 재빌드 직후 (frontend/README.md의 재빌드 규칙 참고)
+assets-tree: bbc8ba07935ed79073c2e91b58143b2594724390

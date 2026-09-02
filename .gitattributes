@@ -1,5 +1,8 @@
 /.gitattributes text eol=lf
 *.sh text eol=lf
+# 번들 스탬프. scripts/frontend_build_stamp.sh가 줄 단위로 해시를 파싱하므로 CRLF로
+# 체크아웃되면 해시 끝에 \r이 붙어 형식 검사에 걸린다(#345).
+/frontend/build-stamp.txt text eol=lf
 # 리눅스 컨테이너(nginx:alpine)로 마운트되는 설정이라 CRLF로 체크아웃되지 않도록 고정한다.
 /frontend/nginx.conf text eol=lf
 # NAT 에이전트 프롬프트 원문. 로더가 유니버설 개행으로 읽으므로 CRLF로 체크아웃돼도 동작은
