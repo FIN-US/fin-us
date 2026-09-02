@@ -177,7 +177,9 @@ public class ApiClient
     // 가정과 달리 이 경로는 드물지 않다. backend가 떠 있지 않으면 nginx가 502를 HTML 본문과
     // 함께 돌려주는데(#245의 프록시 구성), 그 본문이 곧바로 여기로 들어온다. 즉 가장 흔한
     // 실패 상황에서 실패 배너가 뜨지 않는다.
-    private static T TryFromJson<T>(string body) where T : class
+    // PieChartLoader가 Resources 픽스처를 파싱할 때도 쓴다 — 그 호출도 코루틴 안이라
+    // 실패 양상이 같다. 안전한 파서가 이 클래스 밖에 또 생기지 않게 여기를 연다.
+    public static T TryFromJson<T>(string body) where T : class
     {
         if (string.IsNullOrWhiteSpace(body))
             return null;
@@ -203,7 +205,22 @@ public class ApiClient
         }
 
         var errorDetail = string.IsNullOrWhiteSpace(request.error) ? request.result.ToString() : request.error;
-        return $"{fallbackPrefix}: {errorDetail} (url={request.url}, status={request.responseCode})";
+        return $"{fallbackPrefix}: {errorDetail}{DetailSuffix}url={request.url}, status={request.responseCode})";
+    }
+
+    // 위 포맷이 붙이는 꼬리와, 아래에서 그것을 떼는 코드를 같은 자리에 둔다. 떨어져 있으면
+    // 포맷만 바뀌었을 때 잘라내기가 조용히 실패해 내부 주소가 사용자 화면에 다시 샌다.
+    private const string DetailSuffix = " (";
+
+    // 배너처럼 사용자에게 보이는 자리에는 요약만 싣는다(#262 리뷰). 꼬리에는 백엔드 내부
+    // 주소가 들어 있고, 원문은 호출부가 콘솔에 남긴다.
+    public static string SummarizeError(string error)
+    {
+        if (string.IsNullOrEmpty(error))
+            return error;
+
+        int tail = error.IndexOf(DetailSuffix + "url=", StringComparison.Ordinal);
+        return tail < 0 ? error : error.Substring(0, tail);
     }
 
     public IEnumerator FetchPortfolio(Action<PortfolioData> onSuccess, Action<string> onError)

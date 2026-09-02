@@ -50,23 +50,15 @@ public class PieChartLoader : MonoBehaviour
         ));
     }
 
-    // 배너에 실을 요약. ApiClient.ExtractErrorMessage가 붙이는 "(url=..., status=...)"
-    // 꼬리에는 백엔드 내부 주소가 들어 있어, 그대로 띄우면 사용자 화면에 노출된다.
-    // 원문은 호출부의 Debug.LogError가 콘솔에 남긴다(#262 리뷰).
-    static string SummarizeForBanner(string error)
-    {
-        if (string.IsNullOrEmpty(error))
-            return error;
-
-        int tail = error.IndexOf(" (url=", System.StringComparison.Ordinal);
-        return tail < 0 ? error : error.Substring(0, tail);
-    }
-
     void LoadSample(string rawError)
     {
-        string error = SummarizeForBanner(rawError);
+        // 요약 규칙은 꼬리를 붙이는 ApiClient에 둔다 — 여기서 리터럴로 흉내 내면 포맷이
+        // 바뀔 때 내부 주소가 조용히 다시 샌다(#262 리뷰).
+        string error = ApiClient.SummarizeError(rawError);
         TextAsset json = Resources.Load<TextAsset>("data");
-        PortfolioData data = json == null ? null : JsonUtility.FromJson<PortfolioData>(json.text);
+        // 픽스처가 깨져도 예외로 코루틴을 끊지 않는다. 여기가 마지막 방어선이라 끊기면
+        // 아래 ShowDataSourceErrorWhenReady가 시작조차 못 하고 화면에 아무것도 안 남는다.
+        PortfolioData data = json == null ? null : ApiClient.TryFromJson<PortfolioData>(json.text);
 
         // 샘플조차 없으면 그릴 것이 없다. 그래도 실패 사실은 반드시 화면에 남긴다.
         if (data == null || data.holdings == null)
