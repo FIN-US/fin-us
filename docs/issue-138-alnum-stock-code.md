@@ -4,6 +4,7 @@
 > 기준 커밋: `8c2acd5` (origin/main)
 > 조사일: 2026-08-15
 > **이 문서는 조사·설계만 담는다. 주문 가드는 변경하지 않았다.**
+> **이 문서의 모든 `파일:줄` 참조는 `8c2acd5` 고정이다.** 그 뒤 `telegram_commands.py`·`stock_code.py`·`scheduler.py`·`tests/test_telegram_commands.py`·`mcp-trading/index.js` 다섯 파일이 이동했다 — **5.1의 대조표로 다시 찾을 것.** 나머지 참조 파일은 변경이 없어 그대로 유효하다.
 
 ---
 
@@ -231,18 +232,22 @@ pdno (str): [필수] 상품번호 (종목코드(6자리) , ETN의 경우 7자리
 
 이는 부재 증거이므로 "펀드 주문 TR이 절대 없다"는 증명은 아니다(포털 전체 카탈로그는 접근 차단으로 훑지 못했다). 그러나 **`F…` 69건을 이 이슈에서 분리해야 한다는 판단을 강화한다.**
 
-**(라) 마스터 꼬리의 오프셋은 공식 파서로 확정된다** (문서 근거)
+**(라) 마스터 꼬리의 오프셋은 공식 파서로 확정된다 — 단, 시장별로 다르다** (문서 근거)
 
-같은 저장소의 `stocks_info/kis_kospi_code_mst.py`·`kis_kosdaq_code_mst.py`가 꼬리 전체의 폭 배열과 컬럼명을 제공하므로, `.h` 파일을 손으로 대조할 필요가 없다. **4.1에서 서술한 off-by-one 수정 후(`data_width = tail_width - 1` 규약, 즉 227자/221자 기준)** 의 오프셋은 다음과 같다(리뷰어 계산, 공식 파서 원문 미직접대조 — 문서에서 제시된 값임).
+같은 저장소의 `stocks_info/kis_kospi_code_mst.py`·`kis_kosdaq_code_mst.py`가 꼬리 전체의 폭 배열과 컬럼명을 제공하므로, `.h` 파일을 손으로 대조할 필요가 없다. 두 파서의 `field_specs` 합은 **KOSPI 227자(70필드) / KOSDAQ 221자(64필드)** 이며, 이는 **4.1에서 서술한 off-by-one 수정 후 규약(`data_width = tail_width - 1`)이 양 시장 모두에서 성립함**을 뜻한다(228-1=227, 222-1=221).
 
-| 필드 | 공식 컬럼명 | 꼬리 슬라이스 |
-|---|---|---|
-| `scrt_grp_cls_code` | `그룹코드` | `tail[0:2]` |
-| `etp_prod_cls_code` | `ETP` | `tail[22:23]` |
-| `etpr_undt_objt_co_yn` | `SPAC` | `tail[29:30]` |
-| `prst_cls_code` | `우선주` | `tail[158:159]` |
+**두 시장의 꼬리 레이아웃은 같지 않다.** 필드 개수부터 70 대 64로 갈리므로 KOSPI 오프셋을 KOSDAQ 행에 그대로 쓰면 안 된다.
 
-우리 `SOURCES`의 `tail_width` 228/222가 공식 파서의 `row[0:len(row)-228]`·`-222`와 동일한 출처임도 여기서 확인된다. 안 A 구현 시 이 파일들을 정답지로 삼을 수 있으며, `.h` 대조·실호출 없이 오프셋을 확정할 수 있다.
+| 필드 | 공식 컬럼명 (KOSPI / KOSDAQ) | KOSPI 슬라이스 | KOSDAQ 슬라이스 |
+|---|---|---|---|
+| `scrt_grp_cls_code` | `그룹코드` / `증권그룹구분코드` | `tail[0:2]` | `tail[0:2]` |
+| `etp_prod_cls_code` | `ETP` / `ETP 상품구분코드` | `tail[22:23]` | `tail[18:19]` |
+| `etpr_undt_objt_co_yn` | `SPAC` / `기업인수목적회사여부` | `tail[29:30]` | `tail[24:25]` |
+| `prst_cls_code` | `우선주` / `우선주 구분 코드` | `tail[158:159]` | `tail[153:154]` |
+
+**KOSPI 오프셋을 KOSDAQ에 적용하면 예외 없이 조용히 오분류된다.** KOSDAQ 행에서 `tail[22:23]`은 `KRX 바이오 여부`, `tail[29:30]`은 `KRX 건설 여부`를 읽는다(둘 다 `Y`/`N`이라 `prst_cls_code`의 `0`/`1`/`2`와 값이 겹치지는 않지만, 파싱은 통과한다). `tail[158:159]`는 `매출액`(`tail[157:166]`) 안쪽의 숫자 한 자를 읽는다 — **숫자라서 `0`/`1`/`2`와 형태가 겹치고, KOSDAQ 신형우선주가 아무 실패 신호 없이 오분류된다.**
+
+우리 `SOURCES`의 `tail_width` 228/222가 공식 파서의 `row[0:len(row)-228]`·`-222`와 동일한 출처임도 여기서 확인된다. `SOURCES`는 이미 시장별로 `tail_width`를 들고 있으므로, 안 A 구현 시 **오프셋 맵도 같은 자리에 시장별로 둔다.** 이 파일들을 정답지로 삼으면 `.h` 대조·실호출 없이 오프셋을 확정할 수 있다.
 
 **(마) 참고한 1차 자료**
 
@@ -285,6 +290,31 @@ pdno (str): [필수] 상품번호 (종목코드(6자리) , ETN의 경우 7자리
 
 추가로 이슈의 "4. 회귀 테스트 반전"이 언급하지 않은 테스트가 있다: `backend/tests/test_stock_code.py`의 `TestOrderableStockCodeRe`(:163-200). 여기도 함께 다뤄야 한다.
 
+### 5.1 이 문서 자신의 참조도 같은 이유로 늙는다 (대조표)
+
+기준 커밋 `8c2acd5`는 고정이다. 문서의 모든 수치(776건 분해, off-by-one 9건, G1·G2 위치)가 이 커밋에서 실측된 값이라 커밋만 갈아 끼우면 근거와 본문이 어긋난다. 대신 **이후 이동한 참조를 여기에 모아 둔다.** 아래는 `93e9e82`(2026-09-02 기준 `origin/main`, `8c2acd5`로부터 174커밋) 시점의 실측이다.
+
+| 참조 (`8c2acd5`) | 앵커 | `93e9e82` |
+|---|---|---|
+| `backend/stock_code.py:23` | `_STOCK_CODE_EXTRACT_RE` | `:23` (그대로) |
+| `backend/stock_code.py:28-40` | `_STOCK_CODE_RE` 주석·정의 | `:47-59` |
+| `backend/stock_code.py:50-55` | 영숫자 주문 미지원 주석 | `:69-74` |
+| `backend/stock_code.py:59` | **G3** `_ORDERABLE_STOCK_CODE_RE` | `:78` |
+| `backend/telegram_commands.py:46` | `_ORDERABLE_STOCK_CODE_RE` import | `:77` |
+| `backend/telegram_commands.py:785` | 주문 전 코드 형식 검사 | `:1326` |
+| `backend/telegram_commands.py:790-791` | 부정확한 거절 문구 (6.6 대상) | `:1331-1332` |
+| `backend/telegram_commands.py:994` | `_extract_stock_code` | `:1604` |
+| `backend/scheduler.py:113` | `STOCK_LINE_RE` | `:191` |
+| `backend/tests/test_telegram_commands.py:1213` | 주문 거절 회귀 테스트 | `:1399` |
+| `mcp-trading/index.js:218·223-224` | `getStockQuote` 진입·조회 파라미터 | `:221·226-227` |
+| `mcp-trading/index.js:245-246` | 두 번째 조회 파라미터 | `:248-249` |
+| `mcp-trading/index.js:441` | `getTodayDailyOrders` | `:483` |
+| `mcp-trading/index.js:536·542·557` | `order_stock` 툴 스키마·`resolveStock` | `:579·590·605` |
+
+**변경 없음** — `mcp-trading/order.js`, `data/stocks.json`, `scripts/update_stock_master.py`, `stock-master.js`, `order-dedup.js`, `tests/order.test.js`, `backend/tests/test_stock_code.py`. 즉 **G1(`order.js:77`)·G2(`order.js:84`), 4.1의 off-by-one, 776건 수치, 4.2 라의 오프셋은 현재 main에서도 그대로 유효하다.** 드리프트는 위 표의 다섯 파일에 국한된다.
+
+원문이 필요하면 `git show 8c2acd5:<파일>`로 당시 상태를 그대로 볼 수 있다.
+
 ---
 
 ## 6. 가드 완화 설계안
@@ -300,9 +330,15 @@ pdno (str): [필수] 상품번호 (종목코드(6자리) , ETN의 경우 7자리
 `update_stock_master.py`가 지금 버리는 꼬리에서 아래 3개 필드를 뽑아 `stocks.json`에 `type` 필드로 넣는다(4.2 나·라). 그러면 주문 가능 여부를 **코드 문자열 모양이 아니라 상품 종류로** 판정할 수 있다.
 
 ```
-scrt_grp_cls_code     → ST/EF/RT/SR/SW/BC … 상품 대분류   (tail[0:2], 오프셋은 4.2 라)
-prst_cls_code         → 0 보통주 / 1 구형우선주 / 2 신형우선주  (tail[158:159])
-etpr_undt_objt_co_yn  → Y 스팩 (scrt_grp_cls_code=ST 안에서 스팩을 분리하는 유일한 필드)  (tail[29:30])
+scrt_grp_cls_code     → ST/EF/RT/SR/SW/BC … 상품 대분류
+                        KOSPI tail[0:2]     / KOSDAQ tail[0:2]
+prst_cls_code         → 0 보통주 / 1 구형우선주 / 2 신형우선주
+                        KOSPI tail[158:159] / KOSDAQ tail[153:154]
+etpr_undt_objt_co_yn  → Y 스팩 (scrt_grp_cls_code=ST 안에서 스팩을 가르는 유일한 필드)
+                        KOSPI tail[29:30]   / KOSDAQ tail[24:25]
+
+※ 오프셋은 시장별로 다르다(4.2 라). SOURCES가 tail_width를 시장별로 들고 있으므로
+   오프셋 맵도 같은 자리에 둔다. KOSPI 값을 KOSDAQ에 쓰면 조용히 오분류된다.
 ```
 
 - 장점: `0001A0`이 보통주인지 ETF인지 스팩인지 코드 모양으로는 절대 알 수 없다(2.2에서 이름 휴리스틱에 의존해야 했던 이유). `scrt_grp_cls_code`가 `ST`/`EF`/`RT`를 정확히 갈라 주고, `etpr_undt_objt_co_yn`이 `ST` 안에서 스팩을 분리한다.
@@ -512,7 +548,7 @@ CNDT_PRIC        = ""
 - 스펙 문구에 문자 구성 제약이 없다("숫자 6자리"가 아니라 "6자리").
 - `PDNO` 스펙에 **9자에 대한 언급이 없다.**
 - KIS 마스터 정의(`종목마스터정보(코스피).h`)에 `scrt_grp_cls_code`(`ST`/`EF`/`SR`/`BC` …), `prst_cls_code`(`2`=신형우선주), `etp_prod_cls_code`(`3`=ETN), `etpr_undt_objt_co_yn`(`Y`=스팩) 필드가 실재한다 — `update_stock_master.py`가 버리는 꼬리 안에 있다.
-- `kis_kospi_code_mst.py`·`kis_kosdaq_code_mst.py`(공식 파서)가 꼬리 폭 배열을 제공하므로, off-by-one 수정 후(`data_width = tail_width - 1`) 오프셋이 확정된다 — `scrt_grp_cls_code` `tail[0:2]`, `etp_prod_cls_code` `tail[22:23]`, `etpr_undt_objt_co_yn` `tail[29:30]`, `prst_cls_code` `tail[158:159]`. (리뷰에서 제시된 값, 공식 파서 원문 미직접대조)
+- `kis_kospi_code_mst.py`·`kis_kosdaq_code_mst.py`(공식 파서)의 `field_specs` 합이 각각 **227자(70필드) / 221자(64필드)** 다. `data_width = tail_width - 1` 규약이 양 시장에서 성립하고, 오프셋도 확정된다 — KOSPI `tail[0:2]`/`tail[22:23]`/`tail[29:30]`/`tail[158:159]`, KOSDAQ `tail[0:2]`/`tail[18:19]`/`tail[24:25]`/`tail[153:154]`. **두 시장의 레이아웃이 다르므로 오프셋 맵은 시장별로 둬야 한다**(4.2 라).
 - KIS 공식 저장소에 집합투자증권(펀드) 전용 주문 API가 없다(부재 증거).
 - `order.js`가 쓰는 TR ID(`TTTC0012U` 등)는 현행 값이 맞다. 검색에 흔한 `TTTC0802U` 계열은 구버전이다.
 - `0001A0`(덕양에너젠)은 2026-01-30 코스닥 상장 종목으로 실재한다(복수 독립 소스).
