@@ -533,7 +533,12 @@ class TestSaveDiaryRejectsUnrestorable:
             async def __aexit__(self, exc_type, exc, tb):
                 return False
 
-            async def post(self, url, json):
+            async def post(self, url, json, headers=None):
+                # headers를 받는다 — 프로덕션이 backend 호출에 `X-API-Key`를 싣기
+                # 때문이다 (#266 2단계). 받지 않으면 TypeError가 나는데, 그 예외는
+                # save_trading_diary의 넓은 except가 삼켜 오류 JSON으로 바뀌므로
+                # "저장이 안 됐다"는 얼굴로만 드러난다. 헤더 값 자체의 계약은
+                # test_finus_api.py의 *_sends_the_api_key_header가 고정한다.
                 captured["json"] = json
                 return FakeResponse()
 
