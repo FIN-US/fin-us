@@ -311,3 +311,49 @@ def test_bad_signal_threshold_env_is_logged_too(monkeypatch, restore_config, cap
 
     assert reloaded.SIGNAL_SCORE_THRESHOLD == 2
     assert any("SIGNAL_SCORE_THRESHOLD" in record.message for record in caplog.records)
+
+
+# --- #266 2단계: API 정적 키 ------------------------------------------------
+
+
+def test_api_key_is_empty_when_unset(monkeypatch, restore_config):
+    """미설정이 기본값이고, 그 기본값은 "인증 꺼짐"이다."""
+    monkeypatch.delenv("FINUS_API_KEY", raising=False)
+
+    assert importlib.reload(config).FINUS_API_KEY == ""
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        # .env.example이 다른 비밀값에 쓰는 자리표시자 형태 두 가지.
+        "your_api_key_here",
+        "your_finus_api_key",
+        # 공백만 있는 값도 "채우지 않았다"이다.
+        "   ",
+    ],
+)
+def test_placeholder_api_key_is_treated_as_unset(monkeypatch, restore_config, raw):
+    """자리표시자를 유효한 키로 인정하지 않습니다.
+
+    인정하면 `.env.example`에 적힌 값이 그대로 통하는 키가 되어, 인증이 켜져 있는데
+    아무나 아는 키로 열리는 상태가 된다. 그건 꺼져 있는 것보다 나쁘다 — 로그에는
+    "인증 켜짐"이 찍히기 때문이다.
+
+    이 테스트가 잡는 mutation: is_placeholder_secret 검사를 걷어내고 원문을 그대로
+    FINUS_API_KEY에 넣는 회귀.
+    """
+    monkeypatch.setenv("FINUS_API_KEY", raw)
+
+    assert importlib.reload(config).FINUS_API_KEY == ""
+
+
+def test_real_api_key_is_kept_and_trimmed(monkeypatch, restore_config):
+    """실제 값은 앞뒤 공백만 털어 그대로 씁니다.
+
+    공백을 털지 않으면 `.env` 편집기가 남긴 줄 끝 공백 하나 때문에 서버와 클라이언트가
+    서로 다른 키를 들게 되고, 증상은 "왜인지 401"로만 보인다.
+    """
+    monkeypatch.setenv("FINUS_API_KEY", "  s3cr3t-key  ")
+
+    assert importlib.reload(config).FINUS_API_KEY == "s3cr3t-key"
