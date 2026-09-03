@@ -156,9 +156,20 @@ async def require_api_key(request: Request, call_next):
     없는 것과 크게 다르지 않으므로, 접두사 하나로 판정해 새 라우트가 자동으로 덮이게 한다.
 
     라우팅보다 먼저 걸리는 것도 의도다. 존재하지 않는 /api/ 경로도 404가 아니라 401이
-    되므로, 키 없는 호출자가 어떤 엔드포인트가 있는지 훑을 수 없다.
+    되므로, 키 없는 호출자가 /api/를 두드려 엔드포인트를 찾아낼 수 없다. **다만 이것이
+    "라우트 목록을 알 수 없다"는 뜻은 아니다** — /openapi.json과 /docs는 접두사 밖이라
+    이 검사를 타지 않고, 인증을 켠 상태에서도 전체 스키마를 그대로 내준다(PR #352 리뷰).
+    8080에서는 nginx의 `location /`가 try_files ... =404로 끝내 나가지 않지만, 8000에
+    직접 닿는 호출자에게는 열려 있다.
 
-    /health는 접두사 밖이라 그대로 열려 있다. 이것도 의도다 — compose 헬스체크가 curl로
+    그 둘을 함께 닫지 않은 것은 판단이다. docker-compose.yml이 8000 게시를 남기는 이유로
+    "호스트에서 /docs를 열거나"를 명시하고 있어, 인증을 켰다는 이유로 openapi_url을
+    끄면 문서화된 흐름이 부수적으로 사라진다. 게다가 스키마는 이 저장소의 소스 그 자체라
+    비밀이 아니고, 8000은 이미 루프백 전용이다(#246). 즉 여기서 지키는 것은 "무엇이
+    있는지"가 아니라 "무엇을 호출할 수 있는지"다. 이 경계는 test_api_key_auth.py가
+    고정한다 — 나중에 스키마까지 닫기로 하면 그 테스트가 결정을 다시 꺼내 준다.
+
+    /health도 접두사 밖이라 그대로 열려 있다. 이것 역시 의도다 — compose 헬스체크가 curl로
     부르고(docker-compose.yml), 응답에는 {"status": "alive"} 말고 아무것도 없다(#252
     리뷰에서 nat_base_url을 뺐다). 키를 요구하면 컨테이너가 스스로를 unhealthy로 만든다.
 
@@ -183,7 +194,10 @@ async def require_api_key(request: Request, call_next):
         # 쓰는 것은 HTTP 인증 스킴이 아니라 커스텀 헤더다. 없는 스킴 이름을 지어 challenge를
         # 붙이면 규격 문구는 만족하면서 브라우저에 인증 대화상자를 띄울 여지를 남긴다.
         # 403으로 내리는 안도 있으나 "키를 보내면 된다"는 정보를 지운다.
-        return JSONResponse(status_code=401, content={"detail": "API 키가 필요합니다."})
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "API 키가 없거나 올바르지 않습니다."},
+        )
     return await call_next(request)
 
 
@@ -600,9 +614,14 @@ async def websocket_endpoint(websocket: WebSocket):
     # 정적 키 검사(#266 2단계). HTTP는 미들웨어가 헤더로 받지만, 브라우저 WebSocket
     # API에는 커스텀 헤더를 붙일 자리가 없어 쿼리 파라미터로 받는다.
     #
-    # Origin 검사 뒤에 둔다. 둘 다 거절이지만 키는 URL에 실려 프록시 로그·에러 리포트에
-    # 남을 수 있는 값이라, 먼저 잘라낼 수 있는 것을 먼저 잘라 키가 오가는 요청 수를 줄인다.
-    # 판정 자체는 순서와 무관하다(둘 다 통과해야 연결된다).
+    # ⚠️ 그래서 이 키는 URL에 실려 나가고, **nginx 액세스 로그에 평문으로 남는다.**
+    # frontend/nginx.conf의 access_log off는 /nginx-health 한 곳뿐이라 /api/는 기본
+    # 로그를 탄다. 기록은 nginx가 backend보다 먼저 하므로, 여기서 무엇을 먼저 거절하든
+    # 로그에 남는 양은 달라지지 않는다 — 순서로 줄일 수 있는 문제가 아니다(PR #352 리뷰).
+    # 로그 쪽 완화는 nginx에서 쿼리스트링을 뺀 log_format을 쓰는 것이고, 별도 이슈다.
+    #
+    # 두 검사의 순서 자체는 판정에 영향이 없다(둘 다 통과해야 연결된다). Origin을 앞에
+    # 두는 것은 #256이 만든 순서를 그대로 두는 것뿐이다.
     if not is_authorized_api_call(websocket.query_params.get(WS_API_KEY_QUERY_PARAM)):
         # 위 미들웨어와 같은 이유로 제시된 키는 로그에 싣지 않는다.
         logger.warning("WebSocket 연결 거부 — API 키가 없거나 일치하지 않습니다.")

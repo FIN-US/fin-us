@@ -103,7 +103,9 @@ def test_save_trading_diary_posts_to_backend(monkeypatch):
             return FakeResponse()
 
     monkeypatch.setattr(finus_api.httpx, "AsyncClient", FakeClient)
-    monkeypatch.delenv("FINUS_API_KEY", raising=False)
+    # delenv가 아니라 빈 값이다 — dotenv 로딩이 지운 키를 되살릴 수 있고, 빈 값은
+    # _finus_backend_headers가 "키 없음"으로 보는 값이라 판정 결과가 같다(PR #352 리뷰).
+    monkeypatch.setenv("FINUS_API_KEY", "")
 
     config = finus_api.FinusSaveDiaryConfig(backend_url="http://test-backend:8000")
 

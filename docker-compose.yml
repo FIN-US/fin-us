@@ -21,7 +21,8 @@ services:
       context: .
       dockerfile: backend/Dockerfile
     ports:
-      # 인증이 없는 API이고, /api/v1/analyze 한 번이 LLM 과금으로 이어진다. 번들이 상대
+      # 기본값에서는 인증이 없는 API이고(#266 2단계의 FINUS_API_KEY를 채운 배포에서만
+      # 걸린다), /api/v1/analyze 한 번이 LLM 과금으로 이어진다. 번들이 상대
       # 경로로 재빌드돼(#262) 원격 시연의 8000 직접 호출 의존이 사라졌으므로 127.0.0.1에만
       # 바인딩한다(#246). 전 인터페이스에 열어 두면 nginx에 건 레이트리밋(#266 1단계,
       # frontend/nginx.conf)을 8000 직접 호출로 그대로 우회할 수 있다 — 막는 게 아니라

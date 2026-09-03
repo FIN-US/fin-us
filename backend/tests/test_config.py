@@ -317,8 +317,19 @@ def test_bad_signal_threshold_env_is_logged_too(monkeypatch, restore_config, cap
 
 
 def test_api_key_is_empty_when_unset(monkeypatch, restore_config):
-    """미설정이 기본값이고, 그 기본값은 "인증 꺼짐"이다."""
-    monkeypatch.delenv("FINUS_API_KEY", raising=False)
+    """미설정이 기본값이고, 그 기본값은 "인증 꺼짐"이다.
+
+    delenv가 아니라 빈 문자열을 넣는다. config.py는 모듈 최상단에서 레포 루트의 실제
+    `.env`를 load_dotenv로 읽는데, 그 호출은 override는 하지 않아도 **환경에 없는 키는
+    채운다.** 그래서 delenv로 지운 직후 reload하면 지운 값이 `.env`에서 되살아나고,
+    이 테스트는 `.env`에 FINUS_API_KEY를 채운 머신에서만 빨간불이 된다 — 하필 이 PR이
+    운영자에게 채우라고 권하는 값이다(PR #352 리뷰).
+
+    빈 문자열은 is_placeholder_secret이 True로 보므로 결과 상수는 "미설정"과 같고,
+    판정은 작업 트리 밖 파일에서 독립해진다. conftest의 autouse 픽스처가 같은 실패를
+    막으려던 것과 같은 이유다.
+    """
+    monkeypatch.setenv("FINUS_API_KEY", "")
 
     assert importlib.reload(config).FINUS_API_KEY == ""
 

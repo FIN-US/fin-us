@@ -15,14 +15,19 @@
 여기서 부르는 경로는 전부 lifespan 없이 동작한다.
 """
 
+from pathlib import Path
+
 import pytest
 from fastapi import WebSocketDisconnect
 from fastapi.testclient import TestClient
 
-from backend.main import app, is_authorized_api_call, matches_api_key
+from backend.main import API_KEY_HEADER, app, is_authorized_api_call, matches_api_key
 
 
 _KEY = "test-secret-key"
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_NAT_FINUS_API = _REPO_ROOT / "finus_nat" / "src" / "nat_finus_nat" / "finus_api.py"
 
 
 @pytest.fixture
@@ -168,6 +173,44 @@ def test_the_guard_runs_before_routing(auth_on):
     assert (
         client.get("/api/v1/이런-라우트는-없다", headers={"X-API-Key": _KEY}).status_code
         == 404
+    )
+
+
+@pytest.mark.parametrize("path", ["/openapi.json", "/docs"])
+def test_the_schema_stays_open_by_decision_not_by_accident(auth_on, path):
+    """`/openapi.json`·`/docs`는 인증을 켜도 열려 있습니다 — 의도된 경계입니다.
+
+    둘 다 `/api/` 접두사 밖이라 미들웨어를 타지 않습니다. 8080에서는 nginx의
+    `location /`가 `try_files ... =404`로 끝내지만, **8000에 직접 닿는 호출자에게는 전체
+    스키마가 그대로 나갑니다**(PR #352 리뷰). 함께 닫지 않은 이유는 `backend/main.py`의
+    미들웨어 docstring에 있습니다 — docker-compose가 8000 게시를 남기는 이유로 `/docs`를
+    명시하고 있고, 스키마는 이 저장소의 소스 그 자체라 비밀이 아닙니다.
+
+    이 테스트는 보호가 아니라 **결정의 기록**입니다. 나중에 스키마까지 닫기로 하면 여기가
+    빨간불이 되어, 그때 사람이 이 판단을 다시 꺼내 보게 됩니다. 반대로 이 테스트가 없으면
+    "빠뜨린 것"과 "일부러 둔 것"을 구분할 수 없습니다.
+    """
+    assert TestClient(app).get(path).status_code == 200
+
+
+def test_the_nat_client_uses_the_same_header_name():
+    """NAT가 쓰는 헤더 이름이 backend의 API_KEY_HEADER와 같은지 소스에서 대조합니다.
+
+    `finus_nat`은 별도 패키지라 backend의 상수를 import할 수 없고, 그래서 `"X-API-Key"`
+    리터럴이 두 벌 존재합니다. 양쪽 테스트는 각자 자기 리터럴만 확인하므로 한쪽 이름을
+    바꿔도 둘 다 초록불인 채 **인증을 켠 날에야** 매매일지 저장이 401로 드러납니다
+    (PR #352 리뷰).
+
+    소스를 문자열로 읽어 고정하는 것은 이 저장소의 선례를 따른 것입니다 —
+    `test_compose_ports.py`가 `docker-compose.yml`을, `test_nginx_rate_limit.py`가
+    `nginx.conf`를 같은 방식으로 읽습니다. 실행 경계를 넘는 계약은 그쪽에서 import할 수
+    없으니 텍스트로라도 묶어 둡니다.
+    """
+    source = _NAT_FINUS_API.read_text(encoding="utf-8")
+
+    assert f'"{API_KEY_HEADER}"' in source, (
+        f"{_NAT_FINUS_API.name}에 backend의 API_KEY_HEADER({API_KEY_HEADER!r})가 없습니다. "
+        "한쪽 헤더 이름만 바뀌면 인증을 켠 배포에서 NAT의 매매일지 저장이 401로 떨어집니다."
     )
 
 
