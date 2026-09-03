@@ -185,13 +185,25 @@ class RedisSchedulerState:
             ex=self.cooldown_ttl_sec,
         )
 
-    async def acquire_scheduler_lock(self, job_name: str = "market_monitoring") -> str | None:
+    async def acquire_scheduler_lock(
+        self,
+        job_name: str = "market_monitoring",
+        *,
+        ttl_sec: int | None = None,
+    ) -> str | None:
+        """잡 단위 실행 락. ``ttl_sec``은 이 잡만 다른 만료를 쓰고 싶을 때 준다 (#259).
+
+        기본값(SCHEDULER_LOCK_TTL_SEC, 30분)은 10분 주기 감시를 기준으로 잡혀 있다. 그
+        전제에서 락 누수의 대가는 "감시 1회 스킵"이지만, 1분 주기 잡이 같은 값을 쓰면
+        누수 한 번이 30분 정지가 된다 — 체결 통지 재배달처럼 정지가 곧 무응답인 잡에서는
+        받아들일 수 없는 값이다. 대가를 잡의 주기에 맞춰 잘라낼 수 있게 열어 둔다.
+        """
         token = uuid4().hex
         acquired = await self.redis.set(
             self.keys.scheduler_lock(job_name),
             token,
             nx=True,
-            ex=self.scheduler_lock_ttl_sec,
+            ex=self.scheduler_lock_ttl_sec if ttl_sec is None else ttl_sec,
         )
         return token if acquired else None
 

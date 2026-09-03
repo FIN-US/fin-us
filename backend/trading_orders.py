@@ -4,7 +4,7 @@ import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta
-from typing import Any, Awaitable, Callable, Literal
+from typing import Any, Awaitable, Callable, Literal, Protocol
 
 from fastapi import HTTPException
 
@@ -81,11 +81,38 @@ class OrderExecutionResult:
     order_type: OrderType = "LIMIT"
 
 
+class TradeLedger(Protocol):
+    """주문 경로가 체결 원장에 요구하는 전부 (#259 2단계, #319의 방식).
+
+    이 계약이 생기기 전에는 주입 지점이 ``Any | None``이었고 호출부가
+    ``if self.trade_recorder is not None``로 감싸져 있었다. 통지 outbox가 이 원장 위에
+    서는 순간 그 선택성은 곧 **통지가 조용히 사라지는 경로**가 된다 — 원장이 없으면
+    미통지 행도 없고, 미통지 행이 없으면 재배달도 없다. 그래서 전제를 타입으로 고정한다.
+
+    재배달 쪽(``scheduler.trade_notification_task``)이 쓰는 조회는 여기 없다. 그건
+    ``trade_notification_repo.TradeNotificationRepo``의 몫이고, 주문 경로는 쓰지 않는다.
+    """
+
+    def record(self, result: OrderExecutionResult, /) -> int: ...
+
+    def mark_notified(self, trade_id: int, /, *, notified_at: datetime) -> None: ...
+
+
 class TradeRecorder:
     def __init__(self, session_factory: Callable[[], Any]):
         self.session_factory = session_factory
 
-    def record(self, result: OrderExecutionResult) -> None:
+    def record(self, result: OrderExecutionResult) -> int:
+        """체결을 원장에 남기고 그 행의 id를 돌려준다.
+
+        id가 곧 체결 통지의 멱등 키다 (#259 2단계). "한 체결 = 한 통지"가 이 PK 위에서
+        자연히 성립하므로 KIS 주문번호 같은 별도 키를 들이지 않는다 — 현재
+        ``TradeHistory``에 주문번호 필드가 없어 도입하려면 컬럼 둘과 기록 경로가 함께
+        늘어나는데, 지금 필요한 것은 "이 체결에 대한 통지를 이미 보냈는가" 하나다.
+
+        ``notified_at``은 비운 채로 남긴다. 그 상태가 outbox의 "미통지"이며, 통지가
+        나가야 ``mark_notified``가 채운다.
+        """
         from .models import TradeHistory
 
         if result.price <= 0:
@@ -102,16 +129,30 @@ class TradeRecorder:
 
         session = self.session_factory()
         try:
-            session.add(
-                TradeHistory(
-                    stock_code=result.stock_code,
-                    stock_name=result.stock_name,
-                    trade_type=result.side,
-                    quantity=result.quantity,
-                    price=float(result.price),
-                )
+            trade = TradeHistory(
+                stock_code=result.stock_code,
+                stock_name=result.stock_name,
+                trade_type=result.side,
+                quantity=result.quantity,
+                price=float(result.price),
             )
+            session.add(trade)
             session.commit()
+            trade_id = trade.id
+            if trade_id is None:
+                # 실제 Session이면 commit 뒤 id가 채워진다(만료된 속성을 읽는 순간
+                # 다시 SELECT한다). 여기 걸리는 것은 duck-typed 세션뿐이다. 그래도
+                # 조용히 넘기지 않는다 — id 없이는 outbox가 이 행을 마킹할 수 없어
+                # 통지가 한 번 더 나간다.
+                #
+                # 문구가 "기록 실패"가 아닌 이유: commit은 이미 끝났고 아래 rollback도
+                # no-op이다. 호출부는 이 예외를 기록 실패로 다루지만 행은 미통지로 남아
+                # outbox가 다시 보낸다 — 그 어긋남을 메시지에 적어 다음 사람이 헛짚지
+                # 않게 한다.
+                raise RuntimeError(
+                    "체결 이력 id를 받지 못했습니다 (행은 이미 커밋돼 남아 있을 수 있고, "
+                    "그렇다면 통지 재배달 대상으로 남습니다)"
+                )
         except Exception:
             rollback = getattr(session, "rollback", None)
             if callable(rollback):
@@ -121,6 +162,18 @@ class TradeRecorder:
             close = getattr(session, "close", None)
             if callable(close):
                 close()
+        return trade_id
+
+    def mark_notified(self, trade_id: int, *, notified_at: datetime) -> None:
+        """체결 통지가 나갔음을 원장에 남긴다 (#259 2단계).
+
+        쓰기 자체는 ``trade_notification_repo.mark_trade_notified``가 한다. 주문 경로와
+        재배달 경로가 같은 컬럼을 각자 UPDATE하면 한쪽만 조건이 바뀌는 날 절반의 통지가
+        다시 미통지로 보인다.
+        """
+        from .trade_notification_repo import mark_trade_notified
+
+        mark_trade_notified(self.session_factory, trade_id, notified_at=notified_at)
 
 
 McpRunner = Callable[[Any, str, dict[str, Any]], Awaitable[str]]

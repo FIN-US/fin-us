@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -52,6 +52,10 @@ def test_trade_recorder_creates_trade_history_and_commits():
 
         def commit(self):
             self.committed = True
+            # 실제 Session은 commit 뒤 PK를 채운다. 대역이 채우지 않으면 record가
+            # 통지 멱등 키를 못 돌려주고 그 자리에서 터진다 (#259 2단계).
+            for index, item in enumerate(self.added, 1):
+                item.id = index
 
         def close(self):
             self.closed = True
@@ -79,6 +83,63 @@ def test_trade_recorder_creates_trade_history_and_commits():
     assert trade.price == 75000.0
     assert session.committed is True
     assert session.closed is True
+
+
+def test_trade_recorder_marks_with_the_same_session_contract_as_record():
+    """record와 mark_notified가 같은 session_factory에 같은 것을 요구한다 (#259 2단계).
+
+    두 메서드는 팩토리 하나를 나눠 쓴다. 한쪽만 컨텍스트 매니저를 요구하면 같은 팩토리로
+    기록은 되고 마킹만 AttributeError가 나는데, 그 예외는 _handle_confirm의 except에
+    삼켜져 로그 한 줄로 끝나고 행은 미통지로 남아 1분 뒤 중복 배달된다.
+
+    그래서 대역에 __enter__/__exit__를 일부러 두지 않는다 — with를 요구하는 구현으로
+    되돌리면 여기서 터진다.
+    """
+
+    class FakeSession:
+        def __init__(self):
+            self.added = []
+            self.committed = 0
+            self.closed = 0
+
+        def add(self, item):
+            if item not in self.added:
+                self.added.append(item)
+
+        def get(self, model, primary_key):
+            _ = model
+            return next(
+                (item for item in self.added if item.id == primary_key),
+                None,
+            )
+
+        def commit(self):
+            self.committed += 1
+            for index, item in enumerate(self.added, 1):
+                item.id = index
+
+        def close(self):
+            self.closed += 1
+
+    session = FakeSession()
+    recorder = TradeRecorder(lambda: session)
+    trade_id = recorder.record(
+        OrderExecutionResult(
+            stock_code="005930",
+            stock_name="삼성전자",
+            side="BUY",
+            quantity=3,
+            price=75000,
+            message="주문 접수",
+            raw_result="{}",
+        )
+    )
+
+    recorder.mark_notified(trade_id, notified_at=datetime(2026, 5, 20, 1, 0, tzinfo=timezone.utc))
+
+    assert session.added[0].notified_at == datetime(2026, 5, 20, 1, 0)
+    # 두 호출 모두 세션을 열고 닫았다 — 한쪽만 with를 쓰면 이 대칭이 깨진다.
+    assert session.closed == 2
 
 
 def test_trade_recorder_rolls_back_and_closes_when_commit_fails():
@@ -311,7 +372,8 @@ def test_trade_recorder_writes_the_market_reference_price():
             self.added.append(item)
 
         def commit(self):
-            return None
+            for index, item in enumerate(self.added, 1):
+                item.id = index
 
         def close(self):
             return None
@@ -347,7 +409,8 @@ def test_trade_recorder_still_records_the_row_when_the_price_is_unknown(caplog):
             self.added.append(item)
 
         def commit(self):
-            return None
+            for index, item in enumerate(self.added, 1):
+                item.id = index
 
         def close(self):
             return None

@@ -655,3 +655,120 @@ def test_init_db_creates_filtered_signal_table_on_existing_db(tmp_path, monkeypa
         "uncertainty",
         "created_at",
     }
+
+
+# ---------------------------------------------------------------------------
+# 체결 통지 outbox 컬럼 (#259 2단계)
+# ---------------------------------------------------------------------------
+
+
+def _create_old_schema_tradehistory(db_path: str) -> None:
+    """notified_at 컬럼이 없던 시절의 tradehistory를 재현하고 행 하나를 남긴다.
+
+    다른 테이블은 실제 배포처럼 최신 스키마로 둔다 — 이 변경이 건드린 것은 이 테이블
+    하나뿐이라 나머지가 구버전일 이유가 없다(위 agentreport 헬퍼와 같은 이유).
+    """
+    from sqlmodel import SQLModel
+
+    setup_engine = create_engine(f"sqlite:///{db_path}")
+    SQLModel.metadata.create_all(setup_engine)
+
+    old_metadata = MetaData()
+    Table(
+        "tradehistory",
+        old_metadata,
+        Column("id", Integer, primary_key=True),
+        Column("stock_code", String),
+        Column("stock_name", String),
+        Column("trade_type", String),
+        Column("quantity", Integer),
+        Column("price", Float),
+        Column("trade_date", DateTime),
+    )
+    with setup_engine.begin() as conn:
+        conn.exec_driver_sql("DROP TABLE tradehistory")
+    old_metadata.create_all(setup_engine)
+    with setup_engine.begin() as conn:
+        conn.exec_driver_sql(
+            "INSERT INTO tradehistory "
+            "(stock_code, stock_name, trade_type, quantity, price, trade_date) "
+            "VALUES ('005930', '삼성전자', 'BUY', 1, 75000, '2026-01-01 00:00:00')"
+        )
+    setup_engine.dispose()
+
+
+def test_init_db_adds_notified_at_to_old_trade_history(tmp_path, monkeypatch):
+    """구버전 tradehistory에도 outbox 상태 컬럼이 생긴다.
+
+    이 컬럼이 없으면 재배달 조회 자체가 터져 체결 통지 outbox가 통째로 죽는다.
+    """
+    db_path = tmp_path / "old_trade_history.db"
+    _create_old_schema_tradehistory(str(db_path))
+
+    test_engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
+    monkeypatch.setattr(database, "engine", test_engine)
+
+    database.init_db()
+
+    conn = sqlite3.connect(str(db_path))
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(tradehistory)")}
+    conn.close()
+    assert "notified_at" in columns
+
+
+def test_migration_does_not_resurrect_notifications_for_old_trades(tmp_path, monkeypatch):
+    """컬럼 추가와 함께 기존 행이 통지 완료로 백필된다 (#259 2단계).
+
+    백필이 없으면 배포 직후 첫 주기가 창(24시간) 안의 과거 체결을 전부 "통지가
+    늦었습니다"로 다시 알린다. outbox가 이 행들의 통지를 책임진 적이 없으므로 그것은
+    복구가 아니라 없던 통지를 새로 만드는 것이다. 값은 지어내지 않고 trade_date를 쓴다.
+    """
+    db_path = tmp_path / "backfilled_trade_history.db"
+    _create_old_schema_tradehistory(str(db_path))
+
+    test_engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
+    monkeypatch.setattr(database, "engine", test_engine)
+
+    database.init_db()
+
+    conn = sqlite3.connect(str(db_path))
+    rows = conn.execute("SELECT trade_date, notified_at FROM tradehistory").fetchall()
+    conn.close()
+    assert len(rows) == 1
+    trade_date, notified_at = rows[0]
+    assert notified_at is not None
+    assert notified_at == trade_date
+
+
+def test_backfill_does_not_run_again_on_an_already_migrated_db(tmp_path, monkeypatch):
+    """백필은 컬럼이 방금 없었을 때만 돈다.
+
+    부팅마다 무조건 도는 자리에 두면 아직 통지되지 않은 행(notified_at IS NULL)까지
+    통지된 것으로 덮어, 체결됐는데 아무 말도 못 받는 상태가 조용히 확정된다.
+    """
+    db_path = tmp_path / "already_backfilled.db"
+    _create_old_schema_tradehistory(str(db_path))
+
+    test_engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
+    monkeypatch.setattr(database, "engine", test_engine)
+
+    database.init_db()
+
+    # 마이그레이션 이후에 들어온 미통지 체결. 재부팅이 이걸 덮으면 안 된다.
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "INSERT INTO tradehistory "
+        "(stock_code, stock_name, trade_type, quantity, price, trade_date, notified_at) "
+        "VALUES ('035420', 'NAVER', 'BUY', 2, 200000, '2026-02-01 00:00:00', NULL)"
+    )
+    conn.commit()
+    conn.close()
+
+    database.init_db()
+
+    conn = sqlite3.connect(str(db_path))
+    pending = conn.execute(
+        "SELECT stock_name FROM tradehistory WHERE notified_at IS NULL"
+    ).fetchall()
+    conn.close()
+    assert [row[0] for row in pending] == ["NAVER"]

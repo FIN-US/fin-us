@@ -364,6 +364,25 @@ class FakeNotifier:
         return True
 
 
+class FakeTradeLedger:
+    """체결 원장 대역 (#259 2단계).
+
+    주문 경로는 이제 원장 없이 돌지 않는다 — 체결 통지 outbox가 그 위에 서기 때문이다.
+    대역을 안 주면 conftest의 _forbid_implicit_trade_ledger가 터뜨린다.
+    """
+
+    def __init__(self) -> None:
+        self.results: list = []
+        self.notified: list = []
+
+    def record(self, result) -> int:
+        self.results.append(result)
+        return len(self.results)
+
+    def mark_notified(self, trade_id, *, notified_at) -> None:
+        self.notified.append(trade_id)
+
+
 class FakeOrderGateway:
     def __init__(self) -> None:
         self.orders: list = []
@@ -561,6 +580,7 @@ async def test_duplicate_confirm_calls_place_order_only_once():
     store = RedisPendingOrderStore(redis)
     notifier = FakeNotifier()
     gateway = FakeOrderGateway()
+    ledger = FakeTradeLedger()
 
     order = PendingOrder(
         chat_id="123",
@@ -578,6 +598,7 @@ async def test_duplicate_confirm_calls_place_order_only_once():
         notifier=notifier,
         pending_order_store=store,
         order_gateway=gateway,
+        trade_recorder=ledger,
         now_factory=lambda: datetime(2026, 5, 20, 10, 0, 30, tzinfo=KST),
     )
 
@@ -592,6 +613,9 @@ async def test_duplicate_confirm_calls_place_order_only_once():
     )
     assert "주문 완료" in notifier.messages[0]
     assert notifier.messages[-1] == "확정할 대기 주문이 없습니다."
+    # 체결이 한 번만 원장에 남았다 — 통지 outbox도 한 건만 책임진다 (#259 2단계).
+    assert len(ledger.results) == 1
+    assert ledger.notified == [1]
 
 
 # ---------------------------------------------------------------------------
