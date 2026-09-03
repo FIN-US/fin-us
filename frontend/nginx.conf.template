@@ -69,6 +69,12 @@ limit_conn_zone $binary_remote_addr zone=finus_analyze_conn:1m;
 # 레이트리밋 주석이 "CORS는 방어가 되지 않는다"고 적어 둔 그 경로가 부수적으로 함께
 # 닫힌다. 이 속성을 Lax·None으로 내리는 것은 인증 방식을 바꾸는 일이다.
 #
+# 단 "site"는 **스킴 + 등록가능도메인**이고 포트는 보지 않는다(PR #363 리뷰). 같은
+# 호스트의 다른 포트에 페이지가 뜨면 그건 same-site라 쿠키가 그대로 실린다. 지금 전
+# 인터페이스에 게시되는 서비스는 frontend(8080) 하나뿐이고 나머지는 루프백 전용이라
+# (#246·#285) 실제로 그런 페이지가 없지만, 새 서비스를 전 인터페이스에 게시할 때는
+# "임의 페이지"의 범위가 그만큼 넓어진다는 뜻이다.
+#
 # `HttpOnly`도 준다. 번들은 이 값을 자바스크립트로 읽을 필요가 없다 — 브라우저가 붙이는
 # 것이 이 방식의 전부다. WebSocket 핸드셰이크에도 그대로 붙는다(HttpOnly는 스크립트의
 # 읽기만 막고 네트워크 계층의 전송은 막지 않는다).
@@ -79,8 +85,14 @@ limit_conn_zone $binary_remote_addr zone=finus_analyze_conn:1m;
 # 있는 것이고(#266 2026-09-04 코멘트), 없애려면 로그인이나 네트워크 레벨 인증이
 # 필요하다. 이 배포에서 브라우저 경계를 맡는 것은 Tailscale이다.
 #
-# ⚠️ 키에 `$`·`"`·`;`가 들어가면 치환된 결과가 nginx 설정 문법에 섞여 기동이 깨진다.
-# `.env.example`이 권하는 `secrets.token_urlsafe`의 문자 집합([A-Za-z0-9_-])을 지킬 것.
+# ⚠️ 키에 못 쓰는 문자가 있다. 깨지는 이유가 둘로 갈린다.
+#   - `$`·`"` — 치환 결과가 nginx **설정 문법**에 섞인다. `"`는 기동 실패로 끝나지만,
+#     `$`는 하필 실재하는 변수 이름이 뒤따르면(`abc$host`) 조용히 그 값으로 치환돼
+#     backend가 아는 키와 다른 쿠키가 나간다.
+#   - `;`·`,`·`\`·공백 — nginx는 통과시키지만 **쿠키 값**에 쓸 수 없는 문자다
+#     (RFC 6265 cookie-octet). 브라우저가 값을 거기서 끊어 보내 401이 된다.
+# 어느 쪽이든 증상은 frontend에만 나타나므로, 같은 `.env`를 먼저 읽는 backend가 기동
+# 로그로 미리 경고한다(backend/main.py의 unsafe_key_characters).
 
 # `Secure`는 스킴을 보고 붙인다. 이 배포의 주 경로는 Tailscale 위의 평문 HTTP
 # (`http://100.x.y.z:8080`)라 무조건 붙이면 브라우저가 쿠키를 저장하지 않고 대시보드가
@@ -331,7 +343,23 @@ server {
     # 대시보드가 401로 멈추는 것으로만 드러난다. location 사이에는 상속이 없어 보안 헤더
     # 3종도 각각 다시 적어야 한다(위 /nginx-health·@too_many_requests와 같은 이유).
     # 이 중복은 backend/tests/test_nginx_api_key_cookie.py가 대조한다.
+    #
+    # ⚠️ `Cache-Control: no-cache`가 이 방식을 성립시킨다(PR #363 리뷰). 쿠키는
+    # Max-Age·Expires가 없는 **세션 쿠키**라 브라우저를 닫으면 사라지는데, 문서에 캐시
+    # 지시가 없으면 브라우저가 Last-Modified 기준 휴리스틱으로 캐싱해(대략 age의 10%)
+    # 다음 방문의 네비게이션이 네트워크를 타지 않는다. 그러면 쿠키는 없고 문서는 캐시에서
+    # 나와 **새 쿠키를 받을 기회가 없다** — 대시보드가 401로 멈추고, 서버 로그에는 아무
+    # 흔적이 없다. 키 회전도 같은 이유로 깨진다(컨테이너를 다시 만들어도 캐시된 문서를 쓰는
+    # 브라우저는 낡은 쿠키를 계속 보낸다).
+    #
+    # no-store가 아니라 no-cache인 것은 재검증 응답(304)에도 Set-Cookie가 실리기 때문이다
+    # — 실측했다(nginx:alpine, If-None-Match·If-Modified-Since 양쪽 304에 쿠키·보안 헤더가
+    # 그대로 나왔다). 즉 본문을 다시 보내지 않으면서 키는 매번 최신이다.
+    #
+    # 정적 자산에는 일부러 걸지 않는다. 번들은 53MB짜리 .wasm을 포함하고, 그건 캐시가
+    # 동작해야 하는 쪽이다.
     location = / {
+        add_header Cache-Control "no-cache" always;
         add_header Set-Cookie $finus_api_key_cookie always;
         add_header X-Frame-Options SAMEORIGIN always;
         add_header X-Content-Type-Options nosniff always;
@@ -340,6 +368,7 @@ server {
     }
 
     location = /index.html {
+        add_header Cache-Control "no-cache" always;
         add_header Set-Cookie $finus_api_key_cookie always;
         add_header X-Frame-Options SAMEORIGIN always;
         add_header X-Content-Type-Options nosniff always;

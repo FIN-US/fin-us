@@ -39,6 +39,7 @@ _DOCUMENT_LOCATIONS = frozenset({"= /", "= /index.html"})
 _TEMPLATE_MOUNT = "/etc/nginx/templates/default.conf.template"
 
 _COOKIE_DIRECTIVE = "add_header Set-Cookie $finus_api_key_cookie always"
+_NO_CACHE_DIRECTIVE = 'add_header Cache-Control "no-cache" always'
 
 
 @pytest.fixture(scope="module")
@@ -240,6 +241,44 @@ def test_every_document_location_sends_the_cookie(locations, spec):
     )
 
 
+@pytest.mark.parametrize("spec", sorted(_DOCUMENT_LOCATIONS))
+def test_every_document_location_forbids_a_stale_cached_copy(locations, spec):
+    """문서는 매번 재검증돼야 한다 — 안 그러면 쿠키가 전달될 기회 자체가 없다.
+
+    쿠키에는 Max-Age·Expires가 없다(세션 쿠키). 브라우저를 닫으면 사라지는데, 문서에 캐시
+    지시가 없으면 브라우저가 Last-Modified 기준 휴리스틱으로 캐싱해 다음 방문의 네비게이션이
+    네트워크를 타지 않는다. 쿠키는 없고 문서는 캐시에서 나오는 상태 — **새 쿠키를 받을
+    기회가 없다.** 대시보드가 401인데 서버 로그에는 아무 흔적도 없다(PR #363 리뷰).
+
+    키 회전도 같은 이유로 깨진다. `.env`를 고치고 컨테이너를 다시 만들어도, 캐시된 문서를
+    쓰는 브라우저는 낡은 쿠키를 계속 보낸다.
+
+    `no-store`가 아니라 `no-cache`인 것은 재검증 응답(304)에도 Set-Cookie가 실리기
+    때문이다 — nginx:alpine에서 If-None-Match·If-Modified-Since 양쪽을 실측했다. 본문을
+    다시 보내지 않으면서 키는 매번 최신이다.
+    """
+    assert _NO_CACHE_DIRECTIVE in locations[spec], (
+        f"`location {spec}`에 캐시 재검증 지시가 없다: {locations[spec]}. "
+        "브라우저가 문서를 캐시에서 꺼내는 순간 Set-Cookie가 전달되지 않는다."
+    )
+
+
+def test_the_bundle_assets_keep_their_cache(locations):
+    """캐시 제어는 문서에만 건다 — 번들에 걸면 53MB짜리 .wasm을 매번 다시 받는다.
+
+    쿠키가 필요한 것은 문서 응답 한 번뿐이므로, 재검증 비용도 거기까지다.
+    """
+    cached = {
+        spec
+        for spec, directives in locations.items()
+        if any(d.startswith("add_header Cache-Control") for d in directives)
+    }
+
+    assert cached == set(_DOCUMENT_LOCATIONS), (
+        f"캐시 제어가 걸린 location이 문서 경로와 다르다: {sorted(cached)}."
+    )
+
+
 def test_only_the_document_locations_send_the_cookie(locations):
     """정적 자산과 프록시 경로에는 쿠키를 싣지 않는다.
 
@@ -324,23 +363,38 @@ def test_compose_always_defines_the_key_variable(frontend_service):
     )
 
 
-def test_the_ci_syntax_job_checks_the_template_after_substitution():
+@pytest.fixture(scope="module")
+def nginx_ci_job():
+    workflow = yaml.safe_load(_CI_PATH.read_text(encoding="utf-8"))
+    return workflow["jobs"]["nginx-config-check"]
+
+
+def test_the_ci_syntax_job_checks_the_template_after_substitution(nginx_ci_job):
     """CI의 `nginx -t` 잡도 templates 경로에 걸어야 한다.
 
     conf.d에 직접 걸면 치환 전 텍스트를 검증하게 되어, **실제로 뜨는 것과 다른 파일을
     보는 잡**이 된다. 그러면 치환 결과에서만 깨지는 문법 오류가 초록불로 지나간다.
-
-    키 설정/미설정 양쪽을 도는 것도 함께 본다 — 빈 값은 `set $finus_injected_key "";`가 되고
-    쿠키 map이 빈 문자열 분기를 타므로, 한쪽만 검증하면 다른 쪽만 깨지는 오류가 남는다.
     """
-    ci = _CI_PATH.read_text(encoding="utf-8")
+    run = " ".join(step.get("run", "") for step in nginx_ci_job["steps"])
 
-    assert f"nginx.conf.template:{_TEMPLATE_MOUNT}" in ci, (
+    assert f"nginx.conf.template:{_TEMPLATE_MOUNT}" in run, (
         f"CI가 템플릿을 {_TEMPLATE_MOUNT}에 걸지 않는다."
     )
-    assert "/etc/nginx/conf.d/default.conf" not in ci, (
+    assert "/etc/nginx/conf.d/default.conf" not in run, (
         "CI가 아직 conf.d에 직접 걸고 있다 — 치환 전 텍스트를 검증하는 잡이 된다."
     )
-    assert ci.count("api_key:") == 2, (
-        "CI의 nginx 문법 검증이 키 설정/미설정 양쪽을 돌지 않는다."
-    )
+
+
+def test_the_ci_syntax_job_covers_both_the_empty_and_the_filled_key(nginx_ci_job):
+    """빈 키와 채운 키는 치환 결과가 다르므로 양쪽을 다 돌아야 한다.
+
+    빈 값은 `set $finus_injected_key "";`가 되고 쿠키 map이 빈 문자열 분기를 타므로,
+    한쪽만 검증하면 다른 쪽에서만 깨지는 문법 오류가 초록불로 지나간다.
+
+    매트릭스 **항목 수**가 아니라 **값의 집합**을 본다(PR #363 리뷰). 개수만 세면 두 항목을
+    모두 같은 값으로 바꾸는 회귀가 통과하고, 그건 정확히 이 검사가 막으려던 것이다.
+    """
+    keys = [entry["api_key"] for entry in nginx_ci_job["strategy"]["matrix"]["include"]]
+
+    assert "" in keys, "빈 키(= 인증 미설정, 기본 배포)를 도는 항목이 없다."
+    assert any(key for key in keys), "채운 키를 도는 항목이 없다."

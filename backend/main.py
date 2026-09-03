@@ -153,6 +153,67 @@ def is_authorized_api_call(*presented: str | None) -> bool:
     return any(matches_api_key(value) for value in presented)
 
 
+# 키에 섞이면 frontend 쪽에서 깨지는 문자와 그 이유 (#266 3단계, PR #363 리뷰).
+#
+# backend에는 아무 제약이 없다 — 여기서는 문자열을 통째로 비교할 뿐이다. 제약은 같은
+# `.env`를 읽는 nginx 쪽에 있고, 그것도 두 갈래다: 값이 **설정 텍스트**에 치환돼 들어가고
+# (`$`·`"`), 그 결과가 다시 **쿠키 값**이 된다(RFC 6265의 cookie-octet).
+#
+# 허용 목록이 아니라 실제로 깨지는 문자만 본다. `secrets.token_urlsafe`를 권하고는 있지만
+# base64(`+/=`)나 다른 문장 부호를 쓴 키도 아무 문제 없이 동작하므로, 좁은 허용 목록은
+# 멀쩡한 키에 경고를 내고 그러면 경고 자체가 무시되기 시작한다.
+_UNSAFE_KEY_CHARS = {
+    "$": "nginx 설정에서 변수 참조로 읽힙니다",
+    '"': "nginx 설정의 따옴표를 닫습니다",
+    ";": "쿠키 값을 여기서 끊고 뒤를 속성으로 읽습니다",
+    ",": "쿠키 값에 쓸 수 없는 문자입니다",
+    "\\": "쿠키 값에 쓸 수 없는 문자입니다",
+}
+
+
+def unsafe_key_characters(key: str) -> list[str]:
+    """*key*에서 frontend를 깨뜨리는 문자를 골라 돌려줍니다 (없으면 빈 목록).
+
+    공백·제어문자도 함께 본다. 눈에 보이지 않아 `.env`를 아무리 들여다봐도 못 찾는
+    쪽이고(줄 끝 공백이 대표적이다), config.FINUS_API_KEY가 strip하는 것은 양끝뿐이다.
+    """
+    found = {c for c in key if c in _UNSAFE_KEY_CHARS}
+    found |= {c for c in key if c.isspace() or not c.isprintable()}
+    return sorted(found)
+
+
+def _warn_about_unsafe_key_characters() -> None:
+    """키가 frontend를 깨뜨릴 문자를 담고 있으면 기동 시점에 알린다.
+
+    이 검사가 없으면 증상이 전부 frontend에만 나타난다 — 컨테이너가 뜨지 않거나(`"`),
+    더 나쁘게는 **정상 기동한 채 다른 값이 쿠키로 나간다**(`abc$host`처럼 실재하는 nginx
+    변수 이름이 뒤따르는 경우). 후자는 대시보드가 401인데 서버 어디에도 오류가 없는
+    상태이고, `.env` 한 줄을 의심하기까지가 멀다. 같은 값을 먼저 읽는 backend가 말해 주는
+    편이 훨씬 이르다.
+
+    경고에 그치고 기동을 막지는 않는다. backend 자신은 이 키로 정상 동작하고, 대시보드를
+    쓰지 않는 배포(텔레그램·NAT 중심)에서는 실제로 아무것도 깨지지 않는다. 남의 제약으로
+    자기 기동을 막는 것은 과하다.
+
+    문제가 된 **문자**는 로그에 싣되 키는 싣지 않는다. 위 집합은 다섯 글자짜리 공개
+    목록이라 여기서 새는 것이 사실상 없고, 그것 없이는 "어디를 고쳐야 하는지"가 빠져
+    경고가 행동으로 이어지지 않는다.
+    """
+    offenders = unsafe_key_characters(FINUS_API_KEY)
+    if not offenders:
+        return
+    reasons = ", ".join(
+        f"{c!r}({_UNSAFE_KEY_CHARS.get(c, '눈에 보이지 않는 문자입니다')})"
+        for c in offenders
+    )
+    logger.warning(
+        "FINUS_API_KEY에 frontend를 깨뜨리는 문자가 있습니다 — %s. "
+        "nginx가 이 값을 설정에 치환해 쿠키로 내보내므로(#266 3단계), 대시보드가 401이 "
+        "되거나 frontend 컨테이너가 아예 뜨지 않습니다. backend 쪽은 이 키로도 동작합니다.",
+        reasons,
+    )
+
+
 def _log_api_auth_state() -> None:
     """기동 시점에 인증 상태를 로그로 남긴다.
 
@@ -162,6 +223,9 @@ def _log_api_auth_state() -> None:
     """
     if api_auth_enabled():
         logger.info("API 인증이 켜져 있습니다 (#266 2단계) — /api/ 와 /api/v1/ws 가 키를 요구합니다.")
+        # 켜져 있을 때만 본다. 꺼진 배포에서는 이 값이 아무 데도 쓰이지 않으므로
+        # 경고할 것이 없다(그리고 빈 문자열에는 애초에 걸릴 문자가 없다).
+        _warn_about_unsafe_key_characters()
         return
     logger.warning(
         "FINUS_API_KEY가 비어 있어 API 인증이 꺼져 있습니다 — /api/ 전체와 /api/v1/ws가 "

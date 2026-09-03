@@ -36,6 +36,7 @@ from backend.main import (
     app,
     is_authorized_api_call,
     matches_api_key,
+    unsafe_key_characters,
 )
 
 
@@ -132,6 +133,50 @@ def test_is_authorized_api_call_denies_when_nothing_is_presented(auth_on):
     인증을 조용히 끄는 실수가 된다.
     """
     assert is_authorized_api_call() is False
+
+
+# --- 키에 쓸 수 없는 문자 (#266 3단계) -------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("key", "expected"),
+    [
+        # nginx 설정 텍스트에 치환돼 들어가면서 깨지는 문자.
+        # `$`는 하필 실재하는 변수 이름이 뒤따르면 조용히 그 값으로 치환된다 —
+        # 기동은 정상이고 쿠키만 다른 값이라, 서버 어디에도 오류가 남지 않는다.
+        ("abc$host", ["$"]),
+        ("ab" + chr(34) + "cd", [chr(34)]),
+        # nginx는 통과시키지만 쿠키 값에 쓸 수 없는 문자(RFC 6265 cookie-octet).
+        # 브라우저가 값을 거기서 끊어 보내므로 401이 된다.
+        ("abc;def", [";"]),
+        ("abc,def", [","]),
+        ("abc" + chr(92) + "def", [chr(92)]),
+        # 눈에 보이지 않는 쪽. config.FINUS_API_KEY가 strip하는 것은 양끝뿐이라
+        # 가운데 공백은 그대로 남는다.
+        ("abc def", [" "]),
+        ("abc" + chr(9) + "def", [chr(9)]),
+    ],
+)
+def test_unsafe_key_characters_flags_what_breaks_the_frontend(key, expected):
+    assert unsafe_key_characters(key) == expected
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        # token_urlsafe가 내는 문자 집합.
+        "s3cr3t_key-AZaz09",
+        # base64와 그 변형. 좁은 허용 목록을 쓰면 여기서 헛경고가 나고, 헛경고가 나는
+        # 검사는 곧 무시된다 — 그래서 허용 목록이 아니라 깨지는 문자만 본다.
+        "abc+def/ghi=",
+        "abc.def~ghi:jkl",
+        # 한글처럼 ASCII 밖의 문자도 nginx·쿠키 어느 쪽도 깨뜨리지 않는다.
+        # 인증 판정 쪽은 이미 UTF-8 바이트로 비교한다(matches_api_key).
+        "키-값",
+    ],
+)
+def test_unsafe_key_characters_stays_quiet_for_workable_keys(key):
+    assert unsafe_key_characters(key) == []
 
 
 # --- HTTP 미들웨어 --------------------------------------------------------
