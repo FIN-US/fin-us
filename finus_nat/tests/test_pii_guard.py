@@ -44,6 +44,7 @@ from nat_finus_nat.pii_guard import (
     install_mapping_box,
     mask_tool_result,
     restore_for_internal,
+    restore_params_for_kis,
     unmask_response,
     unrestorable_placeholders,
 )
@@ -443,6 +444,246 @@ class TestRestoreForInternal:
         assert "diary_api_http_error" in observation
         assert "210,000원" not in observation
         assert "3주" not in observation
+
+
+class TestRestoreParamsForKis:
+    """도구 **인자** 방향 역치환 + 종류 검사 (#338, 후보 1).
+
+    마스킹은 도구 결과에만 걸려 있었고 인자 방향에는 역치환이 없었다. 그래서 에이전트는
+    자기가 방금 본 잔고 수량으로 주문을 낼 수 없었다 — "보유 전량 매도"가 깨지는 자리다.
+
+    되돌리는 것만으로는 안 된다. 무조건 되돌리면 종류가 어긋난 자리표시자까지 숫자가
+    되어 **의미가 어긋난 주문이 조용히** 나갈 수 있다. 이 클래스는 두 방향을 함께
+    고정한다 — 맞는 종류는 통하고, 어긋난 종류는 여전히 시끄럽게 실패한다.
+    """
+
+    _BALANCE = "삼성전자 (005930) · 1,234주 · 평가금액 12,345,000원"
+
+    def _masked_placeholders(self) -> tuple[str, str]:
+        """잔고를 마스킹하고 (QTY, AMOUNT) 자리표시자를 돌려준다."""
+        mask_tool_result("finus_mcp_trading_get_balance", self._BALANCE)
+        box = PII_MAPPING.get()
+        qty = next(ph for ph in box if ph.startswith("<QTY_"))
+        amount = next(ph for ph in box if ph.startswith("<AMOUNT_"))
+        return qty, amount
+
+    def test_masked_quantity_becomes_a_kis_order_argument(self, mapping_box):
+        """이슈 본문의 흐름 — 마스킹된 잔고를 본 에이전트가 그 수량으로 주문을 낼 수 있다."""
+        qty, amount = self._masked_placeholders()
+
+        restored, rejections = restore_params_for_kis(
+            {"PDNO": "005930", "ORD_QTY": qty, "ORD_UNPR": amount}
+        )
+
+        assert rejections == []
+        # 콤마와 "원"을 벗긴 순수 숫자여야 한다. 원값("1,234"·"12,345,000원")을 그대로
+        # 넣으면 KIS가 거부하므로, 역치환만으로는 이 이슈가 닫히지 않는다.
+        assert restored == {"PDNO": "005930", "ORD_QTY": "1234", "ORD_UNPR": "12345000"}
+
+    def test_amount_placeholder_in_a_quantity_field_is_rejected(self, mapping_box):
+        """이 이슈가 걱정한 위험의 본체 — 종류 검사가 없으면 여기서 오주문이 나간다."""
+        _, amount = self._masked_placeholders()
+
+        restored, rejections = restore_params_for_kis({"ORD_QTY": amount})
+
+        assert [r.field for r in rejections] == ["ORD_QTY"]
+        assert rejections[0].reason == "expected_QTY_placeholder_got_AMOUNT"
+        # 거부한 필드는 복원하지 않는다 — 숫자가 되면 그것이 곧 조용한 오주문이다.
+        assert restored["ORD_QTY"] == amount
+
+    def test_quantity_placeholder_in_a_price_field_is_rejected(self, mapping_box):
+        """반대 방향도 같다. 단가 자리에 수량이 실리면 12,345,000원짜리가 1,234원이 된다."""
+        qty, _ = self._masked_placeholders()
+
+        _, rejections = restore_params_for_kis({"ORD_UNPR": qty})
+
+        assert rejections[0].reason == "expected_AMOUNT_placeholder_got_QTY"
+
+    @pytest.mark.parametrize("field", ["CANO", "ACNT_PRDT_CD", "ORD_DVSN", "PDNO"])
+    def test_fields_outside_the_naming_convention_reject_placeholders(self, mapping_box, field):
+        """접미 마디로 종류를 판정할 수 없는 필드는 fail-closed로 거부한다.
+
+        계좌 필드가 여기 걸리는 것이 특히 중요하다 — mcp-trading이 ``KIS_ACCOUNT_NO``
+        env로 채우는 값이라 LLM 인자로 올 이유가 없고, ``ACCOUNT`` 원값은 하이픈 유무가
+        원문 표기를 따라가므로 ``CANO``/``ACNT_PRDT_CD`` 분리와 어긋날 수 있다.
+        """
+        qty, _ = self._masked_placeholders()
+
+        _, rejections = restore_params_for_kis({field: qty})
+
+        assert [r.reason for r in rejections] == ["field_does_not_accept_placeholders"]
+
+    def test_new_quantity_field_names_are_covered_by_the_convention(self, mapping_box):
+        """필드 이름 목록이 아니라 KIS의 마디 규약을 보므로 새 필드도 자동으로 덮인다.
+
+        목록을 하드코딩했다면 KIS가 필드를 늘릴 때 조용히 새는 쪽으로 무너진다 —
+        이슈가 명시적으로 경계한 지점이다.
+        """
+        qty, amount = self._masked_placeholders()
+
+        restored, rejections = restore_params_for_kis({"CNCL_QTY": qty, "TOT_EVLU_AMT": amount})
+
+        assert rejections == []
+        assert restored == {"CNCL_QTY": "1234", "TOT_EVLU_AMT": "12345000"}
+
+    def test_partial_placeholder_value_is_rejected(self, mapping_box):
+        """자리표시자가 값의 일부면 어디까지가 값인지 판정할 근거가 없다."""
+        qty, _ = self._masked_placeholders()
+
+        _, rejections = restore_params_for_kis({"ORD_QTY": f"{qty}주"})
+
+        assert [r.reason for r in rejections] == ["placeholder_is_not_the_whole_value"]
+
+    def test_foreign_scope_placeholder_is_rejected(self, mapping_box):
+        """backend가 사용자 발화를 마스킹한 자리표시자는 원값이 이 프로세스에 없다.
+
+        ``restore_for_internal``이 저장 경로에서 통과시키는 것과 같은 종류인데, 주문
+        경로에서는 통과시킬 곳이 없다 — KIS로 그대로 나가면 거부되고, 그 실패는
+        사용자에게 "주문이 안 된다"로만 보인다.
+        """
+        _, backend_mapping = mask_pii("300만원에 사줘")
+        foreign = next(iter(backend_mapping))
+
+        _, rejections = restore_params_for_kis({"ORD_UNPR": foreign})
+
+        assert [r.reason for r in rejections] == ["no_mapping_in_this_request"]
+
+    def test_hallucinated_placeholder_of_this_request_is_rejected(self, mapping_box):
+        """LLM이 지어낸 이 요청 scope 번호도 원값이 없기는 마찬가지다."""
+        qty, _ = self._masked_placeholders()
+        invented = f"<QTY_{qty.rsplit('_', 2)[-2]}_9>"
+
+        _, rejections = restore_params_for_kis({"ORD_QTY": invented})
+
+        assert [r.reason for r in rejections] == ["no_mapping_in_this_request"]
+
+    def test_korean_numeral_amount_is_not_guessed_into_a_number(self, mapping_box):
+        """수사 표기는 해석하지 않고 거부한다 — 파서가 한 자리 틀리면 조용한 오주문이다.
+
+        ``_AMOUNT_UNIT_RE``가 만드는 매핑이고, ``finus_list_diaries``가 돌려주는 일지
+        본문에 실제로 들어 있다.
+        """
+        mask_tool_result("finus_list_diaries", "삼성전자를 3천만원어치 샀다")
+        placeholder = next(iter(PII_MAPPING.get()))
+
+        _, rejections = restore_params_for_kis({"ORD_UNPR": placeholder})
+
+        assert [r.reason for r in rejections] == ["restored_value_is_not_a_number"]
+
+    def test_values_without_placeholders_pass_through_untouched(self, mapping_box):
+        """정상 경로 — 에이전트가 종목코드·구분값을 직접 적는 호출은 그대로 통과한다."""
+        params = {"PDNO": "005930", "ORD_DVSN": "00", "ORD_QTY": "10"}
+
+        assert restore_params_for_kis(params) == (params, [])
+
+    def test_placeholder_hidden_in_a_nested_value_is_rejected(self, mapping_box):
+        """중첩 값 안의 자리표시자는 적용할 필드 이름이 없으므로 복원하지 않는다."""
+        qty, _ = self._masked_placeholders()
+
+        _, rejections = restore_params_for_kis({"ORD": {"ORD_QTY": qty}})
+
+        assert [r.reason for r in rejections] == ["placeholder_inside_a_non_string_value"]
+
+    def test_rejection_logs_the_placeholder_but_the_caller_does_not_echo_it(
+        self, mapping_box, caplog
+    ):
+        """자리표시자 원문은 로그에만 남긴다 — 오류 JSON은 LLM 컨텍스트로 재유입된다."""
+        _, amount = self._masked_placeholders()
+
+        with caplog.at_level(logging.WARNING, logger="nat_finus_nat.pii_guard"):
+            restore_params_for_kis({"ORD_QTY": amount})
+
+        assert amount in caplog.text
+
+
+class TestKisToolRestoresParams:
+    """``finus_account_balance``가 실제로 위 규칙을 태우는지 배선을 확인한다 (#338).
+
+    단위 함수만 테스트하면 도구가 그 함수를 부르지 않게 되는 회귀를 놓친다. 두 래퍼
+    (전체 권한·readonly)가 모두 ``_prepare_kis_trading_mcp_call``을 거치므로 여기 한
+    지점이 양쪽을 덮는다.
+    """
+
+    _BALANCE = "삼성전자 (005930) · 1,234주 · 평가금액 12,345,000원"
+
+    @pytest.fixture
+    def remote_mcp(self, monkeypatch):
+        """원격 KIS MCP 대역 — 도구가 실제로 넘긴 arguments를 관측한다."""
+        calls: list[dict] = []
+
+        async def _fake_remote(**kwargs):
+            calls.append(kwargs)
+            return '{"output": [{"odno": "0000117057"}]}'
+
+        monkeypatch.setattr(finus_api, "_mcp_call_tool_remote", _fake_remote)
+        # description 조립이 실제 MCP에 list_tools를 걸지 않게 한다.
+        monkeypatch.setenv("FINUS_SKIP_MCP_LIST_TOOLS", "1")
+        return calls
+
+    async def _order(self, params: dict) -> str:
+        config = finus_api.FinusAccountBalanceConfig(trading_tool_name="domestic_stock")
+        async with finus_api.finus_account_balance(config, None) as info:
+            return await info.single_fn(
+                finus_api.KisTradingMcpCallInput(api_type="order_cash", params=params)
+            )
+
+    async def test_agent_can_order_with_the_quantity_it_just_saw(
+        self, remote_mcp, mapping_box, ledger
+    ):
+        """이슈의 재현 경로 — 잔고 조회 → 그 수량으로 매도 주문이 KIS까지 숫자로 도착한다."""
+        mask_tool_result("finus_mcp_trading_get_balance", self._BALANCE)
+        qty = next(ph for ph in mapping_box if ph.startswith("<QTY_"))
+
+        await self._order({"PDNO": "005930", "ORD_DVSN": "01", "ORD_QTY": qty})
+
+        assert len(remote_mcp) == 1
+        assert remote_mcp[0]["arguments"]["params"]["ORD_QTY"] == "1234"
+
+    async def test_amount_in_the_quantity_slot_never_reaches_kis(
+        self, remote_mcp, mapping_box, ledger
+    ):
+        """종류가 어긋나면 호출 **자체가** 일어나지 않는다 — 시끄러운 실패를 유지한다."""
+        mask_tool_result("finus_mcp_trading_get_balance", self._BALANCE)
+        amount = next(ph for ph in mapping_box if ph.startswith("<AMOUNT_"))
+
+        observation = await self._order({"PDNO": "005930", "ORD_QTY": amount})
+
+        assert remote_mcp == []
+        payload = json.loads(observation)
+        assert payload["error"] == "kis_param_placeholder_rejected"
+        assert payload["rejected"] == [
+            {"field": "ORD_QTY", "reason": "expected_QTY_placeholder_got_AMOUNT"}
+        ]
+        # 에이전트가 같은 호출을 반복하지 않도록 무엇이 잘못됐는지 알려 준다.
+        assert "hint" in payload
+        # 내부 토큰은 Observation으로 돌려주지 않는다 — 되돌려주면 에이전트가 그것을
+        # 답변에 옮겨 적을 여지를 준다(finus_save_diary 거부 가드와 같은 판단).
+        assert amount not in observation
+
+    async def test_one_bad_field_aborts_the_whole_call(self, remote_mcp, mapping_box, ledger):
+        """통과한 것만 복원해 보내면 반쯤 맞는 주문이 KIS까지 간다."""
+        mask_tool_result("finus_mcp_trading_get_balance", self._BALANCE)
+        qty = next(ph for ph in mapping_box if ph.startswith("<QTY_"))
+        amount = next(ph for ph in mapping_box if ph.startswith("<AMOUNT_"))
+
+        await self._order({"ORD_QTY": qty, "CANO": amount})
+
+        assert remote_mcp == []
+
+    async def test_readonly_wrapper_shares_the_same_rule(self, remote_mcp, mapping_box, ledger):
+        """조회 전용 래퍼도 같은 지점을 거친다 — 규칙이 갈리면 한쪽만 고쳐진다."""
+        mask_tool_result("finus_mcp_trading_get_balance", self._BALANCE)
+        qty = next(ph for ph in mapping_box if ph.startswith("<QTY_"))
+
+        config = finus_api.FinusAccountBalanceReadonlyConfig(trading_tool_name="domestic_stock")
+        async with finus_api.finus_account_balance_readonly(config, None) as info:
+            await info.single_fn(
+                finus_api.KisTradingMcpCallInput(
+                    api_type="inquire_price", params={"FID_INPUT_ISCD": "005930", "ORD_QTY": qty}
+                )
+            )
+
+        assert remote_mcp[0]["arguments"]["params"]["ORD_QTY"] == "1234"
 
 
 class TestSaveDiaryRejectsUnrestorable:

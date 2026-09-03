@@ -27,6 +27,7 @@ from .pii_guard import (
     mask_tool_result,
     placeholder_kind,
     restore_for_internal,
+    restore_params_for_kis,
     unrestorable_placeholders,
 )
 
@@ -400,6 +401,61 @@ McpCallArguments: TypeAlias = dict[str, Any]
 def _err_json(error: str, **extra: Any) -> str:
     return json.dumps({"error": error, **extra}, ensure_ascii=False)
 
+
+# 도구 경계의 넓은 ``except``가 잡되 **외부 API 실패로 위장해서는 안 되는** 예외 (#358).
+#
+# ``TypeError``·``AttributeError``는 네트워크나 상대 서버가 아니라 이 저장소의 결함이
+# 던진다 — 호출 시그니처 불일치, 오타 난 속성 이름 같은 것들이다. 이것들을
+# ``mcp_call_failed``·``diary_api_request_failed``로 바꾸면 원인이 "저장이 안 됐다"는
+# 얼굴로만 드러나 진단이 비싸진다. PR #356이 정확히 그 경로였다: 테스트 대역의
+# 시그니처 불일치가 던진 ``TypeError``가 오류 JSON으로 위장돼 있었다.
+#
+# 잡는 것 자체는 유지한다(#358 방침 B). 도구 경계에서 예외가 탈출하면 ReAct 루프가
+# 끊기는데, 그것은 오해를 부르는 Observation보다 운영상 더 큰 실패다. 대신 스택을
+# ``logger.exception``으로 남기고 **오류 코드를 가른다** — 로그와 Observation 양쪽에서
+# 위장이 사라진다.
+#
+# 목록을 넓히는 것(예: ``KeyError``·``ValueError``)은 하지 않았다. 그 둘은 코딩 실수만이
+# 아니라 상대가 준 응답의 모양이 달라도 나므로, 넣으면 진짜 외부 실패가 내부 오류로
+# **반대 방향의 위장**을 하게 된다.
+_TOOL_BUG_EXCEPTIONS: tuple[type[Exception], ...] = (TypeError, AttributeError)
+
+_TOOL_INTERNAL_ERROR = "tool_internal_error"
+_TOOL_INTERNAL_ERROR_HINT = (
+    "이 도구 구현 자체의 오류입니다 — 외부 API나 네트워크 실패가 아닙니다. 인자를 바꿔 "
+    "재시도해도 결과는 같으므로 같은 도구를 반복 호출하지 말고, 다른 방법으로 진행하거나 "
+    "사용자에게 도구 오류를 알리세요."
+)
+
+
+def _tool_boundary_error(
+    exc: BaseException, *, api_error: str, where: str, **extra: Any
+) -> str:
+    """도구 경계에서 잡은 *exc*를 오류 JSON으로 바꾼다 — 스택은 항상 남긴다 (#358).
+
+    코딩 실수(:data:`_TOOL_BUG_EXCEPTIONS`)면 :data:`_TOOL_INTERNAL_ERROR`로, 그 외는
+    *api_error*로 가른다. ``logger.exception``을 쓰므로 **``except`` 블록 안에서만**
+    부른다 — 밖에서 부르면 스택 없이 "NoneType: None"만 남는다.
+
+    *exc*가 그룹에서 꺼낸 하위 예외여도 로그에는 현재 처리 중인 그룹 전체가 남는다.
+    호출 경로가 더 보이는 쪽이라 그대로 둔다.
+    """
+    if isinstance(exc, _TOOL_BUG_EXCEPTIONS):
+        logger.exception(
+            "%s에서 도구 구현 오류(%s)가 발생했습니다 — 외부 API 실패가 아닙니다.",
+            where,
+            type(exc).__name__,
+        )
+        return _err_json(
+            _TOOL_INTERNAL_ERROR,
+            exception=type(exc).__name__,
+            detail=str(exc),
+            hint=_TOOL_INTERNAL_ERROR_HINT,
+            **extra,
+        )
+    logger.exception("%s이(가) 실패했습니다.", where)
+    return _err_json(api_error, detail=str(exc), **extra)
+
 # ReAct 프롬프트(ChatPromptTemplate)에서 ``{``/``}``가 변수로 해석되지 않게 이스케이프합니다.
 def _langchain_escape_braces(text: str) -> str:
     return text.replace("{", "{{").replace("}", "}}")
@@ -462,10 +518,16 @@ async def _run_mcp_timed(inner, *, tool_name: str, timeout_sec: float) -> str:
     except asyncio.CancelledError:
         raise
     except BaseExceptionGroup as exc:
+        # anyio task group을 쓰는 MCP 클라이언트에서는 코딩 실수도 그룹에 싸여 올라온다.
+        # 그룹을 풀지 않으면 아래 분류가 그 경로에서만 통하지 않는다 (#358).
         sub = exc.exceptions[0] if exc.exceptions else exc
-        return _err_json("mcp_call_failed", tool=tool_name, detail=str(sub))
+        return _tool_boundary_error(
+            sub, api_error="mcp_call_failed", where=f"MCP 도구 {tool_name} 호출", tool=tool_name
+        )
     except Exception as exc:  # noqa: BLE001
-        return _err_json("mcp_call_failed", tool=tool_name, detail=str(exc))
+        return _tool_boundary_error(
+            exc, api_error="mcp_call_failed", where=f"MCP 도구 {tool_name} 호출", tool=tool_name
+        )
 
 
 # 작업 timeout에서 SSE 연결 타임아웃을 적당히 산출합니다.
@@ -962,6 +1024,35 @@ def _prepare_kis_trading_mcp_call(
         return _err_json("kis_mcp_missing_api_type", tool=tool_name, blob_keys=list(blob.keys()))
     raw_params = blob.get("params")
     params: dict[str, Any] = raw_params if isinstance(raw_params, dict) else {}
+
+    # 마스킹된 잔고를 본 에이전트가 그 수량으로 주문을 낼 수 있게 인자 방향에도 역치환을
+    # 건다 (#338). 두 래퍼(전체 권한·readonly)가 모두 이 함수를 거치므로 여기 한 곳이면
+    # 양쪽이 같은 규칙을 쓴다.
+    #
+    # 하나라도 거부되면 **호출 자체를 중단한다.** 통과한 것만 복원해 보내면 수량은 맞고
+    # 단가는 자리표시자인 반쯤 맞는 주문이 KIS까지 간다 — 거기서 거부되더라도, 거부되지
+    # 않는 조합이 하나라도 있으면 그때는 조용한 오주문이 된다.
+    params, rejections = restore_params_for_kis(params)
+    if rejections:
+        # 자리표시자 원문은 restore_params_for_kis가 로그에만 남겼다. 오류 JSON은
+        # Observation으로 LLM 컨텍스트에 재유입되므로 필드 이름과 사유 코드만 싣는다 —
+        # finus_save_diary의 거부 가드가 같은 이유로 같은 구분을 한다.
+        return _err_json(
+            "kis_param_placeholder_rejected",
+            tool=tool_name,
+            api_type=str(api_type).strip(),
+            rejected=[{"field": r.field, "reason": r.reason} for r in rejections],
+            hint=(
+                "params에 실린 내부 자리표시자를 그대로 쓸 수 없어 호출하지 않았습니다. "
+                "수량 자리(*_QTY)에는 수량 자리표시자만, 금액·단가 자리(*_UNPR·*_PRPR·*_AMT)에는 "
+                "금액 자리표시자만 넣을 수 있고, 값 전체가 자리표시자 하나여야 합니다. "
+                "계좌번호 자리(CANO·ACNT_PRDT_CD)는 서버가 채우므로 넣지 마세요. "
+                "이 요청에서 조회한 잔고·주문 결과에 나온 값만 이 방식으로 쓸 수 있습니다 — "
+                "사용자 발화에서 온 금액은 재입력해도 같은 결과이므로 재질의하지 말고, "
+                "필요한 값을 조회 도구로 먼저 확인한 뒤 다시 시도하세요."
+            ),
+        )
+
     if tool_name == "domestic_stock":
         params = _adjust_domestic_stock_params(str(api_type).strip(), params)
     return tool_name, {"api_type": str(api_type).strip(), "params": params}
@@ -1391,7 +1482,9 @@ async def finus_save_diary(config: FinusSaveDiaryConfig, _builder: Builder):
             )
             return _record_and_mask("finus_save_diary", result)
         except Exception as exc:  # noqa: BLE001
-            result = _err_json("diary_api_request_failed", detail=str(exc), url=url)
+            result = _tool_boundary_error(
+                exc, api_error="diary_api_request_failed", where="매매일지 저장", url=url
+            )
             return _record_and_mask("finus_save_diary", result)
 
         if body.get("status") != "success":
@@ -1443,7 +1536,9 @@ async def finus_list_diaries(config: FinusListDiariesConfig, _builder: Builder):
             )
             return _record_and_mask("finus_list_diaries", result)
         except Exception as exc:  # noqa: BLE001
-            result = _err_json("diary_api_request_failed", detail=str(exc), url=url)
+            result = _tool_boundary_error(
+                exc, api_error="diary_api_request_failed", where="매매일지 조회", url=url
+            )
             return _record_and_mask("finus_list_diaries", result)
 
         if body.get("status") != "success":
