@@ -712,8 +712,18 @@ async def catalyst_calendar_task(
 TRADE_NOTIFY_INTERVAL_SECONDS = 60
 # 이만큼 지난 체결만 집는다. 주문 경로는 기록 → 전송 → 마킹 순서라, 전송 중인 행이 잠시
 # 미통지로 보인다. 그 행을 집으면 같은 체결이 두 번 나간다 — outbox가 없애려는 무응답을
-# 중복으로 바꾸는 것은 거래가 아니다. 값은 그 구간의 상한(단발 send_text = httpx 타임아웃
-# 10초)보다 넉넉히 크게 잡는다.
+# 중복으로 바꾸는 것은 거래가 아니다.
+#
+# 그 구간의 상한은 **10초 × 조각 수**다. send_text는 split_for_telegram의 조각마다
+# _post_message를 따로 치고, 각 요청에 httpx 타임아웃 10초가 붙기 때문이다. 조각 수에
+# 상한이 없으면 이 유예도 근거가 없다.
+#
+# 체결 통지에는 상한이 있다. 문구가 "주문 완료: " + OrderExecutionResult.message인데,
+# 그 message는 _extract_order_message가 모든 분기에서 500자로 자른다. 507자면
+# TELEGRAM_MESSAGE_LIMIT(4000) 안이라 항상 한 조각이고, 따라서 실제 상한은 10초다.
+# 60초는 그 위의 6배 여유다. 이 전제는 추론이 아니라 테스트로 고정돼 있다
+# (test_fill_notification_is_always_a_single_telegram_part) — 깨지면 유예를
+# 10초 × 조각 수 위로 올려야 한다.
 TRADE_NOTIFY_GRACE = timedelta(seconds=60)
 # 이보다 오래된 체결은 알리지 않는다. 봇이 며칠 꺼져 있었다면 그 사이 체결을 지금 알리는
 # 것은 복구가 아니라 소음이고, 사용자는 이미 증권사 앱에서 봤다. 걸러진 행의 notified_at은
@@ -848,6 +858,14 @@ async def trade_notification_task(
             #
             # 남은 건을 계속 보내지 않고 배치를 끊는다. 이 경로의 지배적 실패 원인은 채팅
             # 단위 rate limit이라, 실패 뒤의 전송은 성공할 가능성이 낮으면서 ban만 늘린다.
+            #
+            # 대가: 목록이 오래된 순이라 맨 앞 행이 계속 실패하면 그 뒤의 신규 통지가 함께
+            # 막힌다. rate limit이라는 전제에서는 뒤엣것도 어차피 못 나가므로 손해가 없지만,
+            # 전제가 깨져 특정 행만 실패하는 경우(그 행 하나 때문에 뒤가 밀리는 경우)에는
+            # 조용한 head-of-line 정지가 된다. 영구하지는 않다 — 막는 행이
+            # TRADE_NOTIFY_MAX_AGE를 넘기면 목록에서 빠지고 뒤가 흐른다. 즉 최악이
+            # 24시간이고, 그동안 신호는 이 로그 한 줄뿐이다. 드러내는 것은 #259 5단계
+            # (전송 최종 실패의 알람·메트릭)의 몫이다.
             logger.error("체결 통지 재배달 실패 — 다음 주기로 미룬다 (trade_id=%s)", trade.id)
             break
         try:

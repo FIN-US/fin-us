@@ -4,6 +4,7 @@ import json
 import pytest
 
 from backend.redis_state import (
+    SCHEDULER_LOCK_TTL_SEC,
     SIGNAL_HASH_TTL_SEC,
     TELEGRAM_POLLER_STATE_TTL_SEC,
     InMemoryPendingOrderStore,
@@ -145,6 +146,37 @@ async def test_scheduler_lock_allows_single_owner():
 
     assert token is not None
     assert await state.acquire_scheduler_lock() is None
+
+
+@pytest.mark.asyncio
+async def test_scheduler_lock_uses_the_default_ttl_when_the_job_does_not_ask():
+    """기본 만료는 SCHEDULER_LOCK_TTL_SEC다. 잡별 TTL이 이걸 조용히 바꾸면 안 된다."""
+    redis = FakeRedis()
+    state = RedisSchedulerState(redis)
+
+    await state.acquire_scheduler_lock("market_monitoring")
+
+    assert redis.calls[-1][2] == SCHEDULER_LOCK_TTL_SEC
+
+
+@pytest.mark.asyncio
+async def test_scheduler_lock_honors_a_per_job_ttl(monkeypatch):
+    """잡별 TTL이 실제로 redis까지 내려간다 (#259 2단계).
+
+    이 인자가 무시되면 1분 주기 잡이 30분짜리 락을 잡는다. 락 누수는 "타임아웃 ≠ 실패"
+    모호성(REDIS_SOCKET_TIMEOUT_SECONDS 주석)으로 실제 일어날 수 있고, 그때 체결 통지
+    재배달이 30분 멈춘다 — 이 잡에서 정지는 곧 "체결됐는데 아무 말도 없는" 시간이라,
+    기본값이 근거로 삼은 "감시 1회 스킵"과 대가가 다르다.
+    """
+    redis = FakeRedis()
+    state = RedisSchedulerState(redis)
+
+    await state.acquire_scheduler_lock("trade_notification", ttl_sec=120)
+
+    key, _token, ex = redis.calls[-1]
+    assert key == state.keys.scheduler_lock("trade_notification")
+    assert ex == 120
+    assert ex != SCHEDULER_LOCK_TTL_SEC  # 기본값과 구별되는 값이어야 검증이 성립한다
 
 
 @pytest.mark.asyncio

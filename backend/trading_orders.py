@@ -144,7 +144,15 @@ class TradeRecorder:
                 # 다시 SELECT한다). 여기 걸리는 것은 duck-typed 세션뿐이다. 그래도
                 # 조용히 넘기지 않는다 — id 없이는 outbox가 이 행을 마킹할 수 없어
                 # 통지가 한 번 더 나간다.
-                raise RuntimeError("체결 이력 id를 받지 못했습니다")
+                #
+                # 문구가 "기록 실패"가 아닌 이유: commit은 이미 끝났고 아래 rollback도
+                # no-op이다. 호출부는 이 예외를 기록 실패로 다루지만 행은 미통지로 남아
+                # outbox가 다시 보낸다 — 그 어긋남을 메시지에 적어 다음 사람이 헛짚지
+                # 않게 한다.
+                raise RuntimeError(
+                    "체결 이력 id를 받지 못했습니다 (행은 이미 커밋돼 남아 있을 수 있고, "
+                    "그렇다면 통지 재배달 대상으로 남습니다)"
+                )
         except Exception:
             rollback = getattr(session, "rollback", None)
             if callable(rollback):

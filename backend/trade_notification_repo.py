@@ -15,7 +15,7 @@
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Callable, Protocol
+from typing import Any, Callable, Protocol
 
 from sqlmodel import Session, col, select
 
@@ -72,7 +72,7 @@ def to_naive_utc(moment: datetime) -> datetime:
 
 
 def mark_trade_notified(
-    session_factory: Callable[[], Session],
+    session_factory: Callable[[], Any],
     trade_id: int,
     *,
     notified_at: datetime,
@@ -86,8 +86,19 @@ def mark_trade_notified(
     이미 채워진 행은 덮지 않는다. 재배달과 주문 경로가 겹치는 경우(전송은 성공했는데
     마킹 전에 죽어 다음 주기가 같은 행을 집는 경우) 처음 통지 시각이 살아남아야 지연을
     재는 값이 뒤로 밀리지 않는다.
+
+    세션을 ``with``가 아니라 손으로 열고 닫는다. **``TradeRecorder.record``와 같은
+    ``session_factory``를 받기 때문이다** — 저쪽은 컨텍스트 매니저가 아닌 세션도 받도록
+    ``rollback``·``close``를 getattr로 다루는데, 이쪽만 ``with``를 요구하면 같은 팩토리로
+    한 메서드는 되고 다른 메서드는 AttributeError가 난다. 그 예외는 ``_handle_confirm``의
+    ``except``에 삼켜져 로그 한 줄로 끝나고, 행은 미통지로 남아 1분 뒤 중복 배달된다.
+    두 경로가 하나의 팩토리를 나눠 쓰는 한 요구 조건도 하나여야 한다.
+
+    같은 모듈의 ``SqliteTradeNotificationRepo.list_unnotified``는 ``with``를 쓴다. 그쪽은
+    스케줄러 전용이라 팩토리를 주문 경로와 나눠 쓰지 않는다.
     """
-    with session_factory() as session:
+    session = session_factory()
+    try:
         trade = session.get(TradeHistory, trade_id)
         if trade is None:
             return
@@ -96,6 +107,15 @@ def mark_trade_notified(
         trade.notified_at = to_naive_utc(notified_at)
         session.add(trade)
         session.commit()
+    except Exception:
+        rollback = getattr(session, "rollback", None)
+        if callable(rollback):
+            rollback()
+        raise
+    finally:
+        close = getattr(session, "close", None)
+        if callable(close):
+            close()
 
 
 class SqliteTradeNotificationRepo:

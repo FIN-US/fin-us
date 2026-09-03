@@ -6,6 +6,7 @@
 불변식이다 — 그게 깨지면 outbox가 없애려던 무응답이 중복 배달로 바뀔 뿐이다.
 """
 
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -13,6 +14,9 @@ from sqlmodel import Session, SQLModel, create_engine
 
 from backend import scheduler as scheduler_module
 from backend.models import TradeHistory
+from backend.presentation import split_for_telegram
+from backend.trading_orders import _extract_order_message
+from backend.redis_state import SCHEDULER_LOCK_TTL_SEC
 from backend.trade_notification_repo import (
     PendingTradeNotification,
     SqliteTradeNotificationRepo,
@@ -309,3 +313,107 @@ async def test_unpriced_trade_is_not_reported_as_a_zero_won_order():
 
     assert "단가 미상" in notifier.messages[0]
     assert "0원" not in notifier.messages[0]
+
+
+# ---------------------------------------------------------------------------
+# 실행 락
+# ---------------------------------------------------------------------------
+
+
+class FakeSchedulerState:
+    """redis_state가 여는 상태 객체의 대역. 잡별 TTL과 해제를 관찰한다."""
+
+    def __init__(self, *, token: str | None = "token"):
+        self.token = token
+        self.acquired = []
+        self.released = []
+
+    async def acquire_scheduler_lock(self, job_name="market_monitoring", *, ttl_sec=None):
+        self.acquired.append((job_name, ttl_sec))
+        return self.token
+
+    async def release_lock(self, key, token):
+        self.released.append((key, token))
+
+    @property
+    def keys(self):
+        class _Keys:
+            @staticmethod
+            def scheduler_lock(job_name):
+                return f"finus:scheduler:lock:{job_name}"
+
+        return _Keys()
+
+
+@pytest.fixture()
+def fake_redis_state(monkeypatch):
+    def _install(state):
+        @asynccontextmanager
+        async def _factory():
+            yield state
+
+        monkeypatch.setattr(scheduler_module, "redis_state", _factory)
+        return state
+
+    return _install
+
+
+@pytest.mark.asyncio
+async def test_task_takes_a_short_lived_lock_and_releases_it(fake_redis_state):
+    """잡별 TTL을 실제로 넘긴다 (#259 2단계).
+
+    기본값(SCHEDULER_LOCK_TTL_SEC, 30분)이 그대로 쓰이면 락 누수 한 번이 30분 정지가
+    되는데, 이 잡에서 정지는 곧 "체결됐는데 아무 말도 없는" 시간이다. 락 분기는 이
+    테스트가 유일하게 지나간다 — 나머지는 use_redis_lock=False로 우회한다.
+    """
+    state = fake_redis_state(FakeSchedulerState())
+    repo = FakeRepo([_pending(7)])
+    notifier = FakeNotifier()
+
+    await scheduler_module.trade_notification_task(
+        repo=repo, notifier=notifier, now_factory=lambda: NOW
+    )
+
+    assert state.acquired == [
+        ("trade_notification", scheduler_module.TRADE_NOTIFY_LOCK_TTL_SECONDS)
+    ]
+    assert scheduler_module.TRADE_NOTIFY_LOCK_TTL_SECONDS < SCHEDULER_LOCK_TTL_SEC
+    # 잡을 실제로 돌았고, 끝나면 락을 놓는다.
+    assert repo.marked == [7]
+    assert state.released == [("finus:scheduler:lock:trade_notification", "token")]
+
+
+@pytest.mark.asyncio
+async def test_task_skips_when_another_worker_holds_the_lock(fake_redis_state):
+    """락을 못 잡으면 아무것도 보내지 않는다 — 잡았을 때만 보내는 것이 락의 전부다."""
+    fake_redis_state(FakeSchedulerState(token=None))
+    repo = FakeRepo([_pending(7)])
+    notifier = FakeNotifier()
+
+    await scheduler_module.trade_notification_task(
+        repo=repo, notifier=notifier, now_factory=lambda: NOW
+    )
+
+    assert notifier.messages == []
+    assert repo.marked == []
+
+
+# ---------------------------------------------------------------------------
+# TRADE_NOTIFY_GRACE가 기대는 전제
+# ---------------------------------------------------------------------------
+
+
+def test_fill_notification_is_always_a_single_telegram_part():
+    """체결 통지가 한 조각이어야 TRADE_NOTIFY_GRACE의 근거가 선다 (#259 2단계).
+
+    send_text는 조각마다 요청을 따로 치고 각 요청에 httpx 타임아웃 10초가 붙는다. 즉
+    주문 경로의 기록 → 마킹 사이 상한은 10초 × 조각 수다. 조각이 7개면 60초 유예를 넘겨
+    outbox가 전송 중인 행을 집고, 그것이 이 상수가 막으려던 바로 그 중복이다.
+
+    한 조각인 근거는 _extract_order_message가 모든 분기에서 500자로 자른다는 것이다.
+    그 상한을 걷어내면 이 테스트가 깨진다 — 그때는 유예를 함께 올려야 한다.
+    """
+    message = _extract_order_message("주" * 5000)
+
+    assert len(message) <= 500
+    assert len(split_for_telegram(f"주문 완료: {message}")) == 1
