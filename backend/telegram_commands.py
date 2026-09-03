@@ -2248,9 +2248,10 @@ class _UpdateFailure:
     영속화·복원 경계에서만 벽시계를 쓴다 — 복원은 벽시계 경과만큼 뒤로 민 monotonic 값을
     ``first_at``에 넣어, 그 뒤의 코드가 계속 한 시계만 보게 한다.
 
-    ``first_wall_at``은 복원해도 원래 값을 그대로 유지한다. 복원 시점으로 새로 찍으면
-    재시작마다 앵커가 앞당겨져, 잦은 재시작이 다시 예산을 무한히 늘리는 #350의 경로가
-    벽시계 쪽으로 되살아난다.
+    ``first_wall_at``은 복원해도 원래 값을 그대로 유지한다 — 앵커가 미래일 때(벽시계가 뒤로
+    조정된 경우)만 예외이고, 근거는 _restore_failures에 있다. 그 예외 밖에서 복원 시점으로
+    새로 찍으면 재시작마다 앵커가 앞당겨져, 잦은 재시작이 다시 예산을 무한히 늘리는 #350의
+    경로가 벽시계 쪽으로 되살아난다.
     """
 
     first_at: float
@@ -2303,6 +2304,10 @@ class TelegramCommandPoller:
         # 복원 실패를 저장소가 offset과 다르게 다루는 근거가 그것이다
         # (RedisTelegramPollerStore._deserialize_failures).
         self._failures: dict[int, _UpdateFailure] = {}
+        # 복원이 저장소를 실제로 읽어냈는가 (PR #362 리뷰). 거짓이면 저장된 offset이
+        # 무엇인지 이 프로세스는 모른다 — self.offset이 None인 것은 "없다"가 아니라
+        # "모른다"다. 그 구분이 필요한 곳은 아래 retry_pending의 쓰기 하나뿐이다.
+        self._state_restored = False
 
     async def run(self) -> None:
         if not self.notifier.enabled:
@@ -2389,7 +2394,17 @@ class TelegramCommandPoller:
                 # 이 쓰기는 재시도 사이클당 한 번(간격 5~45초)이라 정상 경로의 쓰기 빈도를
                 # 바꾸지 않는다. offset은 그대로고 바뀌는 것은 attempts뿐이지만, 상태를 통째로
                 # 덮어쓰는 계약이라 부분 갱신을 따로 만들 이유가 없다.
-                await self._persist_state()
+                #
+                # 다만 그 "통째로"가 여기서는 위험하다 (PR #362 리뷰). 복원이 실패했고 아직
+                # offset을 하나도 확정하지 못했다면, self.offset(None)을 쓰는 순간 저장된
+                # 정상 offset이 지워진다. 루프 안의 쓰기 지점은 offset을 전진시킨 직후라 이
+                # 상태로 도달하지 않지만 여기는 도달한다 — poison이 배치 맨 앞이면 "첫 성공한
+                # update"가 영영 오지 않아, 재시도 사이클마다 같은 쓰기가 반복된다. 그 offset은
+                # 재배달·재실행을 막는 마지막 방어선이므로 예산 한 창과 바꾸지 않는다
+                # (_deserialize_failures 독스트링의 판단과 같다). 예산은 그동안 인메모리로만
+                # 살고, offset을 하나라도 확정하는 순간부터 정상적으로 저장된다.
+                if self._state_restored or self.offset is not None:
+                    await self._persist_state()
                 # 실패한 update를 곧바로 다시 받아 예산을 순식간에 소진하지 않도록 쉬어 간다.
                 # 실패가 이어지면 간격을 늘려 복구 창을 벌고 rate limit도 덜 자극한다 (#241).
                 await self._sleep(self._retry_delay())
@@ -2532,9 +2547,15 @@ class TelegramCommandPoller:
             # CancelledError는 BaseException이라 걸리지 않고 정상 전파된다.
             logger.error("Telegram poller 상태 복원 실패, 빈 상태로 시작: %s", exc)
             return
+        self._state_restored = True
         self.offset = state.offset
         self._failures = self._restore_failures(state.failures)
         if state.offset is not None:
+            # payload가 두 값의 관계를 지킨다는 보장은 없다 (PR #362 리뷰). 정상 쓰기 경로는
+            # pop → offset 전진 → 저장 순이라 offset이 지나간 예산을 만들지 않지만,
+            # _deserialize도 여기도 그 관계를 검증하지 않는다. 그런 항목은 재배달되지 않아
+            # pop될 기회가 영영 없고, _retry_delay의 min(attempts)에 섞여 백오프만 줄인다.
+            self._forget_passed_updates(state.offset)
             logger.info("Telegram poller 상태 복원: offset=%s", state.offset)
         for update_id, failure in self._failures.items():
             # 재시작을 넘긴 예산은 그 자체로 조사 대상이다 — 이 로그가 없으면 "재시작 직후
@@ -2551,9 +2572,15 @@ class TelegramCommandPoller:
     ) -> dict[int, _UpdateFailure]:
         """저장된 벽시계 앵커를 이 프로세스의 monotonic 기준으로 환산한다 (#350).
 
-        경과가 음수면 0으로 접는다. 벽시계가 뒤로 뛴 상태라 그 update가 실제로 얼마나
-        기다렸는지 알 방법이 없고, 이 방향의 오차는 "예산을 한 번 더 준다"(= #350 이전
-        동작)로 떨어져 정지를 새로 만들지 않는다.
+        앵커가 미래면(= 벽시계가 뒤로 조정됐다) 경과를 0으로 접고 **앵커도 지금으로 다시
+        찍는다**. 접기만 하면 예산이 한 번 더 지급되는 것으로 끝나지 않는다 (PR #362 리뷰):
+        시계 오프셋은 재시작 뒤에도 그대로 남아 있으므로 저장된 앵커는 계속 미래고, 그러면
+        **매 재시작이 같은 클램프를 반복해** #350이 없애려던 무기한 정지가 되살아난다.
+        재각인하면 다음 재시작부터는 경과가 정상적으로 쌓여 폐기가 진행된다.
+
+        min을 쓰는 이유는 반대 방향을 건드리지 않기 위해서다. 앵커가 과거면(정상·정방향
+        점프) 저장된 값을 그대로 둔다 — 복원 시점으로 앞당기면 잦은 재시작이 예산을 무한히
+        늘리는 #350의 경로가 그대로 되살아난다.
 
         경과가 창을 이미 넘겼어도 여기서 폐기하지는 않는다. 폐기 판정은 _handle_one_update의
         한 곳에 남겨 둔다 — 그 update가 재배달돼 다시 실패해야 폐기가 의미를 갖고, 재시작
@@ -2563,12 +2590,12 @@ class TelegramCommandPoller:
         now = self._now()
         restored: dict[int, _UpdateFailure] = {}
         for failure in failures:
-            elapsed = max(0.0, wall_now - failure.first_at)
+            anchor = min(failure.first_wall_at, wall_now)
             restored[failure.update_id] = _UpdateFailure(
-                first_at=now - elapsed,
+                first_at=now - (wall_now - anchor),
                 attempts=failure.attempts,
                 send_failure=failure.send_failure,
-                first_wall_at=failure.first_at,
+                first_wall_at=anchor,
             )
         return restored
 
@@ -2606,7 +2633,7 @@ class TelegramCommandPoller:
         return tuple(
             TelegramPollerFailure(
                 update_id=update_id,
-                first_at=failure.first_wall_at,
+                first_wall_at=failure.first_wall_at,
                 attempts=failure.attempts,
                 send_failure=failure.send_failure,
             )

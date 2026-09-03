@@ -265,16 +265,20 @@ class RedisSchedulerState:
 class TelegramPollerFailure:
     """poison 하나의 재시도 예산 중 재시작을 넘겨야 하는 부분 (#350).
 
-    ``first_at``만 **벽시계**(time.time())다. 폴러가 예산 경과를 재는 시계는 monotonic인데
+    ``first_wall_at``은 **벽시계**(time.time())다. 폴러가 예산 경과를 재는 시계는 monotonic인데
     (telegram_commands._now), monotonic의 원점은 프로세스마다 다르므로 그 값을 그대로
     저장하면 재시작 뒤 비교 자체가 무의미하다. 재시작을 넘길 수 있는 시간 좌표는 벽시계뿐이라
     영속화 경계에서만 벽시계를 쓰고, 복원 시 다시 monotonic 기준으로 환산한다
     (telegram_commands.TelegramCommandPoller._restore_state).
 
-    그 대가는 벽시계의 점프다. 뒤로 뛰면 경과가 음수가 되어 복원 측이 0으로 접으므로 예산이
-    한 번 더 지급되고(= #350 이전 동작), 앞으로 뛰면 그만큼 일찍 폐기된다. 예산 창이 65초·
-    335초라 NTP step 정도로는 한 번의 재시도 사이클을 넘지 못하고, 무엇보다 monotonic으로는
-    이 문제를 해결할 수 없다 — 정지를 막는 쪽을 택했다.
+    그 대가는 벽시계의 점프다. 뒤로 뛰면 복원 측이 경과를 0으로 접으며 앵커를 다시 찍고
+    (= 예산이 한 번 더 지급, #350 이전 동작), 앞으로 뛰면 그만큼 일찍 폐기된다. 예산 창이
+    65초·335초라 NTP step 정도로는 한 번의 재시도 사이클을 넘지 못하고, 무엇보다 monotonic
+    으로는 이 문제를 해결할 수 없다 — 정지를 막는 쪽을 택했다.
+
+    이름이 ``first_at``이 아닌 이유는 _UpdateFailure와의 혼동을 막기 위해서다 (PR #362 리뷰).
+    그쪽의 ``first_at``은 monotonic이고 둘 다 float이라, 이름까지 같으면 교차 대입이
+    타입 체커도 리뷰도 통과한다 — 결과는 "재시작을 못 넘기는 예산"이라 조용하다.
 
     ``attempts``까지 담는 이유는 백오프와 로그다. 유실되면 간격이 5초부터 다시 시작해 남은
     창 안에서 재시도가 촘촘해지고(rate limit을 더 자극한다) "skipped after N attempts"
@@ -282,7 +286,7 @@ class TelegramPollerFailure:
     """
 
     update_id: int
-    first_at: float
+    first_wall_at: float
     attempts: int = 1
     send_failure: bool = False
 
@@ -456,7 +460,7 @@ class RedisTelegramPollerStore:
 
         타입 검증은 offset과 같은 이유로 촘촘하다: bool은 int의 하위 타입이라 isinstance만
         으로 통과하고, 여기 새는 값은 update_id 비교(_forget_passed_updates)와 시간 산술
-        (경과 = 지금 - first_at) 양쪽으로 흘러간다.
+        (경과 = 지금 - first_wall_at) 양쪽으로 흘러간다.
         """
         if raw is None:
             return ()
@@ -485,16 +489,16 @@ class RedisTelegramPollerStore:
         if not 0 <= update_id <= MAX_OFFSET:
             raise ValueError(f"failure update_id out of range: {update_id}")
 
-        first_at = entry.get("first_at")
-        if isinstance(first_at, bool) or not isinstance(first_at, (int, float)):
-            raise TypeError(f"failure first_at must be a number, got {first_at!r}")
+        first_wall_at = entry.get("first_wall_at")
+        if isinstance(first_wall_at, bool) or not isinstance(first_wall_at, (int, float)):
+            raise TypeError(f"failure first_wall_at must be a number, got {first_wall_at!r}")
         # NaN·inf가 새면 경과 비교가 항상 False가 되어(NaN) poison이 영구히 재시도되거나,
         # inf면 창을 즉시 넘겨 첫 실패에서 폐기된다. 둘 다 예산이 없는 것보다 나쁘다.
-        if first_at != first_at or first_at in (float("inf"), float("-inf")):
-            raise ValueError(f"failure first_at must be finite, got {first_at!r}")
+        if first_wall_at != first_wall_at or first_wall_at in (float("inf"), float("-inf")):
+            raise ValueError(f"failure first_wall_at must be finite, got {first_wall_at!r}")
         # 벽시계 epoch 초라 0 이하는 정상값이 아니다(1970년 이전).
-        if first_at <= 0:
-            raise ValueError(f"failure first_at must be positive, got {first_at!r}")
+        if first_wall_at <= 0:
+            raise ValueError(f"failure first_wall_at must be positive, got {first_wall_at!r}")
 
         attempts = entry.get("attempts")
         if isinstance(attempts, bool) or not isinstance(attempts, int):
@@ -511,7 +515,7 @@ class RedisTelegramPollerStore:
 
         return TelegramPollerFailure(
             update_id=update_id,
-            first_at=float(first_at),
+            first_wall_at=float(first_wall_at),
             attempts=attempts,
             send_failure=send_failure,
         )

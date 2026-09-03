@@ -346,7 +346,7 @@ async def test_poller_state_load_logs_when_corrupted_key_delete_fails(caplog):
 def _failure(**overrides) -> TelegramPollerFailure:
     values = {
         "update_id": 41,
-        "first_at": 1_700_000_000.5,
+        "first_wall_at": 1_700_000_000.5,
         "attempts": 3,
         "send_failure": True,
     }
@@ -358,7 +358,7 @@ def _failure(**overrides) -> TelegramPollerFailure:
 async def test_poller_state_round_trips_failures():
     """예산이 재시작을 넘으려면 네 필드가 전부 살아 돌아와야 한다 (#350).
 
-    first_at은 벽시계 epoch 초다 — monotonic이면 프로세스가 바뀐 순간 기준점이 사라져
+    first_wall_at은 벽시계 epoch 초다 — monotonic이면 프로세스가 바뀐 순간 기준점이 사라져
     저장한 값으로 경과를 잴 수 없다 (TelegramPollerFailure 독스트링).
     """
     redis = FakeRedis()
@@ -416,24 +416,24 @@ async def test_poller_state_load_without_failures_field_is_not_corruption():
         # 원소는 오브젝트여야 한다.
         "[41]",
         # bool은 int의 하위 타입이라 isinstance만으로는 통과한다.
-        '[{"update_id": true, "first_at": 1.0, "attempts": 1, "send_failure": false}]',
+        '[{"update_id": true, "first_wall_at": 1.0, "attempts": 1, "send_failure": false}]',
         # offset과 같은 축의 값이라 범위도 같이 닫는다. 벗어난 id는 _forget_passed_updates의
         # 비교가 영원히 지우지 못한다.
-        '[{"update_id": -1, "first_at": 1.0, "attempts": 1, "send_failure": false}]',
-        '[{"update_id": 99999999999, "first_at": 1.0, "attempts": 1, "send_failure": false}]',
-        # first_at이 없거나 숫자가 아니면 경과 산술이 TypeError로 터진다.
+        '[{"update_id": -1, "first_wall_at": 1.0, "attempts": 1, "send_failure": false}]',
+        '[{"update_id": 99999999999, "first_wall_at": 1.0, "attempts": 1, "send_failure": false}]',
+        # first_wall_at이 없거나 숫자가 아니면 경과 산술이 TypeError로 터진다.
         '[{"update_id": 41, "attempts": 1, "send_failure": false}]',
-        '[{"update_id": 41, "first_at": "1.0", "attempts": 1, "send_failure": false}]',
+        '[{"update_id": 41, "first_wall_at": "1.0", "attempts": 1, "send_failure": false}]',
         # NaN은 json.loads가 그대로 통과시킨다. 새면 경과 비교가 항상 False가 되어
         # poison이 영원히 재시도된다 — #350이 없애려던 바로 그 상태다.
-        '[{"update_id": 41, "first_at": NaN, "attempts": 1, "send_failure": false}]',
-        '[{"update_id": 41, "first_at": Infinity, "attempts": 1, "send_failure": false}]',
+        '[{"update_id": 41, "first_wall_at": NaN, "attempts": 1, "send_failure": false}]',
+        '[{"update_id": 41, "first_wall_at": Infinity, "attempts": 1, "send_failure": false}]',
         # 벽시계 epoch 초라 0 이하는 정상값이 아니다.
-        '[{"update_id": 41, "first_at": 0, "attempts": 1, "send_failure": false}]',
+        '[{"update_id": 41, "first_wall_at": 0, "attempts": 1, "send_failure": false}]',
         # attempts < 1이면 _retry_delay의 인덱스가 음수가 되어 가장 긴 간격을 고른다.
-        '[{"update_id": 41, "first_at": 1.0, "attempts": 0, "send_failure": false}]',
-        '[{"update_id": 41, "first_at": 1.0, "attempts": true, "send_failure": false}]',
-        '[{"update_id": 41, "first_at": 1.0, "attempts": 1, "send_failure": "yes"}]',
+        '[{"update_id": 41, "first_wall_at": 1.0, "attempts": 0, "send_failure": false}]',
+        '[{"update_id": 41, "first_wall_at": 1.0, "attempts": true, "send_failure": false}]',
+        '[{"update_id": 41, "first_wall_at": 1.0, "attempts": 1, "send_failure": "yes"}]',
     ],
 )
 async def test_poller_state_load_drops_corrupted_failures_but_keeps_offset(failures):
@@ -459,7 +459,7 @@ async def test_poller_state_load_drops_failures_when_offset_is_corrupted():
         {
             "offset": -1,
             "failures": [
-                {"update_id": 41, "first_at": 1.0, "attempts": 1, "send_failure": False}
+                {"update_id": 41, "first_wall_at": 1.0, "attempts": 1, "send_failure": False}
             ],
         }
     )
