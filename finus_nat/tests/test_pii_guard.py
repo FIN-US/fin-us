@@ -361,35 +361,12 @@ class TestRestoreForInternal:
         text = f"사용자 입금 {backend_placeholder}"
         assert restore_for_internal(text) == text
 
-    async def test_save_diary_posts_unmasked_content_to_backend(self, monkeypatch, mapping_box, ledger):
+    async def test_save_diary_posts_unmasked_content_to_backend(self, mock_backend, mapping_box, ledger):
         """``finus_save_diary``가 실제로 역치환한 값을 backend에 POST하는지 배선을 확인한다.
 
         단위 함수만 테스트하면 도구가 그 함수를 부르지 않게 되는 회귀를 놓친다.
         """
-        captured: dict[str, object] = {}
-
-        class FakeResponse:
-            def raise_for_status(self):
-                return None
-
-            def json(self):
-                return {"status": "success", "data": {"id": 1}}
-
-        class FakeClient:
-            def __init__(self, timeout):
-                pass
-
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, exc_type, exc, tb):
-                return False
-
-            async def post(self, url, json, headers=None):
-                captured["json"] = json
-                return FakeResponse()
-
-        monkeypatch.setattr(finus_api.httpx, "AsyncClient", FakeClient)
+        backend = mock_backend({"status": "success", "data": {"id": 1}})
 
         # 에이전트는 마스킹된 잔고를 보고 일지를 쓴다.
         masked = mask_tool_result("finus_mcp_trading_get_balance", "삼성전자 3주 210,000원")
@@ -399,10 +376,10 @@ class TestRestoreForInternal:
                 finus_api.FinusSaveDiaryInput(title="매매일지", content=f"오늘 {masked}")
             )
 
-        assert captured["json"] == {"title": "매매일지", "content": "오늘 삼성전자 3주 210,000원"}
+        assert backend.json_body == {"title": "매매일지", "content": "오늘 삼성전자 3주 210,000원"}
 
     async def test_save_diary_response_does_not_echo_plaintext_back_to_llm(
-        self, monkeypatch, mapping_box, ledger
+        self, mock_backend, mapping_box, ledger
     ):
         """저장 응답이 방금 역치환한 본문을 Observation으로 되비추면 실패한다 (PR #335 리뷰).
 
@@ -414,36 +391,18 @@ class TestRestoreForInternal:
         plaintext_title = "매매일지 2026-05-24"
         plaintext_content = "삼성전자 3주 210,000원 매수"
 
-        class FakeResponse:
-            def raise_for_status(self):
-                return None
-
-            def json(self):
-                # backend/main.py::create_db_diary의 실제 응답 모양.
-                return {
-                    "status": "success",
-                    "data": {
-                        "id": 7,
-                        "title": plaintext_title,
-                        "content": plaintext_content,
-                        "created_at": "2026-05-24T09:00:00+00:00",
-                    },
-                }
-
-        class FakeClient:
-            def __init__(self, timeout):
-                pass
-
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, exc_type, exc, tb):
-                return False
-
-            async def post(self, url, json, headers=None):
-                return FakeResponse()
-
-        monkeypatch.setattr(finus_api.httpx, "AsyncClient", FakeClient)
+        # backend/main.py::create_db_diary의 실제 응답 모양 — data에 평문이 들어 있다.
+        mock_backend(
+            {
+                "status": "success",
+                "data": {
+                    "id": 7,
+                    "title": plaintext_title,
+                    "content": plaintext_content,
+                    "created_at": "2026-05-24T09:00:00+00:00",
+                },
+            }
+        )
 
         masked = mask_tool_result("finus_mcp_trading_get_balance", plaintext_content)
         config = finus_api.FinusSaveDiaryConfig(backend_url="http://test-backend:8000")
@@ -460,36 +419,20 @@ class TestRestoreForInternal:
         # (3) 원장에는 남는다 — 마스킹은 LLM 컨텍스트로 나가는 값에만 필요하다(#209).
         assert ledger.records[-1].tool_name == "finus_save_diary"
 
-    async def test_save_diary_error_detail_is_masked(self, monkeypatch, mapping_box, ledger):
+    async def test_save_diary_error_detail_is_masked(self, mock_backend, mapping_box, ledger):
         """저장 실패 응답이 요청 본문을 되비춰도 평문이 나가지 않는다 (PR #335 리뷰).
 
         성공 경로는 반환값을 메타데이터로 좁혀 되비춤을 없앴지만, 오류 경로는 그럴 수
         없다 — backend의 422 응답 ``detail``에는 방금 역치환한 본문이 그대로 실린다.
         ``finus_save_diary``가 ``MASKED_TOOLS``에 있어야 이 경로가 덮인다.
         """
-
-        class FakeResponse:
-            status_code = 422
-            # FastAPI 검증 오류는 입력을 그대로 되비춘다.
-            text = '{"detail":[{"loc":["body","content"],"input":"삼성전자 3주 210,000원 매수"}]}'
-
-            def raise_for_status(self):
-                raise finus_api.httpx.HTTPStatusError("422", request=None, response=self)
-
-        class FakeClient:
-            def __init__(self, timeout):
-                pass
-
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, exc_type, exc, tb):
-                return False
-
-            async def post(self, url, json, headers=None):
-                return FakeResponse()
-
-        monkeypatch.setattr(finus_api.httpx, "AsyncClient", FakeClient)
+        # FastAPI 검증 오류는 입력을 그대로 되비춘다. 422를 진짜 응답으로 돌려주면
+        # ``raise_for_status``도 진짜 ``HTTPStatusError``를 던진다 — 예외를 손으로
+        # 조립하지 않으므로 프로덕션이 읽는 필드가 실제 것과 어긋날 여지가 없다.
+        mock_backend(
+            status_code=422,
+            text='{"detail":[{"loc":["body","content"],"input":"삼성전자 3주 210,000원 매수"}]}',
+        )
 
         config = finus_api.FinusSaveDiaryConfig(backend_url="http://test-backend:8000")
         async with finus_api.finus_save_diary(config, None) as info:
@@ -514,35 +457,12 @@ class TestSaveDiaryRejectsUnrestorable:
     택했고, 이 클래스가 그 선택을 고정한다.
     """
 
-    @staticmethod
-    def _fake_client(captured: dict[str, object]):
-        class FakeResponse:
-            def raise_for_status(self):
-                return None
-
-            def json(self):
-                return {"status": "success", "data": {"id": 1, "created_at": "2026-09-03T00:00:00Z"}}
-
-        class FakeClient:
-            def __init__(self, timeout):
-                pass
-
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, exc_type, exc, tb):
-                return False
-
-            async def post(self, url, json, headers=None):
-                # headers를 받는다 — 프로덕션이 backend 호출에 `X-API-Key`를 싣기
-                # 때문이다 (#266 2단계). 받지 않으면 TypeError가 나는데, 그 예외는
-                # save_trading_diary의 넓은 except가 삼켜 오류 JSON으로 바뀌므로
-                # "저장이 안 됐다"는 얼굴로만 드러난다. 헤더 값 자체의 계약은
-                # test_finus_api.py의 *_sends_the_api_key_header가 고정한다.
-                captured["json"] = json
-                return FakeResponse()
-
-        return FakeClient
+    # 이 클래스의 단언은 대체로 "POST가 아예 일어나지 않았다"이므로 응답 본문은
+    # 저장 성공 모양이면 족하다. 요청을 받는 쪽이 ``MockTransport``라서 프로덕션이
+    # backend 호출 인자를 바꿔도(예: #266 2단계가 들여온 `X-API-Key`) 여기는
+    # 손대지 않는다. 헤더 값 자체의 계약은 test_finus_api.py의
+    # *_sends_the_api_key_header가 고정한다.
+    _SAVED = {"status": "success", "data": {"id": 1, "created_at": "2026-09-03T00:00:00Z"}}
 
     def test_reports_foreign_scope_placeholders(self, mapping_box):
         """backend가 만든 자리표시자는 이 요청의 박스에 없으므로 되돌릴 수 없다."""
@@ -567,14 +487,13 @@ class TestSaveDiaryRejectsUnrestorable:
         assert unrestorable_placeholders(restore_for_internal(masked)) == []
 
     async def test_save_diary_does_not_post_user_placeholder_to_db(
-        self, monkeypatch, mapping_box, ledger
+        self, mock_backend, mapping_box, ledger
     ):
         """이슈 본문의 경로 — "300만원 벌었어, 일지 써줘"가 DB에 자리표시자로 박히지 않는다."""
         _, backend_mapping = mask_pii("300만원 벌었어")
         backend_placeholder = next(iter(backend_mapping))
 
-        captured: dict[str, object] = {}
-        monkeypatch.setattr(finus_api.httpx, "AsyncClient", self._fake_client(captured))
+        backend = mock_backend(self._SAVED)
 
         config = finus_api.FinusSaveDiaryConfig(backend_url="http://test-backend:8000")
         async with finus_api.finus_save_diary(config, None) as info:
@@ -586,7 +505,7 @@ class TestSaveDiaryRejectsUnrestorable:
             )
 
         # (1) 저장 자체가 일어나지 않는다 — 손상된 본문이 DB에 들어가는 것을 막는 것이 요점이다.
-        assert "json" not in captured
+        assert not backend.called
         # (2) 에이전트는 원인과 실행 가능한 조치를 함께 받는다. **사용자 재질의는 조치가
         #     아니다** — backend `llm_chat`이 요청마다 `mask_pii(user_msg)`를 돌리므로
         #     사용자가 같은 금액을 다시 적어도 새 scope로 마스킹돼 똑같이 거부된다.
@@ -602,13 +521,12 @@ class TestSaveDiaryRejectsUnrestorable:
         # (4) 거부도 도구 호출이므로 원장에는 남는다.
         assert ledger.records[-1].tool_name == "finus_save_diary"
 
-    async def test_save_diary_checks_the_title_too(self, monkeypatch, mapping_box, ledger):
+    async def test_save_diary_checks_the_title_too(self, mock_backend, mapping_box, ledger):
         """본문만 검사하면 제목 경로로 같은 손상이 새어 들어간다."""
         _, backend_mapping = mask_pii("300만원 벌었어")
         backend_placeholder = next(iter(backend_mapping))
 
-        captured: dict[str, object] = {}
-        monkeypatch.setattr(finus_api.httpx, "AsyncClient", self._fake_client(captured))
+        backend = mock_backend(self._SAVED)
 
         config = finus_api.FinusSaveDiaryConfig(backend_url="http://test-backend:8000")
         async with finus_api.finus_save_diary(config, None) as info:
@@ -618,15 +536,14 @@ class TestSaveDiaryRejectsUnrestorable:
                 )
             )
 
-        assert "json" not in captured
+        assert not backend.called
         assert json.loads(observation)["error"] == "diary_unrestorable_placeholder"
 
     async def test_save_diary_still_stores_content_this_request_can_restore(
-        self, monkeypatch, mapping_box, ledger
+        self, mock_backend, mapping_box, ledger
     ):
         """가드가 정상 경로를 막지 않는다 — 되돌릴 수 있는 본문은 그대로 저장된다."""
-        captured: dict[str, object] = {}
-        monkeypatch.setattr(finus_api.httpx, "AsyncClient", self._fake_client(captured))
+        backend = mock_backend(self._SAVED)
 
         masked = mask_tool_result("finus_mcp_trading_get_balance", "삼성전자 3주 210,000원")
         config = finus_api.FinusSaveDiaryConfig(backend_url="http://test-backend:8000")
@@ -635,10 +552,10 @@ class TestSaveDiaryRejectsUnrestorable:
                 finus_api.FinusSaveDiaryInput(title="매매일지", content=f"오늘 {masked}")
             )
 
-        assert captured["json"] == {"title": "매매일지", "content": "오늘 삼성전자 3주 210,000원"}
+        assert backend.json_body == {"title": "매매일지", "content": "오늘 삼성전자 3주 210,000원"}
 
     async def test_save_diary_refuses_when_the_mapping_box_was_never_installed(
-        self, monkeypatch, ledger
+        self, mock_backend, ledger
     ):
         """박스를 물려받지 못한 실행 경로에서도 손상된 본문이 DB에 들어가지 않는다.
 
@@ -648,8 +565,7 @@ class TestSaveDiaryRejectsUnrestorable:
         """
         assert PII_MAPPING.get() is None
 
-        captured: dict[str, object] = {}
-        monkeypatch.setattr(finus_api.httpx, "AsyncClient", self._fake_client(captured))
+        backend = mock_backend(self._SAVED)
 
         masked = mask_tool_result("finus_mcp_trading_get_balance", "삼성전자 3주 210,000원")
         assert "<QTY" in masked  # 마스킹 자체는 박스 없이도 걸린다
@@ -660,7 +576,7 @@ class TestSaveDiaryRejectsUnrestorable:
                 finus_api.FinusSaveDiaryInput(title="매매일지", content=f"오늘 {masked}")
             )
 
-        assert "json" not in captured
+        assert not backend.called
         assert json.loads(observation)["error"] == "diary_unrestorable_placeholder"
 
 

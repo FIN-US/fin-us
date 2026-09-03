@@ -76,33 +76,8 @@ def test_save_diary_input_converter_accepts_multiline_content():
     assert inp.content == "line1\nline2"
 
 
-def test_save_trading_diary_posts_to_backend(monkeypatch):
-    captured = {}
-
-    class FakeResponse:
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return {"status": "success", "data": {"id": 1, "title": "T", "content": "C"}}
-
-    class FakeClient:
-        def __init__(self, timeout):
-            captured["timeout"] = timeout
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, tb):
-            return False
-
-        async def post(self, url, json, headers=None):
-            captured["url"] = url
-            captured["json"] = json
-            captured["headers"] = headers
-            return FakeResponse()
-
-    monkeypatch.setattr(finus_api.httpx, "AsyncClient", FakeClient)
+def test_save_trading_diary_posts_to_backend(monkeypatch, mock_backend):
+    backend = mock_backend({"status": "success", "data": {"id": 1, "title": "T", "content": "C"}})
     # delenv가 아니라 빈 값이다 — dotenv 로딩이 지운 키를 되살릴 수 있고, 빈 값은
     # _finus_backend_headers가 "키 없음"으로 보는 값이라 판정 결과가 같다(PR #352 리뷰).
     monkeypatch.setenv("FINUS_API_KEY", "")
@@ -119,15 +94,19 @@ def test_save_trading_diary_posts_to_backend(monkeypatch):
 
     result = asyncio.run(run_tool())
 
-    assert captured["url"] == "http://test-backend:8000/api/v1/db/diary"
-    assert captured["json"] == {"title": "매매일지 2026-05-24", "content": "본문"}
+    assert backend.method == "POST"
+    assert backend.url == "http://test-backend:8000/api/v1/db/diary"
+    assert backend.json_body == {"title": "매매일지 2026-05-24", "content": "본문"}
     # 키가 없는 배포에서는 헤더 자체를 붙이지 않는다. 빈 값을 보내면 backend가 그것을
     # "틀린 키"로 보므로(main.matches_api_key), 인증이 꺼진 배포에서까지 401이 된다.
-    assert captured["headers"] == {}
+    assert backend.header("X-API-Key") is None
+    # 타임아웃은 요청 객체에 남지 않지만 계약이다. 빠지면 httpx 기본값 5초가 적용돼
+    # 느린 backend에서 저장이 조용히 실패한다 (PR #359 리뷰).
+    assert backend.client_kwargs.get("timeout") == config.timeout_sec
     assert '"id": 1' in result
 
 
-def test_save_trading_diary_sends_the_api_key_header(monkeypatch):
+def test_save_trading_diary_sends_the_api_key_header(monkeypatch, mock_backend):
     """backend가 인증을 켠 배포에서는 `X-API-Key`를 실어 보냅니다 (#266 2단계).
 
     NAT는 컴포즈 내부에서 backend를 부르는 비브라우저 클라이언트다. 이 헤더가 빠지면
@@ -138,30 +117,7 @@ def test_save_trading_diary_sends_the_api_key_header(monkeypatch):
     날에야 드러난다. 이 테스트가 잡는 mutation: headers 인자를 다시 빼거나 이름을
     바꾸는 회귀.
     """
-    captured = {}
-
-    class FakeResponse:
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return {"status": "success", "data": {"id": 7}}
-
-    class FakeClient:
-        def __init__(self, timeout):
-            pass
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, tb):
-            return False
-
-        async def post(self, url, json, headers=None):
-            captured["headers"] = headers
-            return FakeResponse()
-
-    monkeypatch.setattr(finus_api.httpx, "AsyncClient", FakeClient)
+    backend = mock_backend({"status": "success", "data": {"id": 7}})
     monkeypatch.setenv("FINUS_API_KEY", "s3cr3t-key")
 
     config = finus_api.FinusSaveDiaryConfig(backend_url="http://test-backend:8000")
@@ -174,35 +130,12 @@ def test_save_trading_diary_sends_the_api_key_header(monkeypatch):
 
     asyncio.run(run_tool())
 
-    assert captured["headers"] == {"X-API-Key": "s3cr3t-key"}
+    assert backend.header("X-API-Key") == "s3cr3t-key"
 
 
-def test_list_trading_diaries_sends_the_api_key_header(monkeypatch):
+def test_list_trading_diaries_sends_the_api_key_header(monkeypatch, mock_backend):
     """조회 쪽도 같은 헤더를 붙입니다 — 한쪽만 붙이면 그쪽만 401이 된다."""
-    captured = {}
-
-    class FakeResponse:
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return {"status": "success", "data": []}
-
-    class FakeClient:
-        def __init__(self, timeout):
-            pass
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, tb):
-            return False
-
-        async def get(self, url, headers=None):
-            captured["headers"] = headers
-            return FakeResponse()
-
-    monkeypatch.setattr(finus_api.httpx, "AsyncClient", FakeClient)
+    backend = mock_backend({"status": "success", "data": []})
     monkeypatch.setenv("FINUS_API_KEY", "s3cr3t-key")
 
     config = finus_api.FinusListDiariesConfig(backend_url="http://test-backend:8000")
@@ -213,7 +146,11 @@ def test_list_trading_diaries_sends_the_api_key_header(monkeypatch):
 
     asyncio.run(run_tool())
 
-    assert captured["headers"] == {"X-API-Key": "s3cr3t-key"}
+    assert backend.method == "GET"
+    assert backend.header("X-API-Key") == "s3cr3t-key"
+    # 저장 쪽과 마찬가지로 조회 쪽 타임아웃도 여기서 고정한다 — 프로덕션은 두 곳에서
+    # 따로 넘기므로 한쪽만 잃는 회귀가 가능하다.
+    assert backend.client_kwargs.get("timeout") == config.timeout_sec
 
 
 def test_mcp_call_tool_passes_environment_to_child_process(monkeypatch, tmp_path):
