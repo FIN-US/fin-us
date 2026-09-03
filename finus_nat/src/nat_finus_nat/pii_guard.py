@@ -164,8 +164,13 @@ def restore_for_internal(text: str) -> str:
     여기서는 원값으로 되돌리는 것이 맞다.
 
     박스에 있는 것만 되돌리고 나머지는 손대지 않는다 — backend가 만든 자리표시자
-    (사용자 원문 유래)까지 여기서 중립 문구로 갈아엎으면, backend의 왕복이 깨진 채
-    DB에 저장된다.
+    (사용자 원문 유래)까지 여기서 중립 문구로 갈아엎으면, 원값 대신 "(이전 금액 1)"이
+    DB에 박힌다. 손상의 종류만 바뀌고 소실은 그대로다.
+
+    **그래서 이 함수만으로는 저장이 안전하지 않다.** 손대지 않고 통과시킨 것은 원값이
+    어디에도 없는 토큰이고, 저장은 backend 왕복의 바깥이라 나중에 복원될 기회가 없다.
+    호출자는 결과를 :func:`unrestorable_placeholders`에 한 번 더 태워, 남은 것이 있으면
+    저장 자체를 거부해야 한다(#339). 그 함수의 docstring에 두 종류의 잔여 토큰을 적었다.
     """
     # 이웃한 ``unmask_response``는 ``box is None``으로 갈리는데 여기는 빈 dict까지 함께
     # 걷어낸다. **동작 차이는 없다** — 빈 박스로 아래 sub()를 돌려도 되돌릴 항목이 없어
@@ -175,6 +180,47 @@ def restore_for_internal(text: str) -> str:
     if not text or not box:
         return text
     return _SCOPED_PLACEHOLDER_RE.sub(lambda m: box.get(m.group(0), m.group(0)), text)
+
+
+def unrestorable_placeholders(text: str) -> list[str]:
+    """*text*에 남은 **되돌릴 수 없는** 자리표시자를 등장 순서대로 돌려준다 (#339).
+
+    :func:`restore_for_internal`을 **거친 뒤의** 값에 쓴다. 그 함수는 이 요청의 박스에
+    있는 것만 되돌리므로, 남아 있는 것은 두 종류뿐이고 **둘 다 원값이 어디에도 없다**:
+
+    - **낯선 scope** — backend ``llm_chat``이 NAT을 부르기 전에 사용자 발화를 자기
+      매핑으로 마스킹한 것이다(#230). 응답 본문이라면 backend가 돌려받아 역치환하지만,
+      저장은 그 왕복의 **바깥**이다 — ``POST /api/v1/db/diary``는 저장만 하고
+      ``unmask_pii``를 타지 않는다(``backend/main.py::create_db_diary``). 요청이 끝나면
+      backend의 매핑은 지역 변수와 함께 사라진다.
+    - **이 요청 scope인데 박스에 없음** — LLM이 번호를 지어냈거나(``<AMOUNT_9f2a1c_9>``)
+      박스를 물려받지 못한 실행 경로에서 매핑이 유실된 경우다.
+
+    둘을 갈라 한쪽만 막을 이유가 없다. 저장 관점에서 차이는 "누가 만들었는가"뿐이고,
+    결과는 같다 — 원값이 없는 토큰이 ``Diary.content``에 **영구히** 박힌다. 사용자가
+    나중에 일지를 열면 자기가 쓴 금액 대신 내부 토큰을 본다.
+
+    호출자(``finus_save_diary``)는 이 목록이 비어 있지 않으면 **저장하지 않는다.**
+    조용한 원본 소실보다 시끄러운 실패가 낫다는 판정이다(#339 방향 3). 근거와
+    택하지 않은 두 방향은 ``docs/nfr-05-pii-masking.md``에 적었다.
+    """
+    if not text:
+        return []
+    return [m.group(0) for m in _SCOPED_PLACEHOLDER_RE.finditer(text)]
+
+
+def placeholder_kind(placeholder: str) -> str:
+    """자리표시자에서 종류(``ACCOUNT``/``AMOUNT``/``QTY``)를 뽑는다.
+
+    :func:`unrestorable_placeholders`가 돌려준 값을 넣는다. 호출자가 문자열을 직접
+    쪼개면 자리표시자 규약이 바뀔 때 그 자리만 조용히 어긋나므로, 형식을 아는
+    :data:`_SCOPED_PLACEHOLDER_RE`에서 캡처한 값을 그대로 쓴다.
+
+    형식에 맞지 않는 문자열은 빈 문자열을 돌려준다 — 위 함수의 출력만 넣는 한
+    도달하지 않지만, 종류를 알 수 없다는 이유로 호출자를 죽이지는 않는다.
+    """
+    match = _SCOPED_PLACEHOLDER_RE.fullmatch(placeholder)
+    return match.group(1) if match else ""
 
 
 def unmask_response(text: str) -> str:

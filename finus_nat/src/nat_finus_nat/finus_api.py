@@ -23,7 +23,12 @@ from nat.builder.function_info import FunctionInfo
 from nat.cli.register_workflow import register_function
 from nat.data_models.function import FunctionBaseConfig
 
-from .pii_guard import mask_tool_result, restore_for_internal
+from .pii_guard import (
+    mask_tool_result,
+    placeholder_kind,
+    restore_for_internal,
+    unrestorable_placeholders,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1306,15 +1311,50 @@ async def finus_save_diary(config: FinusSaveDiaryConfig, _builder: Builder):
         # 것이라, 그대로 넘기면 "<AMOUNT_9f2a1c_1>주 매수"가 backend DB에 영구히
         # 박힌다 — 요청이 끝나면 매핑이 사라져 복구할 수 없다. 목적지가 외부 LLM이
         # 아니라 우리 backend이므로 여기서 원값으로 되돌리는 것이 맞다.
-        # restore_for_internal은 이 요청이 만든 자리표시자만 되돌리고, backend가
-        # 만든 것(사용자 원문 유래)은 그대로 통과시켜 backend가 판정하게 둔다.
+        # restore_for_internal은 이 요청이 만든 자리표시자만 되돌린다. 통과시킨 나머지는
+        # 아래 거부 가드가 받는다 (#339).
         title = restore_for_internal((inp.title or "").strip())
         content = restore_for_internal((inp.content or "").strip())
         if not title:
-            result = _err_json("diary_title_required", hint="Provide a non-empty title.")
+            result = _err_json("diary_title_required", hint="제목이 비어 있습니다. 비어 있지 않은 제목을 넣으세요.")
             return _record_and_mask("finus_save_diary", result)
         if not content:
-            result = _err_json("diary_content_required", hint="Provide non-empty diary content.")
+            result = _err_json("diary_content_required", hint="본문이 비어 있습니다. 비어 있지 않은 일지 본문을 넣으세요.")
+            return _record_and_mask("finus_save_diary", result)
+
+        # 되돌리지 못한 자리표시자가 남아 있으면 **저장하지 않는다** (#339 방향 3).
+        # 위 역치환은 이 요청이 만든 것만 되돌린다. 남은 것은 backend가 사용자 발화를
+        # 마스킹해 만든 것이거나(#230) LLM이 지어낸 것이고, 둘 다 원값이 이 프로세스
+        # 어디에도 없다. 저장은 backend 왕복의 **바깥**이라(POST /api/v1/db/diary는
+        # unmask_pii를 타지 않는다) 나중에 복원될 기회도 없다 — 그대로 넣으면 사용자가
+        # 쓴 금액이 내부 토큰으로 영구히 대체된다. 조용한 원본 소실 대신 시끄러운 실패를
+        # 택한다. 근거는 docs/nfr-05-pii-masking.md.
+        leftover = unrestorable_placeholders(title) + unrestorable_placeholders(content)
+        if leftover:
+            # 자리표시자 원문은 로그에만 남긴다. 오류 JSON은 Observation으로 LLM
+            # 컨텍스트에 재유입되므로, 거기에 토큰을 실으면 에이전트가 그대로 답변에
+            # 옮겨 적을 여지를 준다 — 지금 막으려는 것과 같은 종류의 오염이다.
+            logger.warning(
+                "매매일지 저장을 거부했습니다 — 되돌리지 못한 자리표시자 %d개: %s",
+                len(leftover),
+                leftover,
+            )
+            result = _err_json(
+                "diary_unrestorable_placeholder",
+                count=len(leftover),
+                kinds=sorted({placeholder_kind(ph) for ph in leftover}),
+                hint=(
+                    "일지 본문·제목에 원값을 알 수 없는 내부 자리표시자가 남아 있어 "
+                    "저장하지 않았습니다. 그대로 저장하면 사용자가 쓴 값이 복구 불가능하게 "
+                    "사라집니다. **사용자에게 값을 다시 물어도 결과는 같습니다** — 사용자 "
+                    "발화의 금액·수량은 요청마다 개인정보 보호 처리를 거치므로 재입력해도 "
+                    "같은 자리표시자로 도착합니다. 재질의하지 말고 둘 중 하나로 진행하세요: "
+                    "(1) 해당 금액·수량을 본문·제목에서 빼고 다시 저장한다, "
+                    "(2) 이 요청의 잔고·주문 조회 도구 결과에서 나온 값만 써서 다시 저장한다. "
+                    "저장한 뒤에는 개인정보 보호 처리 때문에 사용자가 말한 금액을 일지에 "
+                    "그대로 옮기지 못했다고 알리세요."
+                ),
+            )
             return _record_and_mask("finus_save_diary", result)
 
         url = f"{base_url}/api/v1/db/diary"

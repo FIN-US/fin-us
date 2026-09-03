@@ -45,6 +45,7 @@ from nat_finus_nat.pii_guard import (
     mask_tool_result,
     restore_for_internal,
     unmask_response,
+    unrestorable_placeholders,
 )
 from nat_finus_nat.pii_mask import _PLACEHOLDER_RE, mask_pii
 
@@ -499,6 +500,163 @@ class TestRestoreForInternal:
         assert "diary_api_http_error" in observation
         assert "210,000원" not in observation
         assert "3주" not in observation
+
+
+class TestSaveDiaryRejectsUnrestorable:
+    """되돌리지 못한 자리표시자가 남으면 저장하지 않는다 (#339 방향 3).
+
+    #230이 backend에서 마스킹한 사용자 발화("300만원")는 NAT 입장에서 낯선 scope라
+    ``restore_for_internal``이 통과시킨다. 그 근거는 "backend ``unmask_pii``가
+    판정하게 둔다"인데, 저장 목적지인 ``POST /api/v1/db/diary``는 저장만 하고
+    ``unmask_pii``를 타지 않는다 — 저장은 backend 왕복의 **바깥**이다. 그대로 POST하면
+    사용자가 쓴 금액이 ``Diary.content``에 내부 토큰으로 영구히 박히고, 요청이 끝나면
+    backend의 매핑이 사라져 복구 경로가 없다. 조용한 원본 소실 대신 시끄러운 실패를
+    택했고, 이 클래스가 그 선택을 고정한다.
+    """
+
+    @staticmethod
+    def _fake_client(captured: dict[str, object]):
+        class FakeResponse:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"status": "success", "data": {"id": 1, "created_at": "2026-09-03T00:00:00Z"}}
+
+        class FakeClient:
+            def __init__(self, timeout):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def post(self, url, json):
+                captured["json"] = json
+                return FakeResponse()
+
+        return FakeClient
+
+    def test_reports_foreign_scope_placeholders(self, mapping_box):
+        """backend가 만든 자리표시자는 이 요청의 박스에 없으므로 되돌릴 수 없다."""
+        _, backend_mapping = mask_pii("300만원 벌었어")
+        backend_placeholder = next(iter(backend_mapping))
+        text = f"오늘 {backend_placeholder} 수익."
+
+        assert restore_for_internal(text) == text  # 손대지 않고 통과한다 (#231 규칙)
+        assert unrestorable_placeholders(text) == [backend_placeholder]
+
+    def test_reports_hallucinated_placeholders_of_this_request(self, mapping_box):
+        """LLM이 지어낸 이 요청 scope 번호도 원값이 없기는 마찬가지다."""
+        masked = mask_tool_result("finus_mcp_trading_get_balance", "평가금액 210,000원")
+        scope = next(iter(mapping_box)).rsplit("_", 2)[-2]
+        invented = f"<AMOUNT_{scope}_9>"
+
+        assert unrestorable_placeholders(restore_for_internal(masked)) == []
+        assert unrestorable_placeholders(invented) == [invented]
+
+    def test_restorable_content_reports_nothing(self, mapping_box):
+        masked = mask_tool_result("finus_mcp_trading_get_balance", "삼성전자 3주 210,000원")
+        assert unrestorable_placeholders(restore_for_internal(masked)) == []
+
+    async def test_save_diary_does_not_post_user_placeholder_to_db(
+        self, monkeypatch, mapping_box, ledger
+    ):
+        """이슈 본문의 경로 — "300만원 벌었어, 일지 써줘"가 DB에 자리표시자로 박히지 않는다."""
+        _, backend_mapping = mask_pii("300만원 벌었어")
+        backend_placeholder = next(iter(backend_mapping))
+
+        captured: dict[str, object] = {}
+        monkeypatch.setattr(finus_api.httpx, "AsyncClient", self._fake_client(captured))
+
+        config = finus_api.FinusSaveDiaryConfig(backend_url="http://test-backend:8000")
+        async with finus_api.finus_save_diary(config, None) as info:
+            observation = await info.single_fn(
+                finus_api.FinusSaveDiaryInput(
+                    title="매매일지 2026-09-03",
+                    content=f"오늘 {backend_placeholder} 벌었다.",
+                )
+            )
+
+        # (1) 저장 자체가 일어나지 않는다 — 손상된 본문이 DB에 들어가는 것을 막는 것이 요점이다.
+        assert "json" not in captured
+        # (2) 에이전트는 원인과 실행 가능한 조치를 함께 받는다. **사용자 재질의는 조치가
+        #     아니다** — backend `llm_chat`이 요청마다 `mask_pii(user_msg)`를 돌리므로
+        #     사용자가 같은 금액을 다시 적어도 새 scope로 마스킹돼 똑같이 거부된다.
+        #     hint가 재입력을 권하면 에이전트는 무한 재질의 루프에 들어간다.
+        payload = json.loads(observation)
+        assert payload["error"] == "diary_unrestorable_placeholder"
+        assert payload["kinds"] == ["AMOUNT"]
+        assert "다시 물어도 결과는 같습니다" in payload["hint"]
+        assert "재질의하지 말고" in payload["hint"]
+        # (3) 자리표시자 원문은 Observation으로 되돌아가지 않는다 — 에이전트가 답변에
+        #     옮겨 적으면 지금 막으려는 것과 같은 종류의 오염이 된다.
+        assert backend_placeholder not in observation
+        # (4) 거부도 도구 호출이므로 원장에는 남는다.
+        assert ledger.records[-1].tool_name == "finus_save_diary"
+
+    async def test_save_diary_checks_the_title_too(self, monkeypatch, mapping_box, ledger):
+        """본문만 검사하면 제목 경로로 같은 손상이 새어 들어간다."""
+        _, backend_mapping = mask_pii("300만원 벌었어")
+        backend_placeholder = next(iter(backend_mapping))
+
+        captured: dict[str, object] = {}
+        monkeypatch.setattr(finus_api.httpx, "AsyncClient", self._fake_client(captured))
+
+        config = finus_api.FinusSaveDiaryConfig(backend_url="http://test-backend:8000")
+        async with finus_api.finus_save_diary(config, None) as info:
+            observation = await info.single_fn(
+                finus_api.FinusSaveDiaryInput(
+                    title=f"{backend_placeholder} 수익 기록", content="오늘은 잘 됐다."
+                )
+            )
+
+        assert "json" not in captured
+        assert json.loads(observation)["error"] == "diary_unrestorable_placeholder"
+
+    async def test_save_diary_still_stores_content_this_request_can_restore(
+        self, monkeypatch, mapping_box, ledger
+    ):
+        """가드가 정상 경로를 막지 않는다 — 되돌릴 수 있는 본문은 그대로 저장된다."""
+        captured: dict[str, object] = {}
+        monkeypatch.setattr(finus_api.httpx, "AsyncClient", self._fake_client(captured))
+
+        masked = mask_tool_result("finus_mcp_trading_get_balance", "삼성전자 3주 210,000원")
+        config = finus_api.FinusSaveDiaryConfig(backend_url="http://test-backend:8000")
+        async with finus_api.finus_save_diary(config, None) as info:
+            await info.single_fn(
+                finus_api.FinusSaveDiaryInput(title="매매일지", content=f"오늘 {masked}")
+            )
+
+        assert captured["json"] == {"title": "매매일지", "content": "오늘 삼성전자 3주 210,000원"}
+
+    async def test_save_diary_refuses_when_the_mapping_box_was_never_installed(
+        self, monkeypatch, ledger
+    ):
+        """박스를 물려받지 못한 실행 경로에서도 손상된 본문이 DB에 들어가지 않는다.
+
+        ``mask_tool_result``는 박스가 없어도 **마스킹은 그대로 하고**(fail-closed) 매핑만
+        버린 뒤 ERROR를 남긴다. 그 요청의 일지 본문은 되돌릴 수 없는 토큰만 남으므로
+        저장도 함께 막혀야 짝이 맞는다. ``mapping_box`` 픽스처를 일부러 쓰지 않는다.
+        """
+        assert PII_MAPPING.get() is None
+
+        captured: dict[str, object] = {}
+        monkeypatch.setattr(finus_api.httpx, "AsyncClient", self._fake_client(captured))
+
+        masked = mask_tool_result("finus_mcp_trading_get_balance", "삼성전자 3주 210,000원")
+        assert "<QTY" in masked  # 마스킹 자체는 박스 없이도 걸린다
+
+        config = finus_api.FinusSaveDiaryConfig(backend_url="http://test-backend:8000")
+        async with finus_api.finus_save_diary(config, None) as info:
+            observation = await info.single_fn(
+                finus_api.FinusSaveDiaryInput(title="매매일지", content=f"오늘 {masked}")
+            )
+
+        assert "json" not in captured
+        assert json.loads(observation)["error"] == "diary_unrestorable_placeholder"
 
 
 # ---------------------------------------------------------------------------
