@@ -96,12 +96,14 @@ def test_save_trading_diary_posts_to_backend(monkeypatch):
         async def __aexit__(self, exc_type, exc, tb):
             return False
 
-        async def post(self, url, json):
+        async def post(self, url, json, headers=None):
             captured["url"] = url
             captured["json"] = json
+            captured["headers"] = headers
             return FakeResponse()
 
     monkeypatch.setattr(finus_api.httpx, "AsyncClient", FakeClient)
+    monkeypatch.delenv("FINUS_API_KEY", raising=False)
 
     config = finus_api.FinusSaveDiaryConfig(backend_url="http://test-backend:8000")
 
@@ -117,7 +119,99 @@ def test_save_trading_diary_posts_to_backend(monkeypatch):
 
     assert captured["url"] == "http://test-backend:8000/api/v1/db/diary"
     assert captured["json"] == {"title": "매매일지 2026-05-24", "content": "본문"}
+    # 키가 없는 배포에서는 헤더 자체를 붙이지 않는다. 빈 값을 보내면 backend가 그것을
+    # "틀린 키"로 보므로(main.matches_api_key), 인증이 꺼진 배포에서까지 401이 된다.
+    assert captured["headers"] == {}
     assert '"id": 1' in result
+
+
+def test_save_trading_diary_sends_the_api_key_header(monkeypatch):
+    """backend가 인증을 켠 배포에서는 `X-API-Key`를 실어 보냅니다 (#266 2단계).
+
+    NAT는 컴포즈 내부에서 backend를 부르는 비브라우저 클라이언트다. 이 헤더가 빠지면
+    매매일지 저장이 401로 떨어지는데, 그 실패는 에이전트 Observation 안에서만 보여서
+    운영 중에 알아채기 어렵다.
+
+    헤더 이름은 backend/main.py의 API_KEY_HEADER와 같아야 한다 — 어긋나면 인증을 켠
+    날에야 드러난다. 이 테스트가 잡는 mutation: headers 인자를 다시 빼거나 이름을
+    바꾸는 회귀.
+    """
+    captured = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"status": "success", "data": {"id": 7}}
+
+    class FakeClient:
+        def __init__(self, timeout):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, json, headers=None):
+            captured["headers"] = headers
+            return FakeResponse()
+
+    monkeypatch.setattr(finus_api.httpx, "AsyncClient", FakeClient)
+    monkeypatch.setenv("FINUS_API_KEY", "s3cr3t-key")
+
+    config = finus_api.FinusSaveDiaryConfig(backend_url="http://test-backend:8000")
+
+    async def run_tool():
+        async with finus_api.finus_save_diary(config, None) as info:
+            return await info.single_fn(
+                finus_api.FinusSaveDiaryInput(title="제목", content="본문")
+            )
+
+    asyncio.run(run_tool())
+
+    assert captured["headers"] == {"X-API-Key": "s3cr3t-key"}
+
+
+def test_list_trading_diaries_sends_the_api_key_header(monkeypatch):
+    """조회 쪽도 같은 헤더를 붙입니다 — 한쪽만 붙이면 그쪽만 401이 된다."""
+    captured = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"status": "success", "data": []}
+
+    class FakeClient:
+        def __init__(self, timeout):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url, headers=None):
+            captured["headers"] = headers
+            return FakeResponse()
+
+    monkeypatch.setattr(finus_api.httpx, "AsyncClient", FakeClient)
+    monkeypatch.setenv("FINUS_API_KEY", "s3cr3t-key")
+
+    config = finus_api.FinusListDiariesConfig(backend_url="http://test-backend:8000")
+
+    async def run_tool():
+        async with finus_api.finus_list_diaries(config, None) as info:
+            return await info.single_fn(finus_api.FinusListDiariesInput())
+
+    asyncio.run(run_tool())
+
+    assert captured["headers"] == {"X-API-Key": "s3cr3t-key"}
 
 
 def test_mcp_call_tool_passes_environment_to_child_process(monkeypatch, tmp_path):
