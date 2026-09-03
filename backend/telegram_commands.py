@@ -70,6 +70,7 @@ from .trading_orders import (
     OrderSide,
     OrderType,
     PendingOrder,
+    TradeLedger,
     TradeRecorder,
     is_korean_market_open,
     order_reply_markup,
@@ -199,6 +200,10 @@ STATE_STORE_TIMEOUT_SECONDS = 3.0
 # getUpdates 배치 크기. 명시하지 않으면 Telegram 기본값이 100이라, 배치 전체가 settled
 # 전송에 닿으면 한 루프의 점유가 100 × SETTLED_SEND_TIMEOUT_SECONDS까지 늘어나 사실상
 # 상한이 없어진다. 배치를 작게 끊으면 최악이 유계가 된다 (PR #253 2차 리뷰).
+#
+# #259 2단계가 이 계산에서 가장 큰 항을 뺐다 — 체결 통지가 outbox로 나가면서 /confirm
+# 성공 경로는 더 이상 settled 전송을 쓰지 않는다. 남은 settled 경로(/buy 프롬프트,
+# /cancel, /confirm 403·불명확, /earnings·자연어)는 그대로라 이 상한은 계속 필요하다.
 GET_UPDATES_LIMIT = 10
 
 
@@ -559,7 +564,7 @@ class TelegramCommandHandler:
         mcp_runner: Callable[[Any, str, dict[str, Any]], Any] = run_mcp_tool,
         llm_runner: Callable[..., Any] = llm_chat,
         order_gateway: Any | None = None,
-        trade_recorder: Any | None = None,
+        trade_recorder: TradeLedger | None = None,
         now_factory: Callable[[], datetime] | None = None,
         visualization_url: str = VISUALIZATION_URL,
         pending_order_store: PendingOrderStore | None = None,
@@ -571,7 +576,14 @@ class TelegramCommandHandler:
         self.mcp_runner = mcp_runner
         self.llm_runner = llm_runner
         self.order_gateway = order_gateway
-        self.trade_recorder = trade_recorder
+        # None을 그대로 두지 않는다 (#259 2단계). 체결 통지 outbox가 이 원장 위에 서므로,
+        # 원장이 없는 핸들러는 "체결됐는데 통지가 조용히 사라지는" 배포가 된다. 프로덕션은
+        # 어차피 항상 _create_trade_recorder()를 주입해 왔으니 실동작 변화는 없고, 바뀐 것은
+        # 미주입 시의 뜻이다 — "원장 없음"이 아니라 "기본 원장"이다. watchlist_repo·
+        # catalyst_repo가 같은 규칙을 쓴다.
+        self.trade_recorder: TradeLedger = (
+            trade_recorder if trade_recorder is not None else _create_trade_recorder()
+        )
         self.now_factory = now_factory or (lambda: datetime.now(KST))
         self.visualization_url = visualization_url.strip()
         # 프로덕션에서는 TelegramCommandPoller가 RedisPendingOrderStore를 주입한다.
@@ -1505,17 +1517,66 @@ class TelegramCommandHandler:
             )
             return
 
-        # 주문 성공: claim으로 이미 삭제됨 — 추가 delete 불필요
-        record_warning = ""
-        if self.trade_recorder is not None:
-            try:
-                self.trade_recorder.record(result)
-            except Exception as exc:
-                logger.warning("Trade history recording failed: %s", exc)
-                record_warning = f"\n거래 이력 기록 실패: {_short_error(exc)}"
-        # 주문이 체결된 뒤다 — 재실행은 "확정할 대기 주문이 없습니다"로 끝나, 체결된 주문을
-        # 사용자가 미체결로 인식하게 만든다 (#247).
-        await self._send_text_settled(f"주문 완료: {result.message}{record_warning}")
+        # 주문 성공: claim으로 이미 삭제됨 — 추가 delete 불필요.
+        #
+        # 여기부터가 체결 통지 outbox다 (#259 2단계). 재실행은 "확정할 대기 주문이
+        # 없습니다"로 끝나므로(#247) 이 통지는 전송 실패로 사라지면 안 되는데, 그 보장을
+        # 이 자리의 재시도로 만들지 않는다. _send_text_settled는 최대
+        # SETTLED_SEND_TIMEOUT_SECONDS(20초) 동안 폴러 루프를 붙잡고, 그동안 같은 배치에서
+        # 재시도를 기다리는 update가 예산(UPDATE_RETRY_WINDOW_SECONDS, 60초)을 통째로 잃는다.
+        # 상한을 60초 아래로 내려도 닫히지 않는다 — 그러면 429를 흡수한다는 재시도의 목적이
+        # 사라진다.
+        #
+        # 대신 순서를 기록 → 전송 → 마킹으로 둔다. 체결이 먼저 원장에 남고(notified_at =
+        # null) 통지 책임이 outbox로 넘어가므로 전송은 한 번만 시도하면 된다. 실패하면
+        # 미통지 행이 남고 scheduler.trade_notification_task가 다음 주기에 다시 알린다.
+        # 순서를 뒤집어 전송을 먼저 하면 그 사이의 죽음이 곧 무응답이다.
+        try:
+            trade_id = self.trade_recorder.record(result)
+        except Exception as exc:
+            # 원장이 없으면 outbox도 없다 — 재배달할 근거가 남지 않는다. 그래서 이 경우에만
+            # 예전처럼 그 자리에서 재시도한다. 폴러를 붙잡는 대가를 다시 무는 대신, 이
+            # 메시지가 사용자가 받을 유일한 통지가 되기 때문이다.
+            #
+            # 기록 실패를 경고 문자열로만 덧붙이던 예전 동작은 outbox가 서는 순간 위험해진다.
+            # 그때는 "기록 실패"가 곧 "통지가 조용히 사라지는 경로"인데, 그 사실이 성공
+            # 메시지 뒤에 붙는 한 줄로만 드러났다.
+            logger.error("체결 이력 기록 실패 — outbox 대상에서 빠진다: %s", exc)
+            await self._send_text_settled(
+                f"주문 완료: {result.message}"
+                f"\n거래 이력 기록 실패: {_short_error(exc)}"
+                "\n이 메시지가 유일한 통지입니다 — 받지 못했다면 증권사 앱에서 확인하세요."
+            )
+            return
+
+        try:
+            sent = await self.notifier.send_text(f"주문 완료: {result.message}")
+        except Exception as exc:
+            # 이 경로가 예외를 올리면 폴러가 update를 재실행하고, claim이 비어 체결된 주문이
+            # "확정할 대기 주문이 없습니다"로 오표시된다 (#247). 실제 notifier는 실패를
+            # False로 접어 오지만 계약을 여기서 닫는다 — _handle_one_update의 독스트링이
+            # "확정 뒤의 전송은 예외를 던지지 않는다"에 기대고 있고, _send_text_settled를
+            # 걷어내면서 그 보장을 대신 서 주던 자리도 함께 사라졌다.
+            #
+            # CancelledError는 BaseException이라 여기 걸리지 않는다. 폴러의 graceful
+            # shutdown이 막히지 않고, 그 경우 행은 미통지로 남아 재시작 뒤 배달된다.
+            logger.error(
+                "체결 통지 전송 중 예외 — outbox 재배달 대기 (trade_id=%s): %s", trade_id, exc
+            )
+            return
+        if sent is False:
+            # 여기서 끝내도 통지가 사라지지는 않는다. notified_at이 비어 있는 행이 곧
+            # 재배달 대기열이다. 전송 실패의 알람·메트릭은 #259 5단계의 몫이다.
+            logger.error("체결 통지 전송 실패 — outbox 재배달 대기 (trade_id=%s)", trade_id)
+            return
+
+        try:
+            self.trade_recorder.mark_notified(trade_id, notified_at=self.now_factory())
+        except Exception as exc:
+            # 전송은 이미 나갔다. 마킹만 실패하면 다음 주기가 같은 체결을 한 번 더 알린다 —
+            # 중복이지만 무응답보다 낫고, 재배달 문구가 재전송임을 밝힌다. asyncio.timeout
+            # 만료처럼 "보냈는지 모르는" 경우도 같은 결말이라 여기만의 문제가 아니다.
+            logger.error("체결 통지 마킹 실패 — 중복 배달 가능 (trade_id=%s): %s", trade_id, exc)
 
     def _parse_order_argument(self, argument: str) -> tuple[str, int, int, OrderType] | None:
         parts = argument.split()
@@ -2278,18 +2339,20 @@ class TelegramCommandPoller:
                 #
                 # 남는 창은 handle_update의 실행 시간이다. #253이 _send_text_settled로
                 # "부수효과 확정 뒤의 전송"을 그 자리에서 재시도하게 만들면서 이 시간이
-                # 밀리초에서 십수 초로 늘어난다. 그 구간에 SIGTERM이 오면 체결은 됐는데
+                # 밀리초에서 십수 초로 늘어났었다. 그 구간에 SIGTERM이 오면 체결은 됐는데
                 # persist 전이라, 재시작 후 재배달·재실행에서 claim이 None을 돌려주고
                 # 사용자는 "확정할 대기 주문이 없습니다"를 받는다 — #253이 없애려던 그
-                # 오표시다. 다만 두 PR 중 어느 쪽의 회귀도 아니다: 영속화 이전에는 이 창이
-                # 재시도 예산 전체(최대 335초)였고 #251이 그걸 handle_update 한 번으로
-                # 줄인다. 삼중 우연(체결 + 전송 실패 + 그 사이 배포)을 요구하고 금전 자체는
-                # 안전하지만(체결은 정상이고 trade_recorder에도 남는다), 오표시가 수동
-                # 재주문을 유발할 수 있다 (PR #251 리뷰).
+                # 오표시다.
                 #
-                # 이 창은 아직 열려 있다. #269가 그 사실을 회귀 테스트로 고정했고
+                # #259 2단계가 이 창을 **줄였다**. 체결 통지가 outbox로 나가면서 /confirm
+                # 성공 경로의 전송은 재시도 없는 한 번이 됐고, 창은 최대 20초에서 send_text
+                # 한 번(httpx 타임아웃 10초)으로 내려왔다. 그리고 성격이 바뀌었다: 그 창에서
+                # 죽어도 체결은 이미 원장에 미통지로 남아 있어 다음 주기가 통지를 배달한다.
+                # 남는 피해는 재실행이 내보내는 "확정할 대기 주문이 없습니다" 한 줄이다.
+                #
+                # 창 자체는 아직 열려 있다. #269가 그 사실을 회귀 테스트로 고정했고
                 # (test_confirmed_order_is_reexecuted_when_restart_lands_in_the_settled_send),
-                # 닫는 작업은 #293이다.
+                # 닫는 작업은 #293(= #259 3단계)이다.
                 await self._persist_state()
 
             if skipped:
@@ -2316,8 +2379,11 @@ class TelegramCommandPoller:
         """update 처리 결과를 반환한다: 완료 / 재시도 대기 / 예산 소진 후 스킵 (#241).
 
         재시도는 handle_update가 멱등하다는 전제 위에 있고, 그 전제는 핸들러가 지킨다:
-        부수효과가 확정된 뒤의 전송은 _send_text_settled를 써서 예외를 던지지 않으므로
-        여기까지 오지 않는다. 즉 재실행되는 것은 부수효과 이전 구간뿐이다 (#247).
+        부수효과가 확정된 뒤의 전송은 예외를 던지지 않으므로 여기까지 오지 않는다. 즉
+        재실행되는 것은 부수효과 이전 구간뿐이다 (#247). 그 전송이 실패했을 때 무엇으로
+        되살리는지는 경로마다 다르다 — /confirm 체결 성공은 원장에 남은 미통지 행과
+        scheduler.trade_notification_task가 받고(#259 2단계), 나머지 settled 경로는
+        _send_text_settled의 인플레이스 재시도가 전부다.
 
         반대로 부수효과 이전의 전송 실패는 변환 경로(except Exception)에 삼켜지지 않고
         반드시 여기 도달한다 — 전송을 본문에 둔 try는 TelegramSendError를 재던져야 하고,

@@ -52,6 +52,10 @@ def test_trade_recorder_creates_trade_history_and_commits():
 
         def commit(self):
             self.committed = True
+            # 실제 Session은 commit 뒤 PK를 채운다. 대역이 채우지 않으면 record가
+            # 통지 멱등 키를 못 돌려주고 그 자리에서 터진다 (#259 2단계).
+            for index, item in enumerate(self.added, 1):
+                item.id = index
 
         def close(self):
             self.closed = True
@@ -311,7 +315,8 @@ def test_trade_recorder_writes_the_market_reference_price():
             self.added.append(item)
 
         def commit(self):
-            return None
+            for index, item in enumerate(self.added, 1):
+                item.id = index
 
         def close(self):
             return None
@@ -347,7 +352,8 @@ def test_trade_recorder_still_records_the_row_when_the_price_is_unknown(caplog):
             self.added.append(item)
 
         def commit(self):
-            return None
+            for index, item in enumerate(self.added, 1):
+                item.id = index
 
         def close(self):
             return None

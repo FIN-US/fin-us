@@ -1,7 +1,8 @@
 import httpx
 import pytest
 
-from backend import services, stock_code
+from backend import services, stock_code, telegram_commands
+from backend.trading_orders import TradeRecorder
 
 
 @pytest.fixture
@@ -87,3 +88,42 @@ def _api_key_auth_off_by_default(monkeypatch):
     import backend.main as main
 
     monkeypatch.setattr(main, "FINUS_API_KEY", "")
+
+
+class _ImplicitTradeLedgerUsed(BaseException):
+    """기본 체결 원장이 실제로 쓰였다는 신호 (#259 2단계).
+
+    Exception이 아니라 BaseException이다. 주문 경로의 ``except Exception``이 이걸 삼키면
+    "기록 실패" 메시지로 접혀 테스트는 엉뚱한 단언에서 깨지고, 진짜 원인(대역 미주입)이
+    화면에서 사라진다.
+    """
+
+
+@pytest.fixture(autouse=True)
+def _forbid_implicit_trade_ledger(monkeypatch):
+    """핸들러의 기본 체결 원장이 개발자의 backend/finus.db에 쓰는 것을 막는다 (#259).
+
+    TelegramCommandHandler는 ``trade_recorder``를 안 받으면 프로덕션 원장을 만든다 —
+    통지 outbox가 그 원장 위에 서므로 "원장 없음"인 배포를 허용할 수 없기 때문이다(근거는
+    그 생성자 주석). 그 기본값이 테스트에서 살아 있으면 체결까지 가는 테스트가 실제 SQLite
+    파일에 행을 남긴다. 실제로 남겼다.
+
+    대역을 조용히 끼우지 않고 **터지게** 한다. 인메모리로 바꿔치기하면 원장을 단언하지
+    않는 테스트가 통지 경로를 반쯤만 검증한 채 통과하고, 그 테스트는 outbox가 깨져도
+    아무 말을 하지 않는다.
+
+    핸들러 생성 자체는 막지 않는다 — 원장을 쓰지 않는 테스트가 대부분이고, 그쪽에
+    주입을 강요하면 관계없는 130여 곳이 소음으로 바뀐다.
+    """
+
+    def _forbidden_session():
+        raise _ImplicitTradeLedgerUsed(
+            "체결 원장이 실제로 쓰였습니다. TelegramCommandHandler(trade_recorder=...)로 "
+            "대역을 주입하세요 (#259)."
+        )
+
+    monkeypatch.setattr(
+        telegram_commands,
+        "_create_trade_recorder",
+        lambda: TradeRecorder(_forbidden_session),
+    )

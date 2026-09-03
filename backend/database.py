@@ -6,18 +6,30 @@ from .config import DATABASE_URL, DB_ECHO
 # SQLite 사용 시 connect_args={"check_same_thread": False}가 필요함
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False}, echo=DB_ECHO)
 
-# 스키마 변경 시 여기에 (테이블명, 컬럼명, ALTER 문) 을 추가한다.
+# 스키마 변경 시 여기에 (테이블명, 컬럼명, 실행할 문장들) 을 추가한다.
 # SQLModel.metadata.create_all()은 없는 테이블은 만들지만 기존 테이블에 컬럼을
 # 추가하지는 않는다 (SQLAlchemy의 문서화된 동작). 이미 배포된 SQLite 파일은
 # create_all만으로는 새 컬럼을 얻지 못하므로, 부팅 시 직접 보강한다.
-_PENDING_COLUMN_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
+#
+# 세 번째 원소가 문장 하나가 아니라 **문장들**인 이유는 #259의 notified_at 때문이다.
+# 컬럼 추가만으로는 기존 행이 "미통지"로 남아 outbox가 과거 체결을 전부 다시 알리는데,
+# 그걸 막는 백필은 ALTER와 같은 조건(= 컬럼이 방금 없었을 때)에서 정확히 한 번만 돌아야
+# 한다. 부팅마다 무조건 도는 자리에 두면 진짜 미통지 행까지 통지된 것으로 덮는다.
+#
+# 문장들은 순서대로 실행되지만 **원자적이지 않다**. pysqlite가 DML에서만 암묵적으로
+# BEGIN하므로 ALTER는 engine.begin() 안에서도 즉시 커밋된다(_run_table_recreate_migrations의
+# 같은 주석 참조). ALTER와 백필 사이에서 프로세스가 죽으면 컬럼만 남고 백필은 영영 돌지
+# 않는다 — 다음 부팅은 컬럼이 있어 이 항목을 건너뛰기 때문이다. 그때 과거 행이 미통지로
+# 남지만, 재배달 대상은 scheduler.TRADE_NOTIFY_MAX_AGE(기본 24시간) 안의 체결로 한정되므로
+# 새어 나가는 통지도 그 창 안으로 유계다.
+_PENDING_COLUMN_MIGRATIONS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     (
         "agentreport",
         "provider_supports_tools",
         # DEFAULT 0: 이 컬럼이 없던 시절에 만들어진 기존 행을 "도구 미지원"으로
         # 채운다. NULL이나 1로 채우면 지어낸 과거 리포트가 검증된 것처럼 보일 수
         # 있으므로(#162) 반드시 0(False)이어야 한다.
-        "ALTER TABLE agentreport ADD COLUMN provider_supports_tools BOOLEAN NOT NULL DEFAULT 0",
+        ("ALTER TABLE agentreport ADD COLUMN provider_supports_tools BOOLEAN NOT NULL DEFAULT 0",),
     ),
     # #298: 신호 점수화. 세 컬럼 모두 NULL 허용이고 DEFAULT를 주지 않는다 —
     # provider_supports_tools와 정반대의 선택이며, 이유도 정반대다. 저쪽은 "구버전
@@ -27,17 +39,35 @@ _PENDING_COLUMN_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     (
         "agentreport",
         "signal_score",
-        "ALTER TABLE agentreport ADD COLUMN signal_score INTEGER",
+        ("ALTER TABLE agentreport ADD COLUMN signal_score INTEGER",),
     ),
     (
         "agentreport",
         "signal_reason",
-        "ALTER TABLE agentreport ADD COLUMN signal_reason VARCHAR",
+        ("ALTER TABLE agentreport ADD COLUMN signal_reason VARCHAR",),
     ),
     (
         "agentreport",
         "signal_uncertainty",
-        "ALTER TABLE agentreport ADD COLUMN signal_uncertainty FLOAT",
+        ("ALTER TABLE agentreport ADD COLUMN signal_uncertainty FLOAT",),
+    ),
+    # #259 2단계: 체결 통지 outbox. null = 미통지.
+    (
+        "tradehistory",
+        "notified_at",
+        (
+            "ALTER TABLE tradehistory ADD COLUMN notified_at DATETIME",
+            # 백필. 이 컬럼이 없던 시절의 행은 outbox가 책임진 적이 없다 — 그 행들을
+            # 미통지로 두면 배포 직후 첫 주기가 과거 체결을 전부 "통지가 늦었습니다"로
+            # 다시 알린다. 그렇다고 "통지됐다"가 증명되는 사실도 아니므로 값을 지어내지
+            # 않고 trade_date를 그대로 쓴다: "이 행의 통지 책임은 체결 시점에 끝났다"는
+            # 뜻이고, 지연을 재면 0이 나와 소급 채운 행이 눈에 띈다.
+            #
+            # signal_score를 DEFAULT 없이 null로 둔 것과 반대 방향이지만 기준은 같다.
+            # 저쪽은 구버전 행의 점수를 알 방법이 없어 지어내지 않았고, 이쪽은 지어내지
+            # 않으면 **없던 통지가 새로 나간다** — null이 무해한 자리가 아니다.
+            "UPDATE tradehistory SET notified_at = trade_date WHERE notified_at IS NULL",
+        ),
     ),
 )
 
@@ -55,6 +85,11 @@ def _run_schema_migrations() -> None:
     디스크 권한 문제로 인한 진짜 실패)는 그대로 올려 startup이 조용히 절반만
     마이그레이션된 스키마로 계속되지 않게 한다.
 
+    항목 하나가 문장 여러 개일 수 있다(#259의 notified_at은 ALTER + 백필). 늦게 도착한
+    워커가 첫 문장에서 "duplicate column name"을 받으면 뒤 문장도 함께 건너뛰는데, 그
+    문장들은 먼저 도착한 워커가 이미 실행했으므로 옳다. 원자성 한계는
+    _PENDING_COLUMN_MIGRATIONS 주석에 적혀 있다.
+
     주의: BOOLEAN NOT NULL DEFAULT 0 구문과 "duplicate column name" 문자열 매칭은
     SQLite 전용이다. 다른 방언이면 조용히 오동작할 수 있으므로 가드를 둔다.
     """
@@ -63,7 +98,7 @@ def _run_schema_migrations() -> None:
             f"스키마 마이그레이션은 SQLite 전용입니다 (현재: {engine.dialect.name}). "
             "다른 DB로 옮기려면 alembic을 도입하세요."
         )
-    for table_name, column_name, alter_sql in _PENDING_COLUMN_MIGRATIONS:
+    for table_name, column_name, statements in _PENDING_COLUMN_MIGRATIONS:
         inspector = inspect(engine)
         if table_name not in inspector.get_table_names():
             # create_all이 이미 최신 스키마로 새로 만들었으므로 손댈 필요 없음
@@ -73,7 +108,8 @@ def _run_schema_migrations() -> None:
             continue
         try:
             with engine.begin() as conn:
-                conn.execute(text(alter_sql))
+                for statement in statements:
+                    conn.execute(text(statement))
         except OperationalError as exc:
             if "duplicate column name" not in str(exc).lower():
                 raise

@@ -40,6 +40,19 @@ class TradeHistory(SQLModel, table=True):
     quantity: int = Field(description="매매 수량")
     price: float = Field(description="매매 단가")
     trade_date: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="매매 일시")
+    # 체결 통지 outbox의 상태 컬럼 (#259 2단계). null이면 "이 체결에 대한 통지가 아직
+    # 나가지 않았다"는 뜻이고, scheduler.trade_notification_task가 재배달 대상으로 집는다.
+    #
+    # 별도 통지 테이블 대신 이 컬럼 하나로 끝내는 이유: 체결 사실은 이미 이 행으로
+    # 영속화돼 있어 "한 체결 = 한 통지"가 자연히 성립하고, 멱등 키도 이 행의 PK를 그대로
+    # 쓸 수 있다. 통지 원장을 따로 두면 체결 원장과 갈려 정합을 맞출 지점이 새로 생긴다.
+    #
+    # trade_date와 같은 축(tz 없는 UTC)으로 저장된다 — order_assist._kst_day_start_utc의
+    # 설명 참조. 두 값을 빼서 지연을 재는 코드가 생길 수 있으므로 축이 갈리면 안 된다.
+    notified_at: Optional[datetime] = Field(
+        default=None,
+        description="체결 통지 전송 완료 시각 (UTC). null이면 미통지 — outbox 재배달 대상",
+    )
 
 class AgentReport(SQLModel, table=True):
     """

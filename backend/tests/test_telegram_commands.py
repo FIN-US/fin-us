@@ -195,14 +195,29 @@ class FakeOrderGateway:
 
 
 class FakeTradeRecorder:
-    def __init__(self, *, error=None):
+    """체결 원장 대역 (#259 2단계).
+
+    ``record``가 행 id를 돌려주고 ``mark_notified``가 그것을 받는다 — 통지 outbox의 멱등
+    키가 그 id이므로, 대역이 id를 흘리면 "통지가 마킹됐는가"를 단언할 자리가 없어진다.
+    ``notified``에 남는 id 목록이 곧 "이 체결은 재배달 대상이 아니다"의 기록이다.
+    """
+
+    def __init__(self, *, error=None, mark_error=None):
         self.error = error
+        self.mark_error = mark_error
         self.results = []
+        self.notified = []
 
     def record(self, result):
         self.results.append(result)
         if self.error is not None:
             raise self.error
+        return len(self.results)
+
+    def mark_notified(self, trade_id, *, notified_at):
+        if self.mark_error is not None:
+            raise self.mark_error
+        self.notified.append((trade_id, notified_at))
 
 
 def _order_mcp_runner_response(tool_name):
@@ -1746,6 +1761,163 @@ async def test_confirm_executes_gateway_and_records_trade():
 
 
 @pytest.mark.asyncio
+async def test_confirm_falls_back_to_in_place_retry_when_the_ledger_write_fails(monkeypatch):
+    """원장이 없으면 outbox도 없다 — 그때만 예전처럼 그 자리에서 재시도한다 (#259 2단계).
+
+    성공 경로는 단발 전송이면 충분하다. 실패해도 미통지 행이 남아 다음 주기가 배달하기
+    때문이다. 기록 자체가 실패하면 그 근거가 사라지므로, 이 메시지가 사용자가 받을 유일한
+    통지가 된다 — 폴러를 붙잡는 대가를 다시 물더라도 여기서는 재시도해야 한다.
+    """
+    recorder = FakeTradeRecorder(error=RuntimeError("db commit failed"))
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        mcp_runner=_order_mcp_runner(),
+        order_gateway=FakeOrderGateway(),
+        trade_recorder=recorder,
+        now_factory=lambda: datetime(2026, 5, 20, 10, 0, tzinfo=KST),
+    )
+    sleeps = _capture_settled_sleeps(monkeypatch, handler)
+
+    await handler.handle_update(
+        {"message": {"chat": {"id": 123}, "text": "/buy 삼성전자 1 75000"}}
+    )
+    notifier.messages.clear()
+    notifier.send_text_result = False
+
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/confirm"}})
+
+    assert sleeps == list(telegram_commands.SETTLED_SEND_RETRY_BACKOFF_SECONDS)
+    assert len(notifier.messages) == len(sleeps) + 1
+    assert all(
+        "이 메시지가 유일한 통지입니다" in message for message in notifier.messages
+    )
+
+
+@pytest.mark.asyncio
+async def test_confirm_success_marks_the_trade_as_notified():
+    """전송이 성공하면 그 행은 재배달 대기열에서 빠진다 (#259 2단계).
+
+    마킹 없이 두면 유예(TRADE_NOTIFY_GRACE)가 지난 뒤 다음 주기가 같은 체결을 한 번 더
+    알린다 — outbox가 없애려던 무응답이 중복으로 바뀔 뿐이다. 마킹 시각은 핸들러의
+    now_factory에서 온다.
+    """
+    now = datetime(2026, 5, 20, 10, 0, tzinfo=KST)
+    recorder = FakeTradeRecorder()
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        mcp_runner=_order_mcp_runner(),
+        order_gateway=FakeOrderGateway(),
+        trade_recorder=recorder,
+        now_factory=lambda: now,
+    )
+
+    await handler.handle_update(
+        {"message": {"chat": {"id": 123}, "text": "/buy 삼성전자 1 75000"}}
+    )
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/confirm"}})
+
+    assert recorder.notified == [(1, now)]
+
+
+@pytest.mark.asyncio
+async def test_confirm_swallows_a_raising_notifier_after_the_fill():
+    """확정 뒤의 전송은 예외를 올리지 않는다 — 올리면 폴러가 재실행한다 (#247).
+
+    _send_text_settled가 그 보장을 서 주고 있었는데 #259 2단계가 그 자리를 단발 전송으로
+    바꿨다. 재실행은 claim이 비어 "확정할 대기 주문이 없습니다"로 끝나므로, 체결된 주문이
+    오표시되고 체결 통지는 여전히 안 나간 상태가 된다.
+    """
+
+    class RaisingNotifier(FakeNotifier):
+        async def send_text(self, text, *, reply_markup=None):
+            if text.startswith("주문 완료"):
+                raise RuntimeError("socket closed")
+            return await super().send_text(text, reply_markup=reply_markup)
+
+    recorder = FakeTradeRecorder()
+    handler = TelegramCommandHandler(
+        notifier=RaisingNotifier(),
+        mcp_runner=_order_mcp_runner(),
+        order_gateway=FakeOrderGateway(),
+        trade_recorder=recorder,
+        now_factory=lambda: datetime(2026, 5, 20, 10, 0, tzinfo=KST),
+    )
+
+    await handler.handle_update(
+        {"message": {"chat": {"id": 123}, "text": "/buy 삼성전자 1 75000"}}
+    )
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/confirm"}})
+
+    # 예외가 새지 않았고, 체결은 미통지로 남아 다음 주기가 배달한다.
+    assert len(recorder.results) == 1
+    assert recorder.notified == []
+
+
+@pytest.mark.asyncio
+async def test_confirm_survives_a_failed_notification_marking():
+    """마킹만 실패하면 중복 배달로 끝난다 — 예외를 올려 update 재실행을 부르면 안 된다.
+
+    재실행은 claim이 비어 "확정할 대기 주문이 없습니다"로 끝나므로, 이미 성공한 통지가
+    오표시로 덮인다.
+    """
+    recorder = FakeTradeRecorder(mark_error=RuntimeError("db locked"))
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        mcp_runner=_order_mcp_runner(),
+        order_gateway=FakeOrderGateway(),
+        trade_recorder=recorder,
+        now_factory=lambda: datetime(2026, 5, 20, 10, 0, tzinfo=KST),
+    )
+
+    await handler.handle_update(
+        {"message": {"chat": {"id": 123}, "text": "/buy 삼성전자 1 75000"}}
+    )
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/confirm"}})
+
+    assert notifier.messages[-1] == "주문 완료: 주문 접수"
+    assert _orders(handler) == {}
+
+
+@pytest.mark.asyncio
+async def test_confirm_records_the_trade_before_sending_the_result():
+    """순서가 뒤집히면 그 사이의 죽음이 곧 무응답이다 (#259 2단계).
+
+    전송을 먼저 하고 기록을 나중에 하면, 전송 실패 시점에 원장에 아무것도 없어 재배달할
+    근거가 남지 않는다. 기록이 전송보다 먼저라는 것을 순서 자체로 고정한다.
+    """
+    events = []
+
+    class OrderingRecorder(FakeTradeRecorder):
+        def record(self, result):
+            events.append("record")
+            return super().record(result)
+
+    class OrderingNotifier(FakeNotifier):
+        async def send_text(self, text, *, reply_markup=None):
+            if text.startswith("주문 완료"):
+                events.append("send")
+            return await super().send_text(text, reply_markup=reply_markup)
+
+    handler = TelegramCommandHandler(
+        notifier=OrderingNotifier(),
+        mcp_runner=_order_mcp_runner(),
+        order_gateway=FakeOrderGateway(),
+        trade_recorder=OrderingRecorder(),
+        now_factory=lambda: datetime(2026, 5, 20, 10, 0, tzinfo=KST),
+    )
+
+    await handler.handle_update(
+        {"message": {"chat": {"id": 123}, "text": "/buy 삼성전자 1 75000"}}
+    )
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/confirm"}})
+
+    assert events == ["record", "send"]
+
+
+@pytest.mark.asyncio
 async def test_confirm_button_executes_gateway_and_records_trade():
     async def mcp_runner(server_params, tool_name, arguments):
         if tool_name == "resolve_stock_code":
@@ -1858,7 +2030,11 @@ async def test_confirm_gateway_success_recorder_failure_clears_pending_order():
 
     assert len(gateway.orders) == 1
     assert len(recorder.results) == 1
-    assert notifier.messages[-2] == "주문 완료: 주문 접수\n거래 이력 기록 실패: db commit failed"
+    assert notifier.messages[-2] == (
+        "주문 완료: 주문 접수"
+        "\n거래 이력 기록 실패: db commit failed"
+        "\n이 메시지가 유일한 통지입니다 — 받지 못했다면 증권사 앱에서 확인하세요."
+    )
     assert notifier.messages[-1] == "확정할 대기 주문이 없습니다."
     assert _orders(handler) == {}
 
@@ -4209,13 +4385,20 @@ async def test_confirm_result_send_failure_does_not_ask_poller_to_retry(monkeypa
 
     claim(GETDEL)으로 주문이 이미 소비돼 재실행은 "확정할 대기 주문이 없습니다"로 끝난다.
     주문은 체결됐는데 사용자는 미체결로 인식하게 된다.
+
+    #259 2단계로 이 자리의 **재시도도 사라졌다**. 전송은 한 번뿐이고, 폴러 루프를 붙잡던
+    SETTLED_SEND_RETRY_BACKOFF_SECONDS 대기가 하나도 일어나지 않는다. 통지가 사라지지 않게
+    하는 것은 원장에 남은 미통지 행이다 — recorder.notified가 비어 있는 것이 곧 "다음
+    주기가 이 체결을 다시 알린다"는 뜻이다.
     """
     gateway = FakeOrderGateway()
+    recorder = FakeTradeRecorder()
     notifier = FakeNotifier()
     handler = TelegramCommandHandler(
         notifier=notifier,
         mcp_runner=_order_mcp_runner(),
         order_gateway=gateway,
+        trade_recorder=recorder,
         now_factory=lambda: datetime(2026, 5, 20, 10, 0, tzinfo=KST),
     )
     sleeps = _capture_settled_sleeps(monkeypatch, handler)
@@ -4229,8 +4412,12 @@ async def test_confirm_result_send_failure_does_not_ask_poller_to_retry(monkeypa
     await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/confirm"}})
 
     assert len(gateway.orders) == 1
-    assert sleeps == list(telegram_commands.SETTLED_SEND_RETRY_BACKOFF_SECONDS)
-    assert notifier.messages == ["주문 완료: 주문 접수"] * (len(sleeps) + 1)
+    # 체결은 원장에 남았고(= outbox가 집을 수 있다) 통지 마킹은 없다(= 아직 안 나갔다).
+    assert len(recorder.results) == 1
+    assert recorder.notified == []
+    # 폴러를 붙잡지 않는다. 전송은 단 한 번이고 백오프 대기는 일어나지 않는다.
+    assert sleeps == []
+    assert notifier.messages == ["주문 완료: 주문 접수"]
     assert _orders(handler) == {}
 
 
@@ -4761,9 +4948,9 @@ async def test_poller_keeps_polling_when_state_store_hangs(monkeypatch, caplog):
 class _SettledSendBlocker(FakeNotifier):
     """체결 결과("주문 완료") 전송에서 영원히 블록한다 (#269).
 
-    429 flood-wait에 붙잡힌 _send_text_settled의 모형이다. 실제로는 백오프 sleep과
-    재시도로 최대 SETTLED_SEND_TIMEOUT_SECONDS(20초)를 쓰지만, 테스트가 고정하려는 것은
-    "그 구간에 취소가 떨어지면 무슨 일이 벌어지는가"이므로 구간을 열어둔 채 붙잡기만 한다.
+    응답하지 않는 Telegram의 모형이다. #259 2단계 이후 이 경로의 실제 상한은 send_text
+    한 번(httpx 타임아웃 10초)이지만, 테스트가 고정하려는 것은 "그 구간에 취소가 떨어지면
+    무슨 일이 벌어지는가"이므로 구간을 열어둔 채 붙잡기만 한다.
     """
 
     def __init__(self):
@@ -4781,23 +4968,26 @@ class _SettledSendBlocker(FakeNotifier):
 
 @pytest.mark.asyncio
 async def test_confirmed_order_is_reexecuted_when_restart_lands_in_the_settled_send(monkeypatch):
-    """체결 성공 후 _send_text_settled 도중 취소되면 재시작 뒤 같은 update가 재실행된다 (#269).
+    """체결 성공 후 결과 전송 도중 취소되면 재시작 뒤 같은 update가 재실행된다 (#269).
 
     창의 정체: place_order 성공(telegram_commands.py의 _handle_confirm)과 _persist_state()
-    (run()의 배치 루프) 사이에 _send_text_settled가 최대 20초 들어앉는다. 그 사이 SIGTERM이
-    오면 offset이 전진하지 못한 채 죽고, Telegram이 같은 update를 재배달하며, 재실행을 막을
-    상태가 아무것도 없다. claim(GETDEL)은 이미 주문을 소비했으므로 재실행은 "확정할 대기
-    주문이 없습니다"로 끝난다 — 체결된 주문을 미체결로 오표시한다.
+    (run()의 배치 루프) 사이에 결과 전송이 들어앉는다. 그 사이 SIGTERM이 오면 offset이
+    전진하지 못한 채 죽고, Telegram이 같은 update를 재배달하며, 재실행을 막을 상태가
+    아무것도 없다. claim(GETDEL)은 이미 주문을 소비했으므로 재실행은 "확정할 대기 주문이
+    없습니다"로 끝난다 — 체결된 주문을 미체결로 오표시한다.
 
     이 창은 #241 revert(#259 1단계)와 무관하다. 원인이 _handled_ahead의 유무가 아니라
     handle_update 한 번의 실행 시간이기 때문이다.
 
-    이 테스트는 지금 열려 있는 창을 **기록**하는 것이지 승인하는 것이 아니다. 닫는 작업은
-    #293으로 뺐고, 그 이슈가 닫히면 아래 마지막 두 단언이 뒤집혀야 한다.
+    #259 2단계가 창을 좁혔지 닫지는 않았다. 전송이 _send_text_settled의 재시도 루프
+    (최대 20초)에서 단발 send_text(httpx 타임아웃 10초)로 바뀌었을 뿐, 그 사이에 죽으면
+    재배달과 재실행은 그대로다. 닫는 작업은 #293(= #259 3단계)이고, 그 이슈가 닫히면
+    아래 마지막 두 단언이 뒤집혀야 한다.
 
     심각도를 함께 고정한다: 중복 체결은 일어나지 않는다(gateway.orders가 1건). GETDEL claim이
-    두 번째 실행에 주문을 주지 않고 체결 이력도 recorder에 그대로 남아, 피해는 오표시 문구
-    한정이다. 이 단언이 깨지면 그때는 성격이 다른 문제다.
+    두 번째 실행에 주문을 주지 않고 체결 이력도 recorder에 그대로 남는다. 그리고 그 이력이
+    **미통지로 남는다**(recorder.notified가 비어 있다) — 오표시 문구가 나가더라도 체결
+    통지 자체는 outbox가 다음 주기에 배달한다. 이 단언이 깨지면 그때는 성격이 다른 문제다.
     """
     now = datetime(2026, 5, 20, 10, 0, tzinfo=KST)
     gateway = FakeOrderGateway()
@@ -4879,6 +5069,8 @@ async def test_confirmed_order_is_reexecuted_when_restart_lands_in_the_settled_s
     # 중복 체결은 없다 — claim(GETDEL)이 두 번째 실행에 주문을 주지 않는다.
     assert len(gateway.orders) == 1
     assert len(recorder.results) == 1
+    # 체결은 미통지로 남았다. 이 창에서 죽어도 통지가 사라지지는 않는다 (#259 2단계).
+    assert recorder.notified == []
     # 그 대가가 오표시다. 창을 닫으면 아래 두 줄이 뒤집힌다: 복원된 offset이 41을 지나가
     # 재배달 자체가 없어지고(polls == [42]) 사용자에게 나가는 메시지도 없어진다.
     assert polls == [None]
