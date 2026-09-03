@@ -1,9 +1,18 @@
-"""#266 2단계: `/api/` 와 `/api/v1/ws` 의 정적 API 키 인증.
+"""#266 2·3단계: `/api/` 와 `/api/v1/ws` 의 정적 API 키 인증.
 
 1단계(nginx 레이트리밋)는 **비용의 뚜껑**이지 접근 제어가 아니었다. 여기서 고정하는
 것이 접근 제어다. #266이 표로 남긴 잔여 위험 중 "비브라우저(`curl`·`wscat`)는 열려
 있음" 행을 닫는 것이 이 검사이므로, 조용히 무력해지면 이슈가 닫혔다고 착각한 채
 그 행이 다시 열린다.
+
+키가 오는 자리는 둘이다(3단계) — 비브라우저는 `X-API-Key` 헤더를 직접 싣고, 브라우저는
+nginx가 문서 응답에 실어 준 `finus_api_key` 쿠키를 자동으로 붙인다. REST와 WebSocket이
+같은 두 경로를 받는다는 것 자체가 계약이므로 네 조합을 모두 본다. 쿠키 쪽 발급은 nginx
+설정의 몫이고 `test_nginx_api_key_cookie.py`가 본다.
+
+2단계가 WebSocket에만 두었던 `?api_key=...` 쿼리 파라미터는 걷어냈다 — 키가 URL에 실려
+nginx 액세스 로그에 평문으로 남는 원인이었다(#355). 그 경로가 되살아나지 않는 것도
+여기서 고정한다.
 
 인증은 `FINUS_API_KEY`가 설정된 배포에서만 걸린다(미설정이 기본값 — 근거는
 `backend/config.py`의 해당 주석). 그래서 여기서는 **켠 상태**와 **끈 상태** 양쪽을
@@ -21,7 +30,13 @@ import pytest
 from fastapi import WebSocketDisconnect
 from fastapi.testclient import TestClient
 
-from backend.main import API_KEY_HEADER, app, is_authorized_api_call, matches_api_key
+from backend.main import (
+    API_KEY_COOKIE,
+    API_KEY_HEADER,
+    app,
+    is_authorized_api_call,
+    matches_api_key,
+)
 
 
 _KEY = "test-secret-key"
@@ -96,6 +111,29 @@ def test_is_authorized_api_call_requires_the_key_when_auth_is_on(auth_on):
     assert is_authorized_api_call("틀린 키") is False
 
 
+def test_is_authorized_api_call_accepts_any_of_the_presented_values(auth_on):
+    """전달 경로가 둘이므로 하나라도 맞으면 통과입니다 (#266 3단계).
+
+    호출부가 `header or cookie`로 하나만 골라 넘기면 값이 있는 쪽이 이긴다 — 낡은
+    헤더가 남은 클라이언트에서 올바른 쿠키가 가려져 401이 되고, 화면에는 아무 단서가
+    없다. 이 테스트가 잡는 mutation: `any`를 첫 인자만 보는 형태로 되돌리는 회귀.
+    """
+    assert is_authorized_api_call("wrong-key", _KEY) is True
+    assert is_authorized_api_call(_KEY, "wrong-key") is True
+    assert is_authorized_api_call(None, _KEY) is True
+    assert is_authorized_api_call("wrong-key", None) is False
+
+
+def test_is_authorized_api_call_denies_when_nothing_is_presented(auth_on):
+    """자격증명 추출을 빠뜨린 호출부는 열리는 쪽이 아니라 닫히는 쪽으로 실패합니다.
+
+    `any(())`는 False다. 인자를 여럿 받는 시그니처로 바꾸면서 이 성질을 함께 못박아
+    둔다 — 반대로 만들면(빈 인자를 통과로 취급) 새 호출부가 값을 안 넘기는 실수가
+    인증을 조용히 끄는 실수가 된다.
+    """
+    assert is_authorized_api_call() is False
+
+
 # --- HTTP 미들웨어 --------------------------------------------------------
 
 
@@ -146,6 +184,51 @@ def test_guarded_path_accepts_the_configured_key(auth_on, stub_news):
         params={"stock": "삼성전자"},
         headers={"X-API-Key": _KEY},
     )
+    assert response.status_code == 200
+
+
+def test_guarded_path_accepts_the_key_in_a_cookie(auth_on, stub_news):
+    """브라우저 경로: 키는 쿠키로도 통과합니다 (#266 3단계).
+
+    이 요청이 실제로 대시보드의 요청이다. nginx가 문서 응답에 실어 준 쿠키를 브라우저가
+    자동으로 붙이므로, 번들의 `ApiClient`를 고치지 않아도(= WebGL 재빌드 없이도) 인증을
+    통과한다. 2단계에서 기본값을 "꺼짐"으로 둔 이유가 바로 이 경로의 부재였다.
+
+    이 테스트가 잡는 mutation: 미들웨어에서 쿠키 추출을 지워 헤더만 보게 하는 회귀 —
+    그러면 인증을 켠 배포의 대시보드가 다시 401로 멈춘다.
+    """
+    # 쿠키는 클라이언트 인스턴스에 붙인다. 요청별 cookies=는 starlette에서 폐기 예정이고
+    # (지속 동작이 모호하다는 이유), 브라우저의 실제 모양도 "클라이언트가 들고 있는 쿠키"다.
+    client = TestClient(app, cookies={API_KEY_COOKIE: _KEY})
+
+    response = client.get("/api/v1/news", params={"stock": "삼성전자"})
+
+    assert response.status_code == 200
+
+
+def test_guarded_path_rejects_a_wrong_cookie(auth_on, stub_news):
+    client = TestClient(app, cookies={API_KEY_COOKIE: "wrong-key"})
+
+    response = client.get("/api/v1/news", params={"stock": "삼성전자"})
+
+    assert response.status_code == 401
+
+
+def test_a_stale_header_does_not_mask_a_valid_cookie(auth_on, stub_news):
+    """헤더에 낡은 값이 남아 있어도 올바른 쿠키가 있으면 통과합니다.
+
+    `header or cookie`로 하나만 골라 넘기는 구현에서는 값이 있는 헤더가 이겨 401이
+    된다. 브라우저에는 정상 쿠키가 있는데도 거부되는 상태이고, 무엇이 틀렸는지
+    화면에서는 보이지 않는다.
+    """
+    client = TestClient(app, cookies={API_KEY_COOKIE: _KEY})
+
+    response = client.get(
+        "/api/v1/news",
+        params={"stock": "삼성전자"},
+        headers={API_KEY_HEADER: "stale-key"},
+    )
+
     assert response.status_code == 200
 
 
@@ -203,7 +286,7 @@ def test_the_nat_client_uses_the_same_header_name():
 
     소스를 문자열로 읽어 고정하는 것은 이 저장소의 선례를 따른 것입니다 —
     `test_compose_ports.py`가 `docker-compose.yml`을, `test_nginx_rate_limit.py`가
-    `nginx.conf`를 같은 방식으로 읽습니다. 실행 경계를 넘는 계약은 그쪽에서 import할 수
+    `nginx.conf.template`을 같은 방식으로 읽습니다. 실행 경계를 넘는 계약은 그쪽에서 import할 수
     없으니 텍스트로라도 묶어 둡니다.
     """
     source = _NAT_FINUS_API.read_text(encoding="utf-8")
@@ -260,26 +343,60 @@ def test_websocket_rejects_a_wrong_key(auth_on, monkeypatch):
 
     with pytest.raises(WebSocketDisconnect):
         with client.websocket_connect(
-            "/api/v1/ws?api_key=wrong", headers={"origin": "http://localhost:8080"}
+            "/api/v1/ws",
+            headers={"origin": "http://localhost:8080", API_KEY_HEADER: "wrong"},
         ):
             pass
 
 
-def test_websocket_accepts_the_key_as_a_query_parameter(auth_on, monkeypatch):
-    """키는 쿼리 파라미터로 받습니다.
+def test_websocket_accepts_the_key_in_a_cookie(auth_on, monkeypatch):
+    """브라우저 경로: 쿠키는 same-origin 핸드셰이크에도 자동으로 붙습니다 (#266 3단계).
 
-    헤더가 아닌 것은 취향이 아니라 제약이다 — 브라우저 WebSocket API에는 커스텀 헤더를
-    붙일 자리가 없다(#266 방향 결정 코멘트). 전달 경로가 REST와 다르다는 사실 자체를
-    고정해 둔다.
+    2단계가 쿼리 파라미터를 쓴 것은 브라우저 WebSocket API에 커스텀 헤더를 붙일 자리가
+    없기 때문이었다. 쿠키는 그 제약을 우회한다 — 헤더를 붙이는 것이 브라우저이고,
+    HttpOnly라도 전송은 막히지 않는다. 그래서 REST와 WebSocket의 전달 경로가 같아졌다.
+    """
+    monkeypatch.setattr("backend.main.ALLOW_ORIGINS", ["http://localhost:8080"])
+    client = TestClient(app, cookies={API_KEY_COOKIE: _KEY})
+
+    with client.websocket_connect(
+        "/api/v1/ws", headers={"origin": "http://localhost:8080"}
+    ) as websocket:
+        websocket.send_text("ping")
+        assert websocket.receive_json() == {"status": "received", "message": "ping"}
+
+
+def test_websocket_accepts_the_key_in_a_header(auth_on):
+    """비브라우저 경로: `wscat -H "X-API-Key: ..."`.
+
+    REST와 같은 헤더를 쓴다. 헤더는 nginx 기본 `log_format`(combined)에 들어가지 않으므로
+    액세스 로그에 남지 않는다 — 쿼리 파라미터를 걷어낸 이유(#355)가 여기서도 유효하다.
+    """
+    with TestClient(app).websocket_connect(
+        "/api/v1/ws", headers={API_KEY_HEADER: _KEY}
+    ) as websocket:
+        websocket.send_text("ping")
+        assert websocket.receive_json() == {"status": "received", "message": "ping"}
+
+
+def test_websocket_no_longer_accepts_the_key_in_the_url(auth_on, monkeypatch):
+    """`?api_key=...`는 더 이상 인정하지 않습니다 — #355의 원인을 없앤 자리입니다.
+
+    쿼리 파라미터는 nginx 액세스 로그에 평문으로 남고, 기록은 nginx가 backend보다 먼저
+    하므로 backend에서 무엇을 거절하든 이미 남은 뒤다(PR #352 리뷰). 쿠키가 같은 일을
+    하게 된 지금 이 경로를 남겨 두면 노출만 남는다.
+
+    이 테스트가 잡는 mutation: "하위 호환"이라는 이유로 쿼리 파라미터 읽기를 되살리는
+    회귀. 그러면 #355가 조용히 다시 열린다.
     """
     monkeypatch.setattr("backend.main.ALLOW_ORIGINS", ["http://localhost:8080"])
     client = TestClient(app)
 
-    with client.websocket_connect(
-        f"/api/v1/ws?api_key={_KEY}", headers={"origin": "http://localhost:8080"}
-    ) as websocket:
-        websocket.send_text("ping")
-        assert websocket.receive_json() == {"status": "received", "message": "ping"}
+    with pytest.raises(WebSocketDisconnect):
+        with client.websocket_connect(
+            f"/api/v1/ws?api_key={_KEY}", headers={"origin": "http://localhost:8080"}
+        ):
+            pass
 
 
 def test_websocket_key_does_not_override_the_origin_check(auth_on, monkeypatch):
@@ -289,11 +406,11 @@ def test_websocket_key_does_not_override_the_origin_check(auth_on, monkeypatch):
     만드는 회귀. 그러면 임의 사이트가 키를 알아낸 순간 브라우저 경로가 다시 열린다.
     """
     monkeypatch.setattr("backend.main.ALLOW_ORIGINS", ["http://localhost:8080"])
-    client = TestClient(app)
+    client = TestClient(app, cookies={API_KEY_COOKIE: _KEY})
 
     with pytest.raises(WebSocketDisconnect):
         with client.websocket_connect(
-            f"/api/v1/ws?api_key={_KEY}", headers={"origin": "http://evil.example"}
+            "/api/v1/ws", headers={"origin": "http://evil.example"}
         ):
             pass
 
