@@ -23,7 +23,12 @@ from nat.builder.function_info import FunctionInfo
 from nat.cli.register_workflow import register_function
 from nat.data_models.function import FunctionBaseConfig
 
-from .pii_guard import mask_tool_result, restore_for_internal, unrestorable_placeholders
+from .pii_guard import (
+    mask_tool_result,
+    placeholder_kind,
+    restore_for_internal,
+    unrestorable_placeholders,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1311,10 +1316,10 @@ async def finus_save_diary(config: FinusSaveDiaryConfig, _builder: Builder):
         title = restore_for_internal((inp.title or "").strip())
         content = restore_for_internal((inp.content or "").strip())
         if not title:
-            result = _err_json("diary_title_required", hint="Provide a non-empty title.")
+            result = _err_json("diary_title_required", hint="제목이 비어 있습니다. 비어 있지 않은 제목을 넣으세요.")
             return _record_and_mask("finus_save_diary", result)
         if not content:
-            result = _err_json("diary_content_required", hint="Provide non-empty diary content.")
+            result = _err_json("diary_content_required", hint="본문이 비어 있습니다. 비어 있지 않은 일지 본문을 넣으세요.")
             return _record_and_mask("finus_save_diary", result)
 
         # 되돌리지 못한 자리표시자가 남아 있으면 **저장하지 않는다** (#339 방향 3).
@@ -1337,14 +1342,17 @@ async def finus_save_diary(config: FinusSaveDiaryConfig, _builder: Builder):
             result = _err_json(
                 "diary_unrestorable_placeholder",
                 count=len(leftover),
-                kinds=sorted({ph.lstrip("<").split("_", 1)[0] for ph in leftover}),
+                kinds=sorted({placeholder_kind(ph) for ph in leftover}),
                 hint=(
                     "일지 본문·제목에 원값을 알 수 없는 내부 자리표시자가 남아 있어 "
                     "저장하지 않았습니다. 그대로 저장하면 사용자가 쓴 값이 복구 불가능하게 "
-                    "사라집니다. 같은 내용으로 재시도하지 말고, 사용자에게 "
-                    "'개인정보 보호 처리 과정에서 금액·수량이 가려져 일지에 그대로 옮길 수 "
-                    "없었다, 일지에 넣을 값을 한 번 더 적어 달라'고 안내한 뒤 사용자가 "
-                    "다시 알려준 값으로 본문을 고쳐 저장하세요."
+                    "사라집니다. **사용자에게 값을 다시 물어도 결과는 같습니다** — 사용자 "
+                    "발화의 금액·수량은 요청마다 개인정보 보호 처리를 거치므로 재입력해도 "
+                    "같은 자리표시자로 도착합니다. 재질의하지 말고 둘 중 하나로 진행하세요: "
+                    "(1) 해당 금액·수량을 본문·제목에서 빼고 다시 저장한다, "
+                    "(2) 이 요청의 잔고·주문 조회 도구 결과에서 나온 값만 써서 다시 저장한다. "
+                    "저장한 뒤에는 개인정보 보호 처리 때문에 사용자가 말한 금액을 일지에 "
+                    "그대로 옮기지 못했다고 알리세요."
                 ),
             )
             return _record_and_mask("finus_save_diary", result)

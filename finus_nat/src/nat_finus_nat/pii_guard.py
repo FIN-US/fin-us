@@ -209,6 +209,20 @@ def unrestorable_placeholders(text: str) -> list[str]:
     return [m.group(0) for m in _SCOPED_PLACEHOLDER_RE.finditer(text)]
 
 
+def placeholder_kind(placeholder: str) -> str:
+    """자리표시자에서 종류(``ACCOUNT``/``AMOUNT``/``QTY``)를 뽑는다.
+
+    :func:`unrestorable_placeholders`가 돌려준 값을 넣는다. 호출자가 문자열을 직접
+    쪼개면 자리표시자 규약이 바뀔 때 그 자리만 조용히 어긋나므로, 형식을 아는
+    :data:`_SCOPED_PLACEHOLDER_RE`에서 캡처한 값을 그대로 쓴다.
+
+    형식에 맞지 않는 문자열은 빈 문자열을 돌려준다 — 위 함수의 출력만 넣는 한
+    도달하지 않지만, 종류를 알 수 없다는 이유로 호출자를 죽이지는 않는다.
+    """
+    match = _SCOPED_PLACEHOLDER_RE.fullmatch(placeholder)
+    return match.group(1) if match else ""
+
+
 def unmask_response(text: str) -> str:
     """최종 응답 본문의 자리표시자 중 **이 요청이 만든 것만** 처리한다.
 

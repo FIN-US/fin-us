@@ -582,11 +582,15 @@ class TestSaveDiaryRejectsUnrestorable:
 
         # (1) 저장 자체가 일어나지 않는다 — 손상된 본문이 DB에 들어가는 것을 막는 것이 요점이다.
         assert "json" not in captured
-        # (2) 에이전트는 원인과 조치를 함께 받는다. 재시도 금지·사용자 재입력 안내가 핵심이다.
+        # (2) 에이전트는 원인과 실행 가능한 조치를 함께 받는다. **사용자 재질의는 조치가
+        #     아니다** — backend `llm_chat`이 요청마다 `mask_pii(user_msg)`를 돌리므로
+        #     사용자가 같은 금액을 다시 적어도 새 scope로 마스킹돼 똑같이 거부된다.
+        #     hint가 재입력을 권하면 에이전트는 무한 재질의 루프에 들어간다.
         payload = json.loads(observation)
         assert payload["error"] == "diary_unrestorable_placeholder"
         assert payload["kinds"] == ["AMOUNT"]
-        assert "재시도하지 말고" in payload["hint"]
+        assert "다시 물어도 결과는 같습니다" in payload["hint"]
+        assert "재질의하지 말고" in payload["hint"]
         # (3) 자리표시자 원문은 Observation으로 되돌아가지 않는다 — 에이전트가 답변에
         #     옮겨 적으면 지금 막으려는 것과 같은 종류의 오염이 된다.
         assert backend_placeholder not in observation
@@ -627,6 +631,32 @@ class TestSaveDiaryRejectsUnrestorable:
             )
 
         assert captured["json"] == {"title": "매매일지", "content": "오늘 삼성전자 3주 210,000원"}
+
+    async def test_save_diary_refuses_when_the_mapping_box_was_never_installed(
+        self, monkeypatch, ledger
+    ):
+        """박스를 물려받지 못한 실행 경로에서도 손상된 본문이 DB에 들어가지 않는다.
+
+        ``mask_tool_result``는 박스가 없어도 **마스킹은 그대로 하고**(fail-closed) 매핑만
+        버린 뒤 ERROR를 남긴다. 그 요청의 일지 본문은 되돌릴 수 없는 토큰만 남으므로
+        저장도 함께 막혀야 짝이 맞는다. ``mapping_box`` 픽스처를 일부러 쓰지 않는다.
+        """
+        assert PII_MAPPING.get() is None
+
+        captured: dict[str, object] = {}
+        monkeypatch.setattr(finus_api.httpx, "AsyncClient", self._fake_client(captured))
+
+        masked = mask_tool_result("finus_mcp_trading_get_balance", "삼성전자 3주 210,000원")
+        assert "<QTY" in masked  # 마스킹 자체는 박스 없이도 걸린다
+
+        config = finus_api.FinusSaveDiaryConfig(backend_url="http://test-backend:8000")
+        async with finus_api.finus_save_diary(config, None) as info:
+            observation = await info.single_fn(
+                finus_api.FinusSaveDiaryInput(title="매매일지", content=f"오늘 {masked}")
+            )
+
+        assert "json" not in captured
+        assert json.loads(observation)["error"] == "diary_unrestorable_placeholder"
 
 
 # ---------------------------------------------------------------------------
