@@ -16,7 +16,7 @@ from backend import scheduler as scheduler_module
 from backend.models import TradeHistory
 from backend.presentation import split_for_telegram
 from backend.trading_orders import _extract_order_message
-from backend.redis_state import SCHEDULER_LOCK_TTL_SEC
+from backend.redis_state import SCHEDULER_LOCK_TTL_SEC, RedisKeys
 from backend.trade_notification_repo import (
     PendingTradeNotification,
     SqliteTradeNotificationRepo,
@@ -335,14 +335,10 @@ class FakeSchedulerState:
     async def release_lock(self, key, token):
         self.released.append((key, token))
 
-    @property
-    def keys(self):
-        class _Keys:
-            @staticmethod
-            def scheduler_lock(job_name):
-                return f"finus:scheduler:lock:{job_name}"
-
-        return _Keys()
+    # 키 조립은 대역이 다시 구현하지 않고 진짜를 그대로 쓴다. 손으로 적으면
+    # RedisKeys.prefix를 바꾸는 날 프로덕션 키만 움직이고 대역과 단언은 옛 문자열로
+    # 함께 남아 초록을 유지한다 — 검증이 아니라 자기 자신을 확인하는 상태가 된다.
+    keys = RedisKeys()
 
 
 @pytest.fixture()
@@ -380,7 +376,7 @@ async def test_task_takes_a_short_lived_lock_and_releases_it(fake_redis_state):
     assert scheduler_module.TRADE_NOTIFY_LOCK_TTL_SECONDS < SCHEDULER_LOCK_TTL_SEC
     # 잡을 실제로 돌았고, 끝나면 락을 놓는다.
     assert repo.marked == [7]
-    assert state.released == [("finus:scheduler:lock:trade_notification", "token")]
+    assert state.released == [(RedisKeys().scheduler_lock("trade_notification"), "token")]
 
 
 @pytest.mark.asyncio

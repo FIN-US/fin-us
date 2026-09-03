@@ -96,6 +96,19 @@ def mark_trade_notified(
 
     같은 모듈의 ``SqliteTradeNotificationRepo.list_unnotified``는 ``with``를 쓴다. 그쪽은
     스케줄러 전용이라 팩토리를 주문 경로와 나눠 쓰지 않는다.
+
+    ``session_factory``의 타입이 ``Session``이 아니라 ``Any``인 것도 같은 이유다. 이 함수가
+    받는 팩토리는 ``TradeRecorder.session_factory``이고 그쪽은 처음부터 ``Any``였다 —
+    좁히면 이 함수만 호출부보다 엄격해져 같은 값이 한 자리에서는 통과하고 다른 자리에서는
+    막힌다. Protocol로 올리는 안도 봤지만 이 레포의 기준에 걸린다: ``record``는 ``add``·
+    ``commit``만 쓰고 이 함수는 ``get``까지 쓰는데, 팩토리 타입은 하나뿐이라 Protocol은
+    합집합이 된다. 그러면 마킹을 하지 않는 대역까지 ``get``을 갖춰야 주입 지점을 통과하고,
+    그것이 ``catalyst_repo.CatalystNotificationRepo``가 "대역이 쓰지도 않는 메서드까지
+    갖추게 하지 않는다"로 피한 바로 그 형태다.
+
+    그래서 타입이 아니라 테스트가 계약을 지킨다 —
+    ``test_trade_recorder_marks_with_the_same_session_contract_as_record``가 ``with``를
+    제공하지 않는 대역으로 이 함수를 통과시킨다.
     """
     session = session_factory()
     try:
