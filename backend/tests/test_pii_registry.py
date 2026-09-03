@@ -31,7 +31,7 @@ import pytest_asyncio
 from sqlmodel import Session, SQLModel, create_engine, select
 from sqlmodel.pool import StaticPool
 
-from backend import pii_registry, services
+from backend import pii_mask, pii_registry, services
 from backend.database import get_session
 from backend.main import app
 from backend.models import Diary
@@ -203,6 +203,83 @@ class TestUnrestorable:
         kinds = {placeholder_kind(ph) for ph in mapping}
         assert kinds == {"ACCOUNT", "AMOUNT"}
         assert placeholder_kind("자리표시자가 아님") == ""
+
+
+class TestScopeCollision:
+    """scope가 겹쳐도 **어느 쪽도 남의 값을 받지 않는다** (PR #361 2차 리뷰).
+
+    확률로만 닫으면(24비트) 남는 실패 모드가 조용한 오답이다. `_Counter.values`가
+    호출마다 0에서 시작하므로 두 매핑의 첫 자리표시자는 문자열까지 같고
+    (`<AMOUNT_abc123_1>`), 덮어쓰기를 허용하면 겹치는 번호가 남의 값으로 치환되는데
+    `unrestorable`이 비어 있어 호출자가 거부할 근거를 받지 못한다.
+
+    `secrets.token_hex`를 고정해 충돌을 강제한다 — 확률에 기대면 이 테스트는 사실상
+    영원히 아무것도 검사하지 않는다.
+    """
+
+    @pytest.fixture
+    def colliding_scope(self, monkeypatch):
+        """이후 모든 `mask_pii` 호출이 같은 scope를 쓰게 만든다."""
+        monkeypatch.setattr(
+            pii_mask.secrets, "token_hex", lambda _n: "abc123", raising=True
+        )
+        return "abc123"
+
+    def test_the_collision_is_reproduced_as_indistinguishable_tokens(
+        self, colliding_scope
+    ):
+        """전제 확인 — 충돌하면 두 자리표시자가 **문자열까지** 같다.
+
+        이것이 "늦게 온 쪽만 등록에서 빼면 된다"가 통하지 않는 이유다. 등록소는 토큰만
+        보고 소유자를 구분할 수 없다.
+        """
+        masked_a, mapping_a = mask_pii("300만원 벌었어")
+        masked_b, mapping_b = mask_pii("500만원 벌었어")
+
+        assert masked_a == masked_b
+        assert _first_placeholder(mapping_a) == _first_placeholder(mapping_b)
+        assert mapping_a != mapping_b  # 같은 토큰, 다른 원값
+
+    def test_neither_side_receives_the_other_value(self, colliding_scope, caplog):
+        """겹친 두 요청 **모두** 되돌리지 못한다 — 어느 쪽도 남의 금액을 받지 않는다."""
+        masked_a, mapping_a = mask_pii("300만원 벌었어")
+        masked_b, mapping_b = mask_pii("500만원 벌었어")
+        placeholder = _first_placeholder(mapping_a)
+
+        with caplog.at_level(logging.ERROR, logger=pii_registry.__name__):
+            with active_mapping(mapping_a):
+                with active_mapping(mapping_b):
+                    a_restored, a_leftover = restore_live_placeholders(masked_a)
+                    b_restored, b_leftover = restore_live_placeholders(masked_b)
+
+        # 되돌리기 실패 -> 호출자(create_db_diary)가 422로 거부한다.
+        assert a_leftover == [placeholder]
+        assert b_leftover == [placeholder]
+        # 핵심: 어느 쪽 본문에도 상대의 원값이 들어가지 않는다.
+        assert "500만원" not in a_restored
+        assert "300만원" not in b_restored
+        assert len(caplog.records) == 1, "충돌은 조용히 지나가면 안 된다"
+
+    def test_the_poisoned_entry_is_cleaned_up(self, colliding_scope):
+        """오염된 자리도 왕복이 끝나면 사라진다 — 다음 요청까지 물들이지 않는다.
+
+        `finally`가 자기가 **등록한** scope만 지우는지도 함께 본다. `grouped` 전체를
+        지우면 늦게 온 쪽의 종료가 남의 자리를 건드린다.
+        """
+        _masked_a, mapping_a = mask_pii("300만원 벌었어")
+        _masked_b, mapping_b = mask_pii("500만원 벌었어")
+
+        with active_mapping(mapping_a):
+            with active_mapping(mapping_b):
+                assert _REGISTRY  # 오염된 자리가 살아 있다
+            assert _REGISTRY  # B가 나가도 A가 등록한 자리는 A가 지운다
+
+        assert not _REGISTRY
+
+        # 충돌이 끝난 뒤의 새 요청은 정상으로 돌아온다.
+        masked_c, mapping_c = mask_pii("700만원 벌었어")
+        with active_mapping(mapping_c):
+            assert restore_live_placeholders(masked_c) == ("700만원 벌었어", [])
 
 
 class TestConcurrentRequests:
