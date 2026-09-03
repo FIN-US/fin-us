@@ -29,6 +29,7 @@ from .redis_state import (
     RedisSchedulerState,
     RedisPendingOrderStore,
     RedisTelegramPollerStore,
+    TelegramPollerFailure,
     TelegramPollerState,
     TelegramPollerStore,
     create_redis_client,
@@ -2239,11 +2240,23 @@ def _update_label(update: dict[str, Any]) -> str:
 
 @dataclass
 class _UpdateFailure:
-    """update별 재시도 예산. 기준은 횟수가 아니라 첫 실패 이후 흐른 시간이다 (#241)."""
+    """update별 재시도 예산. 기준은 횟수가 아니라 첫 실패 이후 흐른 시간이다 (#241).
+
+    시계가 둘인 이유는 예산이 재시작을 넘겨야 하기 때문이다 (#350). ``first_at``은
+    monotonic이라 경과 계산이 벽시계 조정에 흔들리지 않지만 프로세스가 죽으면 원점이
+    사라지고, ``first_wall_at``은 그 반대다. 그래서 진행 중인 판정은 monotonic으로 하고
+    영속화·복원 경계에서만 벽시계를 쓴다 — 복원은 벽시계 경과만큼 뒤로 민 monotonic 값을
+    ``first_at``에 넣어, 그 뒤의 코드가 계속 한 시계만 보게 한다.
+
+    ``first_wall_at``은 복원해도 원래 값을 그대로 유지한다. 복원 시점으로 새로 찍으면
+    재시작마다 앵커가 앞당겨져, 잦은 재시작이 다시 예산을 무한히 늘리는 #350의 경로가
+    벽시계 쪽으로 되살아난다.
+    """
 
     first_at: float
     attempts: int
     send_failure: bool
+    first_wall_at: float
 
 
 class TelegramCommandPoller:
@@ -2275,18 +2288,20 @@ class TelegramCommandPoller:
             state_store if state_store is not None else _create_poller_state_store()
         )
         self.offset: int | None = None
-        # update_id -> 재시도 예산. 유실돼도 poison 폐기가 미뤄질 뿐 중복 실행으로 이어지지
-        # 않으므로 영속화하지 않는다. 매 update 쓰기에 얹을 값이 아니다 (#248).
+        # update_id -> 재시도 예산. offset과 함께 영속화된다 (#350).
         #
-        # 대가가 #259 1단계로 커졌다: _restore_state가 이 값을 건드리지 않으므로 재시작마다
-        # poison에 예산이 새로 지급되는데, 이제 배치가 그 poison에서 끊기므로 예산보다 잦은
-        # 재시작이 이어지면 폐기가 무기한 미뤄지고 **그 채팅의 모든 명령이 정지한다**.
-        # #241 하에서는 뒤의 update가 선행 실행돼 "poison 폐기가 미뤄짐"에 그쳤다.
-        # 리셋 계기는 배포가 아니라 Dockerfile의 uvicorn --reload + bind mount다 — backend
-        # 파일 저장 하나면 된다. 영속화할지 알람으로 감지만 할지는 #350에서 정한다.
+        # #248은 이 값을 일부러 뺐다. 근거는 "유실돼도 poison 폐기가 미뤄질 뿐 중복 실행으로
+        # 이어지지 않는다"였는데, #259 1단계가 배치를 poison에서 끊게 만들면서 그 대가가
+        # **그동안 그 채팅의 모든 명령이 정지**로 커졌다. #241 하에서는 뒤의 update가 선행
+        # 실행돼 "폐기가 미뤄짐"에 그쳤다. 리셋 계기는 배포가 아니라 Dockerfile의
+        # uvicorn --reload + bind mount라 backend 파일 저장 하나면 되고, 예산(일반 65초·
+        # 전송 실패 335초)보다 잦은 재시작이 이어지면 poison은 영원히 폐기되지 않았다.
         #
         # 방향이 offset과 반대라는 점은 그대로다: offset은 "자신을 poison에 붙들어 매는
-        # 상태"이고 이건 "poison을 포기하게 해주는 유일한 상태"다 (PR #251 리뷰).
+        # 상태"이고 이건 "poison을 포기하게 해주는 유일한 상태"다 (PR #251 리뷰). 그래서
+        # 유실 시의 degrade 방향도 반대다 — offset이 없으면 재실행, 이게 없으면 정지.
+        # 복원 실패를 저장소가 offset과 다르게 다루는 근거가 그것이다
+        # (RedisTelegramPollerStore._deserialize_failures).
         self._failures: dict[int, _UpdateFailure] = {}
 
     async def run(self) -> None:
@@ -2367,6 +2382,14 @@ class TelegramCommandPoller:
                 # test_skip_notice_merges_updates_into_one_message가 helper 단위로 고정한다.
                 await self._notify_updates_skipped(skipped)
             if retry_pending:
+                # 예산을 여기서 쓴다 (#350). 위 루프의 쓰기 지점은 update를 통과시킨 뒤에만
+                # 도는데, RETRY는 배치를 그 자리에서 끊어 거기 닿지 못한다 — 이 한 줄이
+                # 없으면 예산은 영속화 대상이 되고도 실제로는 한 번도 저장되지 않는다.
+                #
+                # 이 쓰기는 재시도 사이클당 한 번(간격 5~45초)이라 정상 경로의 쓰기 빈도를
+                # 바꾸지 않는다. offset은 그대로고 바뀌는 것은 attempts뿐이지만, 상태를 통째로
+                # 덮어쓰는 계약이라 부분 갱신을 따로 만들 이유가 없다.
+                await self._persist_state()
                 # 실패한 update를 곧바로 다시 받아 예산을 순식간에 소진하지 않도록 쉬어 간다.
                 # 실패가 이어지면 간격을 늘려 복구 창을 벌고 rate limit도 덜 자극한다 (#241).
                 await self._sleep(self._retry_delay())
@@ -2414,7 +2437,12 @@ class TelegramCommandPoller:
             now = self._now()
             failure = self._failures.get(update_id)
             if failure is None:
-                failure = _UpdateFailure(first_at=now, attempts=1, send_failure=send_failure)
+                failure = _UpdateFailure(
+                    first_at=now,
+                    attempts=1,
+                    send_failure=send_failure,
+                    first_wall_at=self._wall_now(),
+                )
                 self._failures[update_id] = failure
             else:
                 failure.attempts += 1
@@ -2486,7 +2514,7 @@ class TelegramCommandPoller:
             logger.error("Telegram skip notice not delivered for %s updates", len(mine))
 
     async def _restore_state(self) -> None:
-        """재시작 전 offset을 복원한다 (#248).
+        """재시작 전 offset과 재시도 예산을 복원한다 (#248, #350).
 
         실패하면 빈 상태로 시작한다. Telegram이 미확정 update를 전부 재배달하므로 명령이
         유실되지는 않지만, 실행됐던 것이 다시 실행된다 — 영속화 이전과 같은 상태다.
@@ -2505,11 +2533,47 @@ class TelegramCommandPoller:
             logger.error("Telegram poller 상태 복원 실패, 빈 상태로 시작: %s", exc)
             return
         self.offset = state.offset
+        self._failures = self._restore_failures(state.failures)
         if state.offset is not None:
             logger.info("Telegram poller 상태 복원: offset=%s", state.offset)
+        for update_id, failure in self._failures.items():
+            # 재시작을 넘긴 예산은 그 자체로 조사 대상이다 — 이 로그가 없으면 "재시작 직후
+            # 첫 실패에서 바로 폐기됐다"가 원인 없는 사건으로 보인다.
+            logger.info(
+                "Telegram poller 재시도 예산 복원: update=%s attempts=%s elapsed=%.0fs",
+                update_id,
+                failure.attempts,
+                self._now() - failure.first_at,
+            )
+
+    def _restore_failures(
+        self, failures: tuple[TelegramPollerFailure, ...]
+    ) -> dict[int, _UpdateFailure]:
+        """저장된 벽시계 앵커를 이 프로세스의 monotonic 기준으로 환산한다 (#350).
+
+        경과가 음수면 0으로 접는다. 벽시계가 뒤로 뛴 상태라 그 update가 실제로 얼마나
+        기다렸는지 알 방법이 없고, 이 방향의 오차는 "예산을 한 번 더 준다"(= #350 이전
+        동작)로 떨어져 정지를 새로 만들지 않는다.
+
+        경과가 창을 이미 넘겼어도 여기서 폐기하지는 않는다. 폐기 판정은 _handle_one_update의
+        한 곳에 남겨 둔다 — 그 update가 재배달돼 다시 실패해야 폐기가 의미를 갖고, 재시작
+        사이에 원인이 사라졌다면 그냥 성공하고 예산은 pop된다.
+        """
+        wall_now = self._wall_now()
+        now = self._now()
+        restored: dict[int, _UpdateFailure] = {}
+        for failure in failures:
+            elapsed = max(0.0, wall_now - failure.first_at)
+            restored[failure.update_id] = _UpdateFailure(
+                first_at=now - elapsed,
+                attempts=failure.attempts,
+                send_failure=failure.send_failure,
+                first_wall_at=failure.first_at,
+            )
+        return restored
 
     async def _persist_state(self) -> None:
-        """offset을 저장한다 (#248).
+        """offset과 재시도 예산을 저장한다 (#248, #350).
 
         쓰기 실패는 삼킨다 — fail-open 근거는 RedisTelegramPollerStore 독스트링에 있다.
         폴링은 인메모리 상태로 계속되고, 다음 update의 쓰기가 성공하면 그 시점 상태가
@@ -2521,12 +2585,33 @@ class TelegramCommandPoller:
         """
         try:
             await asyncio.wait_for(
-                self.state_store.save(TelegramPollerState(offset=self.offset)),
+                self.state_store.save(
+                    TelegramPollerState(
+                        offset=self.offset, failures=self._failures_snapshot()
+                    )
+                ),
                 timeout=STATE_STORE_TIMEOUT_SECONDS,
             )
         except Exception as exc:
             # TimeoutError·CancelledError 취급은 _restore_state 주석 참조.
             logger.error("Telegram poller 상태 저장 실패, 인메모리로 계속: %s", exc)
+
+    def _failures_snapshot(self) -> tuple[TelegramPollerFailure, ...]:
+        """인메모리 예산을 저장 형식으로 옮긴다 — 나가는 시각은 벽시계다 (#350).
+
+        update_id 순으로 정렬하는 이유는 payload를 재현 가능하게 만들기 위해서다. dict의
+        삽입 순서가 그대로 나가면 같은 상태가 서로 다른 문자열이 되어, 저장된 값을 눈으로
+        비교하거나 테스트가 payload를 고정하기 어려워진다.
+        """
+        return tuple(
+            TelegramPollerFailure(
+                update_id=update_id,
+                first_at=failure.first_wall_at,
+                attempts=failure.attempts,
+                send_failure=failure.send_failure,
+            )
+            for update_id, failure in sorted(self._failures.items())
+        )
 
     def _forget_passed_updates(self, offset: int) -> None:
         """offset이 지나간 update_id 기록을 정리해 추적 상태가 무한히 커지지 않게 한다 (#241).
@@ -2558,6 +2643,14 @@ class TelegramCommandPoller:
     def _now(self) -> float:
         """재시도 예산용 단조 시계. 테스트에서 대체할 수 있도록 메서드로 둔다 (#241)."""
         return time.monotonic()
+
+    def _wall_now(self) -> float:
+        """예산을 재시작 너머로 나르기 위한 벽시계 (#350).
+
+        _now와 갈라 두는 이유는 _UpdateFailure 독스트링에 있다. 여기 값은 영속화 payload와
+        복원 시 경과 계산에만 쓰이고, 살아 있는 프로세스 안의 판정에는 쓰이지 않는다.
+        """
+        return time.time()
 
     async def _setup_bot_profile(self) -> None:
         # notifier는 주입 가능하고 이 능력은 선택 사항이라, 선언 타입이 아니라

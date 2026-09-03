@@ -28,7 +28,7 @@ COOLDOWN_TTL_SEC = 60 * 10
 TELEGRAM_ALERT_MODES = {"urgent", "all", "off"}
 DEFAULT_TELEGRAM_ALERT_MODE = "urgent"
 
-# 폴러 상태(offset) TTL: 7일.
+# 폴러 상태(offset·재시도 예산) TTL: 7일.
 # Telegram 서버는 미확정 update를 24시간만 보관하므로, 그보다 오래된 offset은 보호할 대상이
 # 이미 없다. TTL은 값의 유효기간이 아니라 폴러가 영구히 내려간 뒤 남는 키를 정리하는 장치다.
 # 쓰기는 update를 처리할 때만 일어나므로 7일 내내 update가 없으면 만료된다 — 폴러가 살아
@@ -262,19 +262,54 @@ class RedisSchedulerState:
 
 
 @dataclass(frozen=True)
+class TelegramPollerFailure:
+    """poison 하나의 재시도 예산 중 재시작을 넘겨야 하는 부분 (#350).
+
+    ``first_at``만 **벽시계**(time.time())다. 폴러가 예산 경과를 재는 시계는 monotonic인데
+    (telegram_commands._now), monotonic의 원점은 프로세스마다 다르므로 그 값을 그대로
+    저장하면 재시작 뒤 비교 자체가 무의미하다. 재시작을 넘길 수 있는 시간 좌표는 벽시계뿐이라
+    영속화 경계에서만 벽시계를 쓰고, 복원 시 다시 monotonic 기준으로 환산한다
+    (telegram_commands.TelegramCommandPoller._restore_state).
+
+    그 대가는 벽시계의 점프다. 뒤로 뛰면 경과가 음수가 되어 복원 측이 0으로 접으므로 예산이
+    한 번 더 지급되고(= #350 이전 동작), 앞으로 뛰면 그만큼 일찍 폐기된다. 예산 창이 65초·
+    335초라 NTP step 정도로는 한 번의 재시도 사이클을 넘지 못하고, 무엇보다 monotonic으로는
+    이 문제를 해결할 수 없다 — 정지를 막는 쪽을 택했다.
+
+    ``attempts``까지 담는 이유는 백오프와 로그다. 유실되면 간격이 5초부터 다시 시작해 남은
+    창 안에서 재시도가 촘촘해지고(rate limit을 더 자극한다) "skipped after N attempts"
+    로그가 재시작 이후만 세게 된다. 같은 쓰기에 int 하나라 담는 값이 있다.
+    """
+
+    update_id: int
+    first_at: float
+    attempts: int = 1
+    send_failure: bool = False
+
+
+@dataclass(frozen=True)
 class TelegramPollerState:
     """폴러가 재시작을 넘겨 살려야 하는 최소 상태 (#248).
 
     #248은 offset과 함께 handled_ahead(poison 뒤에서 선행 실행한 update_id)를 담았다. 그
     필드는 #259 1단계에서 없앴다 — 배치가 poison에서 끊기게 되면서 선행 실행 자체가 사라져
-    기억할 것이 남지 않는다. 값이 하나뿐이어도 dataclass를 유지하는 이유는 저장소 계약
+    기억할 것이 남지 않는다. dataclass를 유지하는 이유는 저장소 계약
     (TelegramPollerStore)이 "한 번에 읽고 한 번에 쓰는 상태 덩어리"이기 때문이다.
 
-    재시도 예산(_UpdateFailure)은 일부러 담지 않는다. 유실되면 poison의 폐기 시점이
-    미뤄질 뿐 중복 실행으로 이어지지 않으므로, 매 update 쓰기에 얹을 값이 아니다.
+    ``failures``(재시도 예산)는 #248에서 일부러 빼 두었던 값이다. 근거는 "유실되면 poison의
+    폐기 시점이 미뤄질 뿐"이었는데, #259 1단계가 배치를 poison에서 끊게 만들면서 그 대가가
+    **그동안 그 채팅의 모든 명령이 정지**로 커졌다. backend/Dockerfile의 uvicorn --reload +
+    bind mount 때문에 파일 저장 하나가 리셋 계기라, 예산(65초·335초)보다 잦은 재시작이
+    이어지면 poison이 영원히 폐기되지 않는다. 그래서 #350에서 담기로 정했다.
+
+    dict가 아니라 순서 있는 튜플인 이유는 frozen dataclass의 필드로 쓰기 때문이다. 원소가
+    실제로는 최대 1개(폴러 _forget_passed_updates 독스트링 참조)여도 목록 형태를 쓰는 것은
+    그 상한이 배치 루프의 모양에 딸린 성질이라서다 — 루프가 다시 바뀌어 미해결 update가
+    여럿이 되면, 저장 형식이 1개만 담고 있으면 나머지가 조용히 유실된다.
     """
 
     offset: int | None = None
+    failures: tuple[TelegramPollerFailure, ...] = ()
 
 
 class TelegramPollerStore(Protocol):
@@ -312,11 +347,14 @@ class InMemoryTelegramPollerStore:
 
 
 class RedisTelegramPollerStore:
-    """폴러의 offset을 redis에 영속화한다 (#248).
+    """폴러의 offset과 재시도 예산을 redis에 영속화한다 (#248, #350).
 
-    #259 1단계 전에는 handled_ahead도 같은 키에 함께 썼다. 지금 남은 값은 offset 하나지만
-    JSON 오브젝트 형태는 유지한다 — 스칼라로 바꾸면 다음에 담을 값이 생길 때 저장 형식이
-    또 한 번 바뀌고, 그 사이 배포는 서로의 payload를 읽지 못한다.
+    #259 1단계 전에는 handled_ahead도 같은 키에 함께 썼다. JSON 오브젝트 형태를 유지해 둔
+    덕에 #350의 failures는 필드 하나를 되돌려 넣는 작업이 됐다 — 스칼라로 바꿨더라면 저장
+    형식이 또 한 번 바뀌고 그 사이 배포는 서로의 payload를 읽지 못했을 것이다.
+
+    failures는 비어 있으면 payload에서 아예 뺀다. 예산이 걸린 update가 있는 것은 예외
+    상황이고, 정상 경로의 쓰기(update마다 한 번)에 빈 배열을 얹을 이유가 없다.
 
     호출자(TelegramCommandPoller)가 예외를 삼키는 fail-open이다.
     RedisPendingOrderStore의 fail-closed와 갈리는 근거는 "redis가 죽었을 때 무엇이 중복될 수
@@ -401,7 +439,82 @@ class RedisTelegramPollerStore:
         # 모르는 키는 그냥 무시한다. 이 배포가 처음 읽는 값은 #259 1단계 이전이 쓴
         # {"offset": ..., "handled_ahead": [...]}이고, handled_ahead를 이제 안 읽는 것이
         # 곧 의도한 동작이다 — 되돌린 최적화의 상태이므로 복원할 대상이 아니다.
-        return TelegramPollerState(offset=offset)
+        return TelegramPollerState(
+            offset=offset,
+            failures=RedisTelegramPollerStore._deserialize_failures(data.get("failures")),
+        )
+
+    @staticmethod
+    def _deserialize_failures(raw: Any) -> tuple[TelegramPollerFailure, ...]:
+        """예산 목록을 복원한다. 손상됐으면 offset은 살리고 예산만 버린다 (#350).
+
+        offset 쪽과 달리 여기서는 raise하지 않는다. 두 값의 유실 대가가 다르기 때문이다:
+        예산 유실은 poison의 폐기가 한 창(최대 335초) 미뤄지는 것 — #350 이전의 동작 —
+        으로 degrade하지만, raise는 손상 키 삭제로 이어져 offset까지 함께 날린다. 그러면
+        Telegram이 미확정 update를 전부 재배달해 이미 실행한 명령이 다시 실행된다. 예산
+        한 창을 아끼려고 중복 주문 위험을 살 수는 없다.
+
+        타입 검증은 offset과 같은 이유로 촘촘하다: bool은 int의 하위 타입이라 isinstance만
+        으로 통과하고, 여기 새는 값은 update_id 비교(_forget_passed_updates)와 시간 산술
+        (경과 = 지금 - first_at) 양쪽으로 흘러간다.
+        """
+        if raw is None:
+            return ()
+        try:
+            if not isinstance(raw, list):
+                raise TypeError(f"failures must be a list, got {type(raw).__name__}")
+            return tuple(
+                RedisTelegramPollerStore._deserialize_failure(entry) for entry in raw
+            )
+        except (ValueError, TypeError, AttributeError) as exc:
+            # 원소 하나가 손상돼도 목록 전체를 버린다. 남은 원소만 살려도 그 payload를
+            # 신뢰할 근거가 없고, 예산은 없어도 되는 값이라 부분 복원의 값이 없다.
+            logger.error("telegram poller 재시도 예산 복원 실패, 예산 없이 시작: %s", exc)
+            return ()
+
+    @staticmethod
+    def _deserialize_failure(entry: Any) -> TelegramPollerFailure:
+        if not isinstance(entry, dict):
+            raise TypeError(f"failure must be an object, got {type(entry).__name__}")
+
+        update_id = entry.get("update_id")
+        if isinstance(update_id, bool) or not isinstance(update_id, int):
+            raise TypeError(f"failure update_id must be int, got {update_id!r}")
+        # offset과 같은 범위를 쓴다. update_id는 offset과 같은 축의 값이고, 범위를 벗어난
+        # 값이 들어오면 _forget_passed_updates의 비교가 그 항목을 영구히 남긴다.
+        if not 0 <= update_id <= MAX_OFFSET:
+            raise ValueError(f"failure update_id out of range: {update_id}")
+
+        first_at = entry.get("first_at")
+        if isinstance(first_at, bool) or not isinstance(first_at, (int, float)):
+            raise TypeError(f"failure first_at must be a number, got {first_at!r}")
+        # NaN·inf가 새면 경과 비교가 항상 False가 되어(NaN) poison이 영구히 재시도되거나,
+        # inf면 창을 즉시 넘겨 첫 실패에서 폐기된다. 둘 다 예산이 없는 것보다 나쁘다.
+        if first_at != first_at or first_at in (float("inf"), float("-inf")):
+            raise ValueError(f"failure first_at must be finite, got {first_at!r}")
+        # 벽시계 epoch 초라 0 이하는 정상값이 아니다(1970년 이전).
+        if first_at <= 0:
+            raise ValueError(f"failure first_at must be positive, got {first_at!r}")
+
+        attempts = entry.get("attempts")
+        if isinstance(attempts, bool) or not isinstance(attempts, int):
+            raise TypeError(f"failure attempts must be int, got {attempts!r}")
+        # 항목이 존재한다는 것 자체가 최소 1회 시도했다는 뜻이다. 0이나 음수가 새면
+        # _retry_delay의 인덱스 계산(min(attempts, len) - 1)이 음수 인덱스가 되어
+        # 백오프 튜플의 뒤에서부터 골라 가장 긴 간격을 쓴다.
+        if attempts < 1:
+            raise ValueError(f"failure attempts must be >= 1, got {attempts}")
+
+        send_failure = entry.get("send_failure")
+        if not isinstance(send_failure, bool):
+            raise TypeError(f"failure send_failure must be bool, got {send_failure!r}")
+
+        return TelegramPollerFailure(
+            update_id=update_id,
+            first_at=float(first_at),
+            attempts=attempts,
+            send_failure=send_failure,
+        )
 
     async def save(self, state: TelegramPollerState) -> None:
         # 상태가 그대로여도 같은 payload를 다시 쓴다. dirty check를 두지 않은 이유는 TTL
@@ -409,7 +522,10 @@ class RedisTelegramPollerStore:
         # 7일(604,800초)이라 만료까지 3자릿수 배수의 여유가 있고, 쓰기가 진짜 0인 유휴
         # 구간은 dirty check가 있든 없든 같다. 단일 채팅 규모에서 중복 SET의 비용이 무시
         # 가능해 상태를 하나 더 들일 값어치가 없다고 봤다 (PR #251 리뷰).
-        payload = json.dumps({"offset": state.offset})
+        payload_data: dict[str, Any] = {"offset": state.offset}
+        if state.failures:
+            payload_data["failures"] = [asdict(f) for f in state.failures]
+        payload = json.dumps(payload_data)
         await self.redis.set(
             self._keys.telegram_poller_state(), payload, ex=self.ttl_sec
         )
