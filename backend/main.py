@@ -20,6 +20,7 @@ from .config import (
     SIGNAL_SCORE_THRESHOLD,
 )
 from .filtered_signal_repo import fill_score_axis, score_histogram
+from .pii_registry import placeholder_kind, restore_live_placeholders
 from .ws_manager import manager
 from .scheduler import start_scheduler, stop_scheduler
 from .telegram_commands import start_telegram_commands, stop_telegram_commands
@@ -551,8 +552,51 @@ async def create_db_diary(
     diary_in: DiaryCreate,
     session: Session = Depends(get_session)
 ):
-    """새로운 투자 일지를 작성합니다."""
-    diary = Diary.model_validate(diary_in)
+    """새로운 투자 일지를 작성합니다.
+
+    저장 직전에 마스킹 자리표시자를 원값으로 되돌린다 (#354). 사용자가 발화에 적은
+    금액·수량은 `llm_chat`이 NAT을 부르기 전에 마스킹하므로(#230), LLM이 그 발화를 보고
+    쓴 일지 본문에는 `<AMOUNT_be3f1a_1>` 같은 backend 토큰이 실려 온다. 그대로 저장하면
+    사용자가 쓴 금액이 내부 토큰으로 **영구히** 대체된다 — #339가 막았던 손상이다.
+
+    되돌릴 수 있는 것은 **아직 응답을 기다리고 있는 요청의 매핑**뿐이다
+    (`pii_registry`). 그 조회는 자리표시자에 실린 scope로 하므로, 이 요청과 원래 채팅
+    요청 사이에 상관관계 식별자를 배선할 필요가 없다.
+
+    되돌리지 못한 것이 하나라도 남으면 **저장하지 않는다.** #339의 판정을 그대로
+    유지한다 — 남은 토큰은 원값이 이 프로세스 어디에도 없고(이전 턴의 것이거나 LLM이
+    지어낸 번호다), 저장은 되돌릴 기회가 다시 오지 않는 종착지다. 조용한 원본 소실보다
+    시끄러운 실패가 낫다. 근거는 docs/nfr-05-pii-masking.md.
+
+    NAT `finus_save_diary`도 같은 거부를 하지만 **자기가 발급한 scope에 대해서만** 한다.
+    두 거부는 막는 것이 다르므로 둘 다 남는다 — NAT은 자기 도구 결과에서 유실·조작된
+    토큰을, 여기서는 그 밖의 모든 경로(이전 턴, NAT을 거치지 않는 직접 호출)를 막는다.
+    """
+    title, leftover_title = restore_live_placeholders(diary_in.title)
+    content, leftover_content = restore_live_placeholders(diary_in.content)
+    leftover = leftover_title + leftover_content
+    if leftover:
+        # 자리표시자 원문은 로그에만 남긴다. 이 응답의 detail은 NAT을 거쳐 Observation으로
+        # LLM 컨텍스트에 재유입되므로(finus_save_diary의 diary_api_http_error), 거기에
+        # 토큰을 실으면 에이전트가 그대로 답변에 옮겨 적을 여지를 준다 — 지금 막으려는
+        # 것과 같은 종류의 오염이다.
+        logger.warning(
+            "매매일지 저장을 거부했습니다 — 되돌리지 못한 자리표시자 %d개: %s",
+            len(leftover),
+            leftover,
+        )
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"일지 제목·본문에 원값을 알 수 없는 내부 자리표시자가 "
+                f"{len(leftover)}개 남아 있어 저장하지 않았습니다"
+                f"(종류: {', '.join(sorted({placeholder_kind(ph) for ph in leftover}))}). "
+                "그대로 저장하면 원래 값이 복구 불가능하게 사라집니다. 해당 금액·수량을 "
+                "빼고 다시 저장하세요."
+            ),
+        )
+
+    diary = Diary.model_validate(diary_in, update={"title": title, "content": content})
     session.add(diary)
     session.commit()
     session.refresh(diary)
