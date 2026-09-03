@@ -1,9 +1,11 @@
+import hmac
 import os
 import logging
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta, timezone
 from typing import Literal
 from fastapi import FastAPI, HTTPException, Query, Depends, Request, WebSocket, WebSocketDisconnect, Body
+from fastapi.responses import JSONResponse
 from sqlmodel import Session, col, select
 
 from .config import (
@@ -11,6 +13,7 @@ from .config import (
     TRADING_MCP_PARAMS,
     DART_MCP_PARAMS,
     ALLOW_ORIGINS,
+    FINUS_API_KEY,
     FILTERED_SIGNAL_RETENTION_DAYS,
     SIGNAL_SCORE_MAX,
     SIGNAL_SCORE_MIN,
@@ -46,6 +49,7 @@ async def lifespan(app: FastAPI):
     start_scheduler()
     start_telegram_commands()
     logger.info("Database initialized and scheduler started.")
+    _log_api_auth_state()
     yield
     # 앱 종료 시 실행: 스케줄러 안전 종료
     await stop_telegram_commands()
@@ -65,11 +69,136 @@ app = FastAPI(
 # CORS 자체가 개입하지 않는다. 남겨 두면 이제 아무도 타지 않는 경로가 "동작 중인
 # 보호"처럼 보이고, 실제로는 응답을 *읽는* 것만 막을 뿐 요청 *실행*은 막지 못한다.
 # 오리진 단위로 실제 호출을 막는 것은 nginx 레이트리밋(#266 1단계, frontend/nginx.conf)과
-# 아직 도입 전인 API 인증(#266 2단계)의 몫이다.
+# 아래 API 키 인증(#266 2단계)의 몫이다.
 #
 # ALLOW_ORIGINS는 남는다 — 아래 is_allowed_ws_origin이 /api/v1/ws 핸드셰이크의 Origin
 # 허용목록으로 계속 쓴다(#256). CORSMiddleware는 애초에 WS 핸드셰이크에 적용되지 않아,
 # 이 미들웨어를 걷어내도 그쪽 검사는 그대로다.
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# API 정적 키 인증 (#266 2단계)
+# ──────────────────────────────────────────────────────────────────────────
+# 1단계(nginx 레이트리밋)는 비용의 뚜껑이지 접근 제어가 아니었다. 여기서 거는 것이
+# 접근 제어다. 키가 설정된 배포에서만 걸린다 — 미설정이 기본이고, 그 이유는
+# config.FINUS_API_KEY 주석에 있다.
+
+# REST가 키를 받는 헤더 이름.
+API_KEY_HEADER = "X-API-Key"
+# WebSocket이 같은 키를 받는 쿼리 파라미터 이름. 헤더가 아닌 것은 취향이 아니라
+# 제약이다 — 브라우저 WebSocket API에는 커스텀 헤더를 붙일 자리가 없다(#266 방향 결정).
+WS_API_KEY_QUERY_PARAM = "api_key"
+
+# 인증이 걸리는 경로 접두사. nginx 레이트리밋이 덮는 범위(#266 1단계의 `location /api/`)와
+# 같은 /api/다. 두 보호의 경계가 어긋나면 "제한은 걸리는데 인증은 안 걸리는" 경로가
+# 생기고, 그런 경로는 설정을 나란히 읽어야만 보인다.
+_GUARDED_PATH_PREFIX = "/api/"
+
+
+def api_auth_enabled() -> bool:
+    """이 배포에 API 인증이 걸려 있는지."""
+    return bool(FINUS_API_KEY)
+
+
+def matches_api_key(presented: str | None) -> bool:
+    """제시된 키가 FINUS_API_KEY와 정확히 같은지 판정합니다.
+
+    hmac.compare_digest를 쓰는 이유는 타이밍 공격만이 아니다. `==`나 startswith 같은
+    비교로 바뀌는 것을 막을 근거를 함수 하나에 못박아 두려는 것이다 — 비교는 항상
+    전체 문자열 완전 일치다(ALLOW_ORIGINS 대조가 같은 이유로 완전 일치인 것과 같다).
+
+    키가 설정되지 않았으면 무엇을 제시하든 False다. "인증이 꺼져 있다"는 판정은 이
+    함수가 아니라 api_auth_enabled가 한다. 둘을 한 함수에 섞으면 키 미설정이 "아무 키나
+    맞음"으로 읽히는 자리가 생기고, 그 자리는 나중에 인증을 켰을 때 조용히 열려 있다.
+
+    비교 전에 UTF-8 바이트로 바꾸는 것은 필수다. hmac.compare_digest는 str을 받으면
+    ASCII만 허용하고 그 밖의 문자에는 TypeError를 낸다 — 그대로 두면 헤더에 한글 한
+    글자를 실은 요청이 401이 아니라 500이 되고, 인증 실패가 서버 오류로 둔갑한다.
+    """
+    if not FINUS_API_KEY or not presented:
+        return False
+    return hmac.compare_digest(presented.encode("utf-8"), FINUS_API_KEY.encode("utf-8"))
+
+
+def is_authorized_api_call(presented: str | None) -> bool:
+    """인증이 꺼져 있으면 통과, 켜져 있으면 키 일치만 통과합니다.
+
+    REST(헤더)와 WebSocket(쿼리 파라미터)이 같은 판정을 쓴다. 전달 경로만 다르고
+    "무엇을 인정하는가"는 하나여야, 한쪽만 느슨해지는 드리프트가 생기지 않는다.
+    """
+    return not api_auth_enabled() or matches_api_key(presented)
+
+
+def _log_api_auth_state() -> None:
+    """기동 시점에 인증 상태를 로그로 남긴다.
+
+    꺼져 있는 것이 기본값이라 조용히 지나가기 쉽다. 무인증으로 열려 있다는 사실은
+    운영자가 매번 다시 확인해야 하는 값이므로 경고로 올린다 — config가 잘못된 env를
+    기본값으로 되돌릴 때 경고를 남기는 것(_warn_bad_env)과 같은 원칙이다.
+    """
+    if api_auth_enabled():
+        logger.info("API 인증이 켜져 있습니다 (#266 2단계) — /api/ 와 /api/v1/ws 가 키를 요구합니다.")
+        return
+    logger.warning(
+        "FINUS_API_KEY가 비어 있어 API 인증이 꺼져 있습니다 — /api/ 전체와 /api/v1/ws가 "
+        "무인증으로 열립니다(#266 2단계). 남은 보호는 nginx 레이트리밋(비용 상한)과 "
+        "WebSocket Origin 검사뿐입니다."
+    )
+
+
+@app.middleware("http")
+async def require_api_key(request: Request, call_next):
+    """/api/ 아래 모든 HTTP 요청에 정적 키를 요구합니다 (#266 2단계).
+
+    라우트마다 Depends를 다는 대신 미들웨어 한 곳에 둔다. 이 파일은 라우트를 계속
+    늘려 왔고(그중 /api/v1/analyze는 호출 한 번이 LLM 과금이다), 데코레이터를 빠뜨린
+    라우트는 아무 테스트도 빨간불로 만들지 않는다. 인증이 "대부분의 경로에 있는" 상태는
+    없는 것과 크게 다르지 않으므로, 접두사 하나로 판정해 새 라우트가 자동으로 덮이게 한다.
+
+    라우팅보다 먼저 걸리는 것도 의도다. 존재하지 않는 /api/ 경로도 404가 아니라 401이
+    되므로, 키 없는 호출자가 /api/를 두드려 엔드포인트를 찾아낼 수 없다. **다만 이것이
+    "라우트 목록을 알 수 없다"는 뜻은 아니다** — /openapi.json과 /docs는 접두사 밖이라
+    이 검사를 타지 않고, 인증을 켠 상태에서도 전체 스키마를 그대로 내준다(PR #352 리뷰).
+    8080에서는 nginx의 `location /`가 try_files ... =404로 끝내 나가지 않지만, 8000에
+    직접 닿는 호출자에게는 열려 있다.
+
+    그 둘을 함께 닫지 않은 것은 판단이다. docker-compose.yml이 8000 게시를 남기는 이유로
+    "호스트에서 /docs를 열거나"를 명시하고 있어, 인증을 켰다는 이유로 openapi_url을
+    끄면 문서화된 흐름이 부수적으로 사라진다. 게다가 스키마는 이 저장소의 소스 그 자체라
+    비밀이 아니고, 8000은 이미 루프백 전용이다(#246). 즉 여기서 지키는 것은 "무엇이
+    있는지"가 아니라 "무엇을 호출할 수 있는지"다. 이 경계는 test_api_key_auth.py가
+    고정한다 — 나중에 스키마까지 닫기로 하면 그 테스트가 결정을 다시 꺼내 준다.
+
+    /health도 접두사 밖이라 그대로 열려 있다. 이것 역시 의도다 — compose 헬스체크가 curl로
+    부르고(docker-compose.yml), 응답에는 {"status": "alive"} 말고 아무것도 없다(#252
+    리뷰에서 nat_base_url을 뺐다). 키를 요구하면 컨테이너가 스스로를 unhealthy로 만든다.
+
+    WebSocket 핸드셰이크는 여기로 오지 않는다 — scope["type"]이 "websocket"이라
+    BaseHTTPMiddleware가 그대로 통과시킨다. /api/v1/ws는 엔드포인트에서 직접 검사한다.
+    """
+    if (
+        request.url.path.startswith(_GUARDED_PATH_PREFIX)
+        and not is_authorized_api_call(request.headers.get(API_KEY_HEADER))
+    ):
+        # 제시된 키 자체는 로그에 남기지 않는다. 오타 진단에는 도움이 되겠지만, 그
+        # 편의를 위해 비밀값을 로그 파일에 영구히 남기는 거래는 하지 않는다(#257에서
+        # 텔레그램 토큰을 URL 로그에서 걷어낸 것과 같은 판단).
+        logger.warning(
+            "API 키 검증 실패 — 요청을 거부합니다: %s %s", request.method, request.url.path
+        )
+        # 본문은 FastAPI의 {"detail": ...}와 같은 모양으로 낸다. Unity의
+        # ApiClient.ExtractErrorMessage가 그 키를 읽어 배너에 싣고, nginx의 429 본문
+        # (#266 1단계)도 이미 같은 계약을 쓴다.
+        #
+        # WWW-Authenticate는 붙이지 않는다. RFC 9110은 401에 그 헤더를 요구하지만 여기서
+        # 쓰는 것은 HTTP 인증 스킴이 아니라 커스텀 헤더다. 없는 스킴 이름을 지어 challenge를
+        # 붙이면 규격 문구는 만족하면서 브라우저에 인증 대화상자를 띄울 여지를 남긴다.
+        # 403으로 내리는 안도 있으나 "키를 보내면 된다"는 정보를 지운다.
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "API 키가 없거나 올바르지 않습니다."},
+        )
+    return await call_next(request)
 
 
 @app.get("/api/v1/news", response_model=CommonResponse, tags=["Market Data"])
@@ -452,9 +581,13 @@ def is_allowed_ws_origin(origin: str | None) -> bool:
 
     Origin 헤더가 없으면 허용한다. Origin은 브라우저가 붙이는 헤더이고 CSWSH는 브라우저
     공격이다. curl·wscat·헬스체크 같은 비브라우저 클라이언트는 헤더를 보내지 않으므로,
-    없음을 거부로 취급하면 막으려는 위협은 그대로 둔 채 운영 도구만 끊긴다. 그 결과 남는
-    잔여 위험(Origin을 보내지 않는 클라이언트는 여전히 붙는다)은 #266이 추적한다 — API
-    전역에 인증이 없어 이 엔드포인트에만 토큰을 도입하면 일관성이 깨지므로 유보 중이다.
+    없음을 거부로 취급하면 막으려는 위협은 그대로 둔 채 운영 도구만 끊긴다.
+
+    그 결과 남던 잔여 위험(Origin을 보내지 않는 클라이언트는 여전히 붙는다)은 이제 이
+    함수가 아니라 API 키가 닫는다(#266 2단계, is_authorized_api_call). 두 검사는 막는
+    것이 다르므로 둘 다 남는다 — Origin 검사는 키를 모르는 **브라우저**를 막고(키를 URL로
+    넘기는 정상 클라이언트가 있어도 임의 사이트는 그 키를 모른다), 키 검사는 Origin을
+    보내지 않거나 위조하는 **비브라우저**를 막는다. 어느 한쪽만으로는 다른 쪽이 열린다.
     """
     if origin is None:
         return True
@@ -476,6 +609,22 @@ async def websocket_endpoint(websocket: WebSocket):
         # accept() 전에 close()하면 핸드셰이크가 완성되지 않고 HTTP 403으로 끝난다.
         # accept() 후에 끊으면 그사이 브로드캐스트 1건이 나갈 수 있으므로 순서가 중요하다.
         logger.warning("WebSocket 연결 거부 — 허용되지 않은 Origin: %s", origin)
+        await websocket.close(code=1008)
+        return
+    # 정적 키 검사(#266 2단계). HTTP는 미들웨어가 헤더로 받지만, 브라우저 WebSocket
+    # API에는 커스텀 헤더를 붙일 자리가 없어 쿼리 파라미터로 받는다.
+    #
+    # ⚠️ 그래서 이 키는 URL에 실려 나가고, **nginx 액세스 로그에 평문으로 남는다.**
+    # frontend/nginx.conf의 access_log off는 /nginx-health 한 곳뿐이라 /api/는 기본
+    # 로그를 탄다. 기록은 nginx가 backend보다 먼저 하므로, 여기서 무엇을 먼저 거절하든
+    # 로그에 남는 양은 달라지지 않는다 — 순서로 줄일 수 있는 문제가 아니다(PR #352 리뷰).
+    # 로그 쪽 완화는 nginx에서 쿼리스트링을 뺀 log_format을 쓰는 것이고, 별도 이슈다.
+    #
+    # 두 검사의 순서 자체는 판정에 영향이 없다(둘 다 통과해야 연결된다). Origin을 앞에
+    # 두는 것은 #256이 만든 순서를 그대로 두는 것뿐이다.
+    if not is_authorized_api_call(websocket.query_params.get(WS_API_KEY_QUERY_PARAM)):
+        # 위 미들웨어와 같은 이유로 제시된 키는 로그에 싣지 않는다.
+        logger.warning("WebSocket 연결 거부 — API 키가 없거나 일치하지 않습니다.")
         await websocket.close(code=1008)
         return
     await manager.connect(websocket)

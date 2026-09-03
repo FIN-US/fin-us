@@ -694,6 +694,21 @@ def _finus_backend_base_url(config_url: str) -> str:
     return (config_url or os.getenv("FINUS_BACKEND_URL") or "http://127.0.0.1:8000").strip().rstrip("/")
 
 
+def _finus_backend_headers() -> dict[str, str]:
+    """backend 호출에 실을 API 키 헤더 (#266 2단계).
+
+    NAT는 컴포즈 내부에서 backend의 `/api/v1/db/diary`를 부르는 **비브라우저**
+    클라이언트다. backend가 인증을 켠 배포(`FINUS_API_KEY` 설정)에서 이 헤더가 없으면
+    매매일지 저장·조회가 401로 떨어진다.
+
+    키가 없으면 헤더 자체를 붙이지 않는다. 빈 값을 보내면 backend는 그것을 "틀린 키"로
+    보므로, 인증이 꺼진 배포에서까지 깨진다. 헤더 이름은 backend/main.py의
+    API_KEY_HEADER와 같아야 한다 — 어긋나면 인증을 켠 날에야 드러난다.
+    """
+    key = (os.getenv("FINUS_API_KEY") or "").strip()
+    return {"X-API-Key": key} if key else {}
+
+
 # ========== Kis Trading remote MCP ==========
 class FinusReactToolInput(BaseModel):
     """ReAct Action Input — 문자열 JSON·Kis ``params`` 래핑을 허용합니다."""
@@ -1360,7 +1375,11 @@ async def finus_save_diary(config: FinusSaveDiaryConfig, _builder: Builder):
         url = f"{base_url}/api/v1/db/diary"
         try:
             async with httpx.AsyncClient(timeout=config.timeout_sec) as client:
-                resp = await client.post(url, json={"title": title, "content": content})
+                resp = await client.post(
+                    url,
+                    json={"title": title, "content": content},
+                    headers=_finus_backend_headers(),
+                )
                 resp.raise_for_status()
                 body = resp.json()
         except httpx.HTTPStatusError as exc:
@@ -1412,7 +1431,7 @@ async def finus_list_diaries(config: FinusListDiariesConfig, _builder: Builder):
         url = f"{base_url}/api/v1/db/diary"
         try:
             async with httpx.AsyncClient(timeout=config.timeout_sec) as client:
-                resp = await client.get(url)
+                resp = await client.get(url, headers=_finus_backend_headers())
                 resp.raise_for_status()
                 body = resp.json()
         except httpx.HTTPStatusError as exc:

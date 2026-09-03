@@ -310,6 +310,28 @@ def is_placeholder_secret(value: str | None) -> bool:
     return not normalized or normalized.startswith("your_") or normalized.endswith("_here")
 
 
+# API 정적 키(#266 2단계). 값이 있으면 `/api/` 아래 모든 HTTP 요청과 `/api/v1/ws`
+# 핸드셰이크가 이 키를 요구한다(backend/main.py). 방식은 #266의 방향 결정 코멘트를
+# 그대로 따른다 — REST는 헤더, WS는 쿼리 파라미터(브라우저 WS API가 커스텀 헤더를 못
+# 붙인다), 키는 .env로 관리.
+#
+# **기본값이 빈 문자열 = 인증 꺼짐이다.** 이 저장소가 보안 설정에서 보통 고르는
+# fail-closed와 반대 방향이라 이유를 남긴다. 지금 추적 중인 Unity WebGL 번들
+# (frontend/Build)은 키를 실어 보내지 못한다 — ApiClient가 헤더를 붙이지 않고, 붙이게
+# 하려면 WebGL 재빌드와 Build/ 커밋이 따라온다(frontend/README.md). 기본값을 "켜짐"으로
+# 두면 `docker compose up`이 그대로 401 화면이 되고, 되돌리는 스위치가 코드가 아니라
+# .env에만 있어 원인을 찾기 어렵다. 그래서 켜는 것을 운영자의 명시적 행위로 둔다.
+#
+# 꺼져 있다는 사실 자체는 조용하지 않다 — main.py의 lifespan이 기동 로그에 경고를
+# 남긴다. "설정이 조용히 기능 하나를 끄는" 상태를 배격하는 것은 위 _int_env_in_range와
+# 같은 원칙이다.
+#
+# 자리표시자(`your_..._here`)는 미설정으로 본다. 그대로 유효한 키로 인정하면 .env.example에
+# 적힌 값으로 열리는, 켜져 있는데 아무나 아는 키인 상태가 된다 — 안 켜진 것보다 나쁘다.
+_API_KEY_RAW = os.getenv("FINUS_API_KEY", "")
+FINUS_API_KEY = "" if is_placeholder_secret(_API_KEY_RAW) else _API_KEY_RAW.strip()
+
+
 # WebSocket(/api/v1/ws) 핸드셰이크의 Origin 허용목록.
 # 기본값은 docker-compose의 frontend(nginx)가 Unity WebGL 번들을 서빙하는 8080 오리진이다.
 # 원래는 CORS 설정을 겸했지만, #245로 nginx가 /api를 backend로 프록시하고 #246·#262로

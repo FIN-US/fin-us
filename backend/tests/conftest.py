@@ -70,3 +70,20 @@ def _clear_master_code_cache():
     yield
     stock_code._master_codes_cache = None
     stock_code._master_codes_cache_path = None
+
+
+@pytest.fixture(autouse=True)
+def _api_key_auth_off_by_default(monkeypatch):
+    """API 인증(#266 2단계)을 끈 상태를 테스트의 기본값으로 고정한다.
+
+    backend/config.py는 레포 루트의 실제 `.env`를 load_dotenv로 읽는다. 그래서 개발자가
+    자기 `.env`에 FINUS_API_KEY를 채워 두면 config.FINUS_API_KEY가 그 값이 되고,
+    `/api/`를 부르는 기존 테스트(test_market_data_routes 등)가 **그 머신에서만** 401로
+    떨어진다. 테스트 결과가 작업 트리 밖의 파일에 좌우되는 상태를 만들지 않는다.
+
+    인증 자체를 보는 테스트(test_api_key_auth.py)는 같은 이름을 다시 monkeypatch해서
+    켠다 — 나중에 적용한 patch가 이기고, 되돌리기는 LIFO라 여기 값도 함께 복원된다.
+    """
+    import backend.main as main
+
+    monkeypatch.setattr(main, "FINUS_API_KEY", "")

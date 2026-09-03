@@ -804,9 +804,10 @@ async def _monitor_market_task(
                 # 브로드캐스트하지 않는다. 동기화가 수행된 경우 updated_at을 매번 갱신하는
                 # 특성상 내용이 직전과 동일해도 신호가 나간다 — 즉 정상 주기마다 1건이다.
                 # payload에는 보유 종목 개수만 싣고 종목명·수량 등 실제 보유 내역은 담지
-                # 않는다. WebSocket에는 인증이 없어(#266) 계좌 보유 현황이 인증 없는
-                # 채널로 유출될 수 있으므로, 신호만 보내고 클라이언트가
-                # /api/v1/db/portfolio를 재조회하도록 한다.
+                # 않는다. WebSocket 인증은 FINUS_API_KEY를 설정한 배포에서만 걸리고
+                # (#266 2단계), 미설정이 기본이라 이 채널은 여전히 무인증으로 열려 있을
+                # 수 있다. 신호만 보내고 클라이언트가 /api/v1/db/portfolio를 재조회하게
+                # 두면 채널이 열려 있어도 계좌 보유 현황이 그 채널로 나가지 않는다.
                 if sync_result is not None:
                     try:
                         await manager.broadcast({
@@ -1076,15 +1077,16 @@ async def _monitor_signal(
         # 싣지 않는다 — PORTFOLIO_UPDATE(#229)와 같은 패턴이고, 클라이언트는 이 신호를
         # 받으면 /api/v1/db/reports를 재조회한다.
         #
-        # #266: WebSocket에는 인증이 없다. Origin 허용목록 검사(main.py
-        # is_allowed_ws_origin)로 브라우저발 Cross-Site WebSocket Hijacking은 막지만,
-        # Origin 헤더를 보내지 않는 비브라우저 클라이언트는 여전히 붙을 수 있다. 분석
-        # 전문을 싣지 않으면 채널이 뚫려도 유출될 내용 자체가 없다.
+        # #266: 이 채널이 인증을 받는지는 배포 설정에 달렸다. Origin 허용목록 검사
+        # (main.py is_allowed_ws_origin)가 브라우저발 Cross-Site WebSocket Hijacking을
+        # 막고, 비브라우저 클라이언트는 FINUS_API_KEY를 설정한 배포에서만 막힌다
+        # (#266 2단계). 그 키는 미설정이 기본이므로 여기서는 무인증을 전제로 둔다 —
+        # 분석 전문을 싣지 않으면 채널이 뚫려도 유출될 내용 자체가 없다.
         #
         # stock·source는 남긴다. 어떤 종목의 리포트를 다시 읽어야 하는지 알려 주는 값이고,
         # 이걸 빼면 클라이언트가 매 신호마다 전체 리포트를 훑어야 한다. 재조회 대상인
-        # /api/v1/db/reports 자체가 같은 내용을 인증 없이 내주므로, 종목명만 남기는 것이
-        # 새로 여는 경로도 아니다.
+        # /api/v1/db/reports는 같은 인증 설정을 그대로 받으므로(키가 없으면 둘 다 열려
+        # 있고, 키가 있으면 둘 다 닫힌다), 종목명만 남기는 것이 새로 여는 경로가 아니다.
         await manager.broadcast({
             "type": "AGENT_ANALYSIS",
             "stock": stock,

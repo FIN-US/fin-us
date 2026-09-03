@@ -385,7 +385,7 @@ class TestRestoreForInternal:
             async def __aexit__(self, exc_type, exc, tb):
                 return False
 
-            async def post(self, url, json):
+            async def post(self, url, json, headers=None):
                 captured["json"] = json
                 return FakeResponse()
 
@@ -440,7 +440,7 @@ class TestRestoreForInternal:
             async def __aexit__(self, exc_type, exc, tb):
                 return False
 
-            async def post(self, url, json):
+            async def post(self, url, json, headers=None):
                 return FakeResponse()
 
         monkeypatch.setattr(finus_api.httpx, "AsyncClient", FakeClient)
@@ -486,7 +486,7 @@ class TestRestoreForInternal:
             async def __aexit__(self, exc_type, exc, tb):
                 return False
 
-            async def post(self, url, json):
+            async def post(self, url, json, headers=None):
                 return FakeResponse()
 
         monkeypatch.setattr(finus_api.httpx, "AsyncClient", FakeClient)
