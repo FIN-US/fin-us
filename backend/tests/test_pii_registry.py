@@ -21,6 +21,8 @@ scope로 다시 마스킹돼 똑같이 거부됐다.
 """
 
 import asyncio
+import contextlib
+import logging
 import re
 
 import httpx
@@ -125,6 +127,45 @@ class TestRegistryLifetime:
         with active_mapping(mapping):
             assert not _REGISTRY
             assert restore_live_placeholders(masked) == (masked, [])
+
+    def test_the_leak_warning_does_not_repeat_per_request(self, caplog, monkeypatch):
+        """임계를 넘긴 부하 구간에서 요청마다 경고를 남기지 않는다 (PR #361 리뷰).
+
+        매 진입에서 크기만 보고 경고하면, 임계를 넘긴 동안 요청당 한 줄씩 쌓여 정작
+        누수 신호가 자기 로그에 묻힌다. 등록소가 다시 빌 때까지 한 줄이어야 한다.
+        """
+        monkeypatch.setattr(pii_registry, "_LEAK_WARN_SIZE", 2)
+        monkeypatch.setattr(pii_registry, "_leak_warned", False)
+        mappings = [mask_pii(f"{n}00만원 벌었어")[1] for n in range(1, 5)]
+
+        with caplog.at_level(logging.WARNING, logger=pii_registry.__name__):
+            with contextlib.ExitStack() as stack:
+                for mapping in mappings:
+                    stack.enter_context(active_mapping(mapping))
+
+        # 임계(2)를 넘긴 진입이 세 번인데 경고는 한 줄이다.
+        assert len(caplog.records) == 1
+
+    def test_the_leak_warning_rearms_after_the_registry_drains(self, caplog, monkeypatch):
+        """걸쇠는 등록소가 완전히 빌 때 풀린다 — 다음 과부하 구간은 다시 알린다.
+
+        영구히 한 번만 남기면 프로세스가 오래 살수록 두 번째 누수는 조용해진다.
+        억제는 "한 차례의 구간에 한 줄"이지 "프로세스에 한 줄"이 아니다.
+        """
+        monkeypatch.setattr(pii_registry, "_LEAK_WARN_SIZE", 2)
+        monkeypatch.setattr(pii_registry, "_leak_warned", False)
+
+        def _one_burst():
+            with active_mapping(mask_pii("300만원")[1]):
+                with active_mapping(mask_pii("잔고 12,345,000원")[1]):
+                    pass
+
+        with caplog.at_level(logging.WARNING, logger=pii_registry.__name__):
+            _one_burst()
+            assert not _REGISTRY  # 구간 사이에 등록소가 비어 걸쇠가 풀린다
+            _one_burst()
+
+        assert len(caplog.records) == 2
 
 
 class TestUnrestorable:

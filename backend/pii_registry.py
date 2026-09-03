@@ -32,11 +32,18 @@
 
 ## 동시 호출이 서로의 매핑을 덮지 않는 이유
 
-`mask_pii` 호출마다 scope를 CSPRNG로 새로 뽑는다(`pii_mask._Counter`). 따라서 동시에
-도는 `llm_chat` 둘은 서로 다른 키에 등록되고, 한쪽의 `<AMOUNT_aaa111_1>`은 다른 쪽
-매핑을 조회할 수 없다. 종전에 매핑을 모듈 전역 dict 하나로 두지 않은 이유가 그대로
-지켜진다 — 전역인 것은 **scope별 칸막이가 있는 등록소**이고, 매핑 자체는 여전히
-호출마다 별개다. (회귀: `test_pii_registry.py::TestConcurrentRequests`)
+`mask_pii` 호출마다 scope를 CSPRNG로 새로 뽑는다(`pii_mask._Counter`). **scope가
+충돌하지 않는 한** 동시에 도는 `llm_chat` 둘은 서로 다른 키에 등록되고, 한쪽의
+`<AMOUNT_aaa111_1>`은 다른 쪽 매핑을 조회할 수 없다. 종전에 매핑을 모듈 전역 dict
+하나로 두지 않은 이유가 그대로 지켜진다 — 전역인 것은 **scope별 칸막이가 있는
+등록소**이고, 매핑 자체는 여전히 호출마다 별개다.
+(회귀: `test_pii_registry.py::TestConcurrentRequests`)
+
+충돌하면(24비트, 16^6 ≈ 1,678만 가지) 나중 등록이 앞선 것을 덮고 먼저 끝나는 쪽의
+`finally`가 그 키를 지운다. **그때 나오는 것은 틀린 값이 아니라 저장 거부다** — 조회는
+scope와 자리표시자 전체 문자열을 함께 맞춰야 성공하므로(`restore_live_placeholders`),
+남의 매핑을 맞히면 번호가 없어 `unrestorable`로 떨어지고 호출자가 422로 거부한다.
+즉 충돌의 결과는 이 모듈이 이미 감수한 실패 모드와 같은 것이고, 조용한 오답이 아니다.
 
 ## 수명 — 요청 범위, 그 이상은 아니다
 
@@ -59,6 +66,13 @@
 - **되돌리기는 살아 있는 scope에만 걸린다.** 이전 턴 자리표시자(NAT SQLite 히스토리에서
   올라온 것)나 LLM이 지어낸 번호는 등록소에 없다. 그 값은 이 프로세스 어디에도 없으므로
   #339의 판정이 그대로 유지된다 — 호출자가 저장을 거부한다.
+- **되돌리기는 인증을 켠 배포를 전제로 한다.** `create_db_diary`는 호출자를 구분하지 않고
+  본문의 자리표시자만 보고 되돌린 뒤 그 평문을 응답 `data`에 실어 돌려준다. 즉 살아 있는
+  scope를 맞히는 요청은 **다른 사용자 발화의 평문을 읽는 오라클**이 된다. 유일한 보호는
+  `main.py`의 `require_api_key`인데, `FINUS_API_KEY`가 비면 통과가 기본값이다
+  (`_log_api_auth_state`가 그 상태를 경고로 올린다). 실전 공격은 아니다 — scope는 24비트고
+  수명이 왕복 한 번뿐이라 창이 극히 좁다 — 지만, 이 모듈 이전에는 **없던 정보 흐름**이므로
+  무인증 배포에서 새로 생기는 노출로 적어 둔다.
 """
 from __future__ import annotations
 
@@ -96,6 +110,13 @@ _LOCK = threading.Lock()
 # finally가 항상 지우므로 정상 동작에서는 "지금 LLM 응답을 기다리는 요청 수"를 넘지
 # 않는다 — 그 수가 64를 넘는 부하라면 등록소 누수든 아니든 알아야 하는 상태다.
 _LEAK_WARN_SIZE = 64
+
+# 위 경고를 **한 번 넘을 때 한 줄만** 남기기 위한 걸쇠. 매 진입마다 크기를 재서 그대로
+# 경고하면, 임계를 넘긴 부하 구간에서 요청당 한 줄씩 쌓여 정작 누수 신호가 자기 로그에
+# 묻힌다. 경계에서 63↔64를 오가는 것만으로도 같은 일이 벌어지므로 "넘는 순간"을 재는
+# 것으로는 부족하고, 등록소가 **완전히 빌 때** 걸쇠를 푼다 — 한 차례의 과부하 구간에
+# 정확히 한 줄이 남고, 상황이 해소된 뒤 다시 나면 그때 다시 한 줄이 남는다.
+_leak_warned = False
 
 
 def _scope_of(placeholder: str) -> str | None:
@@ -136,14 +157,22 @@ def active_mapping(mapping: dict[str, str]) -> Iterator[None]:
         yield
         return
 
+    global _leak_warned
+
     with _LOCK:
         for scope, entries in grouped.items():
             _REGISTRY[scope] = entries
         size = len(_REGISTRY)
-    if size >= _LEAK_WARN_SIZE:
+        # 걸쇠 판정은 락 안에서 한다. 밖으로 빼면 임계를 함께 넘은 요청 여럿이 모두
+        # "아직 안 남겼다"를 읽고 같은 줄을 중복해서 남긴다 — 억제하려던 것이 그대로다.
+        should_warn = size >= _LEAK_WARN_SIZE and not _leak_warned
+        if should_warn:
+            _leak_warned = True
+    if should_warn:
         logger.warning(
             "요청 범위 마스킹 등록소에 매핑 %d개가 동시에 살아 있습니다 — "
-            "active_mapping을 벗어나지 못한 요청이 쌓이고 있는지 확인하세요.",
+            "active_mapping을 벗어나지 못한 요청이 쌓이고 있는지 확인하세요. "
+            "이 경고는 등록소가 다시 빌 때까지 한 번만 남습니다.",
             size,
         )
     try:
@@ -152,6 +181,8 @@ def active_mapping(mapping: dict[str, str]) -> Iterator[None]:
         with _LOCK:
             for scope in grouped:
                 _REGISTRY.pop(scope, None)
+            if not _REGISTRY:
+                _leak_warned = False
 
 
 def restore_live_placeholders(text: str) -> tuple[str, list[str]]:
