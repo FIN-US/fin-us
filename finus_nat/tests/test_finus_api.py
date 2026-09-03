@@ -100,6 +100,9 @@ def test_save_trading_diary_posts_to_backend(monkeypatch, mock_backend):
     # 키가 없는 배포에서는 헤더 자체를 붙이지 않는다. 빈 값을 보내면 backend가 그것을
     # "틀린 키"로 보므로(main.matches_api_key), 인증이 꺼진 배포에서까지 401이 된다.
     assert backend.header("X-API-Key") is None
+    # 타임아웃은 요청 객체에 남지 않지만 계약이다. 빠지면 httpx 기본값 5초가 적용돼
+    # 느린 backend에서 저장이 조용히 실패한다 (PR #359 리뷰).
+    assert backend.client_kwargs.get("timeout") == config.timeout_sec
     assert '"id": 1' in result
 
 
@@ -145,6 +148,9 @@ def test_list_trading_diaries_sends_the_api_key_header(monkeypatch, mock_backend
 
     assert backend.method == "GET"
     assert backend.header("X-API-Key") == "s3cr3t-key"
+    # 저장 쪽과 마찬가지로 조회 쪽 타임아웃도 여기서 고정한다 — 프로덕션은 두 곳에서
+    # 따로 넘기므로 한쪽만 잃는 회귀가 가능하다.
+    assert backend.client_kwargs.get("timeout") == config.timeout_sec
 
 
 def test_mcp_call_tool_passes_environment_to_child_process(monkeypatch, tmp_path):

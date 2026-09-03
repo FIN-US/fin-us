@@ -10,6 +10,11 @@
 ``httpx.MockTransport``는 조립이 끝난 ``httpx.Request``를 받으므로 호출 시그니처와
 무관하다 — 클라이언트 생성 인자든 ``post``/``get`` 인자든 프로덕션이 바꿔도 대역은
 그대로다. 단언도 시그니처가 아니라 요청 객체(URL·메서드·본문·헤더)에서 읽는다.
+
+**시그니처가 아니라 계약으로 지켜야 하는 것**: 구 대역의 ``def __init__(self, timeout)``은
+필수 위치 인자라서 프로덕션이 ``timeout=``을 잃으면 우연히 빨개졌다. 인자를 그대로
+흘리는 이 대역에는 그 우연이 없으므로, 클라이언트 생성 인자를 :attr:`client_kwargs`로
+관측해 테스트가 명시적으로 단언한다 (PR #359 리뷰).
 """
 
 import json
@@ -25,6 +30,9 @@ class RecordedBackend:
 
     def __init__(self) -> None:
         self.requests: list[httpx.Request] = []
+        # 마지막으로 만들어진 클라이언트의 생성 인자. timeout처럼 요청 객체에는 남지
+        # 않지만 계약인 값을 여기서 본다.
+        self.client_kwargs: dict = {}
 
     @property
     def called(self) -> bool:
@@ -59,34 +67,39 @@ class RecordedBackend:
 
 @pytest.fixture
 def mock_backend(monkeypatch):
-    """프로덕션의 ``httpx.AsyncClient``가 ``MockTransport``를 타게 만든다.
+    """``httpx.AsyncClient``가 ``MockTransport``를 타게 만든다.
 
-    ``payload``(JSON 본문)나 ``status_code``·``text``로 응답을 정하고, 요청마다 다른
-    응답이 필요하면 ``handler``(``httpx.Request`` -> ``httpx.Response``)를 준다.
-    반환값은 :class:`RecordedBackend`.
+    ``payload``(JSON 본문)나 ``status_code``·``text``로 응답을 정한다. 반환값은
+    :class:`RecordedBackend`.
+
+    패치 대상은 ``finus_api.httpx``, 즉 **전역 httpx 모듈**이다. 그래서 이 테스트가
+    도는 동안 만들어지는 다른 클라이언트(예: ``finus_api``의 remote-MCP용
+    ``httpx.AsyncClient()``)도 같은 transport를 타고 ``requests``에 섞인다. 지금
+    호출자는 전부 backend 왕복 하나만 태우므로 URL로 걸러내지 않는다 — 한 테스트가 두
+    종류의 호출을 태우게 되면 그때 필터를 넣어야 한다.
     """
+    # 진짜 클라이언트는 패치 **전에** 한 번만 잡는다. _install 안에서 읽으면 두 번째
+    # 호출의 "진짜"가 첫 번째 래퍼가 되어, 안쪽이 첫 transport로 덮어쓴다 — 두 번째
+    # RecordedBackend는 요청을 하나도 못 받은 채 `not backend.called`가 공허하게
+    # 통과한다 (PR #359 리뷰).
+    real_client = finus_api.httpx.AsyncClient
 
-    def _install(payload=None, *, status_code: int = 200, text: str | None = None, handler=None):
+    def _install(payload=None, *, status_code: int = 200, text: str | None = None):
         recorded = RecordedBackend()
-
-        def _respond(request: httpx.Request) -> httpx.Response:
-            if handler is not None:
-                return handler(request)
-            if text is not None:
-                return httpx.Response(status_code, text=text)
-            return httpx.Response(status_code, json=payload if payload is not None else {})
 
         def _dispatch(request: httpx.Request) -> httpx.Response:
             recorded.requests.append(request)
             # 응답은 요청마다 새로 만든다 — httpx.Response는 한 번 읽으면 스트림이 닫힌다.
-            return _respond(request)
+            if text is not None:
+                return httpx.Response(status_code, text=text)
+            return httpx.Response(status_code, json=payload if payload is not None else {})
 
         transport = httpx.MockTransport(_dispatch)
-        real_client = finus_api.httpx.AsyncClient
 
         def _client(*args, **kwargs):
             # 프로덕션이 넘기는 인자는 그대로 진짜 AsyncClient에 흘린다 — 그래서 인자가
             # 하나 더 붙어도 이 대역은 손댈 필요가 없다. transport만 우리 것으로 바꾼다.
+            recorded.client_kwargs = dict(kwargs)
             kwargs["transport"] = transport
             return real_client(*args, **kwargs)
 
