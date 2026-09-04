@@ -357,7 +357,7 @@ def _restore_one_param(
 
 
 def restore_params_for_kis(
-    params: Mapping[str, Any],
+    params: Mapping[str, Any], *, tool_name: str, api_type: str,
 ) -> tuple[dict[str, Any], list[ParamRejection]]:
     """KIS ``params``의 자리표시자를 숫자 원값으로 되돌린다 (#338, 후보 1).
 
@@ -368,7 +368,7 @@ def restore_params_for_kis(
     다만 **역치환만** 붙이면 이 이슈가 우려한 맞바꿈이 생긴다: 지금은 자리표시자가
     실리면 MCP가 거부해 주문이 안 나가는데(시끄러운 실패), 무조건 되돌리면 종류가
     어긋난 값도 숫자가 되어 **조용한 오주문**이 가능해진다. 그래서 되돌리기 전에
-    종류 검사를 건다 — 넷 다 fail-closed다:
+    검사를 건다 — 넷 다 fail-closed다:
 
     - 값 전체가 자리표시자 하나여야 한다.
     - 필드의 접미 마디가 요구하는 종류와 자리표시자의 종류가 같아야 한다.
@@ -379,8 +379,19 @@ def restore_params_for_kis(
     호출자는 사유가 하나라도 있으면 호출 자체를 중단해야 한다 — 일부만 복원해
     보내면 반쯤 맞는 주문이 나간다.
 
+    **막는 것은 종류 *간* 맞바꿈뿐이다.** 같은 종류 안에서 값이 뒤바뀌는 것
+    (평가금액 자리표시자를 ``ORD_UNPR``에 싣는 등)은 둘 다 ``AMOUNT``라 그대로
+    복원돼 나간다. 자리표시자는 숫자의 타당성 신호를 지우므로 — 평문이었다면
+    "주가가 1,234만원"에서 LLM이 느꼈을 이상함이 사라진다 — 이 계층이 만든 위험이
+    맞지만, 값이 의미상 맞는지는 종류가 아니라 종목·문맥을 봐야 하는 별도 판정이다
+    (#365). 이 함수의 계약은 거기까지가 아니다.
+
     자리표시자가 없는 값은 손대지 않는다. 정상 경로(에이전트가 종목코드·구분값을
     직접 적는 경우)는 이 함수를 그대로 통과한다.
+
+    *tool_name*·*api_type*은 거부 로그에만 쓴다. 한 요청에서 KIS 호출이 여러 번 나가면
+    필드 이름과 사유만으로는 어느 호출이 막혔는지 짚을 수 없다 — 호출자가 이미 아는
+    값이므로 받아서 함께 남긴다 (PR #364 리뷰).
     """
     restored: dict[str, Any] = {}
     rejections: list[ParamRejection] = []
@@ -408,7 +419,9 @@ def restore_params_for_kis(
 
     if rejections:
         logger.warning(
-            "KIS params 자리표시자 복원을 거부했습니다 — %s",
+            "KIS params 자리표시자 복원을 거부했습니다 — tool=%s api_type=%s %s",
+            tool_name,
+            api_type,
             [(r.field, r.reason, r.placeholder) for r in rejections],
         )
     return restored, rejections

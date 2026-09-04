@@ -428,6 +428,31 @@ _TOOL_INTERNAL_ERROR_HINT = (
 )
 
 
+def _group_leaf_for_classification(exc: BaseExceptionGroup) -> BaseException:
+    """그룹에서 분류에 쓸 **잎** 예외를 꺼낸다 (#358, PR #364 리뷰).
+
+    ``exceptions[0]`` 한 겹만 푸는 것으로는 부족하다. 실 운영의 MCP 호출은 task group이
+    **두 겹**이다 — ``sse_client``/``stdio_client``가 하나를 열고
+    (``mcp/client/sse.py``·``mcp/client/stdio/__init__.py``), 그 안에서
+    ``ClientSession.__aenter__``가 하나 더 연다(``mcp/shared/session.py``). 그래서 도구
+    함수 안의 ``TypeError``는 ``ExceptionGroup(ExceptionGroup(TypeError))``로 도착하고,
+    한 겹만 풀면 손에 남는 것이 여전히 그룹이라 아래 분류가 **실 경로 전부에서**
+    발화하지 않는다. 실측: 1겹이면 ``tool_internal_error``, 2겹이면 ``mcp_call_failed``.
+
+    코딩 실수가 **어느 깊이에** 있든 찾아내야 하므로 ``subgroup``으로 먼저 걸러낸다 —
+    첫 원소만 보면 형제 중 두 번째에 있는 ``TypeError``를 놓친다.
+
+    코딩 실수가 없으면 그냥 첫 잎으로 내려간다. 종전 ``exceptions[0]``은 중첩일 때
+    그룹 자신을 돌려주어 ``detail``이 "unhandled errors in a TaskGroup (1 sub-exception)"이
+    됐다 — 진짜 외부 실패에서도 원인이 안 보이는 자리라 같은 하강을 적용한다.
+    """
+    bug = exc.subgroup(_TOOL_BUG_EXCEPTIONS)
+    node: BaseException = bug if bug is not None else exc
+    while isinstance(node, BaseExceptionGroup) and node.exceptions:
+        node = node.exceptions[0]
+    return node
+
+
 def _tool_boundary_error(
     exc: BaseException, *, api_error: str, where: str, **extra: Any
 ) -> str:
@@ -519,8 +544,9 @@ async def _run_mcp_timed(inner, *, tool_name: str, timeout_sec: float) -> str:
         raise
     except BaseExceptionGroup as exc:
         # anyio task group을 쓰는 MCP 클라이언트에서는 코딩 실수도 그룹에 싸여 올라온다.
-        # 그룹을 풀지 않으면 아래 분류가 그 경로에서만 통하지 않는다 (#358).
-        sub = exc.exceptions[0] if exc.exceptions else exc
+        # 그룹을 풀지 않으면 아래 분류가 그 경로에서만 통하지 않는다 (#358). 실 운영은
+        # 그룹이 두 겹이라 한 겹만 푸는 것으로는 모자란다 — 위 헬퍼 참고.
+        sub = _group_leaf_for_classification(exc)
         return _tool_boundary_error(
             sub, api_error="mcp_call_failed", where=f"MCP 도구 {tool_name} 호출", tool=tool_name
         )
@@ -1032,7 +1058,9 @@ def _prepare_kis_trading_mcp_call(
     # 하나라도 거부되면 **호출 자체를 중단한다.** 통과한 것만 복원해 보내면 수량은 맞고
     # 단가는 자리표시자인 반쯤 맞는 주문이 KIS까지 간다 — 거기서 거부되더라도, 거부되지
     # 않는 조합이 하나라도 있으면 그때는 조용한 오주문이 된다.
-    params, rejections = restore_params_for_kis(params)
+    params, rejections = restore_params_for_kis(
+        params, tool_name=tool_name, api_type=str(api_type).strip()
+    )
     if rejections:
         # 자리표시자 원문은 restore_params_for_kis가 로그에만 남겼다. 오류 JSON은
         # Observation으로 LLM 컨텍스트에 재유입되므로 필드 이름과 사유 코드만 싣는다 —

@@ -1,9 +1,11 @@
 import asyncio
 import json
 import logging
+import traceback
 from pathlib import Path
 from types import SimpleNamespace
 
+import anyio
 import httpx
 
 from nat_finus_nat import finus_api
@@ -343,7 +345,12 @@ def _assert_disguise_is_gone(observation: str, caplog, *, api_error: str) -> dic
     # 방침 B의 본체 — 로그에 스택이 남는다. 스택이 없으면 운영에서 원인 추적이 막힌다.
     with_stack = [r for r in caplog.records if r.exc_info is not None]
     assert with_stack, "logger.exception이 호출되지 않아 스택이 남지 않았다"
-    assert any(r.exc_info[0] is TypeError for r in with_stack)
+    # 그룹으로 도착한 경우 ``exc_info[0]``은 ``ExceptionGroup``이고 ``TypeError``는 그
+    # 잎에 있다. 어느 모양이든 **원인이 스택에 드러나는 것**이 #358의 검증 기준이므로,
+    # 최상위 타입이 아니라 렌더링된 스택을 본다.
+    assert any(
+        "TypeError" in "".join(traceback.format_exception(*r.exc_info)) for r in with_stack
+    )
     return payload
 
 
@@ -362,15 +369,52 @@ def test_mcp_call_type_error_is_not_disguised_as_api_failure(caplog):
     assert payload["tool"] == "domestic_stock"
 
 
-def test_mcp_call_type_error_inside_an_exception_group_is_not_disguised(caplog):
-    """anyio task group을 쓰는 MCP 클라이언트는 코딩 실수도 그룹에 싸서 올린다.
+def _raise_inside_nested_task_groups(exc: BaseException):
+    """실 운영의 **두 겹** task group 구조를 그대로 만든다 (PR #364 리뷰).
 
-    그룹을 풀지 않으면 위 분류가 **이 경로에서만** 통하지 않는다 — 실 운영의 MCP
-    호출은 대부분 이쪽으로 온다.
+    ``sse_client``/``stdio_client``가 task group을 하나 열고
+    (``mcp/client/sse.py``·``mcp/client/stdio/__init__.py``), 그 안에서
+    ``ClientSession.__aenter__``가 하나 더 연다(``mcp/shared/session.py``). 손으로 만든
+    한 겹짜리 ``BaseExceptionGroup``으로 테스트하면 **이 겹수에서만** 통하지 않는
+    회귀를 통째로 놓친다 — 실제로 놓쳤다.
     """
 
     async def inner():
-        raise BaseExceptionGroup("mcp", [TypeError(_BUG_MESSAGE)])
+        async with anyio.create_task_group():
+            async with anyio.create_task_group():
+                raise exc
+
+    return inner
+
+
+def test_mcp_call_type_error_inside_nested_task_groups_is_not_disguised(caplog):
+    """실 경로의 겹수(2겹)에서 코딩 실수가 분류된다 — 한 겹만 풀면 여기서 되돌아간다."""
+    with caplog.at_level(logging.ERROR, logger=finus_api.logger.name):
+        observation = asyncio.run(
+            finus_api._run_mcp_timed(
+                _raise_inside_nested_task_groups(TypeError(_BUG_MESSAGE)),
+                tool_name="domestic_stock",
+                timeout_sec=5,
+            )
+        )
+
+    payload = _assert_disguise_is_gone(observation, caplog, api_error="mcp_call_failed")
+    # 잎까지 내려가지 않으면 detail이 "unhandled errors in a TaskGroup (1 sub-exception)"이 된다.
+    assert payload["detail"] == _BUG_MESSAGE
+
+
+def test_mcp_call_type_error_is_found_even_when_it_is_not_the_first_sibling(caplog):
+    """형제 중 첫 번째가 아니어도 찾는다 — ``exceptions[0]``만 보면 놓치는 자리다.
+
+    겹수가 아니라 **형제 순서**를 고정하는 테스트라 그룹을 손으로 조립한다. task group
+    으로는 자식 예외의 수집 순서를 결정적으로 만들 수 없다.
+    """
+
+    async def inner():
+        raise BaseExceptionGroup(
+            "mcp",
+            [BaseExceptionGroup("session", [ConnectionError("refused"), TypeError(_BUG_MESSAGE)])],
+        )
 
     with caplog.at_level(logging.ERROR, logger=finus_api.logger.name):
         observation = asyncio.run(
@@ -380,18 +424,24 @@ def test_mcp_call_type_error_inside_an_exception_group_is_not_disguised(caplog):
     assert json.loads(observation)["error"] == finus_api._TOOL_INTERNAL_ERROR
 
 
-def test_mcp_call_real_api_failure_keeps_its_error_code(caplog):
-    """반대 방향 — 진짜 외부 실패가 내부 오류로 위장되면 그것도 같은 종류의 결함이다."""
+def test_mcp_call_real_api_failure_keeps_its_error_code_and_a_useful_detail(caplog):
+    """반대 방향 — 진짜 외부 실패가 내부 오류로 위장되면 그것도 같은 종류의 결함이다.
 
-    async def inner():
-        raise httpx.ConnectError("connection refused")
-
+    같은 두 겹 구조로 낸다. 종전에는 그룹을 한 겹만 풀어 ``detail``이 "unhandled errors
+    in a TaskGroup (1 sub-exception)"이었다 — 진짜 실패에서도 원인이 안 보이는 자리다.
+    """
     with caplog.at_level(logging.ERROR, logger=finus_api.logger.name):
         observation = asyncio.run(
-            finus_api._run_mcp_timed(inner, tool_name="domestic_stock", timeout_sec=5)
+            finus_api._run_mcp_timed(
+                _raise_inside_nested_task_groups(httpx.ConnectError("connection refused")),
+                tool_name="domestic_stock",
+                timeout_sec=5,
+            )
         )
 
-    assert json.loads(observation)["error"] == "mcp_call_failed"
+    payload = json.loads(observation)
+    assert payload["error"] == "mcp_call_failed"
+    assert payload["detail"] == "connection refused"
     # 진짜 실패에도 스택은 남긴다 — 방침 B는 "잡되 조용히 삼키지 않는다"이다.
     assert any(r.exc_info is not None for r in caplog.records)
 
