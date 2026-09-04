@@ -205,11 +205,20 @@ def active_mapping(mapping: dict[str, str]) -> Iterator[None]:
                 # 멀쩡한 요청 하나를 함께 죽이는 대신 남의 금액이 조용히 저장되는 것을
                 # 막는 거래이고, #339가 한 것과 같은 선택이다.
                 _REGISTRY[scope] = _POISONED
+                # scope 값을 싣는다. 이것 없이는 아래 안내를 따라갈 수 없다 — **같은
+                # scope가 반복되는 것**(생성기 고장)과 **매번 다른 scope가 겹치는 것**
+                # (정상 birthday)은 로그만 보고 구분해야 하는데, 값이 없으면 두 경우가
+                # 같은 줄로 보인다. scope는 자리표시자가 가리키는 원값이 아니라 난수
+                # nonce이므로 이 모듈이 로그에서 가리는 대상이 아니다 — 가리는 것은
+                # 사용자 발화의 평문 쪽이다(`create_db_diary`의 422 detail 참고).
                 logger.error(
-                    "요청 범위 마스킹 등록소에서 scope 충돌을 발견했습니다 — 겹친 두 "
-                    "요청 모두 자리표시자를 되돌리지 못하고 저장이 거부됩니다. CSPRNG "
-                    "6자리 hex가 겹칠 확률을 생각하면 정상 동작에서는 나오지 않는 "
-                    "로그이므로, 반복된다면 scope 생성(pii_mask._Counter)을 의심하세요."
+                    "요청 범위 마스킹 등록소에서 scope 충돌을 발견했습니다 (scope=%s) — "
+                    "겹친 두 요청 모두 자리표시자를 되돌리지 못하고 저장이 거부됩니다. "
+                    "CSPRNG 6자리 hex가 겹칠 확률을 생각하면 정상 동작에서는 나오지 않는 "
+                    "로그입니다. **같은 scope로 반복되면** scope 생성"
+                    "(pii_mask._Counter)이 고장 난 것이고, **매번 다른 scope라면** "
+                    "동시 등록 수가 예상보다 크다는 뜻입니다.",
+                    scope,
                 )
                 continue
             _REGISTRY[scope] = entries

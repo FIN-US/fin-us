@@ -259,6 +259,10 @@ class TestScopeCollision:
         assert "500만원" not in a_restored
         assert "300만원" not in b_restored
         assert len(caplog.records) == 1, "충돌은 조용히 지나가면 안 된다"
+        # 로그가 scope를 실어야 안내를 따라갈 수 있다 (PR #361 3차 리뷰). 값이 없으면
+        # "같은 scope 반복"(생성기 고장)과 "매번 다른 scope"(정상 birthday)가 같은 줄로
+        # 보인다. scope는 원값이 아니라 난수 nonce라 가릴 대상이 아니다.
+        assert colliding_scope in caplog.records[0].getMessage()
 
     def test_the_poisoned_entry_is_cleaned_up(self, colliding_scope):
         """오염된 자리도 왕복이 끝나면 사라진다 — 다음 요청까지 물들이지 않는다.
