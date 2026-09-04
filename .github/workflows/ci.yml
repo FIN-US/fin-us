@@ -279,17 +279,36 @@ jobs:
           # Dockerfile 부채(#52)가 정리됐으므로 warning까지 차단해 신규 부채 유입을 막는다.
           failure-threshold: warning
 
-  # frontend/nginx.conf는 컨테이너가 뜰 때만 파싱되므로, 문법이 깨져도 PR 단계에서는
-  # 아무 잡도 실패하지 않고 docker compose up에서야 드러난다. compose가 마운트하는
-  # 것과 같은 경로에 걸어 nginx -t로 검증한다.
+  # frontend/nginx.conf.template은 컨테이너가 뜰 때만 파싱되므로, 문법이 깨져도 PR
+  # 단계에서는 아무 잡도 실패하지 않고 docker compose up에서야 드러난다. compose가
+  # 마운트하는 것과 같은 경로에 걸어 nginx -t로 검증한다.
+  #
+  # conf.d가 아니라 templates에 거는 것이 핵심이다(#266 3단계). 기동 스크립트가 envsubst로
+  # `${FINUS_API_KEY}`를 치환한 뒤에야 nginx가 읽을 수 있는 설정이 되므로, 예전처럼
+  # conf.d에 직접 걸면 치환되지 않은 `${...}`를 검증하게 되어 실제로 뜨는 것과 다른 파일을
+  # 보는 잡이 된다. `nginx -t`도 이미지 엔트리포인트를 타므로($1이 nginx면
+  # /docker-entrypoint.d/*.sh가 먼저 돈다) 치환은 이 명령 하나로 함께 일어난다.
   nginx-config-check:
-    name: nginx.conf 문법 검증
+    name: nginx.conf.template 문법 검증
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 키가 비어 있는 배포(기본값)와 채운 배포는 치환 결과가 다르다 — 빈 값은
+        # `set $finus_api_key "";`가 되고 Set-Cookie를 만드는 map이 빈 문자열 분기를
+        # 탄다. 한쪽만 검증하면 다른 쪽에서만 깨지는 문법 오류가 초록불로 지나간다.
+        include:
+          - label: 키 미설정
+            api_key: ""
+          - label: 키 설정
+            api_key: ci-syntax-check-key
     steps:
       - uses: actions/checkout@v4
 
-      - name: nginx -t 실행
+      - name: nginx -t 실행 (${{ matrix.label }})
         run: |
           docker run --rm \
-            -v "${{ github.workspace }}/frontend/nginx.conf:/etc/nginx/conf.d/default.conf:ro" \
+            -e FINUS_API_KEY="${{ matrix.api_key }}" \
+            -e NGINX_ENVSUBST_FILTER='^FINUS_' \
+            -v "${{ github.workspace }}/frontend/nginx.conf.template:/etc/nginx/templates/default.conf.template:ro" \
             nginx:alpine nginx -t

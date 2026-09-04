@@ -47,6 +47,7 @@ from backend.redis_state import (
     InMemoryPendingOrderStore,
     InMemoryTelegramPollerStore,
     RedisPendingOrderStore,
+    TelegramPollerFailure,
     TelegramPollerState,
     TelegramPollerStore,
 )
@@ -2513,25 +2514,38 @@ async def test_poller_does_not_rerun_llm_when_nat_response_send_fails(monkeypatc
     assert poller._failures == {}
 
 
+# 가짜 벽시계의 기준점. monotonic 기준점(0.0)과 멀찍이 떨어뜨려야, 저장된 벽시계 값을
+# monotonic으로 착각해 쓰는 구현이 테스트에서 티가 난다 — 경과가 -1.7e9초가 되어 예산이
+# 영원히 남는다 (#350).
+WALL_EPOCH = 1_700_000_000.0
+
+
 class FakePollerClock:
-    """폴러의 _sleep/_now만 대체해 시간 기반 재시도 예산을 결정론적으로 진행시킨다 (#241).
+    """폴러의 _sleep/_now/_wall_now를 대체해 시간 기반 재시도 예산을 진행시킨다 (#241, #350).
 
     전역 asyncio.sleep을 패치하면 핸들러 내부의 실제 sleep(_handle_watch의 조회 간격)까지
     가로채므로 인스턴스 수준 간접층만 건드린다 (PR #242 리뷰).
+
+    두 시계를 같은 delay만큼 함께 민다. 재시작을 재현할 때는 새 클록을 만들어 monotonic은
+    다른 기준점에서(새 프로세스처럼), 벽시계는 앞 프로세스가 끝낸 지점부터 이어 붙인다 —
+    ``now``·``wall``이 그 두 기준점을 받는다 (#350).
     """
 
-    def __init__(self, *, stop_after=None):
-        self.now = 0.0
+    def __init__(self, *, stop_after=None, now=0.0, wall=WALL_EPOCH):
+        self.now = now
+        self.wall = wall
         self.sleeps = []
         self._stop_after = stop_after
 
     def install(self, monkeypatch, poller):
         monkeypatch.setattr(poller, "_sleep", self._sleep)
         monkeypatch.setattr(poller, "_now", lambda: self.now)
+        monkeypatch.setattr(poller, "_wall_now", lambda: self.wall)
 
     async def _sleep(self, delay):
         self.sleeps.append(delay)
         self.now += delay
+        self.wall += delay
         if self._stop_after is not None and len(self.sleeps) >= self._stop_after:
             raise asyncio.CancelledError
 
@@ -2753,7 +2767,7 @@ async def test_poller_retry_delay_follows_the_newest_failure(monkeypatch):
     clock.install(monkeypatch, poller)
     # 41은 이미 오래 재시도 중(45초 간격), 42는 이제 막 실패한다.
     poller._failures[41] = telegram_commands._UpdateFailure(
-        first_at=0.0, attempts=8, send_failure=False
+        first_at=0.0, attempts=8, send_failure=False, first_wall_at=WALL_EPOCH
     )
 
     async def fake_get_updates():
@@ -2784,7 +2798,7 @@ def test_forget_passed_updates_drops_only_what_the_offset_passed():
     poller = _make_poller(notifier, handler=NoopHandler())
     for update_id in (40, 41, 42):
         poller._failures[update_id] = telegram_commands._UpdateFailure(
-            first_at=0.0, attempts=1, send_failure=False
+            first_at=0.0, attempts=1, send_failure=False, first_wall_at=WALL_EPOCH
         )
 
     poller._forget_passed_updates(42)
@@ -3290,6 +3304,358 @@ async def test_poller_restores_offset_across_restart(monkeypatch):
         await poller.run()
 
     assert requested_offsets == [42]
+
+
+def _restarting_poison_poller(monkeypatch, notifier, store, handler, clock, handled):
+    """새 폴러 = 새 프로세스. 인메모리 상태는 버리고 store와 벽시계만 넘겨준다 (#350).
+
+    clock의 monotonic 기준점은 프로세스마다 다르게 준다 — 저장된 벽시계 값을 그대로
+    monotonic으로 쓰는 구현이면 여기서 경과가 음수로 튄다.
+    """
+    poller = _make_poller(notifier, handler=handler, state_store=store)
+    clock.install(monkeypatch, poller)
+
+    async def fake_get_updates():
+        if handled:
+            # poison 뒤의 명령이 실행됐으면 이 시나리오는 끝났다. 남겨두면 offset이 배치를
+            # 다 지나 빈 배열이 돌아오는 루프가 sleep 없이 돈다.
+            raise asyncio.CancelledError
+        offset = poller.offset
+        return [u for u in _poison_batch() if offset is None or u["update_id"] >= offset]
+
+    monkeypatch.setattr(poller, "_get_updates", fake_get_updates)
+    return poller
+
+
+@pytest.mark.asyncio
+async def test_poison_budget_survives_restarts_faster_than_the_window(monkeypatch):
+    """재시작이 예산보다 잦아도 poison은 결국 폐기되고 뒤의 명령이 실행된다 (#350).
+
+    #248은 예산을 일부러 영속화하지 않았고, #259 1단계가 배치를 poison에서 끊게 만들면서
+    그 선택의 대가가 "폐기가 미뤄짐"에서 "그 채팅의 모든 명령이 정지"로 커졌다. 리셋 계기는
+    배포가 아니라 backend/Dockerfile의 uvicorn --reload + bind mount라 파일 저장 하나면
+    되므로, 아래처럼 매 프로세스가 재시도 한 번 만에 죽는 상황이 현실적이다.
+
+    각 프로세스는 sleep 한 번(stop_after=1) 만에 죽으므로 혼자서는 60초 창을 절대 채우지
+    못한다. 예산이 재시작을 넘지 못하면 41은 영원히 재시도되고 42는 영원히 실행되지 않는다.
+    """
+    notifier = FakeNotifier()
+    notifier.enabled = True
+    notifier.bot_token = "token"
+    store = InMemoryTelegramPollerStore()
+    handled = []
+
+    class PartialHandler:
+        async def handle_update(self, update):
+            if update["update_id"] == 41:
+                raise RuntimeError("poison update")
+            handled.append(update["update_id"])
+
+    # 재시작 자체에 걸리는 시간. 창(60초)에 비해 무시할 만해야 "재시작이 예산보다 잦다"는
+    # 전제가 성립한다.
+    restart_seconds = 1.0
+    wall = WALL_EPOCH
+    processes = 0
+    for index in range(10):
+        clock = FakePollerClock(stop_after=1, now=1000.0 * index, wall=wall)
+        poller = _restarting_poison_poller(
+            monkeypatch, notifier, store, PartialHandler(), clock, handled
+        )
+        with pytest.raises(asyncio.CancelledError):
+            await poller.run()
+        processes += 1
+        wall = clock.wall + restart_seconds
+        if handled:
+            break
+
+    # 폐기는 t=0/5/20/65의 네 번째 시도에서 일어난다. 재시작 간격이 끼어 있어도 시도 횟수는
+    # 그대로다 — 예산이 시간 기준이기 때문이다.
+    assert handled == [42]
+    assert processes == 4
+    assert poller.offset == 43
+    assert notifier.messages == [
+        f"{telegram_commands.UPDATE_SKIPPED_NOTICE}\n실패한 요청: /alerts off"
+    ]
+    # 폐기된 예산은 저장소에서도 사라져야 한다. 남으면 다음 재시작이 낡은 앵커를 되살린다.
+    assert store.state == TelegramPollerState(offset=43)
+
+
+@pytest.mark.asyncio
+async def test_poller_writes_the_budget_while_the_batch_is_stopped(monkeypatch):
+    """RETRY는 배치를 끊어 update별 쓰기 지점에 닿지 못한다 — 거기서도 써야 한다 (#350).
+
+    이 쓰기가 없으면 예산은 영속화 대상이 되고도 실제로는 한 번도 저장되지 않는다.
+    저장되는 시각이 벽시계라는 것도 함께 고정한다.
+    """
+    notifier = FakeNotifier()
+    notifier.enabled = True
+    notifier.bot_token = "token"
+    store = InMemoryTelegramPollerStore()
+
+    class FailingHandler:
+        async def handle_update(self, update):
+            raise RuntimeError("poison update")
+
+    poller = _make_poller(notifier, handler=FailingHandler(), state_store=store)
+    clock = FakePollerClock(stop_after=1)
+    clock.install(monkeypatch, poller)
+
+    async def fake_get_updates():
+        return [{"update_id": 41, "message": {"chat": {"id": 123}, "text": "/alerts off"}}]
+
+    monkeypatch.setattr(poller, "_get_updates", fake_get_updates)
+
+    with pytest.raises(asyncio.CancelledError):
+        await poller.run()
+
+    assert store.state == TelegramPollerState(
+        offset=None,
+        failures=(
+            TelegramPollerFailure(
+                update_id=41, first_wall_at=WALL_EPOCH, attempts=1, send_failure=False
+            ),
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_send_failure_window_survives_a_restart(monkeypatch):
+    """전송 실패 창(335초)도 재시작을 넘는다 — 넘지 못하면 이르게 폐기된다 (#350).
+
+    send_failure를 흘리면 복원된 예산이 일반 창(60초)으로 판정된다. 이미 100초를 지나온
+    update는 그 순간 첫 시도에서 곧장 폐기되는데, 429·5xx는 update의 문제가 아니라 전역
+    장애라 그 폐기는 명령을 잃는 회귀다 (PR #242 리뷰의 근거 그대로).
+
+    두 프로세스가 서로 다른 예외를 던지는 것이 이 테스트의 핵심이다. 재시작 후에도 전송
+    실패가 이어지면 그 실패가 send_failure를 다시 세워 창을 되살리므로, 복원이 필드를
+    흘려도 티가 나지 않는다. 흘림이 드러나는 것은 "전송 실패로 창을 벌어 둔 update가
+    재시작 뒤 다른 오류로 실패하는" 경우뿐이다 — _handle_one_update가 창을 마지막 예외
+    종류로 다시 고르지 않는 이유(PR #242 리뷰)와 같은 상황이다.
+    """
+    notifier = FakeNotifier()
+    notifier.enabled = True
+    notifier.bot_token = "token"
+    store = InMemoryTelegramPollerStore()
+    processes = []
+
+    class ProcessScopedHandler:
+        """첫 프로세스는 전송 실패, 두 번째 프로세스는 평범한 오류를 던진다."""
+
+        def __init__(self):
+            processes.append(self)
+
+        async def handle_update(self, update):
+            if len(processes) == 1:
+                raise telegram_commands.TelegramSendError("telegram send failed")
+            raise RuntimeError("redis unavailable")
+
+    def run_process(clock):
+        poller = _make_poller(notifier, handler=ProcessScopedHandler(), state_store=store)
+        clock.install(monkeypatch, poller)
+
+        async def fake_get_updates():
+            offset = poller.offset
+            return [u for u in _poison_batch() if offset is None or u["update_id"] >= offset]
+
+        monkeypatch.setattr(poller, "_get_updates", fake_get_updates)
+        return poller
+
+    first_clock = FakePollerClock(stop_after=1)
+    with pytest.raises(asyncio.CancelledError):
+        await run_process(first_clock).run()
+
+    # 일반 창(60초)은 넘고 전송 실패 창(300초)은 넘지 않는 지점에서 재시작한다.
+    second_clock = FakePollerClock(
+        stop_after=1, now=9_000.0, wall=first_clock.wall + 100.0
+    )
+    second = run_process(second_clock)
+    with pytest.raises(asyncio.CancelledError):
+        await second.run()
+
+    assert second._failures[41].send_failure is True
+    # 폐기됐다면 offset이 42로 전진하고 스킵 통지가 나갔을 것이다.
+    assert second.offset is None
+    assert notifier.messages == []
+
+
+def test_restored_budget_reanchors_a_backwards_wall_clock(monkeypatch):
+    """벽시계가 뒤로 뛰면 경과를 0으로 접고 앵커도 지금으로 다시 찍는다 (PR #362 리뷰).
+
+    접기만 하고 앵커를 두면 예산이 "한 번 더"가 아니라 무한이 된다 — 시계 오프셋은 재시작
+    뒤에도 남아 있어 저장된 앵커가 계속 미래고, 매 재시작이 같은 클램프를 반복한다.
+    """
+    notifier = FakeNotifier()
+
+    class NoopHandler:
+        async def handle_update(self, update):
+            return None
+
+    poller = _make_poller(notifier, handler=NoopHandler())
+    clock = FakePollerClock()
+    clock.install(monkeypatch, poller)
+
+    restored = poller._restore_failures(
+        (
+            TelegramPollerFailure(
+                # 벽시계가 100초 뒤로 뛴 상황 = 저장된 앵커가 미래다.
+                update_id=41,
+                first_wall_at=WALL_EPOCH + 100.0,
+                attempts=2,
+                send_failure=False,
+            ),
+        )
+    )
+
+    assert restored[41].first_at == clock.now
+    assert restored[41].first_wall_at == clock.wall
+    assert restored[41].attempts == 2
+
+
+def test_restored_budget_keeps_the_anchor_when_the_clock_moved_forward(monkeypatch):
+    """정방향(정상)에서는 앵커를 건드리지 않는다 (#350).
+
+    복원 시점으로 앞당기면 잦은 재시작이 예산을 무한히 늘리는 #350의 경로가 그대로
+    되살아난다. 뒤로 뛴 경우의 재각인이 이 성질까지 함께 지우지 않았음을 고정한다.
+    """
+    notifier = FakeNotifier()
+
+    class NoopHandler:
+        async def handle_update(self, update):
+            return None
+
+    poller = _make_poller(notifier, handler=NoopHandler())
+    clock = FakePollerClock(wall=WALL_EPOCH + 40.0)
+    clock.install(monkeypatch, poller)
+
+    restored = poller._restore_failures(
+        (
+            TelegramPollerFailure(
+                update_id=41, first_wall_at=WALL_EPOCH, attempts=2, send_failure=False
+            ),
+        )
+    )
+
+    assert restored[41].first_wall_at == WALL_EPOCH
+    # 40초를 이미 쓴 예산으로 복원된다 — monotonic 기준점이 다른 프로세스에서도 그대로다.
+    assert restored[41].first_at == clock.now - 40.0
+
+
+@pytest.mark.asyncio
+async def test_poison_is_discarded_even_after_the_wall_clock_stepped_backwards(monkeypatch):
+    """벽시계가 뒤로 조정된 뒤에도 poison은 폐기된다 (PR #362 리뷰).
+
+    오프셋은 재시작 뒤에도 남으므로, 클램프만 하고 앵커를 저장값 그대로 두면 매 재시작이
+    같은 클램프를 반복해 #350이 없애려던 무기한 정지가 그대로 되살아난다. 아래 루프는
+    시계를 한 시간 뒤로 민 뒤 재시작을 반복한다 — 앵커 재각인이 없으면 10번을 돌아도
+    42는 실행되지 않는다.
+    """
+    notifier = FakeNotifier()
+    notifier.enabled = True
+    notifier.bot_token = "token"
+    store = InMemoryTelegramPollerStore()
+    handled = []
+
+    class PartialHandler:
+        async def handle_update(self, update):
+            if update["update_id"] == 41:
+                raise RuntimeError("poison update")
+            handled.append(update["update_id"])
+
+    wall = WALL_EPOCH
+    processes = 0
+    for index in range(10):
+        clock = FakePollerClock(stop_after=1, now=1000.0 * index, wall=wall)
+        poller = _restarting_poison_poller(
+            monkeypatch, notifier, store, PartialHandler(), clock, handled
+        )
+        with pytest.raises(asyncio.CancelledError):
+            await poller.run()
+        processes += 1
+        wall = clock.wall + 1.0
+        if processes == 1:
+            # 첫 재시작 직전에 시계가 한 시간 뒤로 조정된다. 이후 프로세스는 전부 그
+            # 오프셋 위에서 돈다 — 한 번의 점프가 아니라 지속되는 상태다.
+            wall -= 3600.0
+        if handled:
+            break
+
+    assert handled == [42]
+    assert processes > 1  # 점프 없이 첫 프로세스가 끝내버렸다면 시나리오가 성립하지 않는다
+
+
+@pytest.mark.asyncio
+async def test_retry_write_keeps_a_stored_offset_when_restore_failed(monkeypatch):
+    """복원이 실패한 상태에서는 배치 중단 시 쓰기를 건너뛴다 (PR #362 리뷰).
+
+    _persist_state는 상태를 통째로 덮어쓰므로, 복원 실패로 self.offset이 None인 채 쓰면
+    저장된 정상 offset이 지워진다. poison이 배치 맨 앞이면 offset을 전진시킬 "첫 성공한
+    update"가 영영 오지 않아 재시도 사이클마다 그 쓰기가 반복되고, 다음 재시작에서
+    미확정 update가 전부 재배달돼 이미 실행한 명령이 다시 실행된다.
+    """
+    notifier = FakeNotifier()
+    notifier.enabled = True
+    notifier.bot_token = "token"
+
+    class LoadFailingStore(InMemoryTelegramPollerStore):
+        async def load(self):
+            raise RuntimeError("redis unavailable")
+
+    store = LoadFailingStore(TelegramPollerState(offset=41))
+
+    class FailingHandler:
+        async def handle_update(self, update):
+            raise RuntimeError("poison update")
+
+    poller = _make_poller(notifier, handler=FailingHandler(), state_store=store)
+    clock = FakePollerClock(stop_after=1)
+    clock.install(monkeypatch, poller)
+
+    async def fake_get_updates():
+        return _poison_batch()
+
+    monkeypatch.setattr(poller, "_get_updates", fake_get_updates)
+
+    with pytest.raises(asyncio.CancelledError):
+        await poller.run()
+
+    assert store.state == TelegramPollerState(offset=41)
+    # 쓰기만 건너뛴다. 예산은 인메모리로 계속 쌓여 이 프로세스 안에서는 정상 동작한다.
+    assert poller._failures[41].attempts == 1
+
+
+@pytest.mark.asyncio
+async def test_restore_drops_budget_the_offset_already_passed(monkeypatch):
+    """offset이 지나간 예산 항목은 복원 시 버린다 (PR #362 리뷰).
+
+    정상 쓰기 경로는 이 관계가 깨진 payload를 만들지 않지만 역직렬화도 복원도 그것을
+    검증하지 않는다. 남으면 재배달되지 않아 pop될 기회가 없고, _retry_delay의
+    min(attempts)에 섞여 백오프만 짧아진다.
+    """
+    notifier = FakeNotifier()
+
+    class NoopHandler:
+        async def handle_update(self, update):
+            return None
+
+    store = InMemoryTelegramPollerStore(
+        TelegramPollerState(
+            offset=42,
+            failures=(
+                TelegramPollerFailure(
+                    update_id=41, first_wall_at=WALL_EPOCH, attempts=5, send_failure=False
+                ),
+                TelegramPollerFailure(
+                    update_id=42, first_wall_at=WALL_EPOCH, attempts=1, send_failure=False
+                ),
+            ),
+        )
+    )
+    poller = _make_poller(notifier, handler=NoopHandler(), state_store=store)
+    FakePollerClock().install(monkeypatch, poller)
+
+    await poller._restore_state()
+
+    assert set(poller._failures) == {42}
 
 
 @pytest.mark.asyncio

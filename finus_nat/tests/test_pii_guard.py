@@ -702,15 +702,21 @@ class TestKisToolRestoresParams:
 
 
 class TestSaveDiaryRejectsUnrestorable:
-    """되돌리지 못한 자리표시자가 남으면 저장하지 않는다 (#339 방향 3).
+    """되돌리지 못한 자리표시자가 남으면 저장하지 않는다 (#339 방향 3, #354로 경계 조정).
 
-    #230이 backend에서 마스킹한 사용자 발화("300만원")는 NAT 입장에서 낯선 scope라
-    ``restore_for_internal``이 통과시킨다. 그 근거는 "backend ``unmask_pii``가
-    판정하게 둔다"인데, 저장 목적지인 ``POST /api/v1/db/diary``는 저장만 하고
-    ``unmask_pii``를 타지 않는다 — 저장은 backend 왕복의 **바깥**이다. 그대로 POST하면
-    사용자가 쓴 금액이 ``Diary.content``에 내부 토큰으로 영구히 박히고, 요청이 끝나면
-    backend의 매핑이 사라져 복구 경로가 없다. 조용한 원본 소실 대신 시끄러운 실패를
-    택했고, 이 클래스가 그 선택을 고정한다.
+    가드가 세는 것은 **이 요청이 발급한 scope**의 자리표시자뿐이다. 원값이 이 프로세스
+    어디에도 없으므로(LLM이 번호를 지어냈거나 박스가 유실됐다) 그대로 POST하면
+    ``Diary.content``에 내부 토큰이 영구히 박힌다. 조용한 원본 소실 대신 시끄러운
+    실패를 택했고, 이 클래스가 그 선택을 고정한다.
+
+    #230이 backend에서 마스킹한 사용자 발화("300만원")는 NAT 입장에서 낯선 scope다.
+    #339 시점에는 이것도 함께 거부했다 — ``POST /api/v1/db/diary``가 저장만 하고
+    ``unmask_pii``를 타지 않아 결과가 같았기 때문이다. #354가 그 전제를 바꿨다:
+    backend가 ``llm_chat``의 매핑을 요청 범위로 들고 있다가 저장 직전에 되돌린다
+    (``backend/pii_registry.py``). 여기서 거부하면 그 복구를 NAT이 막는 셈이므로,
+    낯선 scope는 통과시켜 backend가 판정하게 둔다. 되돌리지 못하는 낯선 scope는
+    backend가 422로 거부한다 — 그쪽 경계는 ``backend/tests/test_pii_registry.py``가
+    고정한다.
     """
 
     # 이 클래스의 단언은 대체로 "POST가 아예 일어나지 않았다"이므로 응답 본문은
@@ -720,14 +726,19 @@ class TestSaveDiaryRejectsUnrestorable:
     # *_sends_the_api_key_header가 고정한다.
     _SAVED = {"status": "success", "data": {"id": 1, "created_at": "2026-09-03T00:00:00Z"}}
 
-    def test_reports_foreign_scope_placeholders(self, mapping_box):
-        """backend가 만든 자리표시자는 이 요청의 박스에 없으므로 되돌릴 수 없다."""
+    def test_foreign_scope_placeholders_are_left_to_backend(self, mapping_box):
+        """backend가 만든 자리표시자는 여기서 거부하지 않는다 (#354).
+
+        되돌릴 값을 가진 쪽이 backend이므로 판정도 backend가 한다. 이 목록에 넣으면
+        backend가 되살릴 수 있는 금액까지 NAT이 미리 죽인다 — #354가 회복하려는
+        기능이 바로 그것이다.
+        """
         _, backend_mapping = mask_pii("300만원 벌었어")
         backend_placeholder = next(iter(backend_mapping))
         text = f"오늘 {backend_placeholder} 수익."
 
         assert restore_for_internal(text) == text  # 손대지 않고 통과한다 (#231 규칙)
-        assert unrestorable_placeholders(text) == [backend_placeholder]
+        assert unrestorable_placeholders(text) == []
 
     def test_reports_hallucinated_placeholders_of_this_request(self, mapping_box):
         """LLM이 지어낸 이 요청 scope 번호도 원값이 없기는 마찬가지다."""
@@ -742,10 +753,16 @@ class TestSaveDiaryRejectsUnrestorable:
         masked = mask_tool_result("finus_mcp_trading_get_balance", "삼성전자 3주 210,000원")
         assert unrestorable_placeholders(restore_for_internal(masked)) == []
 
-    async def test_save_diary_does_not_post_user_placeholder_to_db(
+    async def test_save_diary_forwards_user_placeholder_for_backend_to_restore(
         self, mock_backend, mapping_box, ledger
     ):
-        """이슈 본문의 경로 — "300만원 벌었어, 일지 써줘"가 DB에 자리표시자로 박히지 않는다."""
+        """이슈 본문의 경로 — "300만원 벌었어, 일지 써줘"가 backend까지 도달한다 (#354).
+
+        backend 자리표시자를 그대로 실어 POST하는 것이 이 경로의 **정상 동작**이다.
+        backend `create_db_diary`가 요청 범위 등록소로 원값을 되돌려 저장한다. 여기서
+        거부하면 사용자 발화의 금액은 영원히 일지에 남길 수 없다 — #339가 남긴 숙제가
+        바로 그것이었다.
+        """
         _, backend_mapping = mask_pii("300만원 벌었어")
         backend_placeholder = next(iter(backend_mapping))
 
@@ -760,27 +777,19 @@ class TestSaveDiaryRejectsUnrestorable:
                 )
             )
 
-        # (1) 저장 자체가 일어나지 않는다 — 손상된 본문이 DB에 들어가는 것을 막는 것이 요점이다.
-        assert not backend.called
-        # (2) 에이전트는 원인과 실행 가능한 조치를 함께 받는다. **사용자 재질의는 조치가
-        #     아니다** — backend `llm_chat`이 요청마다 `mask_pii(user_msg)`를 돌리므로
-        #     사용자가 같은 금액을 다시 적어도 새 scope로 마스킹돼 똑같이 거부된다.
-        #     hint가 재입력을 권하면 에이전트는 무한 재질의 루프에 들어간다.
-        payload = json.loads(observation)
-        assert payload["error"] == "diary_unrestorable_placeholder"
-        assert payload["kinds"] == ["AMOUNT"]
-        assert "다시 물어도 결과는 같습니다" in payload["hint"]
-        assert "재질의하지 말고" in payload["hint"]
-        # (3) 자리표시자 원문은 Observation으로 되돌아가지 않는다 — 에이전트가 답변에
-        #     옮겨 적으면 지금 막으려는 것과 같은 종류의 오염이 된다.
-        assert backend_placeholder not in observation
-        # (4) 거부도 도구 호출이므로 원장에는 남는다.
+        assert backend.json_body == {
+            "title": "매매일지 2026-09-03",
+            "content": f"오늘 {backend_placeholder} 벌었다.",
+        }
+        assert json.loads(observation) == {"id": 1, "created_at": "2026-09-03T00:00:00Z"}
+        # 거부든 저장이든 도구 호출은 원장에 남는다.
         assert ledger.records[-1].tool_name == "finus_save_diary"
 
     async def test_save_diary_checks_the_title_too(self, mock_backend, mapping_box, ledger):
         """본문만 검사하면 제목 경로로 같은 손상이 새어 들어간다."""
-        _, backend_mapping = mask_pii("300만원 벌었어")
-        backend_placeholder = next(iter(backend_mapping))
+        mask_tool_result("finus_mcp_trading_get_balance", "평가금액 210,000원")
+        scope = next(iter(mapping_box)).rsplit("_", 2)[-2]
+        invented = f"<AMOUNT_{scope}_9>"  # 이 요청 scope인데 박스에 없다 = 원값이 없다
 
         backend = mock_backend(self._SAVED)
 
@@ -788,12 +797,20 @@ class TestSaveDiaryRejectsUnrestorable:
         async with finus_api.finus_save_diary(config, None) as info:
             observation = await info.single_fn(
                 finus_api.FinusSaveDiaryInput(
-                    title=f"{backend_placeholder} 수익 기록", content="오늘은 잘 됐다."
+                    title=f"{invented} 수익 기록", content="오늘은 잘 됐다."
                 )
             )
 
         assert not backend.called
-        assert json.loads(observation)["error"] == "diary_unrestorable_placeholder"
+        payload = json.loads(observation)
+        assert payload["error"] == "diary_unrestorable_placeholder"
+        assert payload["kinds"] == ["AMOUNT"]
+        # 자리표시자 원문은 Observation으로 되돌아가지 않는다 — 에이전트가 답변에 옮겨
+        # 적으면 지금 막으려는 것과 같은 종류의 오염이 된다.
+        assert invented not in observation
+        # 재질의를 권하지 않는 것은 그대로다. 이 종류의 잔여 토큰은 사용자가 무엇을
+        # 다시 말하든 되살아나지 않는다 — 조회 도구를 다시 부르는 것이 유일한 회복이다.
+        assert "다시 묻지 말고" in payload["hint"]
 
     async def test_save_diary_still_stores_content_this_request_can_restore(
         self, mock_backend, mapping_box, ledger
