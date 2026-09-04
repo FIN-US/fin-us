@@ -211,13 +211,15 @@ def active_mapping(mapping: dict[str, str]) -> Iterator[None]:
                 # 같은 줄로 보인다. scope는 자리표시자가 가리키는 원값이 아니라 난수
                 # nonce이므로 이 모듈이 로그에서 가리는 대상이 아니다 — 가리는 것은
                 # 사용자 발화의 평문 쪽이다(`create_db_diary`의 422 detail 참고).
+                # 문구에 마크다운을 쓰지 않는다. 로그는 터미널·집계 도구가 그대로 찍으므로
+                # 별표가 리터럴로 남는다 (PR #361 리뷰). 강조는 따옴표로 한다.
                 logger.error(
                     "요청 범위 마스킹 등록소에서 scope 충돌을 발견했습니다 (scope=%s) — "
                     "겹친 두 요청 모두 자리표시자를 되돌리지 못하고 저장이 거부됩니다. "
                     "CSPRNG 6자리 hex가 겹칠 확률을 생각하면 정상 동작에서는 나오지 않는 "
-                    "로그입니다. **같은 scope로 반복되면** scope 생성"
-                    "(pii_mask._Counter)이 고장 난 것이고, **매번 다른 scope라면** "
-                    "동시 등록 수가 예상보다 크다는 뜻입니다.",
+                    "로그입니다. 같은 scope로 반복되면 scope 생성(pii_mask._Counter)이 "
+                    "고장 난 것이고, 매번 다른 scope라면 동시 등록 수가 예상보다 크다는 "
+                    "뜻입니다.",
                     scope,
                 )
                 continue
