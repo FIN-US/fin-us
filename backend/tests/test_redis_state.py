@@ -13,6 +13,7 @@ from backend.redis_state import (
     RedisPendingOrderStore,
     RedisSchedulerState,
     RedisTelegramPollerStore,
+    TelegramPollerFailure,
     TelegramPollerState,
     TelegramPollerStore,
     signal_hash,
@@ -335,6 +336,137 @@ async def test_poller_state_load_logs_when_corrupted_key_delete_fails(caplog):
         assert await store.load() == TelegramPollerState()
 
     assert "손상 키 삭제 실패" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# 재시도 예산 영속화 (#350)
+# ---------------------------------------------------------------------------
+
+
+def _failure(**overrides) -> TelegramPollerFailure:
+    values = {
+        "update_id": 41,
+        "first_wall_at": 1_700_000_000.5,
+        "attempts": 3,
+        "send_failure": True,
+    }
+    values.update(overrides)
+    return TelegramPollerFailure(**values)
+
+
+@pytest.mark.asyncio
+async def test_poller_state_round_trips_failures():
+    """예산이 재시작을 넘으려면 네 필드가 전부 살아 돌아와야 한다 (#350).
+
+    first_wall_at은 벽시계 epoch 초다 — monotonic이면 프로세스가 바뀐 순간 기준점이 사라져
+    저장한 값으로 경과를 잴 수 없다 (TelegramPollerFailure 독스트링).
+    """
+    redis = FakeRedis()
+    store = RedisTelegramPollerStore(redis)
+
+    await store.save(TelegramPollerState(offset=41, failures=(_failure(),)))
+
+    assert await store.load() == TelegramPollerState(offset=41, failures=(_failure(),))
+
+
+@pytest.mark.asyncio
+async def test_poller_state_save_omits_empty_failures():
+    """예산이 없으면 payload에도 없다 — 정상 경로의 쓰기를 넓히지 않는다 (#350)."""
+    redis = FakeRedis()
+    store = RedisTelegramPollerStore(redis)
+
+    await store.save(TelegramPollerState(offset=45))
+
+    assert json.loads(redis.store["finus:telegram:poller_state"]) == {"offset": 45}
+
+
+@pytest.mark.asyncio
+async def test_poller_state_save_clears_a_previously_written_failure():
+    """예산이 사라진 상태를 쓰면 저장된 예산도 지워져야 한다 (#350).
+
+    남으면 그 update가 통과한 뒤에도 낡은 앵커가 살아, 한참 뒤 같은 id를 다시 쓰게 된
+    폴러가 "이미 예산을 다 썼다"고 판단해 첫 실패에서 곧장 폐기한다.
+    """
+    redis = FakeRedis()
+    store = RedisTelegramPollerStore(redis)
+
+    await store.save(TelegramPollerState(offset=41, failures=(_failure(),)))
+    await store.save(TelegramPollerState(offset=42))
+
+    assert await store.load() == TelegramPollerState(offset=42)
+
+
+@pytest.mark.asyncio
+async def test_poller_state_load_without_failures_field_is_not_corruption():
+    """#350 이전 배포가 남긴 payload는 예산 없는 정상 상태다 — 키를 지우면 안 된다."""
+    redis = FakeRedis()
+    redis.store["finus:telegram:poller_state"] = '{"offset": 44}'
+    store = RedisTelegramPollerStore(redis)
+
+    assert await store.load() == TelegramPollerState(offset=44)
+    assert "finus:telegram:poller_state" in redis.store
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failures",
+    [
+        # 목록이 아니면 원소를 셀 수조차 없다.
+        '"nope"',
+        # 원소는 오브젝트여야 한다.
+        "[41]",
+        # bool은 int의 하위 타입이라 isinstance만으로는 통과한다.
+        '[{"update_id": true, "first_wall_at": 1.0, "attempts": 1, "send_failure": false}]',
+        # offset과 같은 축의 값이라 범위도 같이 닫는다. 벗어난 id는 _forget_passed_updates의
+        # 비교가 영원히 지우지 못한다.
+        '[{"update_id": -1, "first_wall_at": 1.0, "attempts": 1, "send_failure": false}]',
+        '[{"update_id": 99999999999, "first_wall_at": 1.0, "attempts": 1, "send_failure": false}]',
+        # first_wall_at이 없거나 숫자가 아니면 경과 산술이 TypeError로 터진다.
+        '[{"update_id": 41, "attempts": 1, "send_failure": false}]',
+        '[{"update_id": 41, "first_wall_at": "1.0", "attempts": 1, "send_failure": false}]',
+        # NaN은 json.loads가 그대로 통과시킨다. 새면 경과 비교가 항상 False가 되어
+        # poison이 영원히 재시도된다 — #350이 없애려던 바로 그 상태다.
+        '[{"update_id": 41, "first_wall_at": NaN, "attempts": 1, "send_failure": false}]',
+        '[{"update_id": 41, "first_wall_at": Infinity, "attempts": 1, "send_failure": false}]',
+        # 벽시계 epoch 초라 0 이하는 정상값이 아니다.
+        '[{"update_id": 41, "first_wall_at": 0, "attempts": 1, "send_failure": false}]',
+        # attempts < 1이면 _retry_delay의 인덱스가 음수가 되어 가장 긴 간격을 고른다.
+        '[{"update_id": 41, "first_wall_at": 1.0, "attempts": 0, "send_failure": false}]',
+        '[{"update_id": 41, "first_wall_at": 1.0, "attempts": true, "send_failure": false}]',
+        '[{"update_id": 41, "first_wall_at": 1.0, "attempts": 1, "send_failure": "yes"}]',
+    ],
+)
+async def test_poller_state_load_drops_corrupted_failures_but_keeps_offset(failures):
+    """손상된 예산은 버리되 offset은 살린다 (#350).
+
+    offset 쪽 검증과 달리 여기서는 raise하지 않는다. 유실 대가가 다르기 때문이다 —
+    예산이 없으면 폐기가 한 창 미뤄질 뿐이지만(#350 이전 동작), 손상 키 삭제로 offset까지
+    날아가면 Telegram이 미확정 update를 전부 재배달해 이미 실행한 명령이 다시 실행된다.
+    """
+    redis = FakeRedis()
+    redis.store["finus:telegram:poller_state"] = f'{{"offset": 44, "failures": {failures}}}'
+    store = RedisTelegramPollerStore(redis)
+
+    assert await store.load() == TelegramPollerState(offset=44)
+    assert "finus:telegram:poller_state" in redis.store
+
+
+@pytest.mark.asyncio
+async def test_poller_state_load_drops_failures_when_offset_is_corrupted():
+    """offset이 손상되면 예산도 함께 간다 — 앵커만 남겨도 짝이 없다 (#350)."""
+    redis = FakeRedis()
+    redis.store["finus:telegram:poller_state"] = json.dumps(
+        {
+            "offset": -1,
+            "failures": [
+                {"update_id": 41, "first_wall_at": 1.0, "attempts": 1, "send_failure": False}
+            ],
+        }
+    )
+    store = RedisTelegramPollerStore(redis)
+
+    assert await store.load() == TelegramPollerState()
+    assert redis.store == {}
 
 
 # ---------------------------------------------------------------------------
