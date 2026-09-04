@@ -5,7 +5,7 @@
 # 다르게 둘 이유가 없어 이중 방어로 고정한다.
 /frontend/build-stamp.txt text eol=lf
 # 리눅스 컨테이너(nginx:alpine)로 마운트되는 설정이라 CRLF로 체크아웃되지 않도록 고정한다.
-/frontend/nginx.conf text eol=lf
+/frontend/nginx.conf.template text eol=lf
 # NAT 에이전트 프롬프트 원문. 로더가 유니버설 개행으로 읽으므로 CRLF로 체크아웃돼도 동작은
 # 같지만(#284), 워킹트리를 LF로 고정해야 sha256sum으로 저장소 내용과 같은 해시가 나온다.
 # 이 파일들의 바이트 동일성이 #284의 근거라 재현이 환경에 따라 갈리면 안 된다.

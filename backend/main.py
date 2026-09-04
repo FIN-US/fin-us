@@ -68,8 +68,10 @@ app = FastAPI(
 # 상대 경로를 쓰도록 재빌드되면서, 브라우저 요청은 대시보드와 같은 오리진으로 나가
 # CORS 자체가 개입하지 않는다. 남겨 두면 이제 아무도 타지 않는 경로가 "동작 중인
 # 보호"처럼 보이고, 실제로는 응답을 *읽는* 것만 막을 뿐 요청 *실행*은 막지 못한다.
-# 오리진 단위로 실제 호출을 막는 것은 nginx 레이트리밋(#266 1단계, frontend/nginx.conf)과
-# 아래 API 키 인증(#266 2단계)의 몫이다.
+# 오리진 단위로 실제 호출을 막는 것은 nginx 레이트리밋(#266 1단계,
+# frontend/nginx.conf.template)과 아래 API 키 인증(#266 2·3단계)의 몫이다. 후자는 키를
+# `SameSite=Strict` 쿠키로 내려 주면서(3단계) 임의 페이지의
+# `fetch(..., { mode: "no-cors" })` 경로까지 함께 닫는다 — CORS가 못 하던 일이다.
 #
 # ALLOW_ORIGINS는 남는다 — 아래 is_allowed_ws_origin이 /api/v1/ws 핸드셰이크의 Origin
 # 허용목록으로 계속 쓴다(#256). CORSMiddleware는 애초에 WS 핸드셰이크에 적용되지 않아,
@@ -77,17 +79,29 @@ app = FastAPI(
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# API 정적 키 인증 (#266 2단계)
+# API 정적 키 인증 (#266 2단계 · 전달 경로는 3단계)
 # ──────────────────────────────────────────────────────────────────────────
 # 1단계(nginx 레이트리밋)는 비용의 뚜껑이지 접근 제어가 아니었다. 여기서 거는 것이
 # 접근 제어다. 키가 설정된 배포에서만 걸린다 — 미설정이 기본이고, 그 이유는
 # config.FINUS_API_KEY 주석에 있다.
+#
+# 3단계에서 바뀐 것은 판정이 아니라 **키가 오는 자리**다. 브라우저는 nginx가 문서 응답에
+# 실어 준 쿠키를 자동으로 붙이고, 비브라우저는 헤더를 직접 싣는다. 어느 쪽이든 아래
+# is_authorized_api_call 하나가 판정한다.
 
-# REST가 키를 받는 헤더 이름.
+# 비브라우저 클라이언트가 키를 싣는 헤더 이름. NAT의 매매일지 도구
+# (finus_nat/src/nat_finus_nat/finus_api.py)와 curl·wscat이 이 경로를 쓴다.
 API_KEY_HEADER = "X-API-Key"
-# WebSocket이 같은 키를 받는 쿼리 파라미터 이름. 헤더가 아닌 것은 취향이 아니라
-# 제약이다 — 브라우저 WebSocket API에는 커스텀 헤더를 붙일 자리가 없다(#266 방향 결정).
-WS_API_KEY_QUERY_PARAM = "api_key"
+# 브라우저가 키를 싣는 쿠키 이름 (#266 3단계). nginx가 문서 응답에 Set-Cookie로 내려
+# 주고(frontend/nginx.conf.template), 브라우저는 이후 same-origin 요청에 이 쿠키를
+# **자동으로** 붙인다 — `/api/` XHR과 `/api/v1/ws` 핸드셰이크 양쪽이다. 그래서 번들의
+# ApiClient를 고치지 않아도, 즉 WebGL 재빌드 없이도 키가 전달된다.
+#
+# 2단계는 WebSocket만 `?api_key=...` 쿼리 파라미터로 받았다. 그 경로는 걷어냈다 —
+# 원인이 아니라 결과였고(브라우저 WS API가 커스텀 헤더를 못 붙인다), 쿠키가 핸드셰이크에도
+# 자동으로 붙으면서 필요가 없어졌다. 걷어낸 것 자체가 #355(키가 URL에 실려 nginx 액세스
+# 로그에 평문으로 남는다)의 해결이다 — 로그에 남을 URL이 아예 생기지 않는다.
+API_KEY_COOKIE = "finus_api_key"
 
 # 인증이 걸리는 경로 접두사. nginx 레이트리밋이 덮는 범위(#266 1단계의 `location /api/`)와
 # 같은 /api/다. 두 보호의 경계가 어긋나면 "제한은 걸리는데 인증은 안 걸리는" 경로가
@@ -120,13 +134,84 @@ def matches_api_key(presented: str | None) -> bool:
     return hmac.compare_digest(presented.encode("utf-8"), FINUS_API_KEY.encode("utf-8"))
 
 
-def is_authorized_api_call(presented: str | None) -> bool:
-    """인증이 꺼져 있으면 통과, 켜져 있으면 키 일치만 통과합니다.
+def is_authorized_api_call(*presented: str | None) -> bool:
+    """인증이 꺼져 있으면 통과, 켜져 있으면 제시된 값 중 하나라도 일치하면 통과합니다.
 
-    REST(헤더)와 WebSocket(쿼리 파라미터)이 같은 판정을 쓴다. 전달 경로만 다르고
-    "무엇을 인정하는가"는 하나여야, 한쪽만 느슨해지는 드리프트가 생기지 않는다.
+    전달 경로가 둘이다 — 헤더(비브라우저)와 쿠키(브라우저). 인자를 여럿 받아 `any`로
+    보는 것은 의도다. 호출부에서 `header or cookie`로 하나만 골라 넘기면 값이 있는
+    쪽이 이기므로, 낡은 헤더가 남은 클라이언트에서 올바른 쿠키가 가려져 401이 난다 —
+    무엇이 틀렸는지 화면에 아무 단서가 없는 실패다.
+
+    REST와 WebSocket이 같은 판정을 쓴다. 전달 경로만 다르고 "무엇을 인정하는가"는
+    하나여야, 한쪽만 느슨해지는 드리프트가 생기지 않는다.
+
+    인자를 아예 주지 않으면 인증이 켜진 배포에서 거부다(`any(())`는 False). 즉 호출부가
+    자격증명 추출을 빠뜨리면 열리는 쪽이 아니라 닫히는 쪽으로 실패한다.
     """
-    return not api_auth_enabled() or matches_api_key(presented)
+    if not api_auth_enabled():
+        return True
+    return any(matches_api_key(value) for value in presented)
+
+
+# 키에 섞이면 frontend 쪽에서 깨지는 문자와 그 이유 (#266 3단계, PR #363 리뷰).
+#
+# backend에는 아무 제약이 없다 — 여기서는 문자열을 통째로 비교할 뿐이다. 제약은 같은
+# `.env`를 읽는 nginx 쪽에 있고, 그것도 두 갈래다: 값이 **설정 텍스트**에 치환돼 들어가고
+# (`$`·`"`), 그 결과가 다시 **쿠키 값**이 된다(RFC 6265의 cookie-octet).
+#
+# 허용 목록이 아니라 실제로 깨지는 문자만 본다. `secrets.token_urlsafe`를 권하고는 있지만
+# base64(`+/=`)나 다른 문장 부호를 쓴 키도 아무 문제 없이 동작하므로, 좁은 허용 목록은
+# 멀쩡한 키에 경고를 내고 그러면 경고 자체가 무시되기 시작한다.
+_UNSAFE_KEY_CHARS = {
+    "$": "nginx 설정에서 변수 참조로 읽힙니다",
+    '"': "nginx 설정의 따옴표를 닫습니다",
+    ";": "쿠키 값을 여기서 끊고 뒤를 속성으로 읽습니다",
+    ",": "쿠키 값에 쓸 수 없는 문자입니다",
+    "\\": "쿠키 값에 쓸 수 없는 문자입니다",
+}
+
+
+def unsafe_key_characters(key: str) -> list[str]:
+    """*key*에서 frontend를 깨뜨리는 문자를 골라 돌려줍니다 (없으면 빈 목록).
+
+    공백·제어문자도 함께 본다. 눈에 보이지 않아 `.env`를 아무리 들여다봐도 못 찾는
+    쪽이고(줄 끝 공백이 대표적이다), config.FINUS_API_KEY가 strip하는 것은 양끝뿐이다.
+    """
+    found = {c for c in key if c in _UNSAFE_KEY_CHARS}
+    found |= {c for c in key if c.isspace() or not c.isprintable()}
+    return sorted(found)
+
+
+def _warn_about_unsafe_key_characters() -> None:
+    """키가 frontend를 깨뜨릴 문자를 담고 있으면 기동 시점에 알린다.
+
+    이 검사가 없으면 증상이 전부 frontend에만 나타난다 — 컨테이너가 뜨지 않거나(`"`),
+    더 나쁘게는 **정상 기동한 채 다른 값이 쿠키로 나간다**(`abc$host`처럼 실재하는 nginx
+    변수 이름이 뒤따르는 경우). 후자는 대시보드가 401인데 서버 어디에도 오류가 없는
+    상태이고, `.env` 한 줄을 의심하기까지가 멀다. 같은 값을 먼저 읽는 backend가 말해 주는
+    편이 훨씬 이르다.
+
+    경고에 그치고 기동을 막지는 않는다. backend 자신은 이 키로 정상 동작하고, 대시보드를
+    쓰지 않는 배포(텔레그램·NAT 중심)에서는 실제로 아무것도 깨지지 않는다. 남의 제약으로
+    자기 기동을 막는 것은 과하다.
+
+    문제가 된 **문자**는 로그에 싣되 키는 싣지 않는다. 위 집합은 다섯 글자짜리 공개
+    목록이라 여기서 새는 것이 사실상 없고, 그것 없이는 "어디를 고쳐야 하는지"가 빠져
+    경고가 행동으로 이어지지 않는다.
+    """
+    offenders = unsafe_key_characters(FINUS_API_KEY)
+    if not offenders:
+        return
+    reasons = ", ".join(
+        f"{c!r}({_UNSAFE_KEY_CHARS.get(c, '눈에 보이지 않는 문자입니다')})"
+        for c in offenders
+    )
+    logger.warning(
+        "FINUS_API_KEY에 frontend를 깨뜨리는 문자가 있습니다 — %s. "
+        "nginx가 이 값을 설정에 치환해 쿠키로 내보내므로(#266 3단계), 대시보드가 401이 "
+        "되거나 frontend 컨테이너가 아예 뜨지 않습니다. backend 쪽은 이 키로도 동작합니다.",
+        reasons,
+    )
 
 
 def _log_api_auth_state() -> None:
@@ -138,6 +223,9 @@ def _log_api_auth_state() -> None:
     """
     if api_auth_enabled():
         logger.info("API 인증이 켜져 있습니다 (#266 2단계) — /api/ 와 /api/v1/ws 가 키를 요구합니다.")
+        # 켜져 있을 때만 본다. 꺼진 배포에서는 이 값이 아무 데도 쓰이지 않으므로
+        # 경고할 것이 없다(그리고 빈 문자열에는 애초에 걸릴 문자가 없다).
+        _warn_about_unsafe_key_characters()
         return
     logger.warning(
         "FINUS_API_KEY가 비어 있어 API 인증이 꺼져 있습니다 — /api/ 전체와 /api/v1/ws가 "
@@ -175,10 +263,21 @@ async def require_api_key(request: Request, call_next):
 
     WebSocket 핸드셰이크는 여기로 오지 않는다 — scope["type"]이 "websocket"이라
     BaseHTTPMiddleware가 그대로 통과시킨다. /api/v1/ws는 엔드포인트에서 직접 검사한다.
+
+    키는 헤더와 쿠키 양쪽에서 받는다(#266 3단계). 쿠키 쪽은 nginx가 문서 응답에 실어
+    보내는 것이고(frontend/nginx.conf.template), 브라우저가 자동으로 붙이므로 번들을
+    다시 굽지 않아도 대시보드가 인증을 통과한다.
+
+    ⚠️ 쿠키를 받아들이는 순간 CSRF가 이 API의 관심사가 된다 — 브라우저가 자격증명을
+    알아서 붙이므로, 임의 페이지가 유도한 요청도 인증된 요청이 될 수 있다. 이 API에는
+    `POST /api/v1/db/diary` 같은 쓰기 경로가 있다. 그것을 막는 것은 쿠키에 붙은
+    `SameSite=Strict`이고, 그 속성은 nginx 설정 한 곳에만 있다. **Lax·None으로
+    내리거나 쿠키 발급을 다른 곳으로 옮기는 것은 인증 방식을 바꾸는 일이다** — 그때는
+    CSRF 토큰이나 커스텀 헤더 요구 같은 대체 수단이 함께 와야 한다.
     """
-    if (
-        request.url.path.startswith(_GUARDED_PATH_PREFIX)
-        and not is_authorized_api_call(request.headers.get(API_KEY_HEADER))
+    if request.url.path.startswith(_GUARDED_PATH_PREFIX) and not is_authorized_api_call(
+        request.headers.get(API_KEY_HEADER),
+        request.cookies.get(API_KEY_COOKIE),
     ):
         # 제시된 키 자체는 로그에 남기지 않는다. 오타 진단에는 도움이 되겠지만, 그
         # 편의를 위해 비밀값을 로그 파일에 영구히 남기는 거래는 하지 않는다(#257에서
@@ -585,9 +684,13 @@ def is_allowed_ws_origin(origin: str | None) -> bool:
 
     그 결과 남던 잔여 위험(Origin을 보내지 않는 클라이언트는 여전히 붙는다)은 이제 이
     함수가 아니라 API 키가 닫는다(#266 2단계, is_authorized_api_call). 두 검사는 막는
-    것이 다르므로 둘 다 남는다 — Origin 검사는 키를 모르는 **브라우저**를 막고(키를 URL로
-    넘기는 정상 클라이언트가 있어도 임의 사이트는 그 키를 모른다), 키 검사는 Origin을
-    보내지 않거나 위조하는 **비브라우저**를 막는다. 어느 한쪽만으로는 다른 쪽이 열린다.
+    것이 다르므로 둘 다 남는다 — Origin 검사는 **브라우저**를, 키 검사는 Origin을 보내지
+    않거나 위조하는 **비브라우저**를 막는다. 어느 한쪽만으로는 다른 쪽이 열린다.
+
+    #266 3단계로 키가 `SameSite=Strict` 쿠키로 오게 된 뒤에도 이 검사는 남는다. 그
+    속성이 임의 사이트의 핸드셰이크에서 쿠키를 떼 주므로 겹치는 부분이 생기지만, 겹침은
+    상속이 아니다 — 쿠키 속성은 nginx 설정 한 줄이고 브라우저가 지켜 주는 것이며, 여기는
+    서버가 직접 보는 자리다. 한쪽이 무너져도 다른 쪽이 남게 두는 것이 요점이다.
     """
     if origin is None:
         return True
@@ -611,18 +714,24 @@ async def websocket_endpoint(websocket: WebSocket):
         logger.warning("WebSocket 연결 거부 — 허용되지 않은 Origin: %s", origin)
         await websocket.close(code=1008)
         return
-    # 정적 키 검사(#266 2단계). HTTP는 미들웨어가 헤더로 받지만, 브라우저 WebSocket
-    # API에는 커스텀 헤더를 붙일 자리가 없어 쿼리 파라미터로 받는다.
+    # 정적 키 검사(#266 2단계). 받는 경로는 HTTP 미들웨어와 같다 — 헤더와 쿠키다.
     #
-    # ⚠️ 그래서 이 키는 URL에 실려 나가고, **nginx 액세스 로그에 평문으로 남는다.**
-    # frontend/nginx.conf의 access_log off는 /nginx-health 한 곳뿐이라 /api/는 기본
-    # 로그를 탄다. 기록은 nginx가 backend보다 먼저 하므로, 여기서 무엇을 먼저 거절하든
-    # 로그에 남는 양은 달라지지 않는다 — 순서로 줄일 수 있는 문제가 아니다(PR #352 리뷰).
-    # 로그 쪽 완화는 nginx에서 쿼리스트링을 뺀 log_format을 쓰는 것이고, 별도 이슈다.
+    # 2단계는 여기서만 `?api_key=...` 쿼리 파라미터를 받았다. 브라우저 WebSocket API가
+    # 커스텀 헤더를 못 붙이니 다른 자리가 없었기 때문인데, 그 대가로 키가 URL에 실려
+    # **nginx 액세스 로그에 평문으로 남았다**(#355). 3단계의 쿠키가 그 제약을 없앤다 —
+    # 쿠키는 same-origin 핸드셰이크에도 브라우저가 자동으로 붙이므로, 쿼리 파라미터
+    # 경로를 걷어내도 브라우저 클라이언트는 그대로 연결된다. 로그에 남을 URL 자체가
+    # 생기지 않으니 #355는 완화가 아니라 소멸이다.
+    #
+    # 비브라우저 클라이언트는 헤더를 쓴다 — `wscat -H "X-API-Key: ..."`. 헤더는 기본
+    # log_format(combined)에 들어가지 않는다.
     #
     # 두 검사의 순서 자체는 판정에 영향이 없다(둘 다 통과해야 연결된다). Origin을 앞에
     # 두는 것은 #256이 만든 순서를 그대로 두는 것뿐이다.
-    if not is_authorized_api_call(websocket.query_params.get(WS_API_KEY_QUERY_PARAM)):
+    if not is_authorized_api_call(
+        websocket.headers.get(API_KEY_HEADER),
+        websocket.cookies.get(API_KEY_COOKIE),
+    ):
         # 위 미들웨어와 같은 이유로 제시된 키는 로그에 싣지 않는다.
         logger.warning("WebSocket 연결 거부 — API 키가 없거나 일치하지 않습니다.")
         await websocket.close(code=1008)
