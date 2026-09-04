@@ -31,6 +31,7 @@ from .stock_code import (
     _looks_like_stock_code,
 )
 from .pii_mask import mask_pii, unmask_pii
+from .pii_registry import active_mapping
 
 logger = logging.getLogger(__name__)
 _NAT_RESPONSE_LOG_PREVIEW_CHARS = 800
@@ -1257,17 +1258,26 @@ async def llm_chat(
     mask_pii/unmask_pii는 이 함수 지역 변수(mapping)로만 존재한다. 요청마다 새로
     만들어지므로, llm_chat이 asyncio.gather 등으로 동시에 여러 번 호출돼도 서로의
     매핑을 덮어쓰지 않는다.
+
+    다만 지역 변수인 것만으로는 **저장 경로가 막힌다**(#339). LLM이 사용자 발화를 보고
+    쓴 매매일지는 backend가 만든 자리표시자를 싣고 `POST /api/v1/db/diary`로 오는데,
+    그것은 이 왕복의 바깥이라 되돌릴 매핑이 없었다. 그래서 provider 호출 구간 동안만
+    매핑을 scope 키로 등록해(`pii_registry.active_mapping`) 그 요청이 조회할 수 있게
+    한다 — 수명은 여전히 이 호출이고, 등록소는 scope별로 갈려 있어 동시 호출이 서로를
+    덮지 않는다(#354). 등록소 밖으로 나가는 순간 등록은 지워지므로 `unmask_pii`는
+    블록 바깥에서 지역 변수로 돈다.
     """
     masked_msg, mapping = mask_pii(user_msg)
 
-    if provider_key == "openai":
-        raw = await _llm_openai_chat(masked_msg)
-    elif provider_key == "anthropic":
-        raw = await _llm_anthropic_chat(masked_msg)
-    elif provider_key == "ollama":
-        raw = await _llm_ollama_chat(masked_msg)
-    else:
-        raw = await _llm_nat_chat(masked_msg, conversation_id=conversation_id)
+    with active_mapping(mapping):
+        if provider_key == "openai":
+            raw = await _llm_openai_chat(masked_msg)
+        elif provider_key == "anthropic":
+            raw = await _llm_anthropic_chat(masked_msg)
+        elif provider_key == "ollama":
+            raw = await _llm_ollama_chat(masked_msg)
+        else:
+            raw = await _llm_nat_chat(masked_msg, conversation_id=conversation_id)
 
     return unmask_pii(raw, mapping)
 
