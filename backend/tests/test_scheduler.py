@@ -1,8 +1,9 @@
 import pytest
 import asyncio
 import json
+import pathlib
 from contextlib import asynccontextmanager
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from types import SimpleNamespace
 from fastapi.testclient import TestClient
 from unittest.mock import MagicMock
@@ -1330,9 +1331,16 @@ async def test_monitor_market_task_still_watches_stocks_returned_despite_truncat
 
 @pytest.fixture(autouse=True)
 def reset_balance_failure_streak(monkeypatch):
-    """모듈 전역 카운터가 테스트 간에 새지 않도록 매 테스트 시작 시 0으로 고정한다."""
+    """모듈 전역 카운터가 테스트 간에 새지 않도록 매 테스트 시작 시 0으로 고정한다.
+
+    시세 조회 카운터(#196)도 함께 고정한다. 잔고 카운터와 같은 모듈 전역이고, 억제
+    조건이 "첫 실패 / 원인 변경 / 6회마다"라 앞 테스트가 남긴 값에 따라 같은 코드가
+    로그를 남기기도 하고 안 남기기도 한다.
+    """
     monkeypatch.setattr("backend.scheduler._balance_failure_streak", 0)
     monkeypatch.setattr("backend.scheduler._last_balance_error", None)
+    monkeypatch.setattr("backend.scheduler._quote_failure_streak", 0)
+    monkeypatch.setattr("backend.scheduler._last_quote_error", None)
 
 
 def _make_balance_failure_mocks(monkeypatch, mock_run_mcp_tool_fn):
@@ -1352,12 +1360,21 @@ def _make_balance_failure_mocks(monkeypatch, mock_run_mcp_tool_fn):
     async def mock_score_signal(stock, current, last, *, source, provider):
         return _scored(False)
 
+    async def tool_dispatch(params, name, args):
+        # 시세 조회(#196)는 잔고와 같은 KIS 장애를 함께 겪는다고 본다. 이 헬퍼를 쓰는
+        # 테스트들은 "잔고 장애 중의 로그 억제"(#185)를 재는데, 시세 도구를 그대로 두면
+        # 각 테스트의 목이 그 이름에도 "news"를 돌려주고, 그 문자열이 실현손익 리포트
+        # 계약을 어겨 매 주기 error가 하나씩 더 쌓인다 — 세는 대상이 오염된다.
+        if name == "get_balance_rlz_pl":
+            raise RuntimeError("KIS 시세 조회 실패")
+        return await mock_run_mcp_tool_fn(params, name, args)
+
     monkeypatch.setattr("backend.scheduler.redis_state", fake_redis_state)
     monkeypatch.setattr(
         "backend.scheduler.SIGNAL_SOURCES",
         [SignalSource(name="news", mcp_params=object(), tool_name="get_market_news")],
     )
-    monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool_fn)
+    monkeypatch.setattr("backend.scheduler.run_mcp_tool", tool_dispatch)
     monkeypatch.setattr("backend.scheduler.score_signal", mock_score_signal)
     monkeypatch.setattr("backend.scheduler.manager.broadcast", _resolved_broadcast_mock())
 
@@ -2888,3 +2905,736 @@ async def test_recording_recovery_reports_missed_count(monkeypatch, caplog):
     assert len(warnings) == 1
     assert "3건" in warnings[0].getMessage()
     assert scheduler_module._filtered_signal_failure_streak == 0
+
+
+# ---------------------------------------------------------------------------
+# 이슈 #196: get_balance_rlz_pl 텍스트에서 시세를 읽어 Portfolio에 쓴다
+# ---------------------------------------------------------------------------
+
+# mcp-trading·backend 공유 픽스처(#196). balance_report.json(#137)과 같은 목적이며,
+# 경로도 같은 방식으로 __file__ 기준 절대 경로라 worktree·CI 양쪽에서 동일하게 풀린다.
+#
+# 고정은 **양방향**이다: mcp-trading/tests/balance-rlz-pl-report.test.js가 같은 파일의
+# input을 formatter에 넣어 expected_text와 바이트 단위로 비교하므로, formatter가 바뀌면
+# 형식을 소유한 JS 스위트가 먼저 깨진다. 이 파일을 고칠 때는 양쪽을 함께 돌린다.
+_RLZ_PL_FIXTURE_PATH = (
+    pathlib.Path(__file__).parent.parent.parent
+    / "mcp-trading" / "tests" / "fixtures" / "balance_rlz_pl_report.json"
+)
+_RLZ_PL_FIXTURE = json.loads(_RLZ_PL_FIXTURE_PATH.read_text(encoding="utf-8"))
+
+
+def _rlz_pl_text(case: str) -> str:
+    return _RLZ_PL_FIXTURE[case]["expected_text"]
+
+
+def test_parse_rlz_pl_quotes_reads_price_per_code():
+    """공유 픽스처의 정상 응답에서 코드별 현재가를 읽는다.
+
+    같은 pdno(005930)가 현금·신용 두 행으로 나뉘어 있는데, prpr은 종목의 시장
+    가격이라 두 행이 같다. 코드를 키로 처음 유효한 행만 채택하므로 결과는 2건이어야 한다.
+
+    이 테스트가 잡는 mutation: 코드 중복을 걸러내지 않고 매번 덮어쓰거나 더하는 회귀,
+    _RLZ_PL_PRICE_RE를 매입가/평가금액 줄까지 훑도록 넓히는 회귀(그러면 삼성전자
+    현재가가 70,000이나 712,000으로 잡힌다).
+    """
+    from ..scheduler import _parse_rlz_pl_quotes
+
+    quotes = _parse_rlz_pl_quotes(_rlz_pl_text("normal"))
+
+    assert quotes == {"005930": 71200.0, "035420": 201500.0}
+
+
+def test_parse_rlz_pl_quotes_omits_holdings_without_price():
+    """시세를 읽을 수 없는 두 형태 모두 결과에서 빠진다.
+
+    (1) prpr이 null이라 "현재가 -"로 나온 행(000000): 정규식이 매치되지 않는다.
+    (2) prpr이 "0"이라 "현재가 0원"으로 나온 행(123456): 정규식은 **매치된다**.
+        formatWon은 undefined·null·""에만 "-"를 내므로(formatters.js:7-10) "0"은
+        그대로 "0원"이 되고, 값을 보고 거르지 않으면 0.0이 신선한 현재가로 저장된다.
+        거래정지·장 시작 전·신규 상장 종목에 prpr=0이 온다는 것은 KIS 시세 API 전반에
+        대한 통념일 뿐 TTTC8494R 실계좌 응답으로 확인한 바는 없다 — 이는 추론이지
+        관측이 아니다. 다만 빈도와 무관하게 0 이하를 거르는 것이 옳으므로 이 테스트가
+        고정하는 계약은 그 통념에 기대지 않는다.
+
+    어느 쪽이든 0으로 읽으면 없던 시세가 생긴다(#122의 "0과 모름 구분"). 빠진 종목은
+    기존 값이 그대로 남고 TTL이 지나면 스스로 "모름"이 된다.
+
+    이 테스트가 잡는 mutation: 파싱 실패 시 0.0을 채우는 회귀(000000이 0.0으로
+    들어온다), 그리고 `if price <= 0` 가드 제거(123456이 0.0으로 들어온다). 둘 다
+    딕셔너리 비교가 실패한다.
+    """
+    from ..scheduler import _parse_rlz_pl_quotes
+
+    quotes = _parse_rlz_pl_quotes(_rlz_pl_text("no_price"))
+
+    assert quotes == {"005930": 71200.0}
+    # 0원 행이 "시세 0원"으로 살아 들어오지 않았음을 코드로도 못 박는다.
+    assert "123456" not in quotes
+
+
+def test_parse_rlz_pl_quotes_does_not_name_stock_that_later_row_priced(caplog):
+    """앞 행이 시세 없이 와도 뒤 행이 값을 주면 그 종목 이름을 부르지 않는다.
+
+    같은 코드가 매매구분마다 행으로 쪼개지므로, prpr이 "0"인 현금 행 뒤에 정상적인
+    신용 행이 올 수 있다. "현재가를 읽지 못한 종목" 목록을 append 시점의 이름으로
+    만들면 **시세를 실제로 받은** 종목을 못 받았다고 보고하게 된다 — 운영자가 없는
+    문제를 쫓는다.
+
+    이 테스트가 잡는 mutation: 경고 목록을 quotes로 거르지 않고 그대로 내보내는 회귀
+    (삼성전자가 경고에 등장한다).
+    """
+    import logging
+
+    from ..scheduler import _parse_rlz_pl_quotes
+
+    text = (
+        "[보유 종목]\n"
+        "1. 삼성전자 (005930) · 현금\n"
+        "   보유 10주 | 현재가 0원 | 평가 0원\n"
+        "   평가손익 -700,000원 (-100.00%) | 매입가 70,000원\n"
+        "   금일 매수 0주 / 매도 0주 | 전일대비 0 (0.00%)\n"
+        "\n"
+        "2. 삼성전자 (005930) · 신용\n"
+        "   보유 5주 | 현재가 71,200원 | 평가 356,000원\n"
+        "   평가손익 6,000원 (1.72%) | 매입가 70,000원\n"
+        "   금일 매수 0주 / 매도 0주 | 전일대비 300 (0.42%)"
+    )
+
+    with caplog.at_level(logging.WARNING, logger="backend.scheduler"):
+        quotes = _parse_rlz_pl_quotes(text)
+
+    assert quotes == {"005930": 71200.0}
+    unpriced = [r.getMessage() for r in caplog.records if "현재가를 읽지 못한" in r.getMessage()]
+    assert unpriced == [], "뒤 행이 시세를 채워 준 종목을 '못 읽었다'고 부르면 안 된다"
+
+
+def test_parse_rlz_pl_quotes_warns_when_duplicate_rows_disagree(caplog):
+    """같은 코드의 두 행이 다른 현재가를 들고 오면 먼저 채택한 값을 쓰되 경고를 남긴다.
+
+    "prpr은 매매구분과 무관한 시장 가격이라 행마다 같다"는 것은 추론이지 관측이
+    아니다 — TTTC8494R 실계좌 응답을 아직 아무도 보지 못했다. 실측 전까지 그 전제를
+    반증할 수 있는 경로는 프로덕션 로그뿐이므로, 어긋난 값을 조용히 버리면 증거가
+    사라진다.
+
+    이 테스트가 잡는 mutation: 중복 행을 값도 읽지 않고 곧바로 continue하는 회귀
+    (경고가 사라진다), 또는 먼저 채택한 값 대신 마지막 행을 채택하는 회귀(99999가 들어온다).
+    """
+    import logging
+
+    from ..scheduler import _parse_rlz_pl_quotes
+
+    with caplog.at_level(logging.WARNING, logger="backend.scheduler"):
+        quotes = _parse_rlz_pl_quotes(_rlz_pl_text("divergent_price"))
+
+    assert quotes == {"005930": 71200.0}
+    diverged = [r for r in caplog.records if "엇갈립니다" in r.getMessage()]
+    assert len(diverged) == 1, "엇갈린 현재가는 정확히 한 번 경고로 남아야 한다"
+    message = diverged[0].getMessage()
+    # 채택값과 버린 값이 모두 로그에 남아야 반증 자료로 쓸 수 있다.
+    assert "005930" in message
+    assert "71200" in message
+    assert "99999" in message
+
+
+def test_parse_rlz_pl_quotes_separates_missing_code_from_malformed(caplog, monkeypatch):
+    """pdno가 비어 "(-)"로 나온 줄은 형식 위반과 다른 메시지로 보고한다.
+
+    둘 다 종목 줄 정규식에 매치되지 않지만 운영자가 취할 행동이 다르다. 형식 위반은
+    포맷터(balance-rlz-pl-report.js) 회귀 신호이고, 코드 없음은 응답에 pdno가 없는
+    데이터 조건이다. 한 메시지로 묶으면 있지도 않은 JS 회귀를 찾아 나서게 된다.
+
+    이 테스트가 잡는 mutation: 코드 없는 줄을 다시 malformed로 합치는 회귀.
+    """
+    import logging
+
+    from .. import scheduler as scheduler_module
+    from ..scheduler import _parse_rlz_pl_quotes
+
+    # 이 경고는 연속 횟수로 억제되므로 앞선 테스트가 남긴 카운터에 기대지 않는다.
+    monkeypatch.setattr(scheduler_module, "_codeless_streak", 0)
+
+    with caplog.at_level(logging.WARNING, logger="backend.scheduler"):
+        quotes = _parse_rlz_pl_quotes(_rlz_pl_text("no_code"))
+
+    assert quotes == {"005930": 71200.0}
+    messages = [r.getMessage() for r in caplog.records]
+    codeless = [m for m in messages if "pdno가 비어" in m]
+    assert len(codeless) == 1
+    assert "코드없음" in codeless[0]
+    assert not [m for m in messages if "예상치 못한 실현손익 종목 줄 형식" in m], (
+        "코드 없음은 형식 위반이 아니므로 포맷터 회귀 경고를 내면 안 된다"
+    )
+
+
+def test_parse_rlz_pl_quotes_suppresses_repeated_priceless_warning(caplog, monkeypatch):
+    """현재가 없음 경고는 연속 횟수로 억제하고, 조건이 풀리면 다시 첫 회로 돌아간다.
+
+    거래정지처럼 시세가 없는 종목은 팔기 전까지 매 주기 같은 모습으로 다시 온다. 그런데
+    이 파서는 monitor_market_task 안에서 장 운영 시간 게이트 없이 10분마다 도므로
+    (하루 약 144회), 억제가 없으면 같은 종목 이름을 부르는 warning이 영구히 쌓인다 —
+    모의투자 대체 응답(_paper_fallback_streak)에 억제를 건 것과 같은 이유다.
+
+    이 테스트가 잡는 mutation: 억제를 걷어 내고 매번 warning을 내는 회귀(7회 중 7건),
+    첫 회를 삼키는 회귀(1회차가 debug로 빠진다), 조건이 풀려도 카운터를 0으로
+    되돌리지 않는 회귀(마지막 단언이 실패한다).
+    """
+    import logging
+
+    from .. import scheduler as scheduler_module
+    from ..scheduler import _parse_rlz_pl_quotes
+
+    monkeypatch.setattr(scheduler_module, "_priceless_streak", 0)
+
+    with caplog.at_level(logging.DEBUG, logger="backend.scheduler"):
+        for _ in range(7):
+            _parse_rlz_pl_quotes(_rlz_pl_text("no_price"))
+
+    def _priceless_warnings():
+        return [
+            r.getMessage() for r in caplog.records
+            if r.levelno == logging.WARNING and "현재가를 읽지 못한" in r.getMessage()
+        ]
+
+    warnings = _priceless_warnings()
+    # 1회차와 6회차만 warning. 7주기(약 70분)에 2건이면 10분마다 1건이 아니다.
+    assert len(warnings) == 2, warnings
+    assert "1회 연속" in warnings[0]
+    assert "6회 연속" in warnings[1]
+    assert scheduler_module._priceless_streak == 7
+
+    # 전 종목이 시세를 들고 온 주기가 한 번 지나면 카운터가 풀린다. 그러지 않으면
+    # 문제가 재발했을 때 다음 경고가 최대 한 시간 늦게 나온다.
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG, logger="backend.scheduler"):
+        _parse_rlz_pl_quotes(_rlz_pl_text("normal"))
+        assert scheduler_module._priceless_streak == 0
+        _parse_rlz_pl_quotes(_rlz_pl_text("no_price"))
+
+    reopened = _priceless_warnings()
+    assert len(reopened) == 1, reopened
+    assert "1회 연속" in reopened[0]
+
+
+def test_parse_rlz_pl_quotes_suppresses_repeated_codeless_warning(caplog, monkeypatch):
+    """코드 없음 경고도 같은 규칙으로 억제한다.
+
+    pdno가 비어 오는 것은 형식 위반이 아니라 데이터 조건이므로, 현재가 없음과 마찬가지로
+    한 번 생기면 매 주기 그대로 재현된다.
+
+    이 테스트가 잡는 mutation: codeless 경고의 억제를 걷어 내는 회귀(7회 중 7건).
+    """
+    import logging
+
+    from .. import scheduler as scheduler_module
+    from ..scheduler import _parse_rlz_pl_quotes
+
+    monkeypatch.setattr(scheduler_module, "_codeless_streak", 0)
+
+    with caplog.at_level(logging.DEBUG, logger="backend.scheduler"):
+        for _ in range(7):
+            _parse_rlz_pl_quotes(_rlz_pl_text("no_code"))
+
+    warnings = [
+        r.getMessage() for r in caplog.records
+        if r.levelno == logging.WARNING and "pdno가 비어" in r.getMessage()
+    ]
+    assert len(warnings) == 2, warnings
+    assert "1회 연속" in warnings[0]
+    assert "6회 연속" in warnings[1]
+    assert scheduler_module._codeless_streak == 7
+
+
+def test_parse_rlz_pl_quotes_does_not_suppress_divergent_warning(caplog, monkeypatch):
+    """엇갈린 현재가 경고는 **억제하지 않는다** — 매 호출 그대로 남아야 한다.
+
+    데이터 조건인 두 경고와 달리 이쪽은 "prpr은 매매구분과 무관하다"는 전제를 반증할 수
+    있는 유일한 증거 경로다. 실계좌에서 관측된 적이 없어 상시로 도는 경고가 아니고,
+    억제했다가 발생을 놓치면 이 경고를 남긴 이유 자체가 사라진다.
+
+    이 테스트가 잡는 mutation: divergent에도 연속 억제를 거는 회귀(7회 중 2건만 남는다).
+    """
+    import logging
+
+    from .. import scheduler as scheduler_module
+    from ..scheduler import _parse_rlz_pl_quotes
+
+    monkeypatch.setattr(scheduler_module, "_priceless_streak", 0)
+    monkeypatch.setattr(scheduler_module, "_codeless_streak", 0)
+
+    with caplog.at_level(logging.DEBUG, logger="backend.scheduler"):
+        for _ in range(7):
+            _parse_rlz_pl_quotes(_rlz_pl_text("divergent_price"))
+
+    diverged = [
+        r for r in caplog.records
+        if r.levelno == logging.WARNING and "엇갈립니다" in r.getMessage()
+    ]
+    assert len(diverged) == 7, [r.getMessage() for r in diverged]
+
+
+def test_sync_portfolio_prices_updates_every_duplicate_row(portfolio_session):
+    """같은 코드의 Portfolio 행이 둘이면 **둘 다** 시세와 스탬프를 받는다.
+
+    stock_code에는 아직 유니크 제약이 없다(models.Portfolio 주석). 응답의 시세를
+    pop으로 소비하면 두 번째 행부터는 낡은 값과 낡은 스탬프가 그대로 남아, 신선도
+    게이트가 낡은 값을 "신선함"으로 통과시킨다. 잔고 동기화가 중복을 수렴시키긴 하지만
+    잘림·마커 부재·도구 실패 때는 돌지 않고, 이 시세 경로는 의도적으로 balance_ok
+    밖에서 돈다 — 수렴을 기다릴 수 없다.
+
+    이 테스트가 잡는 mutation: quotes.get을 quotes.pop으로 되돌리는 회귀 → 두 번째
+    행의 current_price가 60000, price_updated_at이 None으로 남는다.
+    """
+    from sqlmodel import select
+
+    from ..models import Portfolio
+    from ..scheduler import _sync_portfolio_prices_from_rlz_pl
+
+    for _ in range(2):
+        portfolio_session.add(
+            Portfolio(
+                stock_code="005930",
+                stock_name="삼성전자",
+                quantity=10,
+                avg_price=70000,
+                current_price=60000,
+            )
+        )
+    portfolio_session.commit()
+
+    updated = _sync_portfolio_prices_from_rlz_pl(_rlz_pl_text("normal"), portfolio_session)
+
+    rows = portfolio_session.exec(
+        select(Portfolio).where(Portfolio.stock_code == "005930")
+    ).all()
+    assert len(rows) == 2
+    assert updated == 2
+    for row in rows:
+        assert row.current_price == 71200.0
+        assert row.price_updated_at is not None
+
+
+def test_sync_portfolio_prices_leftover_log_excludes_matched_codes(portfolio_session, caplog):
+    """매칭된 코드는 "Portfolio에 없어 건너뛰었다" 로그에 들어가지 않는다.
+
+    pop 대신 get으로 읽게 되면서 quotes가 소비되지 않으므로, 남은 코드 계산을 별도
+    집합으로 하지 않으면 방금 갱신한 종목까지 "없는 코드"로 보고된다.
+
+    이 테스트가 잡는 mutation: leftover를 sorted(quotes)로 되돌리는 회귀 → 005930이
+    로그에 섞여 아래 단언이 실패한다.
+    """
+    import logging
+
+    from ..models import Portfolio
+    from ..scheduler import _sync_portfolio_prices_from_rlz_pl
+
+    portfolio_session.add(
+        Portfolio(stock_code="005930", stock_name="삼성전자", quantity=10, avg_price=70000)
+    )
+    portfolio_session.commit()
+
+    with caplog.at_level(logging.INFO, logger="backend.scheduler"):
+        _sync_portfolio_prices_from_rlz_pl(_rlz_pl_text("normal"), portfolio_session)
+
+    leftover = [r.getMessage() for r in caplog.records if "Portfolio에 없어" in r.getMessage()]
+    assert len(leftover) == 1
+    # NAVER(035420)만 없는 코드다. 방금 갱신한 005930이 섞이면 안 된다.
+    assert "035420" in leftover[0]
+    assert "005930" not in leftover[0]
+
+
+def test_sync_portfolio_prices_writes_price_and_stamp(portfolio_session):
+    """시세와 갱신 시각을 함께 쓴다. 둘 중 하나만 쓰면 게이트가 무너진다.
+
+    이 테스트가 잡는 mutation: row.price_updated_at 대입 제거(값만 새로워지고 나이는
+    영영 null이라 API가 계속 "모름"으로 내린다), row.current_price 대입 제거,
+    또는 반환값을 갱신 행 수 대신 상수로 바꾸는 회귀.
+    """
+    from sqlmodel import select
+    from ..models import Portfolio
+    from ..scheduler import _sync_portfolio_prices_from_rlz_pl
+
+    before = datetime.now(timezone.utc)
+    portfolio_session.add(
+        Portfolio(stock_code="005930", stock_name="삼성전자", quantity=10, avg_price=70000)
+    )
+    portfolio_session.add(
+        Portfolio(stock_code="035420", stock_name="NAVER", quantity=2, avg_price=202500)
+    )
+    portfolio_session.commit()
+
+    updated = _sync_portfolio_prices_from_rlz_pl(_rlz_pl_text("normal"), portfolio_session)
+
+    assert updated == 2
+    rows = {r.stock_code: r for r in portfolio_session.exec(select(Portfolio)).all()}
+    assert rows["005930"].current_price == 71200.0
+    assert rows["035420"].current_price == 201500.0
+    for row in rows.values():
+        assert row.price_updated_at is not None
+        # SQLite는 오프셋을 저장하지 않으므로 읽어 온 값이 naive일 수 있다.
+        stamped = row.price_updated_at
+        if stamped.tzinfo is None:
+            stamped = stamped.replace(tzinfo=timezone.utc)
+        assert stamped >= before
+
+
+def test_sync_portfolio_prices_leaves_unquoted_rows_untouched(portfolio_session):
+    """응답에 없는 종목의 시세와 스탬프는 손대지 않는다.
+
+    지우면 일시적 누락이 곧바로 "시세 없음"이 되고, 스탬프만 갱신하면 낡은 값이
+    신선하다고 단언된다. 둘 다 하지 않는 것이 옳다 — TTL이 알아서 내려 준다.
+
+    이 테스트가 잡는 mutation: 응답에 없는 행의 current_price를 None으로 지우는 회귀,
+    또는 모든 행에 price_updated_at을 찍는 회귀.
+    """
+    from sqlmodel import select
+    from ..models import Portfolio
+    from ..scheduler import _sync_portfolio_prices_from_rlz_pl
+
+    old_stamp = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    portfolio_session.add(
+        Portfolio(
+            stock_code="035720",
+            stock_name="카카오",
+            quantity=3,
+            avg_price=42000,
+            current_price=41000,
+            price_updated_at=old_stamp,
+        )
+    )
+    portfolio_session.commit()
+
+    updated = _sync_portfolio_prices_from_rlz_pl(_rlz_pl_text("normal"), portfolio_session)
+
+    assert updated == 0
+    row = portfolio_session.exec(select(Portfolio)).one()
+    assert row.current_price == 41000.0
+    stamped = row.price_updated_at
+    assert stamped is not None
+    if stamped.tzinfo is None:
+        stamped = stamped.replace(tzinfo=timezone.utc)
+    assert stamped == old_stamp
+
+
+@pytest.mark.parametrize(
+    "case,expected",
+    [
+        # 잘림: 부분 응답이므로 아무것도 쓰지 않는다.
+        ("truncated", None),
+        # 보유 0건: 응답은 정상이고 쓸 시세가 없을 뿐이므로 None이 아니라 0이다.
+        ("empty", 0),
+    ],
+)
+def test_sync_portfolio_prices_guards_from_fixture(portfolio_session, case, expected):
+    """잘림·보유 0건 응답에서 기존 시세를 그대로 보존한다.
+
+    두 경우의 반환값이 다른 것이 요점이다. None은 "응답을 믿을 수 없어 건너뜀"이고
+    0은 "응답은 읽었고 갱신할 것이 없었음"이다 — 호출처가 둘을 구분할 수 있어야
+    "시세를 못 얻는 상태"와 "빈 계좌"가 같은 로그로 뭉개지지 않는다.
+
+    이 테스트가 잡는 mutation: 잘림 가드 제거(삼성전자 시세가 71,200으로 덮인다),
+    보유 0건을 None으로 처리하는 회귀.
+    """
+    from sqlmodel import select
+    from ..models import Portfolio
+    from ..scheduler import _sync_portfolio_prices_from_rlz_pl
+
+    old_stamp = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    portfolio_session.add(
+        Portfolio(
+            stock_code="005930",
+            stock_name="삼성전자",
+            quantity=10,
+            avg_price=70000,
+            current_price=60000,
+            price_updated_at=old_stamp,
+        )
+    )
+    portfolio_session.commit()
+
+    assert _sync_portfolio_prices_from_rlz_pl(_rlz_pl_text(case), portfolio_session) == expected
+
+    row = portfolio_session.exec(select(Portfolio)).one()
+    assert row.current_price == 60000.0, "가드가 뚫려 기존 시세가 덮였습니다"
+
+
+def test_sync_portfolio_prices_skips_when_marker_absent(portfolio_session, caplog):
+    """[보유 종목] 섹션이 없는 응답은 계약 위반으로 보고 아무것도 쓰지 않는다.
+
+    빈 계좌 문구조차 없으면 "보유 0건"이 아니라 "응답을 읽지 못함"이다. run_mcp_tool은
+    MCP content가 비면 예외 대신 ""를 돌려주므로 이 경로는 실재한다.
+
+    이 테스트가 잡는 mutation: 마커 부재 가드 제거 → 파서가 {}를 돌려주고 반환값이
+    None 대신 0이 된다.
+    """
+    import logging
+    from sqlmodel import select
+    from ..models import Portfolio
+    from ..scheduler import _sync_portfolio_prices_from_rlz_pl
+
+    portfolio_session.add(
+        Portfolio(
+            stock_code="005930",
+            stock_name="삼성전자",
+            quantity=10,
+            avg_price=70000,
+            current_price=60000,
+        )
+    )
+    portfolio_session.commit()
+
+    with caplog.at_level(logging.ERROR, logger="backend.scheduler"):
+        result = _sync_portfolio_prices_from_rlz_pl("응답은 왔지만 종목 섹션이 없습니다.", portfolio_session)
+
+    assert result is None
+    assert portfolio_session.exec(select(Portfolio)).one().current_price == 60000.0
+    assert [r for r in caplog.records if r.levelno == logging.ERROR], (
+        "응답을 읽지 못한 것은 운영자가 알아야 할 계약 위반이다"
+    )
+
+
+def test_sync_portfolio_prices_treats_paper_fallback_as_no_quote(portfolio_session, caplog):
+    """모의투자 대체 응답은 error가 아니라 "이번 주기 시세 없음"이다.
+
+    get_balance_rlz_pl은 실전 계좌 전용이라 모의투자에서는 index.js가 get_balance
+    요약으로 대체한다. 그 응답에는 [보유 종목] 마커가 없으므로, 이 분기가 없으면
+    모의투자 배포에서 10분마다 error가 쌓인다 — 그 배포에서는 정상 동작인데도.
+
+    이 테스트가 잡는 mutation: 모의투자 가드 제거 또는 마커 가드 뒤로 이동 →
+    ERROR 레코드가 생겨 아래 단언이 실패한다.
+    """
+    import logging
+    from sqlmodel import select
+    from ..models import Portfolio
+    from ..scheduler import _sync_portfolio_prices_from_rlz_pl
+
+    portfolio_session.add(
+        Portfolio(
+            stock_code="005930",
+            stock_name="삼성전자",
+            quantity=10,
+            avg_price=70000,
+            current_price=60000,
+        )
+    )
+    portfolio_session.commit()
+
+    # index.js의 getBalanceRlzPl가 실제로 붙이는 문구. get_balance 리포트
+    # 뒤에 안내가 따라온다. index.js 쪽에는 이 매칭을 알리는 주석이 없으므로, 저 문구가
+    # 바뀌면 이 테스트가 유일한 조기 경보다 — scheduler.py의 표지 상수 주석 참고.
+    paper_text = (
+        _make_balance_text(("삼성전자", "005930", 10, 70000))
+        + "\n\n[안내] 모의투자(openapivts) 계좌는 실현손익 TR(v1_국내주식-041)을 "
+        "지원하지 않아 잔고 요약으로 대체했습니다."
+    )
+
+    with caplog.at_level(logging.DEBUG, logger="backend.scheduler"):
+        result = _sync_portfolio_prices_from_rlz_pl(paper_text, portfolio_session)
+
+    assert result is None
+    assert portfolio_session.exec(select(Portfolio)).one().current_price == 60000.0
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR], (
+        "모의투자 배포에서는 매 주기의 정상 동작이므로 error가 아니다"
+    )
+
+
+def test_sync_portfolio_prices_suppresses_repeated_paper_fallback_info(
+    portfolio_session, caplog, monkeypatch
+):
+    """모의투자 대체 응답 안내는 연속 횟수로 억제한다.
+
+    모의투자는 기본 개발 구성이라 이 분기는 매 주기 **항상** 탄다. 억제하지 않으면
+    10분마다 같은 info가 영구히 쌓여 로그가 신호를 잃는다 — 드물게만 도는 실패 경로
+    (_quote_failure_streak)에는 억제가 있는데 상시 도는 이쪽에 없던 것은 우선순위가
+    뒤집힌 상태였다.
+
+    이 테스트가 잡는 mutation: 억제를 걷어 내고 매번 info를 내는 회귀(7회 중 7건),
+    또는 첫 회를 삼키는 회귀(1회차가 debug로 빠진다).
+    """
+    import logging
+
+    from .. import scheduler as scheduler_module
+    from ..scheduler import _sync_portfolio_prices_from_rlz_pl
+
+    monkeypatch.setattr(scheduler_module, "_paper_fallback_streak", 0)
+
+    paper_text = (
+        _make_balance_text(("삼성전자", "005930", 10, 70000))
+        + "\n\n[안내] 모의투자(openapivts) 계좌는 실현손익 TR(v1_국내주식-041)을 "
+        "지원하지 않아 잔고 요약으로 대체했습니다."
+    )
+
+    with caplog.at_level(logging.DEBUG, logger="backend.scheduler"):
+        for _ in range(7):
+            assert _sync_portfolio_prices_from_rlz_pl(paper_text, portfolio_session) is None
+
+    infos = [
+        r for r in caplog.records
+        if r.levelno == logging.INFO and "모의투자 계좌는" in r.getMessage()
+    ]
+    # 1회차와 6회차만 info. 7주기(약 70분)에 2건이면 10분마다 1건이 아니다.
+    assert len(infos) == 2, [r.getMessage() for r in infos]
+    assert "1회 연속" in infos[0].getMessage()
+    assert "6회 연속" in infos[1].getMessage()
+    assert scheduler_module._paper_fallback_streak == 7
+
+
+def test_sync_portfolio_from_balance_preserves_price_columns(portfolio_session):
+    """잔고 동기화는 시세 컬럼을 읽지도 쓰지도 않는다 (#196의 경로 분리).
+
+    이 불변식이 깨지면 10분 주기 잔고 동기화가 방금 채운 시세를 지우거나, 시세를
+    갱신하지 않은 채 스탬프만 새로 찍어 낡은 값을 신선한 것으로 만든다.
+
+    이 테스트가 잡는 mutation: _sync_portfolio_from_balance가 current_price 또는
+    price_updated_at에 대입하는 회귀(신규 행 경로·기존 행 경로 어느 쪽이든).
+    """
+    from sqlmodel import select
+    from ..models import Portfolio
+    from ..scheduler import _sync_portfolio_from_balance
+
+    stamp = datetime(2026, 9, 3, tzinfo=timezone.utc)
+    portfolio_session.add(
+        Portfolio(
+            stock_code="005930",
+            stock_name="삼성전자",
+            quantity=10,
+            avg_price=70000,
+            current_price=71200,
+            price_updated_at=stamp,
+        )
+    )
+    portfolio_session.commit()
+
+    # 수량·평단가가 바뀐 새 잔고. 시세 컬럼은 응답에 없으므로 그대로여야 한다.
+    _sync_portfolio_from_balance(
+        _make_balance_text(("삼성전자", "005930", 15, 70500)), portfolio_session
+    )
+
+    row = portfolio_session.exec(select(Portfolio)).one()
+    assert row.quantity == 15
+    assert row.avg_price == 70500.0
+    assert row.current_price == 71200.0, "잔고 동기화가 시세를 덮었습니다"
+    stamped = row.price_updated_at
+    assert stamped is not None, "잔고 동기화가 시세 갱신 시각을 지웠습니다"
+    if stamped.tzinfo is None:
+        stamped = stamped.replace(tzinfo=timezone.utc)
+    assert stamped == stamp, "잔고 동기화가 시세 갱신 시각을 새로 찍었습니다"
+
+
+@pytest.mark.asyncio
+async def test_monitor_market_task_refreshes_prices_after_balance_sync(monkeypatch):
+    """감시 주기가 잔고 동기화 **뒤에** 시세 갱신을 호출한다 (#196).
+
+    순서가 계약이다. 시세 갱신이 앞서면, 이번 주기에 새로 편입된 종목은 아직 행이
+    없어 건너뛰어지고 한 주기(10분) 동안 price_known=False로 남는다.
+
+    이 테스트가 잡는 mutation: _refresh_portfolio_prices 호출 제거, 또는 잔고 동기화
+    앞으로 옮기는 회귀(call_order가 뒤집혀 실패한다).
+    """
+    from ..scheduler import SignalSource, monitor_market_task
+
+    call_order: list[str] = []
+
+    @asynccontextmanager
+    async def unavailable_redis_state():
+        raise ConnectionError("redis unavailable")
+        yield
+
+    async def mock_run_mcp_tool(params, name, args):
+        if name == "get_balance":
+            return _make_balance_text(("삼성전자", "005930", 10, 70000))
+        if name == "get_balance_rlz_pl":
+            return _rlz_pl_text("normal")
+        return "news"
+
+    def mock_sync_portfolio(balance_text, session, **kwargs):
+        call_order.append("balance")
+        return 1
+
+    def mock_sync_prices(report_text, session):
+        call_order.append("quote")
+        assert report_text == _rlz_pl_text("normal"), (
+            "시세 갱신이 get_balance_rlz_pl 응답이 아닌 다른 텍스트를 받았다"
+        )
+        return 1
+
+    async def mock_score_signal(stock, current, last, *, source, provider):
+        return _scored(False)
+
+    monkeypatch.setattr("backend.scheduler.redis_state", unavailable_redis_state)
+    monkeypatch.setattr(
+        "backend.scheduler.SIGNAL_SOURCES",
+        [SignalSource(name="news", mcp_params=object(), tool_name="get_market_news")],
+    )
+    monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
+    monkeypatch.setattr("backend.scheduler._sync_portfolio_from_balance", mock_sync_portfolio)
+    monkeypatch.setattr("backend.scheduler._sync_portfolio_prices_from_rlz_pl", mock_sync_prices)
+    monkeypatch.setattr("backend.scheduler.score_signal", mock_score_signal)
+    monkeypatch.setattr("backend.scheduler.manager.broadcast", _resolved_broadcast_mock())
+
+    await monitor_market_task(watchlist_repo=FakeWatchlistRepo())
+
+    assert call_order == ["balance", "quote"]
+
+
+@pytest.mark.asyncio
+async def test_monitor_market_task_keeps_balance_sync_when_quote_tool_fails(monkeypatch, caplog):
+    """시세 도구가 실패해도 잔고 동기화와 감시는 그대로 돈다 (#196).
+
+    get_balance_rlz_pl은 실전 계좌 전용이라 배포에 따라 매 주기 실패하는 것이 정상이다.
+    그 실패가 잔고 동기화를 막으면, 이미 동작하던 기능이 새 기능 때문에 멈춘다.
+    실패는 error가 아니라 warning이다 — 감시도 주문도 막지 않기 때문이다.
+
+    이 테스트가 잡는 mutation: _refresh_portfolio_prices의 try/except 제거(예외가
+    _monitor_market_task 밖으로 나가 잔고 동기화 뒤 로직이 끊긴다), 또는 시세 갱신을
+    잔고 동기화 앞·같은 try 안으로 옮기는 회귀.
+    """
+    import logging
+    from ..scheduler import SignalSource, monitor_market_task
+
+    sync_calls: list[str] = []
+    # 도구 호출 순서를 그대로 남긴다. "감시가 계속 돌았다"를 score_signal 호출로 재면
+    # 감시 루프가 동일 signal 중복 제거에서 멈추는 경로와 섮여 묻힌다 — 이 테스트가 재려는 것은
+    # 그것이 아니라 "시세 실패 뒤에도 신호 조회까지 도달했는가"다.
+    tool_calls: list[str] = []
+
+    @asynccontextmanager
+    async def unavailable_redis_state():
+        raise ConnectionError("redis unavailable")
+        yield
+
+    async def mock_run_mcp_tool(params, name, args):
+        tool_calls.append(name)
+        if name == "get_balance":
+            return _make_balance_text(("삼성전자", "005930", 10, 70000))
+        if name == "get_balance_rlz_pl":
+            raise RuntimeError("실전 계좌 전용 도구 거부")
+        return "news"
+
+    def mock_sync_portfolio(balance_text, session, **kwargs):
+        sync_calls.append(balance_text)
+        return 1
+
+    async def mock_score_signal(stock, current, last, *, source, provider):
+        return _scored(False)
+
+    monkeypatch.setattr("backend.scheduler.redis_state", unavailable_redis_state)
+    monkeypatch.setattr(
+        "backend.scheduler.SIGNAL_SOURCES",
+        [SignalSource(name="news", mcp_params=object(), tool_name="get_market_news")],
+    )
+    monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
+    monkeypatch.setattr("backend.scheduler._sync_portfolio_from_balance", mock_sync_portfolio)
+    monkeypatch.setattr("backend.scheduler.score_signal", mock_score_signal)
+    monkeypatch.setattr("backend.scheduler.manager.broadcast", _resolved_broadcast_mock())
+
+    with caplog.at_level(logging.DEBUG, logger="backend.scheduler"):
+        await monitor_market_task(watchlist_repo=FakeWatchlistRepo())
+
+    assert len(sync_calls) == 1, "시세 도구 실패가 잔고 동기화를 막았습니다"
+    assert tool_calls == ["get_balance", "get_balance_rlz_pl", "get_market_news"], (
+        "시세 도구 실패 뒤에도 신호 조회까지 진행되어야 합니다"
+    )
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR], (
+        "시세를 못 얻는 것은 감시·주문 어느 것도 막지 않으므로 error가 아니다"
+    )

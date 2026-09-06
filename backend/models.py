@@ -23,10 +23,30 @@ class Portfolio(SQLModel, table=True):
     stock_name: str = Field(description="종목명")
     quantity: int = Field(default=0, description="보유 수량")
     avg_price: float = Field(default=0.0, description="평균 매입가")
-    # 이 값을 채우는 프로덕션 경로는 아직 없다 — get_balance(inquire-balance,
-    # TTTC8434R) output1에 현재가 필드가 있는지가 실계좌 실측 전까지 미확인이다(#196).
-    # 경로가 생긴 뒤에도 잔고 동기화는 이 필드를 덮지 않는다(위 upsert 참고).
+    # 이 값을 채우도록 배선된 프로덕션 경로는 get_balance_rlz_pl(inquire-balance-rlz-pl,
+    # TTTC8494R)의 텍스트 리포트를 파싱하는 scheduler._sync_portfolio_prices_from_rlz_pl
+    # 하나뿐이다(#196). 잔고 동기화(_sync_portfolio_from_balance)는 이 필드를 읽지도
+    # 쓰지도 않는다 — get_balance(TTTC8434R) output1에 현재가 필드가 있는지가
+    # 미확인이라 그쪽에서 채울 근거가 없고, 덮으면 시세 경로가 방금 쓴 값이 10분마다
+    # null로 지워진다(위 upsert 참고).
+    #
+    # **다만 이 경로가 실제로 값을 낸다는 것도 아직 확인되지 않았다.** TTTC8494R
+    # 실계좌 응답을 아직 아무도 관측하지 못했으므로, 그 응답의 prpr이 채워져 오는지는
+    # TTTC8434R에 현재가 필드가 있는지와 **똑같이 미확인**이다. 둘 중 하나만 검증된
+    # 상태가 아니라 둘 다 미검증이며, 실계좌 실측이 그 판단을 대신할 수 없다.
     current_price: Optional[float] = Field(default=None, description="현재가")
+    # current_price를 마지막으로 갱신한 시각(UTC). updated_at과 **다른 축**이다:
+    # updated_at은 "잔고를 마지막으로 확인한 시각"이라 시세 갱신 여부와 무관하게 매
+    # 주기 갱신되므로, 그 값으로 시세 나이를 재면 항상 방금 갱신된 것처럼 보인다.
+    #
+    # null이면 "시세 나이를 모른다"이지 "시세가 없다"가 아니다. 이 컬럼이 없던 시절에
+    # 저장된 행은 current_price가 채워져 있어도 언제 채워진 값인지 알 수 없어 백필하지
+    # 않는다 — AgentReport.signal_score를 DEFAULT 없이 둔 것과 같은 기준이다(#122·#162).
+    # scheduler.is_price_fresh가 이 null을 "모름"으로 판정해 price_known=False로 내린다.
+    price_updated_at: Optional[datetime] = Field(
+        default=None,
+        description="current_price를 마지막으로 갱신한 시각 (UTC). null이면 시세 나이 미상 — 신선도 판정에서 '모름'.",
+    )
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="최근 업데이트 시간")
 
 class TradeHistory(SQLModel, table=True):

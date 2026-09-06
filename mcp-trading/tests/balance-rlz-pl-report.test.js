@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readFileSync } from "node:fs";
 import { formatBalanceRlzPlReport } from "../balance-rlz-pl-report.js";
 import { isPaperTradingKisUrl } from "../formatters.js";
+
+const rlzPlFixture = JSON.parse(
+  readFileSync(new URL("fixtures/balance_rlz_pl_report.json", import.meta.url), "utf-8"),
+);
 
 test("formatBalanceRlzPlReport includes account summary when holdings are empty", () => {
   const text = formatBalanceRlzPlReport({
@@ -89,3 +94,18 @@ test("isPaperTradingKisUrl detects mock trading host", () => {
   assert.equal(isPaperTradingKisUrl("https://openapivts.koreainvestment.com:29443"), true);
   assert.equal(isPaperTradingKisUrl("https://openapi.koreainvestment.com:9443"), false);
 });
+
+// 이슈 #196: 공유 픽스처 기반 계약 테스트. balance.test.js의 balance_report.json(#137)
+// 테스트와 같은 목적·같은 모양이다.
+//
+// 이 루프가 없으면 계약이 **한 방향으로만** 고정된다: Python 테스트
+// (backend/tests/test_scheduler.py)가 같은 파일의 expected_text를 파서에 넣어 검증하므로,
+// 포맷터가 바뀌면 JS 스위트는 초록으로 남고 Python만 빨개진다 — 형식을 소유한 쪽이
+// 아니라 소비하는 쪽이 깨진다. 아래 단언이 포맷터 변경을 이 파일에서 먼저 잡는다.
+// 픽스처를 고칠 때는 Python 쪽 파서 계약도 함께 확인하세요.
+for (const key of ["normal", "divergent_price", "no_price", "no_code", "truncated", "empty"]) {
+  test(`formatBalanceRlzPlReport output matches shared fixture — ${key} (fixtures/balance_rlz_pl_report.json)`, () => {
+    const { input, expected_text } = rlzPlFixture[key];
+    assert.equal(formatBalanceRlzPlReport(input), expected_text);
+  });
+}
