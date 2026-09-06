@@ -89,7 +89,7 @@ KIS 요청 1건마다 stderr에 정확히 한 줄이 나간다.
 | `index.js`의 `kisApiGet` — 여섯 개 **조회(GET)** 경로가 전부 여기를 지난다(연속조회 두 루프 + `get_balance` + 단건 조회들) | 실제 TR ID | ✅ |
 | `index.js`의 `getAccessToken` — `POST /oauth2/tokenP` | `tokenP` | ✅ |
 | `kis-client.js:16` — hashkey `POST` | — | ❌ **안 나온다** |
-| `kis-client.js:114` — 주문 `POST` | — | ❌ **안 나온다** |
+| `kis-client.js:113` — 주문 `POST` | — | ❌ **안 나온다** |
 
 - 5.3의 계좌 단위 가설을 보려면 단건 조회들이 함께 찍혀야 하는데, `kisApiGet` 한 곳이
   그것을 전부 덮는다.
