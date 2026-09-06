@@ -251,7 +251,7 @@ ORDER_MIN_CONFIDENCE = _float_env("ORDER_MIN_CONFIDENCE", 0.6)
 ORDER_REPROPOSAL_COOLDOWN_MINUTES = _int_env("ORDER_REPROPOSAL_COOLDOWN_MINUTES", 60)
 
 # 주문 금지 종목코드 목록(쉼표 구분). 기본은 빈 목록이다.
-# 판정은 order_assist가 _ORDERABLE_STOCK_CODE_RE 검사 바로 옆에서 수행한다 —
+# 판정은 order_assist가 is_orderable_stock_code_strict() 검사 바로 옆에서 수행한다 —
 # 둘 다 "이 코드로 주문을 낼 수 있는가"라는 같은 질문의 두 갈래라 떨어뜨려 두면
 # 한쪽만 통과하는 경로가 생긴다.
 ORDER_BLACKLIST = frozenset(
