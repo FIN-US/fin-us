@@ -241,12 +241,11 @@ async function kisApiGet(pathname, trId, params, { trCont = "" } = {}) {
 
   const data = response.data;
   if (data.rt_cd !== "0") {
-    const error = new Error(`KIS API 오류: ${data.msg1 || data.msg_cd || "알 수 없는 오류"}`);
-    // msg1이 있으면 위 메시지가 msg_cd를 버린다. 그래서 EGW00201 같은 코드가 상위 로그에
-    // 한 번도 남지 않았다. kis-client.js:124-126의 kisOrderRejected 태깅과 같은 방식으로
-    // 코드를 에러에 붙여, 상위 경로가 사유를 이름으로 부를 수 있게 남겨 둔다.
-    error.kisMsgCd = data.msg_cd;
-    throw error;
+    // msg1이 있으면 이 메시지가 msg_cd를 버린다. 그래도 여기서 error에 msg_cd를 따로
+    // 태깅하지는 않는다 — 읽는 쪽이 없어서 죽은 값이 되기 때문이다(kis-client.js의
+    // kisOrderRejected는 order-submit.js:17이 실제로 읽는다). 버려지던 msg_cd는 이 PR이
+    // 붙인 위 `[kis-req]` 줄의 `msg_cd=` 필드가 이미 싣고 나간다.
+    throw new Error(`KIS API 오류: ${data.msg1 || data.msg_cd || "알 수 없는 오류"}`);
   }
 
   const nextTrCont = response.headers?.tr_cont || response.headers?.["tr-cont"] || "";
