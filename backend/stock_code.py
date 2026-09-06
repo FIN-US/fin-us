@@ -112,6 +112,23 @@ def _alnum_stock_order_enabled() -> bool:
     return os.environ.get("KIS_ALNUM_STOCK_ORDER_ENABLED", "") == "true"
 
 
+def describe_orderable_code_policy() -> str:
+    """지금 이 프로세스가 주문을 받는 코드 형태를 사용자 문장으로 돌려줍니다.
+
+    거절 안내 문구를 호출부에 리터럴로 두면 정책의 4번째 복제본이 되고, 그 복제본만
+    플래그를 보지 않아 조용히 어긋난다 — 실제로 telegram_commands.py의 안내는 플래그를
+    보는 가드 아래에서 플래그 꺼짐 규칙을 무조건 서술하고 있었다. 코드 상한이 없는
+    _STOCK_CODE_EXTRACT_RE 덕분에 8자 코드가 거기까지 도달하므로, 플래그를 켠 채
+    0001A0은 주문되는 프로세스에서 "숫자 6~7자리만 주문할 수 있다"는 안내가 나갔다.
+
+    문장을 판정 정규식 바로 옆에 둬 정책과 설명이 갈라질 자리를 없앤다. 같은 분기를
+    mcp-trading/order.js의 buildCashOrderBody()도 메시지 단위로 갖고 있다.
+    """
+    if _alnum_stock_order_enabled():
+        return "영숫자 6~7자 또는 9자 코드만 주문할 수 있습니다."
+    return "숫자 6~7자리 코드만 주문할 수 있습니다."
+
+
 def is_orderable_stock_code_strict(code: str) -> bool:
     """플래그와 무관하게 #73 기본 정책(숫자 6~7자)으로만 판정합니다.
 

@@ -1557,6 +1557,46 @@ async def test_order_command_allows_alnum_stock_code_when_flag_enabled(
 
 
 @pytest.mark.asyncio
+async def test_order_command_rejection_message_follows_alnum_flag(monkeypatch):
+    """플래그를 켠 프로세스의 거절 안내는 그 프로세스가 실제로 받는 범위를 말해야 한다.
+
+    #138 리뷰: 위 두 테스트는 플래그 꺼짐에서 거절되는 코드와 플래그 켜짐에서 통과하는
+    코드만 다뤄, "플래그를 켰는데도 거절되는 코드"의 안내 문구가 한 번도 실행되지
+    않았다. 8자 코드가 그 경로다 — _STOCK_CODE_EXTRACT_RE에 상한이 없어 추출을 통과하고
+    market이 UNKNOWN이 아니라 미해석 에코 검사도 지나 주문 가능 판정까지 온다. 8자는
+    종목마스터에 0건이라 플래그를 켜도 계속 거절 대상이다(#140과 같은 근거).
+
+    같은 프로세스에서 0001A0은 주문되는데 "숫자 6~7자리 코드만 주문할 수 있습니다"라고
+    답하면 사용자에게 거짓을 말하는 것이다.
+    """
+    monkeypatch.setenv("KIS_ALNUM_STOCK_ORDER_ENABLED", "true")
+
+    async def mcp_runner(server_params, tool_name, arguments):
+        if tool_name == "resolve_stock_code":
+            return "가상종목 (12345678, KOSPI)"
+        raise AssertionError(f"주문 불가 종목인데 호출됨: {tool_name}")
+
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        mcp_runner=mcp_runner,
+        now_factory=lambda: datetime(2026, 5, 20, 10, 0, tzinfo=KST),
+    )
+
+    await handler.handle_update(
+        {"message": {"chat": {"id": 123}, "text": "/buy 가상종목 10"}}
+    )
+
+    message = notifier.messages[-1]
+    assert "가상종목(12345678)" in message
+    assert "주문을 지원하는 종목코드 형태가 아닙니다" in message
+    assert "영숫자 6~7자 또는 9자 코드만 주문할 수 있습니다." in message
+    # 플래그가 켜져 있는데 꺼짐 규칙을 안내하면 안 된다.
+    assert "숫자 6~7자리 코드만" not in message
+    assert _orders(handler) == {}
+
+
+@pytest.mark.asyncio
 async def test_cancel_removes_pending_order():
     async def mcp_runner(server_params, tool_name, arguments):
         if tool_name == "resolve_stock_code":

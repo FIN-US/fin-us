@@ -78,6 +78,7 @@ from .trading_orders import (
 from .stock_code import (
     _STOCK_CODE_EXTRACT_RE,
     _is_unresolved_echo,
+    describe_orderable_code_policy,
     extract_stock_name,
     is_orderable_stock_code,
 )
@@ -1349,9 +1350,12 @@ class TelegramCommandHandler:
                 # 아니라 보통주·우선주이고, 하필 ETN은 KIS order-cash 스펙이 PDNO 대상으로
                 # 명시한 상품이다(docs/issue-138-alnum-stock-code.md 2.2·4.2 가·6.6).
                 # 막는 근거는 상품 종류가 아니라 코드 형태이므로 그것만 말한다.
+                # 허용 형태 문장은 판정 함수와 같은 모듈에서 받아 온다 — 여기 리터럴로
+                # 두면 위 가드는 플래그를 보는데 안내만 보지 않아, 플래그를 켠 프로세스가
+                # 8자 코드 사용자에게 "숫자 6~7자리만"이라고 잘못 답한다(#138 리뷰).
                 await self._send_text_or_raise(
                     f"주문 불가: {stock_name}({stock_code}) — 현재 주문을 지원하는 "
-                    "종목코드 형태가 아닙니다. 숫자 6~7자리 코드만 주문할 수 있습니다."
+                    f"종목코드 형태가 아닙니다. {describe_orderable_code_policy()}"
                 )
                 return
             quote_result, balance_result = await asyncio.gather(
