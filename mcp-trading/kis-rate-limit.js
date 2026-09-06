@@ -217,8 +217,10 @@ const FALSE_VALUES = new Set(["0", "false", "no", "off"]);
  * `KIS_<NAME>`을 먼저 보고, 없으면 `FINUS_KIS_<NAME>`(둘 다 trim 후 첫 비어 있지 않은 값).
  * 값이 이상하면 조용히 삼키지 않고 stderr에 경고를 남기고 기본값으로 돌아간다(같은 파서 관례).
  *
- * 게이트를 두는 이유: 연속조회 1회가 최대 50페이지(DAILY_CCLD_MAX_PAGES)이고 그런 도구가
- * 셋이라 요청별 줄을 상시로 켜면 로그가 잠긴다. 유량 제한 분류는 이 게이트와 무관하게 항상
+ * 게이트를 두는 이유: 연속조회를 쓰는 도구가 셋이고, 셋을 한 번씩 돌리면 페이지 상한의
+ * 합만큼 요청이 난다 — 최대 120건이다(DAILY_CCLD_MAX_PAGES 50 + BALANCE_RLZ_PL_MAX_PAGES 50
+ * + balance.js의 BALANCE_MAX_PAGES 20. 잔고만 20이라 셋 다 50은 아니다). 요청별 줄을
+ * 상시로 켜면 그만큼이 매번 로그에 쌓인다. 유량 제한 분류는 이 게이트와 무관하게 항상
  * 남긴다(index.js) — 드물게 나고, 그게 이슈 #210이 찾는 신호 자체다.
  *
  * @param {string}  [name]     env 접미 이름

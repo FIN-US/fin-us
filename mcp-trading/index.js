@@ -114,7 +114,8 @@ const BALANCE_RLZ_PL_PAGE_DELAY_MS = readPageDelayMsEnv("BALANCE_RLZ_PL_PAGE_DEL
 });
 // 이슈 #210: 요청별 타이밍 로그 게이트. 위 기본값 0을 언제 올려야 하는지는 실측 없이는
 // 알 수 없고, 실측은 실계좌에서만 가능하다 — 그 실측을 "가능하게" 만드는 스위치다.
-// 기본은 꺼짐: 연속조회 1회가 최대 50페이지이고 그런 도구가 셋이라 상시로 켜면 로그가 잠긴다.
+// 기본은 꺼짐: 연속조회를 쓰는 도구가 셋이고 그 페이지 상한의 합이 120이라(50+50+20)
+// 상시로 켜면 로그가 잠긴다.
 // 유량 제한 분류만은 이 스위치와 무관하게 항상 남긴다(logKisRequest).
 const KIS_REQUEST_LOG_ENABLED = readKisRequestLogEnv();
 const PSBL_ORDER_PATH = "/uapi/domestic-stock/v1/trading/inquire-psbl-order";
