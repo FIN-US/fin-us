@@ -3034,7 +3034,7 @@ def test_parse_rlz_pl_quotes_warns_when_duplicate_rows_disagree(caplog):
     assert "99999" in message
 
 
-def test_parse_rlz_pl_quotes_separates_missing_code_from_malformed(caplog):
+def test_parse_rlz_pl_quotes_separates_missing_code_from_malformed(caplog, monkeypatch):
     """pdno가 비어 "(-)"로 나온 줄은 형식 위반과 다른 메시지로 보고한다.
 
     둘 다 종목 줄 정규식에 매치되지 않지만 운영자가 취할 행동이 다르다. 형식 위반은
@@ -3045,7 +3045,11 @@ def test_parse_rlz_pl_quotes_separates_missing_code_from_malformed(caplog):
     """
     import logging
 
+    from .. import scheduler as scheduler_module
     from ..scheduler import _parse_rlz_pl_quotes
+
+    # 이 경고는 연속 횟수로 억제되므로 앞선 테스트가 남긴 카운터에 기대지 않는다.
+    monkeypatch.setattr(scheduler_module, "_codeless_streak", 0)
 
     with caplog.at_level(logging.WARNING, logger="backend.scheduler"):
         quotes = _parse_rlz_pl_quotes(_rlz_pl_text("no_code"))
@@ -3058,6 +3062,112 @@ def test_parse_rlz_pl_quotes_separates_missing_code_from_malformed(caplog):
     assert not [m for m in messages if "예상치 못한 실현손익 종목 줄 형식" in m], (
         "코드 없음은 형식 위반이 아니므로 포맷터 회귀 경고를 내면 안 된다"
     )
+
+
+def test_parse_rlz_pl_quotes_suppresses_repeated_priceless_warning(caplog, monkeypatch):
+    """현재가 없음 경고는 연속 횟수로 억제하고, 조건이 풀리면 다시 첫 회로 돌아간다.
+
+    거래정지처럼 시세가 없는 종목은 팔기 전까지 매 주기 같은 모습으로 다시 온다. 그런데
+    이 파서는 monitor_market_task 안에서 장 운영 시간 게이트 없이 10분마다 도므로
+    (하루 약 144회), 억제가 없으면 같은 종목 이름을 부르는 warning이 영구히 쌓인다 —
+    모의투자 대체 응답(_paper_fallback_streak)에 억제를 건 것과 같은 이유다.
+
+    이 테스트가 잡는 mutation: 억제를 걷어 내고 매번 warning을 내는 회귀(7회 중 7건),
+    첫 회를 삼키는 회귀(1회차가 debug로 빠진다), 조건이 풀려도 카운터를 0으로
+    되돌리지 않는 회귀(마지막 단언이 실패한다).
+    """
+    import logging
+
+    from .. import scheduler as scheduler_module
+    from ..scheduler import _parse_rlz_pl_quotes
+
+    monkeypatch.setattr(scheduler_module, "_priceless_streak", 0)
+
+    with caplog.at_level(logging.DEBUG, logger="backend.scheduler"):
+        for _ in range(7):
+            _parse_rlz_pl_quotes(_rlz_pl_text("no_price"))
+
+    def _priceless_warnings():
+        return [
+            r.getMessage() for r in caplog.records
+            if r.levelno == logging.WARNING and "현재가를 읽지 못한" in r.getMessage()
+        ]
+
+    warnings = _priceless_warnings()
+    # 1회차와 6회차만 warning. 7주기(약 70분)에 2건이면 10분마다 1건이 아니다.
+    assert len(warnings) == 2, warnings
+    assert "1회 연속" in warnings[0]
+    assert "6회 연속" in warnings[1]
+    assert scheduler_module._priceless_streak == 7
+
+    # 전 종목이 시세를 들고 온 주기가 한 번 지나면 카운터가 풀린다. 그러지 않으면
+    # 문제가 재발했을 때 다음 경고가 최대 한 시간 늦게 나온다.
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG, logger="backend.scheduler"):
+        _parse_rlz_pl_quotes(_rlz_pl_text("normal"))
+        assert scheduler_module._priceless_streak == 0
+        _parse_rlz_pl_quotes(_rlz_pl_text("no_price"))
+
+    reopened = _priceless_warnings()
+    assert len(reopened) == 1, reopened
+    assert "1회 연속" in reopened[0]
+
+
+def test_parse_rlz_pl_quotes_suppresses_repeated_codeless_warning(caplog, monkeypatch):
+    """코드 없음 경고도 같은 규칙으로 억제한다.
+
+    pdno가 비어 오는 것은 형식 위반이 아니라 데이터 조건이므로, 현재가 없음과 마찬가지로
+    한 번 생기면 매 주기 그대로 재현된다.
+
+    이 테스트가 잡는 mutation: codeless 경고의 억제를 걷어 내는 회귀(7회 중 7건).
+    """
+    import logging
+
+    from .. import scheduler as scheduler_module
+    from ..scheduler import _parse_rlz_pl_quotes
+
+    monkeypatch.setattr(scheduler_module, "_codeless_streak", 0)
+
+    with caplog.at_level(logging.DEBUG, logger="backend.scheduler"):
+        for _ in range(7):
+            _parse_rlz_pl_quotes(_rlz_pl_text("no_code"))
+
+    warnings = [
+        r.getMessage() for r in caplog.records
+        if r.levelno == logging.WARNING and "pdno가 비어" in r.getMessage()
+    ]
+    assert len(warnings) == 2, warnings
+    assert "1회 연속" in warnings[0]
+    assert "6회 연속" in warnings[1]
+    assert scheduler_module._codeless_streak == 7
+
+
+def test_parse_rlz_pl_quotes_does_not_suppress_divergent_warning(caplog, monkeypatch):
+    """엇갈린 현재가 경고는 **억제하지 않는다** — 매 호출 그대로 남아야 한다.
+
+    데이터 조건인 두 경고와 달리 이쪽은 "prpr은 매매구분과 무관하다"는 전제를 반증할 수
+    있는 유일한 증거 경로다. 실계좌에서 관측된 적이 없어 상시로 도는 경고가 아니고,
+    억제했다가 발생을 놓치면 이 경고를 남긴 이유 자체가 사라진다.
+
+    이 테스트가 잡는 mutation: divergent에도 연속 억제를 거는 회귀(7회 중 2건만 남는다).
+    """
+    import logging
+
+    from .. import scheduler as scheduler_module
+    from ..scheduler import _parse_rlz_pl_quotes
+
+    monkeypatch.setattr(scheduler_module, "_priceless_streak", 0)
+    monkeypatch.setattr(scheduler_module, "_codeless_streak", 0)
+
+    with caplog.at_level(logging.DEBUG, logger="backend.scheduler"):
+        for _ in range(7):
+            _parse_rlz_pl_quotes(_rlz_pl_text("divergent_price"))
+
+    diverged = [
+        r for r in caplog.records
+        if r.levelno == logging.WARNING and "엇갈립니다" in r.getMessage()
+    ]
+    assert len(diverged) == 7, [r.getMessage() for r in diverged]
 
 
 def test_sync_portfolio_prices_updates_every_duplicate_row(portfolio_session):

@@ -365,6 +365,19 @@ _last_quote_error: str | None = None
 # 온다. 억제하지 않으면 10분마다 같은 info가 영구히 쌓여 로그가 신호를 잃는다.
 _paper_fallback_streak = 0
 
+# 코드 없음·현재가 없음 경고의 연속 횟수. 둘 다 **데이터 조건**이라 한 번 생기면
+# 그 종목을 팔기 전까지 매 주기 그대로 재현된다. 시세 갱신은 monitor_market_task 안에서
+# 10분 간격으로 장 운영 시간 게이트 없이 돌므로(하루 약 144회, 그중 100회 남짓이 장 밖),
+# 억제하지 않으면 같은 종목 이름을 부르는 warning이 영구히 쌓여 로그가 신호를 잃는다.
+# _paper_fallback_streak와 같은 규칙(첫 회 + 이후 6회마다 ≈ 1시간에 한 번)을 쓴다.
+#
+# divergent(매매구분별 현재가 엇갈림)에는 일부러 걸지 않는다. 그쪽은 데이터 조건이
+# 아니라 "prpr은 행마다 같다"는 전제를 반증하는 단 하나의 증거 경로이고, 실계좌에서
+# 관측된 적이 없어 상시로 도는 경고가 아니다. 억제했다가 첫 발생을 놓치면 이 브랜치가
+# 그 경고를 남긴 이유 자체가 사라진다.
+_codeless_streak = 0
+_priceless_streak = 0
+
 
 @dataclass(frozen=True)
 class _BalanceHolding:
@@ -625,7 +638,16 @@ def _parse_rlz_pl_quotes(report_text: str) -> dict[str, float]:
     내는데 그것을 0으로 읽으면 없던 시세가 생깁니다(#122의 "0과 모름 구분"). 빠진
     종목의 기존 값은 호출처가 손대지 않으므로 그대로 남고, TTL이 지나면 스스로
     "모름"이 됩니다 — 신선도 게이트를 붙인 이유가 그것입니다.
+
+    **코드 없음·현재가 없음 경고는 연속 횟수로 억제합니다.** 둘 다 응답이 그렇게 오는
+    데이터 조건이라 한 번 생기면 그 종목을 정리하기 전까지 매 주기 그대로 재현되는데,
+    이 경로는 장 운영 시간 게이트 없이 10분마다 돕니다. 억제하지 않으면 같은 종목
+    이름을 부르는 warning이 하루 100여 건씩 영구히 쌓입니다
+    (_codeless_streak·_priceless_streak 주석 참고). divergent는 일부러 억제하지
+    않습니다 — 그 이유도 같은 주석에 적었습니다.
     """
+    global _codeless_streak, _priceless_streak
+
     quotes: dict[str, float] = {}
     if _RLZ_PL_HOLDINGS_MARKER not in report_text:
         return quotes
@@ -702,20 +724,38 @@ def _parse_rlz_pl_quotes(report_text: str) -> dict[str, float]:
             len(malformed), malformed[:3],
         )
     if codeless:
-        logger.warning(
-            "pdno가 비어 종목 코드를 읽지 못한 %d건은 시세를 갱신하지 않습니다(예시 최대 3건): %r. "
-            "형식 위반이 아니라 응답에 코드가 없는 데이터 조건입니다 — 포맷터 회귀가 아닙니다.",
-            len(codeless), codeless[:3],
-        )
+        _codeless_streak += 1
+        if _codeless_streak == 1 or _codeless_streak % 6 == 0:
+            logger.warning(
+                "pdno가 비어 종목 코드를 읽지 못한 %d건은 시세를 갱신하지 않습니다(%d회 연속, "
+                "예시 최대 3건): %r. 형식 위반이 아니라 응답에 코드가 없는 데이터 조건입니다 "
+                "— 포맷터 회귀가 아닙니다.",
+                len(codeless), _codeless_streak, codeless[:3],
+            )
+        else:
+            logger.debug(
+                "코드 없는 종목 줄 %d건이 %d회 연속됩니다.", len(codeless), _codeless_streak
+            )
+    else:
+        _codeless_streak = 0
     # 끝까지 값을 못 얻은 종목만 부릅니다. 같은 코드의 뒤 행이 시세를 채워 줬다면
     # 그 종목은 갱신되었으므로 이름을 부르면 거짓입니다(예: prpr "0" 행 뒤에
     # 71,200원 행이 오면 quotes에는 71200이 들어 있는데도 이름이 불렸습니다).
     unpriced = [name for code, name in priceless if code not in quotes]
     if unpriced:
-        logger.warning(
-            "현재가를 읽지 못한 종목 %d건은 시세를 갱신하지 않습니다(예시 최대 3건): %r",
-            len(unpriced), unpriced[:3],
-        )
+        _priceless_streak += 1
+        if _priceless_streak == 1 or _priceless_streak % 6 == 0:
+            logger.warning(
+                "현재가를 읽지 못한 종목 %d건은 시세를 갱신하지 않습니다(%d회 연속, "
+                "예시 최대 3건): %r",
+                len(unpriced), _priceless_streak, unpriced[:3],
+            )
+        else:
+            logger.debug(
+                "현재가 없는 종목 %d건이 %d회 연속됩니다.", len(unpriced), _priceless_streak
+            )
+    else:
+        _priceless_streak = 0
     if divergent:
         # 이 로그가 존재하는 이유가 곧 이 로그의 내용입니다. 아무도 TTTC8494R 실계좌
         # 응답을 본 적이 없으므로 "prpr은 매매구분과 무관한 시장 가격"이라는 전제는
