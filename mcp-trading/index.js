@@ -22,6 +22,7 @@ import {
   isPaperTradingKisUrl,
 } from "./formatters.js";
 import { kisOrderPost } from "./kis-client.js";
+import { formatKisRequestLog, readKisRequestLogEnv } from "./kis-rate-limit.js";
 import {
   OrderDedupStore,
   createOrderDedupKey,
@@ -111,6 +112,11 @@ const BALANCE_RLZ_PL_TIME_BUDGET_MS = 90_000;
 const BALANCE_RLZ_PL_PAGE_DELAY_MS = readPageDelayMsEnv("BALANCE_RLZ_PL_PAGE_DELAY_MS", 0, {
   maxMs: BALANCE_RLZ_PL_TIME_BUDGET_MS,
 });
+// 이슈 #210: 요청별 타이밍 로그 게이트. 위 기본값 0을 언제 올려야 하는지는 실측 없이는
+// 알 수 없고, 실측은 실계좌에서만 가능하다 — 그 실측을 "가능하게" 만드는 스위치다.
+// 기본은 꺼짐: 연속조회 1회가 최대 50페이지이고 그런 도구가 셋이라 상시로 켜면 로그가 잠긴다.
+// 유량 제한 분류만은 이 스위치와 무관하게 항상 남긴다(logKisRequest).
+const KIS_REQUEST_LOG_ENABLED = readKisRequestLogEnv();
 const PSBL_ORDER_PATH = "/uapi/domestic-stock/v1/trading/inquire-psbl-order";
 // 매수가능조회 TR ID. 연속조회가 없는 단건 조회라 페이지 상한·시간 예산이 없다.
 // 오버라이드 이름은 KIS_TR_ID_DAILY_CCLD / KIS_TR_ID_BALANCE_RLZ_PL과 같은 관례를 따른다
@@ -193,24 +199,54 @@ async function getAccessToken({ lockWaitMs } = {}) {
   }, { lockWaitMs });
 }
 
+// 이슈 #210: KIS 요청 1건을 stderr 한 줄로 남긴다. 줄 만들기는 kis-rate-limit.js가 하고
+// (비밀 위생 계약이 그 안에 있다) 여기서는 "언제 내보내는가"만 정한다.
+// 유량 제한 분류는 게이트와 무관하게 항상 내보낸다 — 드물게 나고, 이슈 #210이 찾는 신호
+// 자체다. 그 밖의 요청별 타이밍 줄은 KIS_REQUEST_LOG로 켤 때만 나간다.
+// stdout은 MCP JSON-RPC 채널이므로 console.error(stderr)만 쓴다. 이 stderr는 MCP Python
+// SDK가 자식 프로세스를 띄울 때 부모 stderr로 그대로 이어 준다
+// (docs/issue-210-rate-limit-observation.md).
+function logKisRequest(input) {
+  const { line, rateLimited } = formatKisRequestLog(input);
+  if (KIS_REQUEST_LOG_ENABLED || rateLimited) console.error(line);
+}
+
+// 계측 지점을 fetchAllPaged가 아니라 여기(kisApiGet)에 두는 것은 의도적이다. 이 프로세스가
+// KIS를 치는 여섯 경로가 전부 이 함수를 지나므로(연속조회 두 루프 + getBalance + 단건
+// kisGet들), 서로 다른 프로세스에서 뜬 도구 호출들의 요청이 시각 순으로 한 줄씩 남는다 —
+// PR #264 리뷰가 제기한 "유량 제한이 계좌 단위인가"를 확인하려면 그 겹침을 봐야 한다.
+// fetchAllPaged 안에 두면 단건 조회가 통째로 빠지고, balance.js도 건드려야 한다.
 async function kisApiGet(pathname, trId, params, { trCont = "" } = {}) {
   const token = await getAccessToken();
-  const response = await kisAxios.get(`${KIS_URL}${pathname}`, {
-    headers: {
-      "Content-Type": "application/json",
-      authorization: `Bearer ${token}`,
-      appkey: KIS_API_KEY,
-      appsecret: KIS_API_SECRET,
-      tr_id: trId,
-      tr_cont: trCont,
-      custtype: "P",
-    },
-    params,
-  });
+  const startedAt = Date.now();
+  let response;
+  try {
+    response = await kisAxios.get(`${KIS_URL}${pathname}`, {
+      headers: {
+        "Content-Type": "application/json",
+        authorization: `Bearer ${token}`,
+        appkey: KIS_API_KEY,
+        appsecret: KIS_API_SECRET,
+        tr_id: trId,
+        tr_cont: trCont,
+        custtype: "P",
+      },
+      params,
+    });
+  } catch (error) {
+    logKisRequest({ trId, elapsedMs: Date.now() - startedAt, error });
+    throw error;
+  }
+  logKisRequest({ trId, elapsedMs: Date.now() - startedAt, response });
 
   const data = response.data;
   if (data.rt_cd !== "0") {
-    throw new Error(`KIS API 오류: ${data.msg1 || data.msg_cd || "알 수 없는 오류"}`);
+    const error = new Error(`KIS API 오류: ${data.msg1 || data.msg_cd || "알 수 없는 오류"}`);
+    // msg1이 있으면 위 메시지가 msg_cd를 버린다. 그래서 EGW00201 같은 코드가 상위 로그에
+    // 한 번도 남지 않았다. kis-client.js:124-126의 kisOrderRejected 태깅과 같은 방식으로
+    // 코드를 에러에 붙여, 상위 경로가 사유를 이름으로 부를 수 있게 남겨 둔다.
+    error.kisMsgCd = data.msg_cd;
+    throw error;
   }
 
   const nextTrCont = response.headers?.tr_cont || response.headers?.["tr-cont"] || "";
