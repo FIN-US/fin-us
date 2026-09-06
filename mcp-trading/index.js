@@ -204,7 +204,15 @@ async function getAccessToken({ lockWaitMs } = {}) {
       };
     } catch (error) {
       logKisRequest({ trId: "tokenP", elapsedMs: Date.now() - now, error });
-      throw new Error(`Access Token 발급 실패: ${error.response?.data?.msg1 || error.message}`);
+      // kisApiGet의 오류 메시지와 같은 마스킹을 씌운다. 이 경로의 요청 바디는
+      // { grant_type, appkey, appsecret }뿐이라 계좌 컨텍스트가 없고, 그래서 CANO가
+      // 되울려 올 자리도 사실상 없다. 그런데도 씌우는 이유는 대칭성이다 — 헬퍼는 이미
+      // 이 파일에 들어와 있고, 한 곳만 비워 두면 다음 사람이 "왜 여기만 다른가"를
+      // 매번 다시 유도해야 한다.
+      // **남는 위험은 마스킹이 닫아 주지 않는다.** 이 엔드포인트에서 되울려 올 법한 값은
+      // appkey이고, appkey는 영숫자라 maskLongDigitRuns(연속 숫자 8자리 이상)에 걸리지
+      // 않는다. 씌우든 안 씌우든 그 위험은 그대로 남는다.
+      throw new Error(`Access Token 발급 실패: ${maskLongDigitRuns(error.response?.data?.msg1 || error.message)}`);
     }
   }, { lockWaitMs });
 }
