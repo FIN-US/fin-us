@@ -44,6 +44,26 @@ function isAlnumStockOrderEnabled() {
   return process.env.KIS_ALNUM_STOCK_ORDER_ENABLED === "true";
 }
 
+// 주문 가능 코드 정책을 이루는 두 정규식. buildCashOrderBody() 안에 리터럴로 묻어
+// 두면 "지금 정책이 무엇인가"를 함수 본문을 읽어야만 알 수 있고, 테스트도 함수를
+// 통해서만 간접 확인할 수 있다. 이름을 붙여 내보내면 판정표
+// (tests/fixtures/orderable_code_policy.json)를 짝인 backend/stock_code.py와 맞출 때
+// 두 계층이 무엇을 비교하는지가 드러난다(#138, docs/issue-138-alnum-stock-code.md §6.2).
+// `/g` 플래그가 없으므로 모듈 상수로 재사용해도 lastIndex가 남지 않는다.
+//
+// 기본값(#73): 숫자 6~7자만 주문 가능. backend/stock_code.py의
+// _ORDERABLE_STOCK_CODE_RE와 짝이다. JS의 `\d`는 ASCII 전용이라 전각 숫자를 매치하지
+// 않지만, Python의 `\d`는 매치하므로 백엔드 쪽은 `[0-9]`로 명시해 둔다.
+export const ORDERABLE_STOCK_CODE_RE = /^\d{6,7}$/;
+
+// 플래그 켜짐(KIS_ALNUM_STOCK_ORDER_ENABLED=true): 영숫자 6~7자·9자.
+// backend/stock_code.py의 _ORDERABLE_STOCK_CODE_ALNUM_RE와 짝이다. 8자는 종목마스터에
+// 0건이라 `{6,9}`로 뭉뚱그리지 않는다(#140과 같은 근거). `/i`를 달면 안 된다 — 짝인
+// 백엔드 정규식은 IGNORECASE가 없어 소문자를 거절하므로, 여기만 관용하면 같은 값에
+// 두 계층이 다른 판정을 내리고 소문자가 그대로 PDNO에 실린다(index.js는 upper 정규화를
+// 하지 않는다).
+export const ORDERABLE_STOCK_CODE_ALNUM_RE = /^(?:[0-9A-Z]{6,7}|[0-9A-Z]{9})$/;
+
 export function selectCashOrderTrId({ orderEnv, side }) {
   const env = normalizeOrderEnv(orderEnv);
   const normalizedSide = normalizeSide(side);
@@ -90,14 +110,11 @@ export function buildCashOrderBody({ accountNo, stockCode, quantity, price, orde
   // 조용히 계속 막힌다(#138) — KIS_ALNUM_STOCK_ORDER_ENABLED 값을 두 계층에 함께 넣어야
   // 한다.
   if (isAlnumStockOrderEnabled()) {
-    // 플래그 켜짐: 영숫자 6~7자·9자를 연다(8자는 종목마스터에 0건이라 제외, #140과
-    // 같은 근거). KIS PDNO 실제 수용 여부는 이 가드를 통과한 뒤 KIS 응답으로 결정된다.
-    // `/i`를 달면 안 된다 — 짝인 backend/stock_code.py의 _ORDERABLE_STOCK_CODE_ALNUM_RE는
-    // IGNORECASE가 없어 소문자를 거절하므로, 여기만 관용하면 같은 값에 두 계층이 다른
-    // 판정을 내리고 소문자 그대로 PDNO에 실린다(index.js는 upper 정규화를 하지 않는다).
-    // 기본값 분기는 결정 가드가 /^\d{6,7}$/라 대소문자가 무의미했다 — 이 분기에서만
-    // 생기는 갈림이다.
-    if (!/^(?:[0-9A-Z]{6,7}|[0-9A-Z]{9})$/.test(code)) {
+    // 플래그 켜짐: 영숫자 6~7자·9자를 연다. 범위와 소문자 거절 근거는
+    // ORDERABLE_STOCK_CODE_ALNUM_RE 선언부 주석 참조. KIS PDNO 실제 수용 여부는 이
+    // 가드를 통과한 뒤 KIS 응답으로 결정된다. 기본값 분기는 결정 가드가 숫자 전용이라
+    // 대소문자가 무의미했다 — 소문자 갈림은 이 분기에서만 생긴다.
+    if (!ORDERABLE_STOCK_CODE_ALNUM_RE.test(code)) {
       throw new Error("stock_code는 6~7자 영숫자 또는 9자 코드여야 합니다.");
     }
   } else {
@@ -105,10 +122,12 @@ export function buildCashOrderBody({ accountNo, stockCode, quantity, price, orde
     // 이룬다. 첫 번째는 영숫자 코드(0001A0 등)에 전용 메시지를 주기 위한 것이고,
     // 실제로 범위를 확정하는 건 두 번째다. 9자 펀드코드(F70100026)는 첫 번째에
     // 매치조차 되지 않고 두 번째에서 거절된다.
-    if (/^[0-9A-Z]{6,7}$/i.test(code) && !/^\d{6,7}$/.test(code)) {
+    // 첫 번째는 정책이 아니라 "어느 메시지를 줄 것인가"를 고르는 검사라 상수로
+    // 올리지 않는다 — 이름을 붙이면 ORDERABLE_* 두 상수와 같은 층위로 읽힌다.
+    if (/^[0-9A-Z]{6,7}$/i.test(code) && !ORDERABLE_STOCK_CODE_RE.test(code)) {
       throw new Error("이 종목은 현재 주문을 지원하지 않습니다.");
     }
-    if (!/^\d{6,7}$/.test(code)) {
+    if (!ORDERABLE_STOCK_CODE_RE.test(code)) {
       throw new Error("stock_code는 6자리 또는 7자리 종목코드여야 합니다.");
     }
   }
