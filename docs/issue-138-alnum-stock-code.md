@@ -312,8 +312,14 @@ pdno (str): [필수] 상품번호 (종목코드(6자리) , ETN의 경우 7자리
 | `mcp-trading/index.js:245-246` | 두 번째 조회 파라미터 | `:248-249` |
 | `mcp-trading/index.js:441` | `getTodayDailyOrders` | `:483` |
 | `mcp-trading/index.js:536·542·557` | `order_stock` 툴 스키마·`resolveStock` | `:579·590·605` |
+| `mcp-trading/order.js:77` | **G1** 전용 메시지 가드 | `buildCashOrderBody()` 안 — **줄 번호로 가리키지 않는다** |
+| `mcp-trading/order.js:84` | **G2** 형태 가드 | 〃 (`ORDERABLE_STOCK_CODE_RE` 검사) |
+| `mcp-trading/tests/order.test.js:112-123` | `0001A0` 단일 회귀 테스트 | 공유 판정표를 읽는 테스트로 대체(6.4-1) |
+| `backend/tests/test_stock_code.py:163-200` | `TestOrderableStockCodeRe` | 같은 판정표를 함께 읽도록 확장(6.4-3) |
 
-**변경 없음** — `mcp-trading/order.js`, `data/stocks.json`, `scripts/update_stock_master.py`, `stock-master.js`, `order-dedup.js`, `tests/order.test.js`, `backend/tests/test_stock_code.py`. 즉 **G1(`order.js:77`)·G2(`order.js:84`), 4.1의 off-by-one, 776건 수치, 4.2 라의 오프셋은 현재 main에서도 그대로 유효하다.** 드리프트는 위 표의 다섯 파일에 국한된다.
+**변경 없음** — `data/stocks.json`, `scripts/update_stock_master.py`, `stock-master.js`, `order-dedup.js`. 즉 **4.1의 off-by-one, 776건 수치, 4.2 라의 오프셋은 현재 main에서도 그대로 유효하다.**
+
+G1·G2의 줄 번호(`:77`·`:84`)는 `93e9e82` 시점에 이미 낡아 있었고(당시 `:108`·`:111`), 이 브랜치가 가드를 `buildCashOrderBody()` 안쪽으로 더 밀었다. 그래서 위 표는 줄 번호 대신 **함수와 심볼로** 가리킨다 — 커밋 `a7916bc`가 `stock_code.py` 쪽 주석에 적용한 규약과 같다. 줄 번호로 적힌 참조는 앞으로도 같은 방식으로 늙는다.
 
 원문이 필요하면 `git show 8c2acd5:<파일>`로 당시 상태를 그대로 볼 수 있다.
 
@@ -406,7 +412,7 @@ TR은 `order.js:33-40`의 `selectCashOrderTrId`가 `demo`/`real` × `BUY`/`SELL`
 권장 처리:
 
 1. **(완료, Stage 0)** **테스트를 "형식별 판정표"로 바꾼다.** 단일 케이스(`0001A0` 거부) 대신, 2.2의 형식별 대표 코드(`005930`, `00088K`, `0001A0`, `Q500020`, `J0036221D`, `F70100026`) 각각에 대해 기대 결과(통과 / 전용 메시지 거절 / 일반 메시지 거절)를 표로 고정한다.
-2. 롤아웃 단계가 올라갈 때마다 **그 표의 해당 행만** 거절→통과로 바꾼다. 나머지 행이 그대로 red 없이 유지되는 것이 "이번 단계가 의도한 범위만 열었다"는 증거가 된다.
+2. 롤아웃 단계가 올라갈 때마다 **단계별 verdict 열을 하나 더 붙이고**(`flag_stage1` 등) 그 단계가 여는 행만 `pass`로 둔다. 기존 `flag_on` 열은 이미 *완전히 열린* 정책이라(`00088K`·`0001A0`·`Q500020`·`J0036221D`·`F70100026`가 전부 `pass`) 그 열에서 "해당 행만" 고치는 것으로는 단계를 표현할 수 없다. 열을 늘리려면 양쪽 스위트의 키 집합 단언(`order.test.js`·`test_stock_code.py`)을 함께 고쳐야 한다 — 한쪽만 늘리지 못하게 일부러 막아 둔 것이다. 그 단계가 열지 않은 행이 red 없이 그대로인 것이 "이번 단계가 의도한 범위만 열었다"는 증거가 된다.
 3. **(부분 완료, Stage 0)** `backend/tests/test_stock_code.py`의 `TestOrderableStockCodeRe`·`TestIsOrderableStockCode`는 같은 표를 공유하게 맞췄다. `backend/tests/test_telegram_commands.py`의 조기 거절 테스트는 아직 표를 쓰지 않는다. 특히 후자는 **시세·잔고 조회 전에 끊는다**는 성질을 고정하고 있으므로, 열린 형식에 대해서는 "조회까지 진행된다"를 단언하는 케이스로 반전시켜야 한다.
 4. `test_rejects_eight_char`·`test_rejects_fullwidth_digits`는 **어느 단계에서도 유지**한다(Stage 0에서도 표와 별개로 명시 테스트로 남겼다). 8자는 마스터에 0건이고(2.1), 전각 숫자는 Python `\d`와 JS `\d`의 차이를 막는 가드다.
 
@@ -583,7 +589,7 @@ CNDT_PRIC        = ""
 
 1. **7장의 검증을 사람이 실행한다.** 이것 없이는 아무 코드도 쓸 수 없다.
 2. 검증 결과를 이 문서의 4.2·8장에 반영한다.
-3. 7.6의 분기에 따라 6.5의 롤아웃을 시작한다. ~~6.2(두 계층 결합 테스트)를 단계 1보다 먼저 넣는다~~ → **완료(Stage 0)**. 공유 판정표가 들어갔으므로 **단계 1은 이제 7장 실측 하나만 남은 차단 요인이다** — 롤아웃 단계가 올라갈 때는 판정표의 해당 행 verdict만 바꾸고 나머지 행이 red 없이 유지되는 것이 "이번 단계가 의도한 범위만 열었다"는 증거가 된다(6.4-2).
+3. 7.6의 분기에 따라 6.5의 롤아웃을 시작한다. ~~6.2(두 계층 결합 테스트)를 단계 1보다 먼저 넣는다~~ → **완료(Stage 0)**. 공유 판정표가 들어갔으므로 **단계 1은 이제 7장 실측 하나만 남은 차단 요인이다** — 롤아웃 단계가 올라갈 때는 판정표에 단계별 verdict 열을 붙여 그 단계가 여는 행만 `pass`로 두고(열을 늘리면 양쪽 스위트의 키 집합 단언도 함께 고쳐야 한다), 나머지 행이 red 없이 유지되는 것이 "이번 단계가 의도한 범위만 열었다"는 증거가 된다(6.4-2).
 4. 검증 결과와 무관하게 착수 가능한 것:
    - ~~`backend/telegram_commands.py`의 부정확한 문구 수정(6.6)~~ → **완료(Stage 0)**. 상품군을 단정하지 않고 코드 형태만 말하는 문장으로 바꿨다.
    - 이슈 #138 본문의 낡은 파일:줄 참조 갱신(5장)
