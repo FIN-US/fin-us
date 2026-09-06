@@ -124,6 +124,9 @@ const policyFixture = JSON.parse(
 );
 const POLICY_CASES = policyFixture.cases;
 const POLICY_VERDICTS = new Set(["pass", "reject_unsupported", "reject_shape"]);
+// 거절 메시지 원문은 표가 들고 있다. 여기에 리터럴을 복제하면 order.js와 함께 고치면
+// 되므로 문구가 바뀌어도(혹은 두 문구가 뒤바뀌어도) 아무 테스트도 red가 되지 않는다.
+const POLICY_MESSAGES = policyFixture._messages;
 
 // 이 스위트가 표에서 실제로 집어 간 행. takeCases()를 모듈 로드 시점(테스트 등록
 // 시점)에 호출하므로, 아래 메타 테스트는 실행 순서나 -t 필터에 영향받지 않는다.
@@ -149,6 +152,9 @@ function describeCase(policyCase) {
 
 // 표의 3값 verdict를 실제 동작으로 환산한다. 두 거절 메시지를 구분해야 "왜 막혔는가"가
 // 표에 남는다 — 통과/거절 2값으로 뭉개면 전용 메시지가 사라져도 아무도 모른다.
+// 분류는 표의 _messages 리터럴과 정확히 대조한다. "전용 메시지가 아니면 전부
+// reject_shape"로 뭉개면 세 번째 종류의 예외(계좌번호 오류 등)가 형태 거절로 둔갑하고,
+// backend/tests/test_stock_code.py의 node 스크립트와 분류 기준도 갈린다.
 function verdictOf(code) {
   try {
     const body = buildCashOrderBody({
@@ -158,13 +164,34 @@ function verdictOf(code) {
       price: 10000,
       orderType: "LIMIT",
     });
-    return { verdict: "pass", body };
+    return { verdict: "pass", body, message: null };
   } catch (error) {
-    const verdict = /이 종목은 현재 주문을 지원하지 않습니다/.test(error.message)
-      ? "reject_unsupported"
-      : "reject_shape";
-    return { verdict, body: null };
+    const { message } = error;
+    let verdict = "reject_other";
+    if (message === POLICY_MESSAGES.reject_unsupported) {
+      verdict = "reject_unsupported";
+    } else if (
+      message === POLICY_MESSAGES.reject_shape_off
+      || message === POLICY_MESSAGES.reject_shape_on
+    ) {
+      verdict = "reject_shape";
+    }
+    return { verdict, body: null, message };
   }
+}
+
+// 거절 verdict가 어느 문구로 나와야 하는지는 열이 정한다 — flag_off 열은 기본값 분기,
+// flag_on 열은 플래그 켜짐 분기를 도는 테스트에서만 쓰이기 때문이다.
+function expectedMessageFor(verdict, column) {
+  if (verdict === "reject_unsupported") {
+    return POLICY_MESSAGES.reject_unsupported;
+  }
+  if (verdict === "reject_shape") {
+    return column === "flag_on"
+      ? POLICY_MESSAGES.reject_shape_on
+      : POLICY_MESSAGES.reject_shape_off;
+  }
+  return null;
 }
 
 function assertPolicyColumn(cases, column) {
@@ -176,11 +203,15 @@ function assertPolicyColumn(cases, column) {
       POLICY_VERDICTS.has(expected),
       `알 수 없는 verdict "${expected}": ${describeCase(policyCase)}`,
     );
-    const { verdict, body } = verdictOf(policyCase.code);
+    const { verdict, body, message } = verdictOf(policyCase.code);
     assert.equal(verdict, expected, describeCase(policyCase));
     if (expected === "pass") {
       // 통과 행은 코드가 손상 없이 PDNO에 실리는지까지 본다.
       assert.equal(body.PDNO, policyCase.code, describeCase(policyCase));
+    } else {
+      // verdict만 보면 두 형태 메시지가 서로 뒤바뀌어도 통과한다 — 거절당한 사용자
+      // 전원이 반대 규칙을 안내받는 변경이므로 문구까지 이 자리에서 고정한다.
+      assert.equal(message, expectedMessageFor(expected, column), describeCase(policyCase));
     }
   }
 }

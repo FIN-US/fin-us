@@ -2,9 +2,15 @@
   "_comment": "이슈 #138: 주문 가능 종목코드 정책을 JS·Python 두 계층이 하나의 정의에서 읽도록 고정하는 공유 판정표입니다(docs/issue-138-alnum-stock-code.md §6.2·§6.4-1). mcp-trading/order.js의 buildCashOrderBody() 가드와 backend/stock_code.py의 is_orderable_stock_code()/is_orderable_stock_code_strict()는 같은 정책의 복제본이므로, 두 스위트(mcp-trading/tests/order.test.js, backend/tests/test_stock_code.py)가 이 표를 각자 읽어 같은 판정을 내는지 확인합니다. 어느 한 계층만 바꾸면 그 계층 스위트가 red가 됩니다. 롤아웃 단계(§6.5)가 올라가면 그 단계가 여는 행의 verdict만 고치고 나머지 행은 그대로 두는 것이 '의도한 범위만 열었다'는 증거가 됩니다. 행을 추가하면 양쪽 스위트의 메타 테스트가 그 행의 소비 여부를 확인하므로 한쪽이 조용히 무시할 수 없습니다.",
   "_verdicts": {
     "pass": "가드를 통과해 주문 바디가 만들어진다(백엔드에서는 주문 가능 코드로 판정).",
-    "reject_unsupported": "order.js의 영숫자 전용 메시지 '이 종목은 현재 주문을 지원하지 않습니다.'로 거절된다. 백엔드에서는 거절(False)이며 메시지 구분은 없다.",
-    "reject_shape": "order.js의 일반 형태 메시지('stock_code는 …여야 합니다')로 거절된다. 백엔드에서는 거절(False)."
+    "reject_unsupported": "order.js가 _messages.reject_unsupported로 거절한다. 백엔드에서는 거절(False)이며 메시지 구분은 없다.",
+    "reject_shape": "order.js가 일반 형태 메시지(_messages.reject_shape_off 또는 reject_shape_on)로 거절한다. 백엔드에서는 거절(False)."
   },
+  "_messages": {
+    "reject_unsupported": "이 종목은 현재 주문을 지원하지 않습니다.",
+    "reject_shape_off": "stock_code는 6자리 또는 7자리 종목코드여야 합니다.",
+    "reject_shape_on": "stock_code는 6~7자 영숫자 또는 9자 코드여야 합니다."
+  },
+  "_messages_comment": "거절 메시지 원문. 산문이 아니라 데이터로 둔다 — 두 스위트가 이 리터럴로 거절을 분류하고(분류 기준이 갈리면 세 번째 예외 종류에서 서로 다른 verdict를 낸다), order.test.js는 열에 맞는 메시지가 실제로 나왔는지까지 대조한다. 문구가 스위트에 하드코딩돼 있지 않으므로 두 메시지를 서로 맞바꾸면 JS 스위트가 red가 된다. reject_shape_off는 플래그 꺼짐 분기(숫자 6~7자), reject_shape_on은 플래그 켜짐 분기(영숫자 6~7자·9자)의 문구다.",
   "_flag": "flag_off = KIS_ALNUM_STOCK_ORDER_ENABLED 미설정 또는 정확히 \"true\"가 아닌 값(#73 기본 정책). flag_on = 정확히 \"true\".",
   "cases": [
     {

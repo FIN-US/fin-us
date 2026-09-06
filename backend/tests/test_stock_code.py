@@ -328,9 +328,9 @@ import { pathToFileURL } from "node:url";
 const { buildCashOrderBody } = await import(
   pathToFileURL(process.env.PARITY_ORDER_JS).href
 );
-const cases = JSON.parse(
-  readFileSync(process.env.PARITY_FIXTURE, "utf-8"),
-).cases;
+const fixture = JSON.parse(readFileSync(process.env.PARITY_FIXTURE, "utf-8"));
+const cases = fixture.cases;
+const messages = fixture._messages;
 
 const verdicts = {};
 for (const flag of ["flag_off", "flag_on"]) {
@@ -351,9 +351,19 @@ for (const flag of ["flag_off", "flag_on"]) {
       });
       verdict = "pass";
     } catch (error) {
-      verdict = error.message.startsWith("stock_code")
-        ? "reject_shape"
-        : "reject_unsupported";
+      // 분류 기준을 표의 _messages 리터럴에 맞춘다. 이 스크립트가
+      // startsWith("stock_code")로, order.test.js가 전용 메시지 매칭으로 각자 분류하면
+      // 세 번째 종류의 예외에서 두 스위트가 서로 다른 verdict를 낸다.
+      if (error.message === messages.reject_unsupported) {
+        verdict = "reject_unsupported";
+      } else if (
+        error.message === messages.reject_shape_off
+        || error.message === messages.reject_shape_on
+      ) {
+        verdict = "reject_shape";
+      } else {
+        verdict = "reject_other";
+      }
     }
     verdicts[flag + "|" + index] = verdict;
   });
