@@ -360,6 +360,11 @@ _RLZ_PL_PRICE_RE = re.compile(r"현재가\s+([\d,]+(?:\.\d+)?)원")
 _quote_failure_streak = 0
 _last_quote_error: str | None = None
 
+# 모의투자 대체 응답 연속 횟수. 실패 경로(_quote_failure_streak)보다 이쪽이 억제가 더
+# 필요하다 — 실패는 드물지만 모의투자 대체 응답은 **기본 개발 구성에서 매 주기 항상**
+# 온다. 억제하지 않으면 10분마다 같은 info가 영구히 쌓여 로그가 신호를 잃는다.
+_paper_fallback_streak = 0
+
 
 @dataclass(frozen=True)
 class _BalanceHolding:
@@ -741,20 +746,40 @@ def _sync_portfolio_prices_from_rlz_pl(report_text: str, session: Session) -> in
       - None: 응답을 신뢰할 수 없어 아무것도 쓰지 않고 건너뛴 경우
 
     건너뛰는 세 경우와 로그 수준:
-      1) 모의투자 대체 응답 — 그 배포에서는 매 주기의 정상 동작이므로 info.
+      1) 모의투자 대체 응답 — 그 배포에서는 매 주기의 정상 동작이므로 info이고,
+         게다가 **항상** 오므로 연속 횟수로 억제한다(첫 회와 이후 1시간에 한 번).
+         억제 강도가 실패 경로보다 높은 것이 맞다 — 실패는 드물고 이쪽은 상시다.
       2) 연속조회 잘림 — 부분 응답이라 warning. 얻은 종목만 써도 행이 지워지지는
          않지만, 잘린 응답은 마지막 블록이 중간에서 끊겨 있을 수 있고 "의심스러운
          응답으로는 쓰지 않는다"를 잔고 동기화와 갈라 둘 이유가 없습니다.
       3) 마커 부재(빈 계좌 문구도 없음) — 응답을 읽지 못한 것이므로 error.
     """
+    global _paper_fallback_streak
+
     # 순서가 중요합니다. 모의투자 대체 응답에는 "[보유 종목]" 마커가 없으므로, 이
     # 검사를 뒤로 미루면 마커 부재 가드가 먼저 걸려 정상 상황에 error가 남습니다.
     if _RLZ_PL_PAPER_FALLBACK_MARKER in report_text:
-        logger.info(
-            "모의투자 계좌는 실현손익 TR을 지원하지 않아 이번 주기 시세 갱신을 건너뜁니다. "
-            "기존 시세와 갱신 시각을 유지합니다."
-        )
+        _paper_fallback_streak += 1
+        # 6회 = 약 1시간(10분 주기). _quote_failure_streak와 같은 규칙이되 이쪽이 더
+        # 절실합니다 — 실패는 드물지만 모의투자에서는 이 분기가 **매 주기 정상**입니다.
+        if _paper_fallback_streak == 1 or _paper_fallback_streak % 6 == 0:
+            logger.info(
+                "모의투자 계좌는 실현손익 TR을 지원하지 않아 이번 주기 시세 갱신을 건너뜁니다 "
+                "(%d회 연속). 기존 시세와 갱신 시각을 유지합니다.",
+                _paper_fallback_streak,
+            )
+        else:
+            logger.debug(
+                "모의투자 대체 응답이 %d회 연속됩니다.", _paper_fallback_streak
+            )
         return None
+
+    if _paper_fallback_streak:
+        logger.info(
+            "실현손익 TR 응답으로 돌아왔습니다. 직전까지 %d회 연속 모의투자 대체 응답이었습니다.",
+            _paper_fallback_streak,
+        )
+        _paper_fallback_streak = 0
 
     if is_balance_truncated(report_text):
         logger.warning(

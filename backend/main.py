@@ -266,6 +266,10 @@ async def get_visualization_portfolio(session: Session = Depends(get_session)):
     이를 방지하기 위해 각 nullable 필드에 대응하는 bool 플래그를 함께 내립니다:
       - price_known: current_price를 **지금** 안다고 말할 수 있는지(이슈 #122·#196)
         ※ 값이 있어도 신선하지 않으면 False입니다 — 아래 신선도 게이트 참고
+        ※ 여기서 "지금"은 **나이**만 뜻합니다. 장 운영 시간 게이트는 없으므로 새벽
+          3시에 True여도 "장이 열려 있고 이 값이 실시간 체결가"라는 뜻이 아니라
+          "몇 분 전에 KIS에 물어본 값"이라는 뜻입니다. 장 마감 뒤에는 종가가 TTL
+          동안 신선한 값으로 유지됩니다.
       - return_rate_known: return_rate가 실제 계산된 값인지 여부(이슈 #122)
         ※ current_price는 알지만 avg_price <= 0이면 price_known=True·return_rate_known=False
       - price_updated_at_known: price_updated_at이 실제 시각인지 여부(이슈 #196)
@@ -375,7 +379,18 @@ async def get_visualization_portfolio(session: Session = Depends(get_session)):
 
 @app.get("/api/v1/db/portfolio", response_model=CommonResponse, tags=["Database"])
 async def get_db_portfolio(session: Session = Depends(get_session)):
-    """저장된 포트폴리오 정보를 조회합니다."""
+    """저장된 포트폴리오 정보를 조회합니다.
+
+    이 엔드포인트는 **의도적으로 게이트를 걸지 않은** 원본 덤프입니다. 행을 그대로
+    내보내므로 price_updated_at은 저장된 그대로, 즉 오프셋 없는 naive ISO 문자열로
+    나가고 신선도 플래그도 붙지 않습니다 — scheduler.format_price_updated_at의
+    docstring이 경고하는 바로 그 형태입니다. 같은 자리의 updated_at도 예전부터 같은
+    모양이라 이 엔드포인트의 기존 계약과 일관됩니다.
+
+    소비자용 표현은 GET /api/v1/portfolio입니다. 그쪽이 오프셋을 붙이고
+    price_known·price_updated_at_known으로 신선도를 판정해 내립니다. 이 덤프의 값을
+    "현재가"로 읽지 마세요.
+    """
     portfolios = session.exec(select(Portfolio)).all()
     return {"status": "success", "data": portfolios}
 

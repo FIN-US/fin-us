@@ -3289,6 +3289,47 @@ def test_sync_portfolio_prices_treats_paper_fallback_as_no_quote(portfolio_sessi
     )
 
 
+def test_sync_portfolio_prices_suppresses_repeated_paper_fallback_info(
+    portfolio_session, caplog, monkeypatch
+):
+    """모의투자 대체 응답 안내는 연속 횟수로 억제한다.
+
+    모의투자는 기본 개발 구성이라 이 분기는 매 주기 **항상** 탄다. 억제하지 않으면
+    10분마다 같은 info가 영구히 쌓여 로그가 신호를 잃는다 — 드물게만 도는 실패 경로
+    (_quote_failure_streak)에는 억제가 있는데 상시 도는 이쪽에 없던 것은 우선순위가
+    뒤집힌 상태였다.
+
+    이 테스트가 잡는 mutation: 억제를 걷어 내고 매번 info를 내는 회귀(7회 중 7건),
+    또는 첫 회를 삼키는 회귀(1회차가 debug로 빠진다).
+    """
+    import logging
+
+    from .. import scheduler as scheduler_module
+    from ..scheduler import _sync_portfolio_prices_from_rlz_pl
+
+    monkeypatch.setattr(scheduler_module, "_paper_fallback_streak", 0)
+
+    paper_text = (
+        _make_balance_text(("삼성전자", "005930", 10, 70000))
+        + "\n\n[안내] 모의투자(openapivts) 계좌는 실현손익 TR(v1_국내주식-041)을 "
+        "지원하지 않아 잔고 요약으로 대체했습니다."
+    )
+
+    with caplog.at_level(logging.DEBUG, logger="backend.scheduler"):
+        for _ in range(7):
+            assert _sync_portfolio_prices_from_rlz_pl(paper_text, portfolio_session) is None
+
+    infos = [
+        r for r in caplog.records
+        if r.levelno == logging.INFO and "모의투자 계좌는" in r.getMessage()
+    ]
+    # 1회차와 6회차만 info. 7주기(약 70분)에 2건이면 10분마다 1건이 아니다.
+    assert len(infos) == 2, [r.getMessage() for r in infos]
+    assert "1회 연속" in infos[0].getMessage()
+    assert "6회 연속" in infos[1].getMessage()
+    assert scheduler_module._paper_fallback_streak == 7
+
+
 def test_sync_portfolio_from_balance_preserves_price_columns(portfolio_session):
     """잔고 동기화는 시세 컬럼을 읽지도 쓰지도 않는다 (#196의 경로 분리).
 
