@@ -2914,9 +2914,9 @@ async def test_recording_recovery_reports_missed_count(monkeypatch, caplog):
 # mcp-trading·backend 공유 픽스처(#196). balance_report.json(#137)과 같은 목적이며,
 # 경로도 같은 방식으로 __file__ 기준 절대 경로라 worktree·CI 양쪽에서 동일하게 풀린다.
 #
-# 한 가지가 다르다: 저쪽은 JS 테스트가 expected_text를 직접 단언해 양방향으로
-# 고정되지만, 이 파일은 Python 쪽에서만 소비된다. formatter가 바뀌면 JS 스위트는
-# 초록으로 남고 여기만 빨개진다 — 픽스처 파일의 _comment에 그 한계를 적어 두었다.
+# 고정은 **양방향**이다: mcp-trading/tests/balance-rlz-pl-report.test.js가 같은 파일의
+# input을 formatter에 넣어 expected_text와 바이트 단위로 비교하므로, formatter가 바뀌면
+# 형식을 소유한 JS 스위트가 먼저 깨진다. 이 파일을 고칠 때는 양쪽을 함께 돌린다.
 _RLZ_PL_FIXTURE_PATH = (
     pathlib.Path(__file__).parent.parent.parent
     / "mcp-trading" / "tests" / "fixtures" / "balance_rlz_pl_report.json"
