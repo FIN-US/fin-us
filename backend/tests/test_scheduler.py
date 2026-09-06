@@ -3174,7 +3174,9 @@ def test_sync_portfolio_prices_treats_paper_fallback_as_no_quote(portfolio_sessi
     )
     portfolio_session.commit()
 
-    # index.js:588-594가 실제로 붙이는 문구. get_balance 리포트 뒤에 안내가 따라온다.
+    # index.js:583-589가 실제로 붙이는 문구(리터럴은 :586-587). get_balance 리포트
+    # 뒤에 안내가 따라온다. index.js 쪽에는 이 매칭을 알리는 주석이 없으므로, 저 문구가
+    # 바뀌면 이 테스트가 유일한 조기 경보다 — scheduler.py의 표지 상수 주석 참고.
     paper_text = (
         _make_balance_text(("삼성전자", "005930", 10, 70000))
         + "\n\n[안내] 모의투자(openapivts) 계좌는 실현손익 TR(v1_국내주식-041)을 "
