@@ -142,6 +142,15 @@ mcp-trading은 백엔드가 **도구 호출 1건마다 새로 띄우는 단명 �
 `errlog=sys.stderr`로 잇는 것이 기본이고, 두 호출부 모두 이 인자를 넘기지 않는다 — 즉
 자식의 stderr는 **부모 프로세스의 stderr 파일 디스크립터로 그대로 흘러간다.**
 
+> 이 문장은 설치된 SDK 소스에서 직접 확인했다(`mcp/client/stdio/__init__.py`:
+> `async def stdio_client(server: StdioServerParameters, errlog: TextIO = sys.stderr)`,
+> 그 값이 자식 프로세스의 `stderr=`로 그대로 넘어간다). **SDK 기본값에 기대는 주장이므로
+> 버전을 올릴 때 같이 확인해야 한다.** 재확인 방법:
+> ```bash
+> python -c "import inspect, mcp.client.stdio as m; print(inspect.signature(m.stdio_client))"
+> grep -rn "errlog" backend finus_nat --include=*.py   # 호출부의 재정의 여부. 비어 있어야 한다
+> ```
+
 따라서:
 
 - ✅ 컨테이너/서비스 로그에 남는다 → 여기서 걷는다.
