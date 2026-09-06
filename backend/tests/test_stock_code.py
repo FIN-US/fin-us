@@ -6,7 +6,12 @@ telegram_commands.py의 조기 거절)은 각자의 테스트 파일에 남아 �
 """
 import json
 import logging
+import os
+import shutil
+import subprocess
 from pathlib import Path
+
+import pytest
 
 from backend import stock_code
 from backend.stock_code import (
@@ -18,11 +23,60 @@ from backend.stock_code import (
     _looks_like_stock_code,
     _master_stocks_path,
     is_orderable_stock_code,
+    is_orderable_stock_code_strict,
 )
 
 # 종목마스터 실제 데이터(4,353종 전수) — 판정 함수가 이름·별칭을 코드로 오인하지
 # 않는지 검증하는 데 쓴다. 이 파일은 레포에 커밋돼 있어야 한다.
 _STOCKS_JSON_PATH = Path(__file__).resolve().parents[2] / "mcp-trading" / "data" / "stocks.json"
+
+# --------------------------------------------------------------------------
+# 주문 가능 코드 정책 공유 판정표 (#138)
+# --------------------------------------------------------------------------
+# mcp-trading/tests/order.test.js와 같은 파일을 읽는다. 정책이 JS·Python 두 곳에
+# 복제돼 있으므로(order.js의 buildCashOrderBody 가드 / 이 모듈의 주문 가능 판정),
+# 표를 공유하지 않으면 한쪽만 넓혀도 아무 테스트도 red가 되지 않는다
+# (docs/issue-138-alnum-stock-code.md 6.2). 경로는 __file__ 기준 절대 경로라
+# worktree·CI 양쪽에서 동일하게 해석된다 — test_balance_parser.py가 이슈 #137에서
+# balance_report.json에 쓴 방식과 같다.
+#
+# order.js는 거절 메시지가 둘이라 verdict가 3값이지만, 백엔드 판정은 bool 하나다.
+# 따라서 Python 쪽은 "pass인가"만 본다 — 거절 사유 구분은 JS 스위트가 맡는다.
+_POLICY_FIXTURE_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "mcp-trading" / "tests" / "fixtures" / "orderable_code_policy.json"
+)
+_POLICY_FIXTURE = json.loads(_POLICY_FIXTURE_PATH.read_text(encoding="utf-8"))
+_POLICY_CASES = _POLICY_FIXTURE["cases"]
+_POLICY_VERDICTS = frozenset({"pass", "reject_unsupported", "reject_shape"})
+
+# 이 파일이 표에서 실제로 집어 간 행. _policy_params()가 파라미터를 만드는 시점
+# (수집 시점)에 채우므로, 아래 메타 테스트는 실행 순서나 -k 필터에 영향받지 않는다.
+_DRIVEN_CODES: set[str] = set()
+
+
+def _policy_params(column: str) -> dict:
+    """판정표의 한 열을 parametrize 인자로 편다.
+
+    ``column``은 "flag_off"(KIS_ALNUM_STOCK_ORDER_ENABLED 미설정·기타 값) 또는
+    "flag_on"(정확히 "true")이다. 오타난 verdict가 "거절"로 조용히 취급되지 않도록
+    여기서 먼저 막는다.
+    """
+    argvalues = []
+    ids = []
+    for case in _POLICY_CASES:
+        verdict = case[column]
+        assert verdict in _POLICY_VERDICTS, (
+            f"판정표에 알 수 없는 verdict {verdict!r}가 있다: {case['code']!r}"
+        )
+        _DRIVEN_CODES.add(case["code"])
+        argvalues.append((case["code"], verdict == "pass", case["note"]))
+        ids.append(case["code"] or "(empty)")
+    return {
+        "argnames": "code, expected_orderable, note",
+        "argvalues": argvalues,
+        "ids": ids,
+    }
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -163,35 +217,26 @@ class TestLooksLikeStockCode:
 
 class TestOrderableStockCodeRe:
     """뮤테이션 ②: _ORDERABLE_STOCK_CODE_RE 판정을 무력화(항상 True 반환 등)하면
-    test_rejects_alphanumeric / test_rejects_nine_char_fund 가 red가 된다.
+    공유 판정표를 도는 test_matches_shared_policy_table 이 red가 된다.
     """
 
-    def test_accepts_six_char_numeric(self):
-        assert _ORDERABLE_STOCK_CODE_RE.fullmatch("005930")
+    @pytest.mark.parametrize(**_policy_params("flag_off"))
+    def test_matches_shared_policy_table(self, code, expected_orderable, note):
+        """공유 판정표의 flag_off 열 = #73 기본 정책(숫자 6~7자).
 
-    def test_accepts_seven_char_numeric(self):
-        assert _ORDERABLE_STOCK_CODE_RE.fullmatch("1234567")
-
-    def test_rejects_alphanumeric(self):
-        """영숫자 코드는 order.js가 전용 메시지로 거절한다 — 백엔드도 동일하게 거절."""
-        assert not _ORDERABLE_STOCK_CODE_RE.fullmatch("0001A0")
-
-    def test_rejects_nine_char_fund(self):
-        r"""9자 펀드 코드는 order.js 두 번째 가드(/^\d{6,7}$/)에서 거절된다.
-
-        _looks_like_stock_code가 True를 반환하도록 확대됐어도(_STOCK_CODE_RE {6,9}),
-        주문 가능 여부는 여전히 숫자 6~7자로 제한된다 — 정책 불변.
+        표의 같은 행을 mcp-trading/tests/order.test.js도 검사하므로, order.js의
+        기본 분기와 이 상수 중 한쪽만 바뀌면 그 계층의 스위트가 red가 된다.
+        상수와 공개 진입점(is_orderable_stock_code_strict)이 갈리지 않는 것도 같은
+        자리에서 고정한다 — 갈리면 order_assist의 제안 경로만 조용히 달라진다.
         """
-        assert not _ORDERABLE_STOCK_CODE_RE.fullmatch("F70100026")
+        assert bool(_ORDERABLE_STOCK_CODE_RE.fullmatch(code)) is expected_orderable, note
+        assert is_orderable_stock_code_strict(code) is expected_orderable, note
 
     def test_rejects_five_char(self):
         assert not _ORDERABLE_STOCK_CODE_RE.fullmatch("00593")
 
     def test_rejects_eight_char(self):
         assert not _ORDERABLE_STOCK_CODE_RE.fullmatch("12345678")
-
-    def test_rejects_empty(self):
-        assert not _ORDERABLE_STOCK_CODE_RE.fullmatch("")
 
     def test_rejects_fullwidth_digits(self):
         r"""전각 숫자(０ 등)는 [0-9] 패턴에 매치되지 않아야 한다.
@@ -209,30 +254,29 @@ class TestOrderableStockCodeRe:
 
 class TestIsOrderableStockCode:
     """뮤테이션: 플래그 분기를 무력화(항상 확장 정규식 사용 등)하면
-    test_flag_unset_matches_default_policy가 red가 된다.
+    test_flag_unset_matches_shared_policy_table이 red가 된다.
     """
 
-    def test_flag_unset_matches_default_policy(self, monkeypatch):
-        """플래그 미설정 시 #73 정책(숫자 6~7자만)을 그대로 유지한다."""
+    @pytest.mark.parametrize(**_policy_params("flag_off"))
+    def test_flag_unset_matches_shared_policy_table(
+        self, monkeypatch, code, expected_orderable, note
+    ):
+        """플래그 미설정 시 판정표의 flag_off 열(#73 정책)을 그대로 유지한다."""
         monkeypatch.delenv("KIS_ALNUM_STOCK_ORDER_ENABLED", raising=False)
-        assert is_orderable_stock_code("005930")
-        assert is_orderable_stock_code("1234567")
-        assert not is_orderable_stock_code("0001A0")
-        assert not is_orderable_stock_code("F70100026")
+        assert is_orderable_stock_code(code) is expected_orderable, note
+
+    @pytest.mark.parametrize(**_policy_params("flag_on"))
+    def test_flag_true_matches_shared_policy_table(
+        self, monkeypatch, code, expected_orderable, note
+    ):
+        """플래그를 켜면 판정표의 flag_on 열 = order.js 확장 가드와 같은 범위를 연다."""
+        monkeypatch.setenv("KIS_ALNUM_STOCK_ORDER_ENABLED", "true")
+        assert is_orderable_stock_code(code) is expected_orderable, note
 
     def test_flag_false_matches_default_policy(self, monkeypatch):
         monkeypatch.setenv("KIS_ALNUM_STOCK_ORDER_ENABLED", "false")
         assert not is_orderable_stock_code("0001A0")
         assert not is_orderable_stock_code("F70100026")
-
-    def test_flag_true_allows_alphanumeric_and_nine_char_codes(self, monkeypatch):
-        """플래그를 켜면 order.js 확장 가드와 같은 범위(6~7자 영숫자, 9자)를 연다."""
-        monkeypatch.setenv("KIS_ALNUM_STOCK_ORDER_ENABLED", "true")
-        assert is_orderable_stock_code("005930")
-        assert is_orderable_stock_code("1234567")
-        assert is_orderable_stock_code("0001A0")
-        assert is_orderable_stock_code("Q500020")
-        assert is_orderable_stock_code("F70100026")
 
     def test_flag_true_still_rejects_eight_char(self, monkeypatch):
         """8자는 종목마스터에 0건이라 플래그를 켜도 계속 거절한다(#140과 동일 근거)."""
@@ -244,6 +288,123 @@ class TestIsOrderableStockCode:
         갈릴 수 있다 — 정확히 "true"만 인정한다."""
         monkeypatch.setenv("KIS_ALNUM_STOCK_ORDER_ENABLED", "True")
         assert not is_orderable_stock_code("0001A0")
+
+
+# --------------------------------------------------------------------------
+# 공유 판정표 메타 테스트 — 표가 실제로 소비되는지 / JS 가드와 일치하는지 (#138)
+# --------------------------------------------------------------------------
+
+def test_policy_fixture_rows_are_all_exercised():
+    """판정표에 행을 추가했는데 이 파일이 조용히 무시하는 것을 막는다.
+
+    파일을 다시 읽어 비교하므로, _policy_params()가 어떤 행을 빠뜨리면 여기서 잡힌다.
+    같은 성격의 메타 테스트가 mcp-trading/tests/order.test.js에도 있다 — 두 계층 중
+    한쪽만 새 행을 집어 가는 상황을 양쪽에서 막아야 표가 실제로 결합을 강제한다.
+    """
+    fresh = json.loads(_POLICY_FIXTURE_PATH.read_text(encoding="utf-8"))
+    codes = [case["code"] for case in fresh["cases"]]
+
+    assert len(set(codes)) == len(codes), "판정표에 중복 code 행이 있다"
+    assert _DRIVEN_CODES == set(codes)
+
+    # 형식별 대표 코드와 경계 케이스는 표에서 사라지면 안 된다
+    # (docs/issue-138-alnum-stock-code.md 6.4-1·6.4-4).
+    for required in ("005930", "0001A0", "Q500020", "F70100026", "12345678", "００５９３０"):
+        assert required in codes, f"판정표에서 대표 코드 {required}가 사라졌다"
+
+    for case in fresh["cases"]:
+        assert case.get("note"), f"{case['code']!r} 행에 note가 없다 — 표는 정책을 설명해야 한다"
+
+
+# mcp-trading/order.js의 실제 가드를 node로 돌려 판정표와 대조한다. 표를 양쪽이 "각자
+# 읽는" 것만으로는 JS만 바뀐 변경이 Python 스위트에서 잡히지 않는다 — 이 테스트가 그
+# 방향의 결합을 만든다(order.js의 정책 정규식만 손대도 여기서 red가 된다).
+# order.js 소스를 정규식으로 긁지 않는다 — 리터럴 표기가 조금만 달라져도 조용히
+# 어긋나기 때문이다. 대신 함수를 실제로 호출해 나온 판정을 비교한다.
+_NODE_PARITY_SCRIPT = """\
+import { readFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const { buildCashOrderBody } = await import(
+  pathToFileURL(process.env.PARITY_ORDER_JS).href
+);
+const cases = JSON.parse(
+  readFileSync(process.env.PARITY_FIXTURE, "utf-8"),
+).cases;
+
+const verdicts = {};
+for (const flag of ["flag_off", "flag_on"]) {
+  if (flag === "flag_on") {
+    process.env.KIS_ALNUM_STOCK_ORDER_ENABLED = "true";
+  } else {
+    delete process.env.KIS_ALNUM_STOCK_ORDER_ENABLED;
+  }
+  cases.forEach((policyCase, index) => {
+    let verdict;
+    try {
+      buildCashOrderBody({
+        accountNo: "1234567801",
+        stockCode: policyCase.code,
+        quantity: 1,
+        price: 10000,
+        orderType: "LIMIT",
+      });
+      verdict = "pass";
+    } catch (error) {
+      verdict = error.message.startsWith("stock_code")
+        ? "reject_shape"
+        : "reject_unsupported";
+    }
+    verdicts[flag + "|" + index] = verdict;
+  });
+}
+process.stdout.write(JSON.stringify(verdicts));
+"""
+
+
+def test_order_js_guard_agrees_with_shared_policy_table(tmp_path):
+    """order.js의 buildCashOrderBody()가 판정표와 같은 판정을 내는지 직접 확인한다.
+
+    node가 없으면 skip한다 — 그 경우에도 정책 자체의 커버리지는 잃지 않는다. 같은 표를
+    mcp-trading/tests/order.test.js가 검사하기 때문이다. 여기서 잃는 것은 "JS만 바꿨을
+    때 Python 스위트도 red가 된다"는 교차 확인뿐이다.
+    """
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip(
+            "node를 찾을 수 없어 order.js 교차 확인을 건너뛴다 "
+            "(같은 판정표를 mcp-trading 스위트가 검사한다)"
+        )
+
+    script = tmp_path / "orderable_code_parity.mjs"
+    script.write_text(_NODE_PARITY_SCRIPT, encoding="utf-8")
+    order_js = Path(__file__).resolve().parents[2] / "mcp-trading" / "order.js"
+
+    child_env = {
+        key: value
+        for key, value in os.environ.items()
+        if key != "KIS_ALNUM_STOCK_ORDER_ENABLED"
+    }
+    child_env["PARITY_ORDER_JS"] = str(order_js)
+    child_env["PARITY_FIXTURE"] = str(_POLICY_FIXTURE_PATH)
+
+    completed = subprocess.run(
+        [node, str(script)],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=60,
+        env=child_env,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+    js_verdicts = json.loads(completed.stdout)
+    expected = {
+        f"{column}|{index}": case[column]
+        for column in ("flag_off", "flag_on")
+        for index, case in enumerate(_POLICY_CASES)
+    }
+    assert js_verdicts == expected
 
 
 # ──────────────────────────────────────────────────────────────────────────

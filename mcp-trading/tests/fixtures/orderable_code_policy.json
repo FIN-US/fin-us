@@ -1,0 +1,83 @@
+{
+  "_comment": "이슈 #138: 주문 가능 종목코드 정책을 JS·Python 두 계층이 하나의 정의에서 읽도록 고정하는 공유 판정표입니다(docs/issue-138-alnum-stock-code.md §6.2·§6.4-1). mcp-trading/order.js의 buildCashOrderBody() 가드와 backend/stock_code.py의 is_orderable_stock_code()/is_orderable_stock_code_strict()는 같은 정책의 복제본이므로, 두 스위트(mcp-trading/tests/order.test.js, backend/tests/test_stock_code.py)가 이 표를 각자 읽어 같은 판정을 내는지 확인합니다. 어느 한 계층만 바꾸면 그 계층 스위트가 red가 됩니다. 롤아웃 단계(§6.5)가 올라가면 그 단계가 여는 행의 verdict만 고치고 나머지 행은 그대로 두는 것이 '의도한 범위만 열었다'는 증거가 됩니다. 행을 추가하면 양쪽 스위트의 메타 테스트가 그 행의 소비 여부를 확인하므로 한쪽이 조용히 무시할 수 없습니다.",
+  "_verdicts": {
+    "pass": "가드를 통과해 주문 바디가 만들어진다(백엔드에서는 주문 가능 코드로 판정).",
+    "reject_unsupported": "order.js의 영숫자 전용 메시지 '이 종목은 현재 주문을 지원하지 않습니다.'로 거절된다. 백엔드에서는 거절(False)이며 메시지 구분은 없다.",
+    "reject_shape": "order.js의 일반 형태 메시지('stock_code는 …여야 합니다')로 거절된다. 백엔드에서는 거절(False)."
+  },
+  "_flag": "flag_off = KIS_ALNUM_STOCK_ORDER_ENABLED 미설정 또는 정확히 \"true\"가 아닌 값(#73 기본 정책). flag_on = 정확히 \"true\".",
+  "cases": [
+    {
+      "code": "005930",
+      "flag_off": "pass",
+      "flag_on": "pass",
+      "note": "대조군. 숫자 6자(마스터 3,889종목)는 #73 이후 어느 플래그 상태에서도 주문 가능해야 한다 — 표 전체가 거절이면 테스트가 무의미해지므로 통과 행이 반드시 있어야 한다."
+    },
+    {
+      "code": "1234567",
+      "flag_off": "pass",
+      "flag_on": "pass",
+      "note": "숫자 7자. 기본 가드가 /^\\d{6,7}$/라 6자만이 아니라 7자도 이미 열려 있다는 사실을 고정한다(플래그가 여는 것은 '영숫자'이지 '7자'가 아니다)."
+    },
+    {
+      "code": "00088K",
+      "flag_off": "reject_unsupported",
+      "flag_on": "pass",
+      "note": "신형우선주(숫자5+K/L, 23종목). 롤아웃 §6.5의 1단계 대상 — 사고 반경이 가장 작아 가장 먼저 열릴 후보이므로 표에 대표로 둔다."
+    },
+    {
+      "code": "0001A0",
+      "flag_off": "reject_unsupported",
+      "flag_on": "pass",
+      "note": "신규 6자(숫자4+영문1+숫자1, 289종목). 롤아웃 3단계 대상이며 ETF·스팩이 함께 열리는 형식이다. #73 회귀 테스트가 원래 단일 케이스로 고정하던 코드라 표의 기준점이기도 하다."
+    },
+    {
+      "code": "Q500020",
+      "flag_off": "reject_unsupported",
+      "flag_on": "pass",
+      "note": "ETN 7자(389종목). KIS order-cash 스펙의 PDNO 설명이 'ETN은 7자리'를 명시해 근거가 가장 강한 형식이다(§4.2 가) — 그런데도 기본값에서는 막힌다는 사실을 표에 남긴다."
+    },
+    {
+      "code": "J0036221D",
+      "flag_off": "reject_shape",
+      "flag_on": "pass",
+      "note": "신주인수권 9자(6종목). 9자는 order.js 기본 분기의 첫 가드({6,7})에 매치조차 되지 않아 전용 메시지가 아니라 일반 형태 메시지로 거절된다 — 두 거절 메시지가 갈리는 지점이라 3값 verdict가 필요한 이유다."
+    },
+    {
+      "code": "F70100026",
+      "flag_off": "reject_shape",
+      "flag_on": "pass",
+      "note": "펀드 9자(69종목). 공식 저장소에 집합투자증권 주문 API가 없어 근거가 가장 약한 형식이다(§4.2 다). 플래그를 켜면 가드는 통과하지만 실제 수용 여부는 KIS 응답이 결정한다."
+    },
+    {
+      "code": "12345678",
+      "flag_off": "reject_shape",
+      "flag_on": "reject_shape",
+      "note": "8자는 종목마스터 4,353종 전수에 0건이라 플래그를 켜도 계속 거절해야 한다(#140과 같은 근거). 이슈가 제안했던 단순 확장 /^[0-9A-Z]{6,9}$/를 쓰면 이 행이 pass로 바뀌어 red가 된다 — 길이 상한을 뭉개는 변경을 잡는 행."
+    },
+    {
+      "code": "0001a0",
+      "flag_off": "reject_unsupported",
+      "flag_on": "reject_shape",
+      "note": "소문자. 같은 코드가 플래그 상태에 따라 서로 다른 거절 메시지로 갈리는 유일한 행이다. 기본 분기의 첫 가드는 /i가 있어 전용 메시지를 주지만, 플래그 켜짐 분기는 [0-9A-Z]만 받아 일반 메시지로 거절한다. index.js는 upper 정규화를 하지 않으므로 여기서 관용하면 소문자가 그대로 PDNO에 실린다."
+    },
+    {
+      "code": "００５９３０",
+      "flag_off": "reject_shape",
+      "flag_on": "reject_shape",
+      "note": "전각 숫자. Python의 \\d는 이 문자들을 매치하지만 JS의 \\d는 매치하지 않는다 — 두 계층이 갈리는 대표 사례라 Python 쪽 정규식을 [0-9]로 명시한 근거다(§6.4-4). 어느 단계에서도 거절로 남아야 한다."
+    },
+    {
+      "code": "",
+      "flag_off": "reject_shape",
+      "flag_on": "reject_shape",
+      "note": "빈 문자열. 길이 하한이 사라지는 변경(예: {0,7})을 잡는 경계 행이다."
+    },
+    {
+      "code": "005 930",
+      "flag_off": "reject_shape",
+      "flag_on": "reject_shape",
+      "note": "내부 공백. 앵커가 빠지거나 문자 집합에 공백이 섞이면 통과해 버리는 경계 행이다. 백엔드는 strip() 후에도 내부 공백이 남는다는 성질을 함께 고정한다."
+    }
+  ]
+}
