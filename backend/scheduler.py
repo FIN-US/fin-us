@@ -634,7 +634,10 @@ def _parse_rlz_pl_quotes(report_text: str) -> dict[str, float]:
     lines = section.split("\n")
     malformed: list[str] = []
     codeless: list[str] = []
-    priceless: list[str] = []
+    # (코드, 종목명)으로 모읍니다. 이름만 모으면 나중 행이 시세를 채워 준 종목까지
+    # "현재가를 읽지 못했다"고 이름을 부르게 됩니다 — append 시점에는 그 종목이
+    # quotes에 없는 것이 맞지만, 뒤에 오는 매매구분 행이 값을 줄 수 있기 때문입니다.
+    priceless: list[tuple[str, str]] = []
     divergent: list[tuple[str, float, float]] = []
 
     for i, line in enumerate(lines):
@@ -688,7 +691,7 @@ def _parse_rlz_pl_quotes(report_text: str) -> dict[str, float]:
             continue
 
         if price is None:
-            priceless.append(name)
+            priceless.append((code, name))
             continue
         quotes[code] = price
 
@@ -704,10 +707,14 @@ def _parse_rlz_pl_quotes(report_text: str) -> dict[str, float]:
             "형식 위반이 아니라 응답에 코드가 없는 데이터 조건입니다 — 포맷터 회귀가 아닙니다.",
             len(codeless), codeless[:3],
         )
-    if priceless:
+    # 끝까지 값을 못 얻은 종목만 부릅니다. 같은 코드의 뒤 행이 시세를 채워 줬다면
+    # 그 종목은 갱신되었으므로 이름을 부르면 거짓입니다(예: prpr "0" 행 뒤에
+    # 71,200원 행이 오면 quotes에는 71200이 들어 있는데도 이름이 불렸습니다).
+    unpriced = [name for code, name in priceless if code not in quotes]
+    if unpriced:
         logger.warning(
             "현재가를 읽지 못한 종목 %d건은 시세를 갱신하지 않습니다(예시 최대 3건): %r",
-            len(priceless), priceless[:3],
+            len(unpriced), unpriced[:3],
         )
     if divergent:
         # 이 로그가 존재하는 이유가 곧 이 로그의 내용입니다. 아무도 TTTC8494R 실계좌

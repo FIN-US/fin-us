@@ -2970,6 +2970,42 @@ def test_parse_rlz_pl_quotes_omits_holdings_without_price():
     assert "123456" not in quotes
 
 
+def test_parse_rlz_pl_quotes_does_not_name_stock_that_later_row_priced(caplog):
+    """앞 행이 시세 없이 와도 뒤 행이 값을 주면 그 종목 이름을 부르지 않는다.
+
+    같은 코드가 매매구분마다 행으로 쪼개지므로, prpr이 "0"인 현금 행 뒤에 정상적인
+    신용 행이 올 수 있다. "현재가를 읽지 못한 종목" 목록을 append 시점의 이름으로
+    만들면 **시세를 실제로 받은** 종목을 못 받았다고 보고하게 된다 — 운영자가 없는
+    문제를 쫓는다.
+
+    이 테스트가 잡는 mutation: 경고 목록을 quotes로 거르지 않고 그대로 내보내는 회귀
+    (삼성전자가 경고에 등장한다).
+    """
+    import logging
+
+    from ..scheduler import _parse_rlz_pl_quotes
+
+    text = (
+        "[보유 종목]\n"
+        "1. 삼성전자 (005930) · 현금\n"
+        "   보유 10주 | 현재가 0원 | 평가 0원\n"
+        "   평가손익 -700,000원 (-100.00%) | 매입가 70,000원\n"
+        "   금일 매수 0주 / 매도 0주 | 전일대비 0 (0.00%)\n"
+        "\n"
+        "2. 삼성전자 (005930) · 신용\n"
+        "   보유 5주 | 현재가 71,200원 | 평가 356,000원\n"
+        "   평가손익 6,000원 (1.72%) | 매입가 70,000원\n"
+        "   금일 매수 0주 / 매도 0주 | 전일대비 300 (0.42%)"
+    )
+
+    with caplog.at_level(logging.WARNING, logger="backend.scheduler"):
+        quotes = _parse_rlz_pl_quotes(text)
+
+    assert quotes == {"005930": 71200.0}
+    unpriced = [r.getMessage() for r in caplog.records if "현재가를 읽지 못한" in r.getMessage()]
+    assert unpriced == [], "뒤 행이 시세를 채워 준 종목을 '못 읽었다'고 부르면 안 된다"
+
+
 def test_parse_rlz_pl_quotes_warns_when_duplicate_rows_disagree(caplog):
     """같은 코드의 두 행이 다른 현재가를 들고 오면 첫 행을 쓰되 경고를 남긴다.
 
