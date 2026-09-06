@@ -165,6 +165,119 @@ test("HTTP 오류 응답의 바디에서도 유량 제한을 잡는다", () => {
   assert.match(line, /msg_cd=EGW00133/);
 });
 
+// ---------------------------------------------------------------------------
+// 토큰 발급(tr_id=tokenP). index.js의 getAccessToken 주석과 런북 2절이 "EGW00133이 실제로
+// 관측될 수 있는 곳은 사실상 이 경로"라고 못 박는데, 정작 이 경로의 줄 모양을 고정하는
+// 테스트가 하나도 없었다. 게다가 이 경로의 실패 바디는 조회(GET)와 모양이 다르다 —
+// OAuth 형식이라 msg_cd/msg1이 아니라 error_code/error_description으로 온다.
+// ---------------------------------------------------------------------------
+
+test("토큰 발급 성공 줄은 런북이 적어 둔 rt_cd=- msg_cd=- class=ok 모양 그대로다", () => {
+  // 런북 2절이 이 모양을 "정상"이라고 설명한다. 그 문장을 코드가 지키는지 통째로 고정한다.
+  const { line, classification, rateLimited } = formatKisRequestLog({
+    trId: "tokenP",
+    elapsedMs: 14,
+    pid: 4242,
+    now: () => Date.parse("2026-09-06T09:00:00.000Z"),
+    response: {
+      status: 200,
+      data: {
+        access_token: "eyJhbGciOiJIUzI1NiJ9.SUPERSECRETACCESSTOKEN.sig",
+        access_token_token_expired: "2026-09-07 09:00:00",
+        token_type: "Bearer",
+        expires_in: 86_400,
+      },
+    },
+  });
+
+  assert.equal(classification, KIS_CLASS_OK);
+  assert.equal(rateLimited, false);
+  assert.equal(
+    line,
+    "[kis-req] ts=2026-09-06T09:00:00.000Z pid=4242 tr_id=tokenP elapsed_ms=14 http=200 rt_cd=- msg_cd=- class=ok",
+  );
+  // 응답 바디에 토큰이 통째로 들어 있는 유일한 경로다. 화이트리스트가 그것을 읽지 않는다.
+  for (const secret of ["SUPERSECRETACCESSTOKEN", "eyJhbGciOiJIUzI1NiJ9", "access_token", "Bearer"]) {
+    assert.equal(line.includes(secret), false, `토큰 발급 줄에 ${secret}이(가) 새어 나갔다: ${line}`);
+  }
+});
+
+// 토큰 발급 요청 바디에는 appkey·appsecret이 통째로 들어가고(index.js의 getAccessToken),
+// axios는 그것을 error.config.data에 그대로 들고 있다. 조회 경로의 realisticAxiosError가
+// params(CANO)를 재현하듯, 이쪽은 그 요청 바디를 재현한다.
+function realisticTokenAxiosError() {
+  const error = new Error("Request failed with status code 403");
+  error.name = "AxiosError";
+  error.code = "ERR_BAD_REQUEST";
+  error.config = {
+    url: "https://openapi.koreainvestment.com:9443/oauth2/tokenP",
+    method: "post",
+    headers: { "Content-Type": "application/json" },
+    data: JSON.stringify({
+      grant_type: "client_credentials",
+      appkey: "PSxxxxAPPKEYxxxxSECRETVALUE",
+      appsecret: "APPSECRETyyyyLONGyyyyVALUEyyyy",
+    }),
+  };
+  error.response = {
+    status: 403,
+    data: {
+      error_code: "EGW00133",
+      error_description: "접근토큰 발급 유량을 초과하였습니다.",
+    },
+  };
+  return error;
+}
+
+test("토큰 발급 실패의 OAuth 바디(error_code)도 유량 제한으로 잡힌다", () => {
+  // 이 갈래를 안 보면 class=other가 되고, 게이트가 꺼진 기본 설정에서는 rateLimited가
+  // false라 줄이 **아예 나가지 않는다**(index.js의 logKisRequest). 침묵이 회귀의 모양이다.
+  const { line, classification, rateLimited } = formatKisRequestLog({
+    trId: "tokenP",
+    elapsedMs: 33,
+    error: realisticTokenAxiosError(),
+  });
+
+  assert.equal(classification, KIS_CLASS_RATE_LIMIT);
+  assert.equal(rateLimited, true, "게이트가 꺼진 기본 설정에서 줄을 내보내는 유일한 조건이다");
+  assert.match(line, /tr_id=tokenP/);
+  assert.match(line, /http=403/);
+  assert.match(line, /msg_cd=EGW00133/);
+  assert.match(line, /class=rate_limit/);
+  assert.match(line, /err=ERR_BAD_REQUEST/);
+  assert.match(line, /msg1="접근토큰 발급 유량을 초과하였습니다\."/);
+
+  for (const secret of [
+    "PSxxxxAPPKEYxxxxSECRETVALUE",
+    "APPSECRETyyyyLONGyyyyVALUEyyyy",
+    "grant_type",
+    "appkey",
+    "appsecret",
+    "access_token",
+    "koreainvestment.com",
+  ]) {
+    assert.equal(line.includes(secret), false, `토큰 발급 줄에 ${secret}이(가) 새어 나갔다: ${line}`);
+  }
+});
+
+test("OAuth 바디의 본문(error_description)만으로도 잡고, KIS 표준 필드가 우선한다", () => {
+  // msg_cd 목록이 완전하다는 보장이 없어 본문을 두 번째 증거 경로로 두는 규칙은
+  // OAuth 모양 바디에도 그대로 적용되어야 한다.
+  const error = realisticTokenAxiosError();
+  error.response.data = { error_description: "초당 거래건수를 초과하였습니다." };
+  assert.equal(
+    formatKisRequestLog({ trId: "tokenP", elapsedMs: 1, error }).rateLimited,
+    true,
+  );
+
+  // 두 모양이 한 바디에 섞여 오면 KIS 표준 필드를 믿는다(?? 의 순서를 고정한다).
+  const mixed = realisticTokenAxiosError();
+  mixed.response.data = { msg_cd: "EGW00123", msg1: "기간이 올바르지 않습니다.", error_code: "EGW00201" };
+  const { line, classification } = formatKisRequestLog({ trId: "tokenP", elapsedMs: 1, error: mixed });
+  assert.equal(classification, KIS_CLASS_OTHER);
+  assert.match(line, /msg_cd=EGW00123/);
+});
+
 test("이상한 tr_id·elapsedMs는 로그 줄을 깨뜨리지 않고 '-'로 눕는다", () => {
   const { line } = formatKisRequestLog({
     trId: "bad id\nwith newline",

@@ -160,8 +160,18 @@ export function formatKisRequestLog({
 } = {}) {
   const body = response?.data ?? error?.response?.data ?? null;
   const rtCd = body && typeof body === "object" ? body.rt_cd : undefined;
-  const rawMsgCd = body && typeof body === "object" ? body.msg_cd : undefined;
-  const rawMsg1 = body && typeof body === "object" ? body.msg1 : undefined;
+  // msg_cd/msg1 옆에 error_code/error_description을 함께 보는 이유: 토큰 발급
+  // (POST /oauth2/tokenP)의 실패 바디는 조회(GET)와 모양이 다른 OAuth 형식이라
+  // `{ error_code: "EGW00133", error_description: "..." }`으로 온다. 이 갈래를 안 보면
+  // 그 경로의 EGW00133이 class=other로 떨어지고, 게이트가 꺼진 기본 설정에서는
+  // rateLimited가 false라 **줄이 아예 나가지 않는다**(index.js의 logKisRequest는
+  // `KIS_REQUEST_LOG_ENABLED || rateLimited`일 때만 쓴다). 줄이 나빠지는 게 아니라
+  // 통째로 침묵한다 — 런북 2절이 "게이트를 꺼도 class=rate_limit 줄은 항상 나간다"고
+  // 약속한 그 경로에서, 그리고 index.js가 "EGW00133이 관측될 수 있는 곳은 사실상
+  // 이 경로뿐"이라고 적어 둔 그 경로에서.
+  // 조회 바디는 이 두 필드를 쓰지 않으므로 KIS 표준 필드를 먼저 보고 ?? 로 뒤에 둔다.
+  const rawMsgCd = body && typeof body === "object" ? (body.msg_cd ?? body.error_code) : undefined;
+  const rawMsg1 = body && typeof body === "object" ? (body.msg1 ?? body.error_description) : undefined;
 
   const httpStatus = response?.status ?? error?.response?.status;
   const failed = Boolean(error) || (rtCd !== undefined && String(rtCd) !== "0");

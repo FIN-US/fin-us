@@ -96,6 +96,12 @@ KIS 요청 1건마다 stderr에 정확히 한 줄이 나간다.
 - 토큰 발급 성공 줄은 `rt_cd=-  msg_cd=-`로 나온다. 토큰 응답 바디에 그 필드가 없기
   때문이며 정상이다(`access_token`은 포맷터가 읽지 않으므로 줄에 실리지 않는다).
   실제 모양: `[kis-req] ts=... pid=... tr_id=tokenP elapsed_ms=14 http=200 rt_cd=- msg_cd=- class=ok`
+- 토큰 발급 **실패** 바디는 조회와 모양이 다르다. OAuth 형식이라 `msg_cd`/`msg1`이 아니라
+  `error_code`/`error_description`으로 온다(`{"error_code":"EGW00133", ...}`). 포맷터가 두
+  모양을 모두 읽으므로 줄에는 조회와 똑같이 `msg_cd=EGW00133 class=rate_limit`으로 나온다
+  (`mcp-trading/kis-rate-limit.js`). 이 갈래를 안 보면 게이트가 꺼진 기본 설정에서
+  **줄이 아예 안 나가므로**, 이 절 앞머리의 약속(게이트를 꺼도 `class=rate_limit` 줄은
+  항상 나간다)이 이 경로에서만 조용히 깨진다.
 - **토큰 발급이 5.3에서 특히 중요하다.** mcp-trading은 도구 호출 1건마다 새로 뜨는 단명
   프로세스라(3장), 캐시가 비었거나 만료된 순간 동시에 뜬 프로세스들이 전부 `tokenP`로
   몰린다. 이것이 5.3이 보려는 프로세스 간 버스트 그 자체다. `EGW00133`이 실제로 관측될
