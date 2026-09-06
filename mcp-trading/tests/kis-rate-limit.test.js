@@ -59,7 +59,7 @@ test("8자리 이상 연속 숫자만 가리고 짧은 숫자는 남긴다", () 
 });
 
 test("성공 응답은 한 줄 ok 로그가 되고 rateLimited가 아니다", () => {
-  const { line, classification, rateLimited, msgCd } = formatKisRequestLog({
+  const { line, classification, rateLimited } = formatKisRequestLog({
     trId: "TTTC0081R",
     elapsedMs: 132.6,
     response: {
@@ -70,7 +70,6 @@ test("성공 응답은 한 줄 ok 로그가 되고 rateLimited가 아니다", ()
 
   assert.equal(classification, KIS_CLASS_OK);
   assert.equal(rateLimited, false);
-  assert.equal(msgCd, "MCA00000");
   assert.equal(line.includes("\n"), false, "한 요청은 반드시 한 줄이어야 한다");
   assert.match(line, /^\[kis-req\] /);
   assert.match(line, /tr_id=TTTC0081R/);
@@ -111,9 +110,9 @@ test("pid·시각을 못 얻어도 줄 모양은 깨지지 않는다", () => {
 });
 
 test("rt_cd가 0이 아닌 응답은 유량 제한으로 분류되고 msg_cd가 줄에 남는다", () => {
-  // index.js:212-213은 msg1이 있으면 msg_cd를 통째로 버린다. 그래서 EGW00201이 지금까지
+  // index.js의 kisApiGet은 msg1이 있으면 msg_cd를 통째로 버린다. 그래서 EGW00201이 지금까지
   // 로그에 한 번도 남지 않았다 — 이 줄이 그 구멍을 메운다.
-  const { line, classification, rateLimited, msgCd } = formatKisRequestLog({
+  const { line, classification, rateLimited } = formatKisRequestLog({
     trId: "TTTC8434R",
     elapsedMs: 41,
     response: {
@@ -128,7 +127,6 @@ test("rt_cd가 0이 아닌 응답은 유량 제한으로 분류되고 msg_cd가 
 
   assert.equal(classification, KIS_CLASS_RATE_LIMIT);
   assert.equal(rateLimited, true);
-  assert.equal(msgCd, "EGW00201");
   assert.match(line, /msg_cd=EGW00201/);
   assert.match(line, /class=rate_limit/);
   assert.match(line, /msg1="초당 거래건수를 초과하였습니다\."/);

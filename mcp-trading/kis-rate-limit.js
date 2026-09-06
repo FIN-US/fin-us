@@ -148,7 +148,7 @@ export function classifyKisError(input = {}) {
  * @param {object}  [input.error]     axios 에러 (실패 시)
  * @param {number}  [input.pid]       프로세스 id. 없으면 필드를 생략한다.
  * @param {Function}[input.now]       시각 주입 이음매 (balance.js의 fetchAllPaged와 같은 방식)
- * @returns {{ line: string, classification: string, rateLimited: boolean, msgCd: string|null }}
+ * @returns {{ line: string, classification: string, rateLimited: boolean }}
  */
 export function formatKisRequestLog({
   trId,
@@ -177,7 +177,7 @@ export function formatKisRequestLog({
     `http=${Number.isInteger(httpStatus) ? httpStatus : ABSENT}`,
     `rt_cd=${sanitizeToken(rtCd)}`,
     // msg_cd는 조건 없이 남긴다. 유량 제한 판정의 1차 증거이고, KIS가 정한 영숫자 코드라
-    // 계정 정보가 실릴 자리가 아니다. index.js:212-213이 msg1이 있으면 msg_cd를 버리는
+    // 계정 정보가 실릴 자리가 아니다. index.js의 kisApiGet이 msg1이 있으면 msg_cd를 버리는
     // 바람에 지금까지 이 코드가 로그에 한 번도 남지 않았다.
     `msg_cd=${sanitizeToken(rawMsgCd)}`,
     `class=${classification}`,
@@ -189,11 +189,13 @@ export function formatKisRequestLog({
   const msg1 = sanitizeMsg1(rawMsg1);
   if (msg1) fields.push(`msg1=${JSON.stringify(msg1)}`);
 
+  // msg_cd는 줄(`msg_cd=` 필드)로만 내보낸다. 따로 반환하지 않는 이유는 읽는 쪽이
+  // 없어서다 — index.js는 { line, rateLimited }만 꺼내 쓴다. 테스트만 보는 반환값은
+  // 프로덕션에서 검증되지 않는 API 표면이라 두지 않는다.
   return {
     line: `${KIS_REQUEST_LOG_PREFIX} ${fields.join(" ")}`,
     classification,
     rateLimited: classification === KIS_CLASS_RATE_LIMIT,
-    msgCd: typeof rawMsgCd === "string" && rawMsgCd.trim() ? rawMsgCd.trim() : null,
   };
 }
 
