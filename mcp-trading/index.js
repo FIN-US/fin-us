@@ -22,7 +22,7 @@ import {
   isPaperTradingKisUrl,
 } from "./formatters.js";
 import { kisOrderPost } from "./kis-client.js";
-import { formatKisRequestLog, readKisRequestLogEnv } from "./kis-rate-limit.js";
+import { formatKisRequestLog, maskLongDigitRuns, readKisRequestLogEnv } from "./kis-rate-limit.js";
 import {
   OrderDedupStore,
   createOrderDedupKey,
@@ -245,7 +245,15 @@ async function kisApiGet(pathname, trId, params, { trCont = "" } = {}) {
     // 태깅하지는 않는다 — 읽는 쪽이 없어서 죽은 값이 되기 때문이다(kis-client.js의
     // kisOrderRejected는 order-submit.js:17이 실제로 읽는다). 버려지던 msg_cd는 이 PR이
     // 붙인 위 `[kis-req]` 줄의 `msg_cd=` 필드가 이미 싣고 나간다.
-    throw new Error(`KIS API 오류: ${data.msg1 || data.msg_cd || "알 수 없는 오류"}`);
+    //
+    // msg1에는 maskLongDigitRuns를 씌운다. KIS가 되울려 주는 msg1에 계좌번호가 실려 오고
+    // (관측된 예: "... 계좌 50123456"), 이 error.message는 그대로 여러 갈래로 새어 나간다 —
+    // balance.js:206의 stderr 줄, MCP 도구 결과 텍스트, backend services.short_error를
+    // 거쳐 텔레그램까지. [kis-req] 줄만 가리고 정작 원본 메시지가 안 가려지면 마스킹이
+    // 반쪽이 된다. 여기 한 군데를 가리면 그 하위 소비자가 전부 함께 닫힌다.
+    // (kis-client.js:125의 같은 모양 주문 경로와 도구 결과 전반의 마스킹은 #230/#231
+    //  PII 작업의 몫이라 이 PR 범위 밖이다.)
+    throw new Error(`KIS API 오류: ${maskLongDigitRuns(data.msg1) || data.msg_cd || "알 수 없는 오류"}`);
   }
 
   const nextTrCont = response.headers?.tr_cont || response.headers?.["tr-cont"] || "";

@@ -305,4 +305,54 @@ for (const { tool, envKey, constant, kisPath } of PAGED_TOOLS) {
       `게이트가 꺼져 있으면 정상 요청의 타이밍 줄은 나가지 않아야 한다. stderr was: ${stderrText}`,
     );
   });
+
+  // -------------------------------------------------------------------------
+  // 이슈 #210: KIS가 되울려 주는 msg1에 계좌번호가 실려 오고, kisApiGet이 만드는
+  // "KIS API 오류: <msg1>" 에러 메시지는 [kis-req] 줄의 마스킹을 통과하지 않은 채
+  // 도구 결과 텍스트·balance.js의 stderr 줄·백엔드 short_error(텔레그램)까지 그대로
+  // 흘러간다. 1페이지에서 계좌번호가 실린 msg1을 돌려주면 fetchAllPaged가 그대로
+  // 전파하므로(pages === 0 분기) 도구 결과 텍스트에서 그 누출을 직접 볼 수 있다.
+  test(`KIS 오류 메시지의 긴 숫자는 도구 결과에서도 가려진다 (${tool})`, { timeout: PROBE_TEST_TIMEOUT_MS }, async (t) => {
+    const { server, port } = await startKisStub(kisPath, {
+      rateLimitOnPage: 1,
+      rateLimitMsg1: "초당 거래건수를 초과하였습니다. 계좌 50123456",
+    });
+    const tokenCachePath = path.join(os.tmpdir(), `finus-msg1-mask-probe-${randomUUID()}.json`);
+
+    const transport = new StdioClientTransport({
+      command: process.execPath,
+      args: ["index.js"],
+      cwd: process.cwd(),
+      // 유량 제한 줄이 테스트 출력에 섞이지 않게 잡아 둔다(여기서 읽지는 않는다).
+      stderr: "pipe",
+      env: {
+        ...process.env,
+        KIS_URL: `http://127.0.0.1:${port}`,
+        KIS_API_KEY: "stub-appkey",
+        KIS_API_SECRET: "stub-appsecret",
+        KIS_ACCOUNT_NO: "5012345601",
+        KIS_TOKEN_CACHE_PATH: tokenCachePath,
+      },
+    });
+    const client = new Client({ name: "msg1-mask-test", version: "1.0.0" });
+    t.after(async () => {
+      await client.close().catch(() => {});
+      await new Promise((resolve) => server.close(resolve));
+      await rm(tokenCachePath, { force: true });
+      await rm(`${tokenCachePath}.lock`, { force: true, recursive: true });
+    });
+
+    await client.connect(transport);
+    transport.stderr?.resume();
+    const result = await client.callTool({ name: tool, arguments: {} });
+
+    assert.equal(result.isError, true, "1페이지 실패는 그대로 전파되어야 한다");
+    const text = result.content?.[0]?.text ?? "";
+    assert.ok(text.includes("KIS API 오류: "), `KIS 오류가 전파되어야 한다: ${text}`);
+    assert.ok(
+      !text.includes("50123456"),
+      `KIS API 오류 메시지의 8자리 이상 숫자는 가려져야 한다(계좌번호 누출). 실제: ${text}`,
+    );
+    assert.ok(text.includes("계좌 ********"), `자릿수는 남기고 값만 지운다. 실제: ${text}`);
+  });
 }
