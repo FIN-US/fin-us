@@ -83,8 +83,11 @@ _STOCK_CODE_RE = re.compile(r"\A(?:[0-9A-Z]{6,7}|[0-9A-Z]{9})\Z")
 # 실호출 확인은 아님"). 실계좌 없이는 판정할 수 없으므로 가드를 무조건 열지 않고
 # KIS_ALNUM_STOCK_ORDER_ENABLED 플래그 뒤에 둔다 — 아래 is_orderable_stock_code()가
 # 텔레그램 주문 경로의 판정 진입점이며, 이 상수는 그 함수의 "플래그 꺼짐(기본값)"
-# 분기에서, 그리고 order_assist.check_orderable_code()에서 쓰인다. 후자는 플래그와
-# 무관하게 이 상수를 직접 참조한다(아래 ⚠️ 블록 3번째 복제본 항목 참조).
+# 분기에서, 그리고 order_assist.check_orderable_code()에서 쓰인다. 후자는 플래그를 보지
+# 않는 is_orderable_stock_code_strict()를 거친다(아래 ⚠️ 블록 3번째 복제본 항목 참조).
+#
+# 이 상수와 mcp-trading/order.js의 ORDERABLE_STOCK_CODE_RE가 같은 판정을 내는지는
+# mcp-trading/tests/fixtures/orderable_code_policy.json 공유 판정표가 고정한다(#138).
 _ORDERABLE_STOCK_CODE_RE = re.compile(r"\A[0-9]{6,7}\Z")
 
 # 플래그가 켜졌을 때(KIS_ALNUM_STOCK_ORDER_ENABLED=true) 허용하는 범위. _STOCK_CODE_RE
@@ -109,6 +112,20 @@ def _alnum_stock_order_enabled() -> bool:
     return os.environ.get("KIS_ALNUM_STOCK_ORDER_ENABLED", "") == "true"
 
 
+def is_orderable_stock_code_strict(code: str) -> bool:
+    """플래그와 무관하게 #73 기본 정책(숫자 6~7자)으로만 판정합니다.
+
+    ``_ORDERABLE_STOCK_CODE_RE``를 모듈 밖으로 새어 나가게 두면 "이 상수를 직접 쓰는
+    곳이 몇 군데인가"를 grep으로만 알 수 있고, 정책이 바뀔 때 호출부가 각자
+    ``fullmatch`` 호출을 복제한다. 진입점을 함수로 고정해 상수는 이 모듈 안에 둔다.
+
+    ``is_orderable_stock_code()``와 달리 KIS_ALNUM_STOCK_ORDER_ENABLED를 보지 않는다 —
+    자동 제안 경로(order_assist.check_orderable_code)가 쓰는 하드 한도이며, 이
+    비대칭은 의도된 것이다(아래 is_orderable_stock_code() docstring 참조).
+    """
+    return bool(_ORDERABLE_STOCK_CODE_RE.fullmatch(code))
+
+
 def is_orderable_stock_code(code: str) -> bool:
     """code(이미 upper() 정규화된 값)가 현재 정책상 주문 가능한 형태인지 판정합니다.
 
@@ -123,7 +140,7 @@ def is_orderable_stock_code(code: str) -> bool:
         접두사 통과 목록을 통해 같은 값을 그대로 물려받는다.
 
         3번째 복제본이 하나 더 있다: order_assist.check_orderable_code()가
-        _ORDERABLE_STOCK_CODE_RE를 직접 참조한다(자동 제안 경로의 하드 한도 판정).
+        is_orderable_stock_code_strict()를 쓴다(자동 제안 경로의 하드 한도 판정).
         이건 의도된 비대칭이다 — 플래그를 켜도 자동 제안은 숫자 6~7자만 낸다.
         사람이 명시적으로 입력한 코드와 달리 봇이 스스로 고른 종목은 KIS 수용
         여부가 확정될 때까지(#265 실측) 기존 범위에 묶어 둔다.
@@ -132,7 +149,7 @@ def is_orderable_stock_code(code: str) -> bool:
     """
     if _alnum_stock_order_enabled():
         return bool(_ORDERABLE_STOCK_CODE_ALNUM_RE.fullmatch(code))
-    return bool(_ORDERABLE_STOCK_CODE_RE.fullmatch(code))
+    return is_orderable_stock_code_strict(code)
 
 
 # ──────────────────────────────────────────────────────────────────────────

@@ -305,8 +305,9 @@ def test_suggestion_path_stays_numeric_only_even_when_alnum_flag_is_on(monkeypat
     """자동 제안 경로는 KIS_ALNUM_STOCK_ORDER_ENABLED=true에서도 숫자 코드만 낸다.
 
     의도된 비대칭이다(#138) — 텔레그램 주문 경로는 stock_code.is_orderable_stock_code()를
-    거쳐 플래그를 따르지만, check_orderable_code()는 _ORDERABLE_STOCK_CODE_RE를 직접
-    참조해 봇이 스스로 고른 종목을 기존 범위(숫자 6~7자)에 묶어 둔다. KIS가 영숫자·9자
+    거쳐 플래그를 따르지만, check_orderable_code()는 플래그를 보지 않는
+    is_orderable_stock_code_strict()를 써서 봇이 스스로 고른 종목을 기존 범위(숫자
+    6~7자)에 묶어 둔다. KIS가 영숫자·9자
     PDNO를 실제로 수용하는지 확정되기 전(#265 실측)까지 유지한다.
     나중에 이 비대칭을 없앨 때는 이 테스트를 함께 지워야 한다 — 조용히 갈리지 않도록
     여기서 고정한다.
