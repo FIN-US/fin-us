@@ -179,7 +179,7 @@ async function getAccessToken({ lockWaitMs } = {}) {
 
   return tokenCache.getOrIssue(async () => {
     // 만료 시각은 요청 "전" 시각에서 센다. 응답이 늦게 오면 그만큼 캐시 수명을
-    // 짧게 잡는 쪽이 안전하다.
+    // 짧게 잡는 쪽이 안전하다. 요청 소요 시간(elapsedMs)의 기준 시각도 같은 값이다.
     const now = Date.now();
     try {
       const response = await kisAxios.post(`${KIS_URL}/oauth2/tokenP`, {
@@ -187,6 +187,15 @@ async function getAccessToken({ lockWaitMs } = {}) {
         appkey: KIS_API_KEY,
         appsecret: KIS_API_SECRET,
       });
+      // 이슈 #210: 토큰 발급도 KIS 요청이므로 kisApiGet과 같은 줄로 남긴다. 이 경로가
+      // 5.3(프로세스 간 버스트)에서 가장 중요하다 — mcp-trading은 도구 호출 1건마다 새로
+      // 뜨는 단명 프로세스라, 캐시가 비었거나 만료된 순간 동시에 뜬 프로세스들이 전부
+      // 여기로 몰린다. 계측하지 않으면 그 버스트가 로그에 아예 보이지 않는다. 저장소에서
+      // EGW00133이 관측될 수 있는 곳도 사실상 이 경로뿐이다(tests/kis-client.test.js의
+      // 픽스처 문구가 그 코드를 토큰 발급 응답으로 쓴다).
+      // formatKisRequestLog는 화이트리스트(rt_cd/msg_cd/msg1/status/code)만 읽으므로
+      // 응답 바디의 access_token은 줄에 실리지 않는다.
+      logKisRequest({ trId: "tokenP", elapsedMs: Date.now() - now, response });
 
       const expiresIn = Number(response.data.expires_in || 86_400);
       return {
@@ -194,6 +203,7 @@ async function getAccessToken({ lockWaitMs } = {}) {
         expiresAt: now + expiresIn * 1000,
       };
     } catch (error) {
+      logKisRequest({ trId: "tokenP", elapsedMs: Date.now() - now, error });
       throw new Error(`Access Token 발급 실패: ${error.response?.data?.msg1 || error.message}`);
     }
   }, { lockWaitMs });
@@ -212,10 +222,18 @@ function logKisRequest(input) {
 }
 
 // 계측 지점을 fetchAllPaged가 아니라 여기(kisApiGet)에 두는 것은 의도적이다. 이 프로세스가
-// KIS를 치는 여섯 경로가 전부 이 함수를 지나므로(연속조회 두 루프 + getBalance + 단건
-// kisGet들), 서로 다른 프로세스에서 뜬 도구 호출들의 요청이 시각 순으로 한 줄씩 남는다 —
-// PR #264 리뷰가 제기한 "유량 제한이 계좌 단위인가"를 확인하려면 그 겹침을 봐야 한다.
-// fetchAllPaged 안에 두면 단건 조회가 통째로 빠지고, balance.js도 건드려야 한다.
+// KIS를 치는 여섯 개 **조회(GET)** 경로가 전부 이 함수를 지나므로(연속조회 두 루프 +
+// getBalance + 단건 kisGet들), 서로 다른 프로세스에서 뜬 도구 호출들의 요청이 시각 순으로
+// 한 줄씩 남는다 — PR #264 리뷰가 제기한 "유량 제한이 계좌 단위인가"를 확인하려면 그 겹침을
+// 봐야 한다. fetchAllPaged 안에 두면 단건 조회가 통째로 빠지고, balance.js도 건드려야 한다.
+//
+// "전부"는 조회 경로에 한정된 말이다. 이 함수를 지나지 않는 KIS POST가 셋 있다.
+//   - /oauth2/tokenP (getAccessToken) — 위에서 같은 방식으로 계측한다(tr_id=tokenP).
+//   - kis-client.js:16 hashkey POST, kis-client.js:114 주문 POST — **계측되지 않는다.**
+//     kis-client.js가 이 PR의 범위 밖이라 손대지 않았다. 실측 집계에서 place_order 1건이
+//     실제로 만드는 KIS 요청 2건은 빠져 있다는 뜻이다(런북 2절에 같은 내용을 적어 두었다).
+//     애초에 런북 4절이 "주문 API로 유량 제한을 때리지 말 것"이라 측정 대상도 아니지만,
+//     겹침을 셀 때 그 2건이 로그에 없다는 사실은 알고 세야 한다.
 async function kisApiGet(pathname, trId, params, { trCont = "" } = {}) {
   const token = await getAccessToken();
   const startedAt = Date.now();
