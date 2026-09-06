@@ -310,14 +310,18 @@ _RLZ_PL_HOLDINGS_MARKER = "[보유 종목]"
 _RLZ_PL_EMPTY_MARKER = "보유 종목이 없습니다"
 
 # 모의투자 계좌 대체 응답의 표지. get_balance_rlz_pl은 실전 계좌 전용이라
-# (mcp-trading/index.js:737) 모의투자(openapivts)에서는 index.js가 TR을 호출하지 않고
-# get_balance 요약을 대신 돌려주면서 이 문구를 덧붙인다(index.js:583-589).
+# (mcp-trading/index.js의 get_balance_rlz_pl registerTool 설명) 모의투자(openapivts)
+# 에서는 index.js가 TR을 호출하지 않고 get_balance 요약을 대신 돌려주면서 이 문구를
+# 덧붙인다(index.js의 getBalanceRlzPl 첫 분기).
+#
+# 줄 번호가 아니라 **심볼 이름으로** 가리킨다. 이 주석이 필요해지는 시점은 index.js가
+# 바뀐 뒤인데, 줄 번호는 그때 이미 다른 코드를 가리키고 있다.
 #
 # 이걸 따로 잡지 않으면 그 응답에는 "[보유 종목]" 마커가 없으므로 마커 부재 가드가
 # error를 남긴다 — 모의투자 배포에서는 그게 매 주기의 정상 동작이라 error가 아니다.
 # 시세를 못 얻는다는 결론은 같지만, 로그 수준과 운영자가 읽을 원인이 다르다.
 #
-# ⚠️ **JS 리터럴과의 결합**: 아래 문자열은 index.js:586-587이 만드는 안내 문구의
+# ⚠️ **JS 리터럴과의 결합**: 아래 문자열은 index.js의 getBalanceRlzPl가 만드는 안내 문구의
 # 부분 문자열이다. 그런데 balance.js:355-360이 잘림 문구에 남긴 것과 달리 index.js
 # 쪽에는 "파이썬이 이 문구를 매칭한다"는 경고 주석이 **없다**. 그래서 저 문구를
 # 다듬는 것만으로 이 가드가 조용히 무력화된다.
@@ -913,7 +917,8 @@ async def _refresh_portfolio_prices() -> int | None:
     is_price_fresh가 알아서 "모름"으로 내립니다.
 
     실패 로그를 억제하는 이유는 get_balance(_balance_failure_streak)와 같지만 사정이
-    더 무겁습니다. 이 도구는 **실전 계좌 전용**(mcp-trading/index.js:737)이라
+    더 무겁습니다. 이 도구는 **실전 계좌 전용**(mcp-trading/index.js의
+    get_balance_rlz_pl registerTool 설명)이라
     모의투자 배포에서는 매 주기 대체 응답이 오고, 권한이 없는 실전 계좌에서는 매 주기
     실패합니다. 그런 배포에서 10분마다 error를 쌓으면 로그가 신호를 잃습니다. 수준도
     error가 아니라 warning입니다 — 시세를 못 얻는 것은 감시도 주문도 막지 않습니다.

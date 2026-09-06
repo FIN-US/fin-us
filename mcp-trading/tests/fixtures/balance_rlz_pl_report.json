@@ -1,6 +1,6 @@
 {
   "_comment": "이슈 #196: mcp-trading/balance-rlz-pl-report.js formatBalanceRlzPlReport()의 출력 계약을 backend/scheduler.py의 시세 파서와 공유하는 픽스처입니다. balance_report.json(#137)과 같은 목적이고 고정 방식도 같습니다 — **양방향**입니다: JS 쪽(tests/balance-rlz-pl-report.test.js)이 각 케이스의 input을 formatter에 넣어 expected_text와 바이트 단위로 비교하고, Python 쪽(backend/tests/test_scheduler.py)이 같은 expected_text를 파서에 넣어 검증합니다. formatter를 바꾸면 형식을 소유한 JS 스위트가 먼저 깨지고, 파서를 바꾸면 Python이 깨집니다. 이 파일을 고칠 때는 양쪽을 함께 돌리세요. 필드 값 자체는 실계좌 관측이 아니라 지어낸 값입니다 — expected_text만 실제 formatter 실행 결과입니다.",
-  "_tr_id": "TTTC8494R (v1_국내주식-041, inquire-balance-rlz-pl). 실전 계좌 전용 — 모의투자(openapivts) 계좌에서는 index.js:583-589가 get_balance 요약으로 대체하고 '[안내] ... 잔고 요약으로 대체했습니다.'를 덧붙입니다.",
+  "_tr_id": "TTTC8494R (v1_국내주식-041, inquire-balance-rlz-pl). 실전 계좌 전용 — 모의투자(openapivts) 계좌에서는 index.js의 getBalanceRlzPl가 get_balance 요약으로 대체하고 '[안내] ... 잔고 요약으로 대체했습니다.'를 덧붙입니다.",
   "normal": {
     "_comment": "정상 응답. 같은 pdno(005930)가 trad_dvsn_name만 다른 두 행으로 나뉜 경우를 포함한다 — KIS는 현금/신용 등 매매구분마다 행을 따로 준다. prpr(현재가)은 종목의 시장 가격이므로 두 행이 같은 값일 것으로 **보고** Python 파서는 코드당 처음으로 유효한 시세가 있는 행을 채택한다(앞선 행의 prpr이 비었거나 '0'이면 그 행은 시세가 아니므로 건너뛴다). 다만 TTTC8494R 실계좌 응답을 아직 아무도 보지 못했으므로 이는 추론이지 관측이 아니다 — 값이 엇갈리는 경우는 divergent_price 케이스가 담는다.",
     "input": {
