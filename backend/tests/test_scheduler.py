@@ -2970,6 +2970,34 @@ def test_parse_rlz_pl_quotes_omits_holdings_without_price():
     assert "123456" not in quotes
 
 
+def test_parse_rlz_pl_quotes_warns_when_duplicate_rows_disagree(caplog):
+    """같은 코드의 두 행이 다른 현재가를 들고 오면 첫 행을 쓰되 경고를 남긴다.
+
+    "prpr은 매매구분과 무관한 시장 가격이라 행마다 같다"는 것은 추론이지 관측이
+    아니다 — TTTC8494R 실계좌 응답을 아직 아무도 보지 못했다. 실측 전까지 그 전제를
+    반증할 수 있는 경로는 프로덕션 로그뿐이므로, 어긋난 값을 조용히 버리면 증거가
+    사라진다.
+
+    이 테스트가 잡는 mutation: 중복 행을 값도 읽지 않고 곧바로 continue하는 회귀
+    (경고가 사라진다), 또는 첫 행 대신 마지막 행을 채택하는 회귀(99999가 들어온다).
+    """
+    import logging
+
+    from ..scheduler import _parse_rlz_pl_quotes
+
+    with caplog.at_level(logging.WARNING, logger="backend.scheduler"):
+        quotes = _parse_rlz_pl_quotes(_rlz_pl_text("divergent_price"))
+
+    assert quotes == {"005930": 71200.0}
+    diverged = [r for r in caplog.records if "엇갈립니다" in r.getMessage()]
+    assert len(diverged) == 1, "엇갈린 현재가는 정확히 한 번 경고로 남아야 한다"
+    message = diverged[0].getMessage()
+    # 채택값과 버린 값이 모두 로그에 남아야 반증 자료로 쓸 수 있다.
+    assert "005930" in message
+    assert "71200" in message
+    assert "99999" in message
+
+
 def test_sync_portfolio_prices_writes_price_and_stamp(portfolio_session):
     """시세와 갱신 시각을 함께 쓴다. 둘 중 하나만 쓰면 게이트가 무너진다.
 

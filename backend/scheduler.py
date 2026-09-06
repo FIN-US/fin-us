@@ -584,12 +584,17 @@ def _parse_rlz_pl_quotes(report_text: str) -> dict[str, float]:
 
     **반환 키가 코드인 이유(중복 행 처리)**: KIS는 같은 종목이라도 매매구분
     (trad_dvsn_name: 현금/신용 등)마다 행을 따로 줍니다. 즉 한 응답에 같은 pdno가
-    여러 번 나오는 것이 정상입니다. 그러나 prpr은 그 종목의 시장 가격이라 어느 행에서
-    읽어도 같은 값이어야 하므로, 코드를 키로 삼아 **첫 행만 채택**하고 뒤의 중복은
-    버립니다. 합산할 값이 아니므로 더하면 안 되고(그러면 현재가가 행 수만큼 부풀고),
-    Portfolio는 코드당 1행이라 매매구분별로 나눠 저장할 자리도 없습니다. 값이 서로
-    다르게 온다면 그것은 응답 자체의 이상이지 이 함수가 조정할 문제가 아니며, 그
-    경우에도 첫 행을 쓰는 편이 결정적입니다.
+    여러 번 나오는 것이 정상입니다. prpr은 그 종목의 시장 가격이므로 어느 행에서 읽어도
+    같은 값일 **것으로 보고**, 코드를 키로 삼아 **첫 행만 채택**하고 뒤의 중복은 버립니다.
+    합산할 값이 아니므로 더하면 안 되고(그러면 현재가가 행 수만큼 부풀고), Portfolio는
+    코드당 1행이라 매매구분별로 나눠 저장할 자리도 없습니다. 값이 서로 다르게 온다면
+    그것은 응답 자체의 이상이지 이 함수가 조정할 문제가 아니며, 그 경우에도 첫 행을 쓰는
+    편이 결정적입니다.
+
+    **이 전제는 추론이지 관측이 아닙니다.** TTTC8494R 실계좌 응답을 아직 아무도 보지
+    못했으므로, 행마다 prpr이 같다는 보장도 prpr이 채워져 온다는 보장도 없습니다.
+    그래서 어긋난 값을 조용히 버리지 않고 warning으로 남깁니다 — 실측 전까지 이 전제를
+    반증할 수 있는 경로는 프로덕션 로그뿐입니다.
 
     잘림·마커·모의투자 가드는 호출처(_sync_portfolio_prices_from_rlz_pl)가 담당하므로
     이 함수는 있는 그대로 파싱합니다. 마커가 없으면 {} 반환.
@@ -607,6 +612,7 @@ def _parse_rlz_pl_quotes(report_text: str) -> dict[str, float]:
     lines = section.split("\n")
     malformed: list[str] = []
     priceless: list[str] = []
+    divergent: list[tuple[str, float, float]] = []
 
     for i, line in enumerate(lines):
         if _RLZ_PL_INDEX_PREFIX_RE.match(line) is None:
@@ -621,30 +627,38 @@ def _parse_rlz_pl_quotes(report_text: str) -> dict[str, float]:
         code = match.group("code")
         if not name:
             continue
-        if code in quotes:
-            # 매매구분이 다른 같은 종목의 두 번째 행. 위 docstring 참고.
-            continue
-
+        # 중복 코드 판정보다 **먼저** 값을 읽습니다. 두 번째 행을 곧바로 버리면
+        # "prpr은 행마다 같다"는 전제가 틀렸을 때 그 사실이 흔적 없이 사라집니다.
         price_line = lines[i + 1] if i + 1 < len(lines) else ""
         price_match = _RLZ_PL_PRICE_RE.search(price_line)
-        if price_match is None:
-            priceless.append(name)
+        price: float | None = None
+        if price_match is not None:
+            try:
+                parsed = float(price_match.group(1).replace(",", ""))
+            except ValueError:
+                # 숫자·쉼표만 매치된 문자열이라 도달하기 어렵지만, 도달했다면 값을
+                # 채우는 대신 "모름"으로 둡니다.
+                parsed = None
+            if parsed is not None and parsed > 0:
+                price = parsed
+            # parsed가 0 이하이면 price는 None으로 남습니다. prpr이 "0"이면 formatWon이
+            # "0원"을 내므로 위 정규식은 매치된다(formatters.js:7-10은 undefined·null·""
+            # 에만 "-"를 낸다). 그러나 0원짜리 보유 종목은 없습니다 — 거래정지·장 시작
+            # 전·신규 상장처럼 시세가 아직 없는 상태이지 "현재가가 0원"이 아닙니다.
+            # 그대로 쓰면 평가액 0원·수익률 -100%가 price_known=True로, 즉 **신선하고
+            # 확실한 값**으로 나갑니다 — 이 이슈가 없애려는 결함 그 자체입니다.
+            # "-"와 같은 취급으로 결과에서 뺍니다(#122의 "0과 모름 구분"). 음수는 KIS가
+            # 낼 값이 아니지만 같은 이유로 함께 막습니다.
+
+        if code in quotes:
+            # 매매구분이 다른 같은 종목의 두 번째 행. 첫 행을 그대로 씁니다(docstring
+            # 참고). 다만 값이 **다르면** 기록합니다 — 그 전제가 틀렸다는 유일한 증거라
+            # 조용히 버리면 실계좌 실측 전까지 영영 반증할 수 없습니다.
+            if price is not None and price != quotes[code]:
+                divergent.append((code, quotes[code], price))
             continue
-        try:
-            price = float(price_match.group(1).replace(",", ""))
-        except ValueError:
-            # 숫자·쉼표만 매치된 문자열이라 도달하기 어렵지만, 도달했다면 값을 채우는
-            # 대신 건너뜁니다.
-            priceless.append(name)
-            continue
-        if price <= 0:
-            # prpr이 "0"이면 formatWon이 "0원"을 내므로 위 정규식은 매치된다
-            # (formatters.js:7-10은 undefined·null·""에만 "-"를 낸다). 그러나 0원짜리
-            # 보유 종목은 없다 — 거래정지·장 시작 전·신규 상장처럼 시세가 아직 없는
-            # 상태이지 "현재가가 0원"이 아니다. 그대로 쓰면 평가액 0원·수익률 -100%가
-            # price_known=True로, 즉 **신선하고 확실한 값**으로 나간다 — 이 이슈가
-            # 없애려는 결함 그 자체다. "-"와 같은 취급으로 결과에서 뺀다(#122의
-            # "0과 모름 구분"). 음수는 KIS가 낼 값이 아니지만 같은 이유로 함께 막는다.
+
+        if price is None:
             priceless.append(name)
             continue
         quotes[code] = price
@@ -658,6 +672,18 @@ def _parse_rlz_pl_quotes(report_text: str) -> dict[str, float]:
         logger.warning(
             "현재가를 읽지 못한 종목 %d건은 시세를 갱신하지 않습니다(예시 최대 3건): %r",
             len(priceless), priceless[:3],
+        )
+    if divergent:
+        # 이 로그가 존재하는 이유가 곧 이 로그의 내용입니다. 아무도 TTTC8494R 실계좌
+        # 응답을 본 적이 없으므로 "prpr은 매매구분과 무관한 시장 가격"이라는 전제는
+        # 추론이지 관측이 아닙니다. 실계좌 실측 전까지 그 전제를 반증할 수 있는 경로는
+        # 프로덕션 로그뿐이라, 어긋난 값을 조용히 버리면 증거 자체가 사라집니다.
+        logger.warning(
+            "같은 종목의 매매구분별 행에서 현재가가 엇갈립니다 %d건 — 첫 행 값을 채택했습니다 "
+            "(코드, 채택값, 버린 값, 예시 최대 3건): %r. prpr이 행마다 같다는 전제는 아직 "
+            "실계좌로 확인된 바 없으며, 이 경고가 실측 전까지 그 전제를 반증할 수 있는 "
+            "유일한 경로입니다 — 보이면 이슈로 올려 주세요.",
+            len(divergent), divergent[:3],
         )
     return quotes
 
