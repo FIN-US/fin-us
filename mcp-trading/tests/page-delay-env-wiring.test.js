@@ -127,11 +127,27 @@ const PROBE_MIN_OBSERVED_GAP_MS = 500;
 // 테스트 러너가 무한정 매달린다.
 const PROBE_TEST_TIMEOUT_MS = 60_000;
 
-function startKisStub(kisPath, { rateLimitOnPage = 0, rateLimitMsg1 = "초당 거래건수를 초과하였습니다." } = {}) {
+function startKisStub(kisPath, {
+  rateLimitOnPage = 0,
+  rateLimitMsg1 = "초당 거래건수를 초과하였습니다.",
+  // 200이 아니면 토큰 발급 POST가 그 상태로 응답한다 — axios가 던지므로
+  // getAccessToken의 catch로 들어간다.
+  tokenIssueStatus = 200,
+  // 그 번째 페이지 GET을 HTTP 500으로 돌려준다 — 같은 이유로 kisApiGet의 catch로 들어간다.
+  httpErrorOnPage = 0,
+} = {}) {
   const requestTimes = [];
   const server = createServer((req, res) => {
     if (req.method === "POST" && req.url.startsWith("/oauth2/tokenP")) {
       req.resume();
+      if (tokenIssueStatus !== 200) {
+        // 바디는 일부러 msg_cd/msg1도 error_code/error_description도 아닌 모양으로 둔다.
+        // 이 테스트가 보는 것은 "실패해도 줄이 나가는가"이지 실패 바디의 모양이 아니고,
+        // 그 모양은 아직 미확인이다(런북 0절).
+        res.writeHead(tokenIssueStatus, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ message: "stub token issue failure" }));
+        return;
+      }
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ access_token: "stub-token", expires_in: 86_400 }));
       return;
@@ -139,6 +155,11 @@ function startKisStub(kisPath, { rateLimitOnPage = 0, rateLimitMsg1 = "초당 �
     if (req.method === "GET" && req.url.startsWith(kisPath)) {
       requestTimes.push(Date.now());
       const isFirstPage = requestTimes.length === 1;
+      if (requestTimes.length === httpErrorOnPage) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ message: "stub upstream failure" }));
+        return;
+      }
       if (requestTimes.length === rateLimitOnPage) {
         // 유량 제한은 HTTP 200 + rt_cd=1로 온다(런북 2절 `http` 필드 주석). 그래서 axios가
         // 던지지 않고 kisApiGet의 rt_cd 분기가 잡는다 — logKisRequest는 그전에 이미 지났다.
@@ -356,3 +377,114 @@ for (const { tool, envKey, constant, kisPath } of PAGED_TOOLS) {
     assert.ok(text.includes("계좌 ********"), `자릿수는 남기고 값만 지운다. 실제: ${text}`);
   });
 }
+
+// ---------------------------------------------------------------------------
+// 이슈 #210: 위 프로브들은 전부 **성공 경로**만 지난다. KIS는 유량 제한을 HTTP 200 +
+// rt_cd=1로 돌려주므로(런북 2절의 `http` 필드) axios가 던지지 않고, 그래서 index.js의 두
+// catch 안에 있는 logKisRequest — getAccessToken의 것과 kisApiGet의 것 — 는 어떤 테스트에도
+// 닿지 않았다. 둘을 통째로 지워도 전 스위트가 초록이었다.
+//
+// 그중 getAccessToken의 catch는 이 PR의 OAuth 분기가 노리는 바로 그 호출부다. 분기의
+// 분류는 tests/kis-rate-limit.test.js가 고정했지만, 그 자리에서 줄이 실제로 **나가는지**는
+// 아무것도 고정하지 않았다.
+//
+// 그래서 전송 계층 실패를 실제로 일으킨다 — 스텁이 non-2xx를 돌려주면 axios가 던지고
+// catch가 열린다. 게이트는 켠다: 전송 실패는 class=other라 게이트가 꺼져 있으면 설계대로
+// 안 나간다(그 반대 방향은 위 유량 제한 프로브가 이미 고정한다). 덤으로 이 두 테스트가
+// 게이트의 정방향(켜면 유량 제한이 아닌 줄도 나간다)도 함께 고정한다.
+const { tool: CATCH_PROBE_TOOL, kisPath: CATCH_PROBE_KIS_PATH } = PAGED_TOOLS[0];
+
+test("전송 실패한 토큰 발급도 [kis-req] 줄을 남긴다 (getAccessToken의 catch)", { timeout: PROBE_TEST_TIMEOUT_MS }, async (t) => {
+  const { server, port, requestTimes } = await startKisStub(CATCH_PROBE_KIS_PATH, { tokenIssueStatus: 503 });
+  const tokenCachePath = path.join(os.tmpdir(), `finus-token-catch-probe-${randomUUID()}.json`);
+
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: ["index.js"],
+    cwd: process.cwd(),
+    stderr: "pipe",
+    env: {
+      ...process.env,
+      KIS_URL: `http://127.0.0.1:${port}`,
+      KIS_API_KEY: "stub-appkey",
+      KIS_API_SECRET: "stub-appsecret",
+      KIS_ACCOUNT_NO: "5012345601",
+      KIS_TOKEN_CACHE_PATH: tokenCachePath,
+      KIS_REQUEST_LOG: "1",
+    },
+  });
+  const client = new Client({ name: "token-catch-emit-test", version: "1.0.0" });
+  t.after(async () => {
+    await client.close().catch(() => {});
+    await new Promise((resolve) => server.close(resolve));
+    await rm(tokenCachePath, { force: true });
+    await rm(`${tokenCachePath}.lock`, { force: true, recursive: true });
+  });
+
+  await client.connect(transport);
+  assert.ok(transport.stderr, "stderr: \"pipe\"를 넘겼으므로 transport.stderr가 있어야 한다");
+  let stderrText = "";
+  transport.stderr.on("data", (chunk) => { stderrText += chunk; });
+
+  const result = await client.callTool({ name: CATCH_PROBE_TOOL, arguments: {} });
+
+  assert.equal(result.isError, true, "토큰 발급이 실패하면 도구 호출도 실패해야 한다");
+  assert.equal(requestTimes.length, 0, "토큰이 없으면 조회 GET은 아예 나가지 않는다");
+
+  const line = await waitForStderrLine(() => stderrText, /^\[kis-req\] .*tr_id=tokenP/);
+  assert.ok(
+    line,
+    "getAccessToken의 catch도 [kis-req] 줄을 내보내야 한다 — 이 줄이 없으면 토큰 발급 " +
+      `실패는 로그에 아예 남지 않는다. stderr was: ${stderrText}`,
+  );
+  assert.match(line, /http=503/);
+  assert.match(line, /class=other/);
+});
+
+test("전송 실패한 조회도 [kis-req] 줄을 남긴다 (kisApiGet의 catch)", { timeout: PROBE_TEST_TIMEOUT_MS }, async (t) => {
+  const { server, port, requestTimes } = await startKisStub(CATCH_PROBE_KIS_PATH, { httpErrorOnPage: 1 });
+  const tokenCachePath = path.join(os.tmpdir(), `finus-get-catch-probe-${randomUUID()}.json`);
+
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: ["index.js"],
+    cwd: process.cwd(),
+    stderr: "pipe",
+    env: {
+      ...process.env,
+      KIS_URL: `http://127.0.0.1:${port}`,
+      KIS_API_KEY: "stub-appkey",
+      KIS_API_SECRET: "stub-appsecret",
+      KIS_ACCOUNT_NO: "5012345601",
+      KIS_TOKEN_CACHE_PATH: tokenCachePath,
+      KIS_REQUEST_LOG: "1",
+    },
+  });
+  const client = new Client({ name: "get-catch-emit-test", version: "1.0.0" });
+  t.after(async () => {
+    await client.close().catch(() => {});
+    await new Promise((resolve) => server.close(resolve));
+    await rm(tokenCachePath, { force: true });
+    await rm(`${tokenCachePath}.lock`, { force: true, recursive: true });
+  });
+
+  await client.connect(transport);
+  assert.ok(transport.stderr, "stderr: \"pipe\"를 넘겼으므로 transport.stderr가 있어야 한다");
+  let stderrText = "";
+  transport.stderr.on("data", (chunk) => { stderrText += chunk; });
+
+  const result = await client.callTool({ name: CATCH_PROBE_TOOL, arguments: {} });
+
+  assert.equal(result.isError, true, "1페이지가 전송 계층에서 실패하면 그대로 전파된다");
+  assert.ok(requestTimes.length >= 1, "조회 GET이 스텁에 도달해야 한다");
+
+  // 토큰 발급은 성공했으므로 http=500 줄의 주인은 조회뿐이다. tr_id로 한 번 더 못 박는다.
+  const line = await waitForStderrLine(() => stderrText, /^\[kis-req\] .*http=500/);
+  assert.ok(
+    line,
+    "kisApiGet의 catch도 [kis-req] 줄을 내보내야 한다 — 이 줄이 없으면 전송 계층에서 끊긴 " +
+      `요청(타임아웃·연결 실패)이 로그에 통째로 빠진다. stderr was: ${stderrText}`,
+  );
+  assert.ok(!line.includes("tr_id=tokenP"), `조회 줄이어야 한다. 실제: ${line}`);
+  assert.match(line, /class=other/);
+});
