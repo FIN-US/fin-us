@@ -216,9 +216,19 @@ async function getAccessToken({ lockWaitMs } = {}) {
 // stdout은 MCP JSON-RPC 채널이므로 console.error(stderr)만 쓴다. 이 stderr는 MCP Python
 // SDK가 자식 프로세스를 띄울 때 부모 stderr로 그대로 이어 준다
 // (docs/issue-210-rate-limit-observation.md).
+// 로깅이 원래 오류를 대체하지 않게 통째로 감싼다. 이 함수는 kisApiGet과 getAccessToken의
+// catch 안에서도 불리는데, 여기서 무언가 던지면 KIS가 준 진짜 실패 대신 로깅 쪽 예외가
+// 위로 올라가 진단이 통째로 사라진다. formatKisRequestLog에서 도달 가능한 throw는 찾지
+// 못했지만(순수 문자열 연산이고 Date 변환은 그쪽에서 이미 try로 감쌌다), 이 자리에서
+// 예외가 나면 대가가 비대칭적으로 크다. 줄이 조용히 사라지는 회귀는
+// tests/page-delay-env-wiring.test.js의 유량 제한 프로브가 잡는다.
 function logKisRequest(input) {
-  const { line, rateLimited } = formatKisRequestLog({ ...input, pid: process.pid });
-  if (KIS_REQUEST_LOG_ENABLED || rateLimited) console.error(line);
+  try {
+    const { line, rateLimited } = formatKisRequestLog({ ...input, pid: process.pid });
+    if (KIS_REQUEST_LOG_ENABLED || rateLimited) console.error(line);
+  } catch {
+    // 삼킨다. 여기서 다시 stderr에 쓰려 들면 그 쓰기 자체가 실패 원인일 때 같은 자리로 돌아온다.
+  }
 }
 
 // 계측 지점을 fetchAllPaged가 아니라 여기(kisApiGet)에 두는 것은 의도적이다. 이 프로세스가
