@@ -328,8 +328,11 @@ grep -oE 'elapsed_ms=[0-9]+' kis-req.log | cut -d= -f2 | sort -n \
 **뽑을 것:** `pid`가 다른 줄들의 `ts`가 겹치는 구간에서 `rate_limit`이 나는가.
 
 ```bash
+# sed는 -n + p로 "패턴이 맞은 줄만" 낸다. s///만 쓰면 안 맞는 줄이 통째로 그대로 흘러나와
+# 4열 표를 오염시킨다(5.1·5.2를 grep -o로 바꾼 것과 같은 이유). pid는 [0-9]+가 아니라
+# [^ ]+로 받는다 — 값이 없는 줄은 pid=-이라 숫자 패턴에 걸리지 않는다.
 grep '^\[kis-req\]' kis-req.log | sort -t= -k2 \
-  | sed -E 's/.*ts=([^ ]+) pid=([0-9]+) tr_id=([^ ]+).*class=([a-z_]+).*/\1 \2 \3 \4/'
+  | sed -nE 's/^\[kis-req\] ts=([^ ]+) pid=([^ ]+) tr_id=([^ ]+).*class=([a-z_]+).*/\1 \2 \3 \4/p'
 ```
 
 - 서로 다른 `pid`의 요청이 같은 초 안에 있고 그 중 하나가 `rate_limit`이면 **계좌(또는
