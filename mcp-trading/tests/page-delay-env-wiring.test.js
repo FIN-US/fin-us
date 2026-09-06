@@ -122,8 +122,12 @@ const PAGED_TOOLS = [
 // 우연히 이만큼의 간격이 생길 수 없다. setTimeout은 일찍 깨지 않으므로 하한만 본다.
 const PROBE_PAGE_DELAY_MS = 600;
 const PROBE_MIN_OBSERVED_GAP_MS = 500;
+// 자식 프로세스를 띄우고 MCP 핸드셰이크까지 도는 프로브들의 상한. 위 SPAWN_TIMEOUT_MS와
+// 같은 이유로 명시한다 — 없으면 스텁이 응답하지 않거나 t.after의 server.close가 걸릴 때
+// 테스트 러너가 무한정 매달린다.
+const PROBE_TEST_TIMEOUT_MS = 60_000;
 
-function startKisStub(kisPath) {
+function startKisStub(kisPath, { rateLimitOnPage = 0, rateLimitMsg1 = "초당 거래건수를 초과하였습니다." } = {}) {
   const requestTimes = [];
   const server = createServer((req, res) => {
     if (req.method === "POST" && req.url.startsWith("/oauth2/tokenP")) {
@@ -135,6 +139,13 @@ function startKisStub(kisPath) {
     if (req.method === "GET" && req.url.startsWith(kisPath)) {
       requestTimes.push(Date.now());
       const isFirstPage = requestTimes.length === 1;
+      if (requestTimes.length === rateLimitOnPage) {
+        // 유량 제한은 HTTP 200 + rt_cd=1로 온다(런북 2절 `http` 필드 주석). 그래서 axios가
+        // 던지지 않고 kisApiGet의 rt_cd 분기가 잡는다 — logKisRequest는 그전에 이미 지났다.
+        res.writeHead(200, { "Content-Type": "application/json", tr_cont: "D" });
+        res.end(JSON.stringify({ rt_cd: "1", msg_cd: "EGW00201", msg1: rateLimitMsg1 }));
+        return;
+      }
       res.writeHead(200, {
         "Content-Type": "application/json",
         // "F"면 다음 페이지가 있다는 뜻이고, "D"면 마지막이다(balance.js의 isContinuationTrCont).
@@ -161,8 +172,20 @@ function startKisStub(kisPath) {
   });
 }
 
+// 자식의 stderr는 파이프를 타고 비동기로 도착하므로 callTool이 반환한 직후에는 아직
+// 비어 있을 수 있다. 패턴에 맞는 줄이 올 때까지 짧게 기다린다(없으면 null).
+async function waitForStderrLine(read, pattern, timeoutMs = 5_000) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const found = read().split(/\r?\n/).find((line) => pattern.test(line));
+    if (found) return found;
+    if (Date.now() >= deadline) return null;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+}
+
 for (const { tool, envKey, constant, kisPath } of PAGED_TOOLS) {
-  test(`index.js passes ${constant} to fetchAllPaged as pageDelayMs (${tool})`, async (t) => {
+  test(`index.js passes ${constant} to fetchAllPaged as pageDelayMs (${tool})`, { timeout: PROBE_TEST_TIMEOUT_MS }, async (t) => {
     const { server, port, requestTimes } = await startKisStub(kisPath);
     // 토큰 캐시는 반드시 임시 파일로 돌린다 — 기본 경로를 그대로 쓰면 개발자 머신의 실제
     // 토큰 캐시를 스텁 토큰으로 덮어쓴다.
@@ -207,6 +230,79 @@ for (const { tool, envKey, constant, kisPath } of PAGED_TOOLS) {
       observedGapMs >= PROBE_MIN_OBSERVED_GAP_MS,
       `index.js must pass ${constant} as fetchAllPaged's pageDelayMs; ` +
         `two pages arrived ${observedGapMs}ms apart with a ${PROBE_PAGE_DELAY_MS}ms delay configured`,
+    );
+  });
+
+  // -------------------------------------------------------------------------
+  // 이슈 #210: 이 PR의 중심 약속은 ".env.example:78 / index.js / 런북 2절이 말하는 대로,
+  // 게이트(KIS_REQUEST_LOG)를 꺼도 유량 제한 판정 줄은 항상 나간다"이다. 기본 설정에서
+  // 이 PR이 만들어 내는 관측 가능한 출력은 그 줄 하나뿐인데, 지금까지 그것을 고정하는
+  // 테스트가 없었다 — logKisRequest가 줄을 실제로 내보내게 만드는 테스트가 하나도 없어서
+  // `if (KIS_REQUEST_LOG_ENABLED || rateLimited) console.error(line)`을 통째로 지우거나
+  // `||`를 `&&`로 바꿔도 전 스위트가 초록이었다.
+  //
+  // 그래서 게이트를 명시적으로 꺼 둔 채(개발자 환경이나 루트 .env가 켜 두었을 수 있으므로
+  // "설정 안 함"이 아니라 "0"으로 못 박는다) 2페이지에서 EGW00201을 돌려주고, 자식의
+  // stderr에 그 줄이 실제로 나왔는지 본다. 2페이지 실패는 fetchAllPaged가 부분 결과로
+  // 흡수하므로(balance.js의 `pages === 0` 분기) 도구 호출은 정상 결과를 그대로 돌려준다 —
+  // 그 결과를 함께 확인해 stderr 한 줄이 stdout JSON-RPC 프레이밍을 깨지 않는 것도 본다.
+  test(`유량 제한 줄은 KIS_REQUEST_LOG를 꺼도 stderr로 나간다 (${tool})`, { timeout: PROBE_TEST_TIMEOUT_MS }, async (t) => {
+    const { server, port, requestTimes } = await startKisStub(kisPath, { rateLimitOnPage: 2 });
+    const tokenCachePath = path.join(os.tmpdir(), `finus-rate-limit-probe-${randomUUID()}.json`);
+
+    const transport = new StdioClientTransport({
+      command: process.execPath,
+      args: ["index.js"],
+      cwd: process.cwd(),
+      // 자식의 stderr를 부모로 흘려보내지 않고 잡는다. 기본값은 "inherit"이라
+      // transport.stderr가 null이 된다.
+      stderr: "pipe",
+      env: {
+        ...process.env,
+        KIS_URL: `http://127.0.0.1:${port}`,
+        KIS_API_KEY: "stub-appkey",
+        KIS_API_SECRET: "stub-appsecret",
+        KIS_ACCOUNT_NO: "5012345601",
+        KIS_TOKEN_CACHE_PATH: tokenCachePath,
+        // 게이트를 확실히 끈다. 두 이름을 다 꺼야 한다(kis-rate-limit.js의 readKisRequestLogEnv).
+        KIS_REQUEST_LOG: "0",
+        FINUS_KIS_REQUEST_LOG: "0",
+      },
+    });
+    const client = new Client({ name: "kis-request-log-test", version: "1.0.0" });
+    t.after(async () => {
+      await client.close().catch(() => {});
+      await new Promise((resolve) => server.close(resolve));
+      await rm(tokenCachePath, { force: true });
+      await rm(`${tokenCachePath}.lock`, { force: true, recursive: true });
+    });
+
+    await client.connect(transport);
+    let stderrText = "";
+    assert.ok(transport.stderr, "stderr: \"pipe\"를 넘겼으므로 transport.stderr가 있어야 한다");
+    transport.stderr.on("data", (chunk) => { stderrText += chunk; });
+
+    const result = await client.callTool({ name: tool, arguments: {} });
+
+    assert.equal(requestTimes.length, 2, "1페이지 정상 + 2페이지 유량 제한으로 요청은 2건이어야 한다");
+    // (b) 줄을 내보내도 stdout JSON-RPC 프레이밍은 멀쩡하다 — 2페이지 실패는 부분 결과로 흡수된다.
+    assert.equal(result.isError, undefined, `tool call failed: ${result.content?.[0]?.text}`);
+    assert.equal(typeof result.content?.[0]?.text, "string", "도구 결과는 파싱 가능한 텍스트여야 한다");
+
+    // (a) 게이트가 꺼져 있어도 유량 제한 줄은 나간다.
+    const line = await waitForStderrLine(() => stderrText, /^\[kis-req\] .*class=rate_limit/);
+    assert.ok(
+      line,
+      "게이트를 꺼도 class=rate_limit 줄은 항상 나가야 한다(.env.example, 런북 2절의 약속). " +
+        `stderr was: ${stderrText}`,
+    );
+    assert.match(line, /msg_cd=EGW00201/);
+
+    // 역방향 가드: "게이트를 무시하고 전부 내보낸다"로 통과하는 상태가 아님을 확인한다.
+    // 1페이지는 class=ok이고, 게이트가 꺼져 있으므로 그 줄은 나오면 안 된다.
+    assert.ok(
+      !stderrText.includes("class=ok"),
+      `게이트가 꺼져 있으면 정상 요청의 타이밍 줄은 나가지 않아야 한다. stderr was: ${stderrText}`,
     );
   });
 }
