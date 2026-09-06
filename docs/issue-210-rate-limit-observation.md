@@ -157,10 +157,20 @@ mcp-trading은 백엔드가 **도구 호출 1건마다 새로 띄우는 단명 �
 `errlog=sys.stderr`로 잇는 것이 기본이고, 두 호출부 모두 이 인자를 넘기지 않는다 — 즉
 자식의 stderr는 **부모 프로세스의 stderr 파일 디스크립터로 그대로 흘러간다.**
 
-> 이 문장은 설치된 SDK 소스에서 직접 확인했다(`mcp/client/stdio/__init__.py`:
-> `async def stdio_client(server: StdioServerParameters, errlog: TextIO = sys.stderr)`,
-> 그 값이 자식 프로세스의 `stderr=`로 그대로 넘어간다). **SDK 기본값에 기대는 주장이므로
-> 버전을 올릴 때 같이 확인해야 한다.** 재확인 방법:
+> 이 문장은 **이 저장소가 핀으로 고정한 바로 그 버전의 SDK 소스에서** 확인했다.
+> `backend/uv.lock:388`이 `mcp==1.27.1`을 고정하고, 그 휠의
+> `mcp/client/stdio/__init__.py:106`이
+> `async def stdio_client(server: StdioServerParameters, errlog: TextIO = sys.stderr):`이다.
+> 그 값은 `:128`의 `errlog=errlog` → `:239`의 `errlog: TextIO = sys.stderr` → `:254`의
+> `stderr=errlog`로 흘러 자식 프로세스의 `stderr=`가 된다. 두 호출부
+> (`backend/services.py:1092`, `finus_nat/src/nat_finus_nat/finus_api.py:539`) 중 어느 쪽도
+> `errlog`를 넘기지 않는다. 윈도우 spawn 갈래
+> (`mcp/os/win32/utilities.py:140,176,187,199,213`)도 기본값이 같으므로 로컬 윈도우에서
+> 재도 결과가 같다. `finus_nat`이 따로 잠근 `1.27.0`(`finus_nat/uv.lock:1486`)은 한 패치
+> 낮지만 같은 시그니처 계열이다.
+>
+> **그래도 SDK 기본값에 기대는 주장이라 버전을 올릴 때 같이 확인해야 한다** — 기본값이
+> 뒤집히면 이 절의 결론이 통째로 바뀐다. 재확인 방법:
 > ```bash
 > python -c "import inspect, mcp.client.stdio as m; print(inspect.signature(m.stdio_client))"
 > grep -rn "errlog" backend finus_nat --include=*.py   # 호출부의 재정의 여부. 비어 있어야 한다
