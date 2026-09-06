@@ -367,7 +367,7 @@ G1·G2·G3의 정규식을 형식별로 넓힌다. 이슈가 제안한 방식이
 - `mcp-trading/tests/fixtures/orderable_code_policy.json` — 형식별 대표 코드(2.2) × 플래그 on/off × 3값 판정(`pass` / `reject_unsupported` / `reject_shape`). 행마다 그 행이 표에 있는 이유를 `note`로 적어, 표가 정책을 인코딩만 하는 것이 아니라 설명하도록 했다. 이슈 #137의 `balance_report.json`이 만든 공유 픽스처 선례를 그대로 따른다.
 - `mcp-trading/tests/order.test.js`와 `backend/tests/test_stock_code.py`가 같은 파일을 읽어 각자 판정을 대조한다. 양쪽에 "표의 모든 행이 소비됐는가" 메타 테스트를 둬, 행을 추가했을 때 한쪽이 조용히 무시하지 못하게 했다.
 - `order.js`의 정책 정규식 두 개는 `ORDERABLE_STOCK_CODE_RE` / `ORDERABLE_STOCK_CODE_ALNUM_RE`로 이름을 붙여 export했고, 백엔드에는 플래그를 보지 않는 진입점 `is_orderable_stock_code_strict()`를 두어 `_ORDERABLE_STOCK_CODE_RE`가 모듈 밖으로 새지 않게 했다.
-- `backend/tests/test_stock_code.py`가 node로 `order.js`의 `buildCashOrderBody()`를 실제 호출해 표와 대조한다. **JS 쪽만 바꾼 변경도 백엔드 스위트에서 red가 된다.** `order.js` 소스를 정규식으로 긁는 방식은 쓰지 않았다 — 리터럴 표기가 조금만 달라져도 조용히 어긋난다.
+- `backend/tests/test_stock_code.py`가 node로 `order.js`의 `buildCashOrderBody()`를 실제 호출해 표와 대조한다. **CI에서는 JS 쪽만 바꾼 변경도 백엔드 스위트에서 red가 된다** — `.github/workflows/ci.yml`의 `backend-test` 잡이 `setup-node`로 Node 24를 못 박고, node가 없으면 그 잡이 skip이 아니라 fail한다(`CI` 환경변수 기준). node가 없는 로컬에서는 이 교차 확인만 skip되고 정책 커버리지 자체는 `mcp-trading` 스위트가 유지한다. `order.js` 소스를 정규식으로 긁는 방식은 쓰지 않았다 — 리터럴 표기가 조금만 달라져도 조용히 어긋난다.
 
 뮤테이션 확인: 플래그 켜짐 분기를 이슈가 제안했던 단순 확장 `^[0-9A-Z]{6,9}$`로 바꾸면 8자 행(`12345678`)이 표와 어긋나 **JS·Python 두 스위트가 모두 red**가 된다.
 

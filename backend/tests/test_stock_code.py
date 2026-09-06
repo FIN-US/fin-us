@@ -400,16 +400,26 @@ process.stdout.write(JSON.stringify(verdicts));
 def test_order_js_guard_agrees_with_shared_policy_table(tmp_path):
     """order.js의 buildCashOrderBody()가 판정표와 같은 판정을 내는지 직접 확인한다.
 
-    node가 없으면 skip한다 — 그 경우에도 정책 자체의 커버리지는 잃지 않는다. 같은 표를
-    mcp-trading/tests/order.test.js가 검사하기 때문이다. 여기서 잃는 것은 "JS만 바꿨을
-    때 Python 스위트도 red가 된다"는 교차 확인뿐이다.
+    로컬에서 node가 없으면 skip한다 — 그 경우에도 정책 자체의 커버리지는 잃지 않는다.
+    같은 표를 mcp-trading/tests/order.test.js가 검사하기 때문이다. 여기서 잃는 것은
+    "JS만 바꿨을 때 Python 스위트도 red가 된다"는 교차 확인뿐이다.
+
+    CI에서는 fail-closed다. 그 교차 확인이 이 스위트가 주장하는 보장이므로, 러너에
+    node가 없으면 조용한 skip이 아니라 실패여야 한다 — .github/workflows/ci.yml의
+    backend-test 잡이 setup-node로 버전을 못 박고 있고, 그게 사라지면 여기서 드러난다.
     """
     node = shutil.which("node")
     if node is None:
-        pytest.skip(
-            "node를 찾을 수 없어 order.js 교차 확인을 건너뛴다 "
-            "(같은 판정표를 mcp-trading 스위트가 검사한다)"
+        message = (
+            "node를 찾을 수 없어 order.js 교차 확인을 할 수 없다 "
+            "(같은 판정표를 mcp-trading 스위트가 검사하지만, JS만 바꾼 변경을 "
+            "백엔드 스위트가 잡는다는 보장은 이 테스트에만 있다)"
         )
+        if os.environ.get("CI"):
+            pytest.fail(
+                f"{message}. ci.yml의 backend-test 잡에 setup-node가 있어야 한다."
+            )
+        pytest.skip(message)
 
     script = tmp_path / "orderable_code_parity.mjs"
     script.write_text(_NODE_PARITY_SCRIPT, encoding="utf-8")
