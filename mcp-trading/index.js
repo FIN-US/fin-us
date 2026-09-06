@@ -207,7 +207,7 @@ async function getAccessToken({ lockWaitMs } = {}) {
 // SDK가 자식 프로세스를 띄울 때 부모 stderr로 그대로 이어 준다
 // (docs/issue-210-rate-limit-observation.md).
 function logKisRequest(input) {
-  const { line, rateLimited } = formatKisRequestLog(input);
+  const { line, rateLimited } = formatKisRequestLog({ ...input, pid: process.pid });
   if (KIS_REQUEST_LOG_ENABLED || rateLimited) console.error(line);
 }
 

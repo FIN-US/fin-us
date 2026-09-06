@@ -81,6 +81,35 @@ test("성공 응답은 한 줄 ok 로그가 되고 rateLimited가 아니다", ()
   assert.match(line, /class=ok/);
 });
 
+test("줄에 시각과 pid가 실려 프로세스 간 요청 겹침을 볼 수 있다", () => {
+  // mcp-trading은 도구 호출마다 새로 뜨는 단명 프로세스이고 자식 stderr가 전부 부모
+  // stderr 하나로 합쳐진다. 시각·pid가 줄 안에 없으면 "동시에 뜬 별개 프로세스의 요청이
+  // 겹쳤는가"(PR #264 리뷰의 계좌 단위 가설)를 합쳐진 로그에서 되짚을 수 없다.
+  const { line } = formatKisRequestLog({
+    trId: "TTTC8434R",
+    elapsedMs: 10,
+    pid: 4242,
+    now: () => Date.parse("2026-09-06T01:02:03.004Z"),
+    response: { status: 200, data: { rt_cd: "0" } },
+  });
+
+  assert.match(line, /ts=2026-09-06T01:02:03\.004Z/);
+  assert.match(line, /pid=4242/);
+});
+
+test("pid·시각을 못 얻어도 줄 모양은 깨지지 않는다", () => {
+  const { line } = formatKisRequestLog({
+    trId: "TTTC8434R",
+    elapsedMs: 10,
+    now: () => Number.NaN,
+    response: { status: 200, data: { rt_cd: "0" } },
+  });
+
+  assert.match(line, /ts=-/);
+  assert.match(line, /pid=-/);
+  assert.equal(line.includes("\n"), false);
+});
+
 test("rt_cd가 0이 아닌 응답은 유량 제한으로 분류되고 msg_cd가 줄에 남는다", () => {
   // index.js:212-213은 msg1이 있으면 msg_cd를 통째로 버린다. 그래서 EGW00201이 지금까지
   // 로그에 한 번도 남지 않았다 — 이 줄이 그 구멍을 메운다.

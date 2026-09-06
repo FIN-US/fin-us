@@ -59,6 +59,19 @@ export function maskLongDigitRuns(text) {
   return String(text ?? "").replace(LONG_DIGIT_RUN, (run) => "*".repeat(run.length));
 }
 
+// ISO 8601(UTC). 로그 수집기가 붙여 주는 시각에 기대지 않는다 — stderr를 파일로 그냥
+// 리다이렉트한 환경에는 시각이 아예 없고, 그러면 겹침을 볼 수 없다.
+function formatTimestamp(now) {
+  const ms = now?.();
+  if (!Number.isFinite(ms)) return ABSENT;
+  try {
+    return new Date(ms).toISOString();
+  } catch {
+    // Date 범위를 벗어난 값. 줄 하나 때문에 요청 경로를 죽이지 않는다.
+    return ABSENT;
+  }
+}
+
 function sanitizeToken(value) {
   const text = String(value ?? "").trim();
   return SAFE_TOKEN.test(text) ? text : ABSENT;
@@ -108,14 +121,30 @@ export function classifyKisError(input = {}) {
  * 뺀 이유도 같다 — 축적된 문자열이라 무엇이 섞여 있는지 이 함수가 보장할 수 없다. 대신
  * error.code를 토큰 화이트리스트로 걸러 낸다.
  *
- * @param {object}  input
- * @param {string}  input.trId       tr_id
- * @param {number}  input.elapsedMs  요청 소요 시간(ms). 호출자가 잰다.
- * @param {object} [input.response]  axios 응답 (성공 시)
- * @param {object} [input.error]     axios 에러 (실패 시)
+ * ts와 pid를 줄 안에 직접 싣는다. 이 둘이 없으면 실측의 핵심 질문에 답할 수 없기 때문이다 —
+ * mcp-trading은 도구 호출 1건마다 새로 뜨는 단명 프로세스이고(backend/services.py의
+ * run_mcp_tool, finus_nat의 finus_api.py가 호출마다 stdio_client를 새로 연다), 그 자식들의
+ * stderr는 전부 같은 부모 stderr 하나로 합쳐진다. 합쳐진 스트림에서 "동시에 뜬 별개
+ * 프로세스들의 요청이 겹쳤는가"(PR #264 리뷰의 계좌 단위 가설)를 보려면 줄 자체가 시각과
+ * 프로세스를 들고 있어야 한다.
+ *
+ * @param {object}   input
+ * @param {string}   input.trId       tr_id
+ * @param {number}   input.elapsedMs  요청 소요 시간(ms). 호출자가 잰다.
+ * @param {object}  [input.response]  axios 응답 (성공 시)
+ * @param {object}  [input.error]     axios 에러 (실패 시)
+ * @param {number}  [input.pid]       프로세스 id. 없으면 필드를 생략한다.
+ * @param {Function}[input.now]       시각 주입 이음매 (balance.js의 fetchAllPaged와 같은 방식)
  * @returns {{ line: string, classification: string, rateLimited: boolean, msgCd: string|null }}
  */
-export function formatKisRequestLog({ trId, elapsedMs, response = null, error = null } = {}) {
+export function formatKisRequestLog({
+  trId,
+  elapsedMs,
+  response = null,
+  error = null,
+  pid = null,
+  now = () => Date.now(),
+} = {}) {
   const body = response?.data ?? error?.response?.data ?? null;
   const rtCd = body && typeof body === "object" ? body.rt_cd : undefined;
   const rawMsgCd = body && typeof body === "object" ? body.msg_cd : undefined;
@@ -128,6 +157,8 @@ export function formatKisRequestLog({ trId, elapsedMs, response = null, error = 
     : KIS_CLASS_OK;
 
   const fields = [
+    `ts=${formatTimestamp(now)}`,
+    `pid=${Number.isInteger(pid) && pid > 0 ? pid : ABSENT}`,
     `tr_id=${sanitizeToken(trId)}`,
     `elapsed_ms=${Number.isFinite(elapsedMs) && elapsedMs >= 0 ? Math.round(elapsedMs) : ABSENT}`,
     `http=${Number.isInteger(httpStatus) ? httpStatus : ABSENT}`,
