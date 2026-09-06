@@ -60,17 +60,18 @@ def extract_stock_name(resolved_text: str) -> str | None:
 _STOCK_CODE_RE = re.compile(r"\A(?:[0-9A-Z]{6,7}|[0-9A-Z]{9})\Z")
 
 # ──────────────────────────────────────────────────────────────────────────
-# 주문 가능 코드 판정 — mcp-trading/order.js:77-84 정책의 백엔드 복제본
+# 주문 가능 코드 판정 — mcp-trading/order.js buildCashOrderBody() 정책의 백엔드 복제본
 # ──────────────────────────────────────────────────────────────────────────
 # order.js의 buildCashOrderBody()는 두 가드가 함께 "숫자 6~7자만 주문 가능"을 이룬다:
-#   첫 번째(line 77): /^[0-9A-Z]{6,7}$/i && !/^\d{6,7}$/ → 영숫자 코드 전용 메시지
-#   두 번째(line 84): !/^\d{6,7}$/               → 실제 범위 확정 (9자 펀드 포함 거절)
+#   첫 번째: /^[0-9A-Z]{6,7}$/i && !ORDERABLE_STOCK_CODE_RE → 영숫자 코드 전용 메시지
+#   두 번째: !ORDERABLE_STOCK_CODE_RE                       → 실제 범위 확정 (9자 펀드 포함 거절)
+# (줄 번호로 가리키지 않는다 — order.js가 조금만 움직여도 주석이 엉뚱한 줄을 가리킨다.)
 # 이 상수는 두 번째 가드(`/^\d{6,7}$/`)를 백엔드에서 복제한다.
 # 백엔드가 조기 거절하므로 영숫자·9자 코드는 /confirm 전에 막힌다.
 # 영숫자 코드 주문 미지원은 #73에서 확정된 정책이다.
 #
-# ⚠️  결합 유지 필수: 이 상수와 mcp-trading/order.js:77-84 가드는 쌍을 이루므로
-#     한쪽만 바꾸면 해당 계층에서 조용히 계속 막힌다(#138 참조).
+# ⚠️  결합 유지 필수: 이 상수와 mcp-trading/order.js buildCashOrderBody()의 두 가드는
+#     쌍을 이루므로 한쪽만 바꾸면 해당 계층에서 조용히 계속 막힌다(#138 참조).
 #     영숫자 코드 주문 지원을 검토할 때(#138)는 order.js 두 가드와 이 상수를
 #     **모두** 함께 바꿔야 한다.
 #
@@ -150,11 +151,12 @@ def is_orderable_stock_code(code: str) -> bool:
     buildCashOrderBody() 가드를 미리 복제해, 조기 거절로 시세·잔고 조회와 60초 대기
     슬롯 낭비를 막는다(#73).
 
-    ⚠️  결합 유지 필수: 이 함수와 mcp-trading/order.js:77-84(+ 플래그 분기)는 쌍을
-        이루므로 한쪽만 바꾸면 그 계층에서 조용히 계속 막힌다. 플래그를 켤 때는 두
-        계층에 같은 KIS_ALNUM_STOCK_ORDER_ENABLED 값을 넣어야 한다 — mcp-trading은
-        backend가 띄우는 자식 프로세스라 config._MCP_ENV_ALLOWED_PREFIXES의 KIS_
-        접두사 통과 목록을 통해 같은 값을 그대로 물려받는다.
+    ⚠️  결합 유지 필수: 이 함수와 mcp-trading/order.js buildCashOrderBody()의 두 가드
+        (+ 플래그 분기)는 쌍을 이루므로 한쪽만 바꾸면 그 계층에서 조용히 계속 막힌다.
+        플래그를 켤 때는 두 계층에 같은 KIS_ALNUM_STOCK_ORDER_ENABLED 값을 넣어야
+        한다 — mcp-trading은 backend가 띄우는 자식 프로세스라
+        config._MCP_ENV_ALLOWED_PREFIXES의 KIS_ 접두사 통과 목록을 통해 같은 값을
+        그대로 물려받는다.
 
         3번째 복제본이 하나 더 있다: order_assist.check_orderable_code()가
         is_orderable_stock_code_strict()를 쓴다(자동 제안 경로의 하드 한도 판정).

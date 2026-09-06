@@ -231,7 +231,7 @@ class TestLooksLikeStockCode:
 
 # ──────────────────────────────────────────────────────────────────────────
 # _ORDERABLE_STOCK_CODE_RE — 주문 가능 코드 판정
-# mcp-trading/order.js:77-84 정책의 백엔드 복제본
+# mcp-trading/order.js buildCashOrderBody()의 두 가드 정책의 백엔드 복제본
 # ──────────────────────────────────────────────────────────────────────────
 
 class TestOrderableStockCodeRe:
