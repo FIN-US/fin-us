@@ -332,6 +332,12 @@ def test_policy_fixture_rows_are_all_exercised():
         assert required in codes, f"판정표에서 대표 코드 {required}가 사라졌다"
 
     for case in fresh["cases"]:
+        # 값만 검사하면 행의 *모양*이 검사되지 않는다 — 오타난 열(flag_stage1 등)을 붙인
+        # 행이 양쪽 스위트를 그대로 통과한다. 6.5가 단계별 verdict 열을 계획하고 있어
+        # 열이 실제로 늘어날 자리이므로, 늘릴 때 두 스위트를 함께 고치도록 키를 고정한다.
+        assert sorted(case.keys()) == ["code", "flag_off", "flag_on", "note"], (
+            f"{case['code']!r} 행의 열 구성이 표 규약과 다르다"
+        )
         assert case.get("note"), f"{case['code']!r} 행에 note가 없다 — 표는 정책을 설명해야 한다"
 
 

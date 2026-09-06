@@ -282,6 +282,14 @@ test("orderable code policy fixture rows are all exercised by this suite (#138)"
   }
 
   for (const policyCase of fresh.cases) {
+    // 값만 검사하면 행의 *모양*이 검사되지 않는다 — 오타난 열(flag_stage1 등)을 붙인
+    // 행이 양쪽 스위트를 그대로 통과한다. §6.5가 단계별 verdict 열을 계획하고 있어
+    // 열이 실제로 늘어날 자리이므로, 늘릴 때 두 스위트를 함께 고치도록 키를 고정한다.
+    assert.deepEqual(
+      Object.keys(policyCase).sort(),
+      ["code", "flag_off", "flag_on", "note"],
+      `${policyCase.code} 행의 열 구성이 표 규약과 다르다`,
+    );
     assert.ok(
       typeof policyCase.note === "string" && policyCase.note.length > 0,
       `${policyCase.code} 행에 note가 없다 — 표는 정책을 설명해야 한다`,
