@@ -415,7 +415,9 @@ def test_order_js_guard_agrees_with_shared_policy_table(tmp_path):
             "(같은 판정표를 mcp-trading 스위트가 검사하지만, JS만 바꾼 변경을 "
             "백엔드 스위트가 잡는다는 보장은 이 테스트에만 있다)"
         )
-        if os.environ.get("CI"):
+        # CI를 "false"/"0"/"no"로 내보내는 관행(CRA·Vite·husky)이 있어 truthy 검사만
+        # 하면 CI를 껐다고 믿는 로컬 셸에서 fail-closed 분기에 걸린다.
+        if os.environ.get("CI", "").strip().lower() not in ("", "0", "false", "no"):
             pytest.fail(
                 f"{message}. ci.yml의 backend-test 잡에 setup-node가 있어야 한다."
             )
