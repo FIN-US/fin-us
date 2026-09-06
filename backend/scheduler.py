@@ -904,7 +904,9 @@ def _sync_portfolio_prices_from_rlz_pl(report_text: str, session: Session) -> in
             "실현손익 응답의 %d개 종목이 Portfolio에 없어 건너뛰었습니다: %r",
             len(leftover), leftover[:5],
         )
-    logger.info("Portfolio 시세 갱신 완료: %d개 종목", updated)
+    # 종목 수가 아니라 **행 수**다. stock_code에 유니크 제약이 없어 같은 코드의 행이
+    # 둘 이상일 수 있고, 그때 이 값은 종목 수보다 크다(docstring의 반환값 설명과 일치).
+    logger.info("Portfolio 시세 갱신 완료: %d개 행", updated)
     return updated
 
 
