@@ -55,16 +55,35 @@ _POLICY_VERDICTS = frozenset({"pass", "reject_unsupported", "reject_shape"})
 _DRIVEN_CODES: set[str] = set()
 
 
+def _take_cases(predicate) -> list[dict]:
+    """판정표에서 구획 하나를 집어 간다."""
+    return [case for case in _POLICY_CASES if predicate(case)]
+
+
+# mcp-trading/tests/order.test.js와 같은 구획 모양을 쓴다. 백엔드 판정은 bool 하나라
+# 거절 사유로 나눈 두 구획이 검사 내용상 같지만, 모양을 맞춰 두 계층 어느 쪽에서
+# 구획 필터가 행을 빠뜨려도 같은 메타 테스트가 같은 방식으로 red가 되게 한다.
+# 표 전체를 도는 목록을 _POLICY_CASES에서 직접 만들면 안 된다 — 그러면 소비 기록이
+# 정의상 표 전체가 되어 아래 메타 테스트가 실패할 수 없는 단언이 된다.
+_OFF_UNSUPPORTED_CASES = _take_cases(lambda case: case["flag_off"] == "reject_unsupported")
+_OFF_REMAINING_CASES = _take_cases(lambda case: case["flag_off"] != "reject_unsupported")
+_ALL_POLICY_CASES = [*_OFF_UNSUPPORTED_CASES, *_OFF_REMAINING_CASES]
+
+
 def _policy_params(column: str) -> dict:
     """판정표의 한 열을 parametrize 인자로 편다.
 
     ``column``은 "flag_off"(KIS_ALNUM_STOCK_ORDER_ENABLED 미설정·기타 값) 또는
     "flag_on"(정확히 "true")이다. 오타난 verdict가 "거절"로 조용히 취급되지 않도록
     여기서 먼저 막는다.
+
+    도는 대상은 구획들의 합집합(``_ALL_POLICY_CASES``)이지 ``_POLICY_CASES``가 아니다.
+    소비 기록도 여기서 남기므로, 구획 필터가 행을 빠뜨리든 이 함수가 빠뜨리든
+    메타 테스트가 잡는다.
     """
     argvalues = []
     ids = []
-    for case in _POLICY_CASES:
+    for case in _ALL_POLICY_CASES:
         verdict = case[column]
         assert verdict in _POLICY_VERDICTS, (
             f"판정표에 알 수 없는 verdict {verdict!r}가 있다: {case['code']!r}"

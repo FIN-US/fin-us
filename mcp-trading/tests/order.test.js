@@ -144,7 +144,10 @@ function takeCases(predicate) {
 // 그 밖의 행(통과·일반 메시지 거절). 두 구획의 합집합이 표 전체다.
 const OFF_UNSUPPORTED_CASES = takeCases((c) => c.flag_off === "reject_unsupported");
 const OFF_REMAINING_CASES = takeCases((c) => c.flag_off !== "reject_unsupported");
-const ALL_POLICY_CASES = takeCases(() => true);
+// 표 전체를 도는 테스트도 takeCases(() => true)로 따로 긁지 않는다 — 그러면 어떤
+// 구획 필터가 행을 빠뜨려도 drivenCodes는 정의상 표 전체가 되어, 아래 소비 메타
+// 테스트가 실패할 수 없는 단언이 된다. 실제 구획들이 집어 간 것의 합집합만 쓴다.
+const ALL_POLICY_CASES = [...OFF_UNSUPPORTED_CASES, ...OFF_REMAINING_CASES];
 
 function describeCase(policyCase) {
   return `${policyCase.code === "" ? "(빈 문자열)" : policyCase.code} — ${policyCase.note}`;
