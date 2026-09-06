@@ -807,7 +807,13 @@ def _sync_portfolio_prices_from_rlz_pl(report_text: str, session: Session) -> in
         row.current_price = price
         # 이 스탬프를 찍는 곳은 이 줄 하나뿐입니다. 다른 경로가 찍으면 "시세를 갱신한
         # 시각"이라는 뜻이 무너지고 신선도 판정이 거짓말이 됩니다.
-        row.price_updated_at = now
+        #
+        # _as_utc_naive를 통과시켜 "UTC" 계약을 관례가 아니라 구조로 만듭니다.
+        # SQLAlchemy의 SQLite DATETIME은 오프셋을 **변환하지 않고 버립니다** —
+        # +09:00의 15:00을 넣으면 15:00이 그대로 저장돼 조용히 9시간이 틀어집니다.
+        # 지금은 now가 항상 UTC라 도달하지 않지만, 이 한 줄이 그 사고를 구조적으로
+        # 막습니다(is_price_fresh·format_price_updated_at도 같은 헬퍼를 씁니다).
+        row.price_updated_at = _as_utc_naive(now)
         updated += 1
 
     session.commit()
@@ -1158,9 +1164,12 @@ def is_price_fresh(price_updated_at: datetime | None, *, now: datetime) -> bool:
     같은 기준). 신선하다고 말할 수 없는 것이지 값이 없다는 뜻은 아니며, 다음 시세 갱신
     주기가 진짜 값을 채우면 그 행은 즉시 신선해진다.
 
-    미래 시각(now보다 뒤)은 신선으로 판정된다. 시계 역행이나 KIS/로컬 시각 오차로만
-    생기는 값이고, 그 경우 "방금 갱신됨"으로 읽는 편이 안전하다 — 반대로 막으면 시계가
-    조금 어긋난 배포에서 모든 시세가 영구히 "모름"이 된다.
+    미래 시각(now보다 뒤)은 **TTL만큼만** 신선으로 판정된다. 시계 역행이나 KIS/로컬
+    시각 오차로 조금 앞선 값은 "방금 갱신됨"으로 읽는 편이 안전하다 — 반대로 막으면
+    시계가 조금 어긋난 배포에서 모든 시세가 영구히 "모름"이 된다. 그러나 하한이 없으면
+    한참 미래의 스탬프는 **영원히** 신선해진다. 시계가 크게 틀어졌거나 잘못된 값이
+    한 번 쓰이면 그 행의 시세는 다시는 "모름"으로 내려가지 않는다 — 이 게이트가
+    없애려는 상태 그 자체다. 그래서 위아래 대칭으로 TTL을 건다.
     """
     if price_updated_at is None:
         return False
@@ -1168,7 +1177,7 @@ def is_price_fresh(price_updated_at: datetime | None, *, now: datetime) -> bool:
     # datetime.now(timezone.utc)라 aware이므로, 맞추지 않고 빼면
     # "can't compare offset-naive and offset-aware datetimes"로 죽는다.
     age = _as_utc_naive(now) - _as_utc_naive(price_updated_at)
-    return age <= PRICE_FRESHNESS_TTL
+    return -PRICE_FRESHNESS_TTL <= age <= PRICE_FRESHNESS_TTL
 
 
 def format_price_updated_at(price_updated_at: datetime | None) -> str:

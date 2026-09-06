@@ -308,6 +308,7 @@ def test_get_visualization_portfolio_price_known_honours_freshness_ttl(
     이 테스트가 잡는 mutation:
     - PRICE_FRESHNESS_TTL을 넓히거나 좁히면 아래 상수 단언이 깨진다.
     - is_price_fresh의 비교 방향을 뒤집으면(>= / <) 두 경계 행의 판정이 서로 바뀐다.
+    - 미래 쪽 하한(-TTL)을 지우면 한참 앞선 스탬프가 영원히 신선으로 통과한다.
     - NULL 분기를 True로 되돌리거나 지우면 "미상" 행이 신선으로 통과한다.
     - main이 price_known을 다시 `current_price is not None`으로 되돌리면 세 행이
       모두 True가 된다.
@@ -331,6 +332,19 @@ def test_get_visualization_portfolio_price_known_honours_freshness_ttl(
         "정확히 TTL만큼 지난 값은 아직 경계 안이다(<=)"
     )
     assert is_price_fresh(None, now=fixed_now) is False
+
+    # 미래 스탬프도 대칭으로 TTL을 건다. 하한이 없으면 시계가 크게 틀어졌거나 잘못된
+    # 값이 한 번 쓰인 행은 **영원히** 신선해져 다시는 "모름"으로 내려가지 않는다.
+    # 이 테스트가 잡는 mutation: 하한(-PRICE_FRESHNESS_TTL <= age)을 지우는 회귀.
+    assert is_price_fresh(fixed_now + timedelta(seconds=1), now=fixed_now) is True, (
+        "시계 오차 수준으로 앞선 값은 '방금 갱신됨'으로 읽는다"
+    )
+    assert is_price_fresh(fixed_now + PRICE_FRESHNESS_TTL, now=fixed_now) is True
+    assert is_price_fresh(
+        fixed_now + PRICE_FRESHNESS_TTL + timedelta(seconds=1), now=fixed_now
+    ) is False, (
+        "TTL을 넘어 앞선 스탬프는 시계 오차가 아니라 잘못된 값이다 — 영원히 신선하면 안 된다"
+    )
 
     now = datetime.now(timezone.utc)
     session.add(
