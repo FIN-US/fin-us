@@ -1497,9 +1497,12 @@ async def test_order_command_rejects_unorderable_stock_code_before_quote_and_bal
     # 그대로 흘려보내도 통과한다. 조합된 형태를 단언해야 실제로 우리가 만든 문장이 나갔음이
     # 고정된다.
     assert f"{stock_name}({stock_code})" in message
-    assert "주문을 지원하지 않습니다" in message
+    assert "주문을 지원하는 종목코드 형태가 아닙니다" in message
     # 왜 안 되는지를 설명하는 문장이 이 수정의 핵심이므로 함께 고정한다.
-    assert "ETN·펀드 등 영숫자 종목코드는 아직 주문 대상이 아닙니다." in message
+    # 상품군(ETN 등)을 단정하던 이전 문구는 부정확해서 걷어냈다(#138) — 되돌아오지
+    # 않도록 거절 근거가 "코드 형태"로만 서술되는지 함께 고정한다.
+    assert "숫자 6~7자리 코드만 주문할 수 있습니다." in message
+    assert "ETN" not in message
     assert _orders(handler) == {}
 
 
@@ -1550,7 +1553,7 @@ async def test_order_command_allows_alnum_stock_code_when_flag_enabled(
 
     assert _orders(handler)["123"].stock_code == stock_code
     assert "주문 확인" in notifier.messages[-1]
-    assert "주문을 지원하지 않습니다" not in notifier.messages[-1]
+    assert "주문을 지원하는 종목코드 형태가 아닙니다" not in notifier.messages[-1]
 
 
 @pytest.mark.asyncio
@@ -1670,7 +1673,8 @@ async def test_buy_with_unresolved_echo_is_rejected(code):
 
     뮤테이션: _is_unresolved_echo 가드를 지우면 999999가 대기 주문으로 등록돼 red가
     된다(ZZZZ99·Q999999는 영숫자라 is_orderable_stock_code가 뒤에서 잡지만, 거절
-    사유가 "ETN·펀드"로 바뀌므로 메시지 단정에서 red가 된다).
+    사유가 "주문을 지원하는 종목코드 형태가 아닙니다"로 바뀌므로 아래 메시지 단정에서
+    red가 된다).
     """
 
     async def mcp_runner(server_params, tool_name, arguments):

@@ -1344,9 +1344,14 @@ class TelegramCommandHandler:
                 # 사용자가 입력한 건 종목명인데 거절 사유는 종목코드 형태다.
                 # 코드를 함께 보여주지 않으면 인과가 보이지 않는다.
                 # 조사(은/는)는 코드 끝자리 받침에 따라 갈리므로 아예 쓰지 않는다.
+                # 상품군을 단정하지 않는다(#138). 이전 문구는 특정 상품군(ETN, 펀드)을
+                # 예로 들었는데 두 번 부정확했다 — 차단되는 776종목의 상당수는 그 상품군이
+                # 아니라 보통주·우선주이고, 하필 ETN은 KIS order-cash 스펙이 PDNO 대상으로
+                # 명시한 상품이다(docs/issue-138-alnum-stock-code.md 2.2·4.2 가·6.6).
+                # 막는 근거는 상품 종류가 아니라 코드 형태이므로 그것만 말한다.
                 await self._send_text_or_raise(
-                    f"주문 불가: {stock_name}({stock_code}) — 현재 주문을 지원하지 않습니다. "
-                    "ETN·펀드 등 영숫자 종목코드는 아직 주문 대상이 아닙니다."
+                    f"주문 불가: {stock_name}({stock_code}) — 현재 주문을 지원하는 "
+                    "종목코드 형태가 아닙니다. 숫자 6~7자리 코드만 주문할 수 있습니다."
                 )
                 return
             quote_result, balance_result = await asyncio.gather(
