@@ -2932,7 +2932,7 @@ def test_parse_rlz_pl_quotes_reads_price_per_code():
     """공유 픽스처의 정상 응답에서 코드별 현재가를 읽는다.
 
     같은 pdno(005930)가 현금·신용 두 행으로 나뉘어 있는데, prpr은 종목의 시장
-    가격이라 두 행이 같다. 코드를 키로 첫 행만 채택하므로 결과는 2건이어야 한다.
+    가격이라 두 행이 같다. 코드를 키로 처음 유효한 행만 채택하므로 결과는 2건이어야 한다.
 
     이 테스트가 잡는 mutation: 코드 중복을 걸러내지 않고 매번 덮어쓰거나 더하는 회귀,
     _RLZ_PL_PRICE_RE를 매입가/평가금액 줄까지 훑도록 넓히는 회귀(그러면 삼성전자
@@ -3007,7 +3007,7 @@ def test_parse_rlz_pl_quotes_does_not_name_stock_that_later_row_priced(caplog):
 
 
 def test_parse_rlz_pl_quotes_warns_when_duplicate_rows_disagree(caplog):
-    """같은 코드의 두 행이 다른 현재가를 들고 오면 첫 행을 쓰되 경고를 남긴다.
+    """같은 코드의 두 행이 다른 현재가를 들고 오면 먼저 채택한 값을 쓰되 경고를 남긴다.
 
     "prpr은 매매구분과 무관한 시장 가격이라 행마다 같다"는 것은 추론이지 관측이
     아니다 — TTTC8494R 실계좌 응답을 아직 아무도 보지 못했다. 실측 전까지 그 전제를
@@ -3015,7 +3015,7 @@ def test_parse_rlz_pl_quotes_warns_when_duplicate_rows_disagree(caplog):
     사라진다.
 
     이 테스트가 잡는 mutation: 중복 행을 값도 읽지 않고 곧바로 continue하는 회귀
-    (경고가 사라진다), 또는 첫 행 대신 마지막 행을 채택하는 회귀(99999가 들어온다).
+    (경고가 사라진다), 또는 먼저 채택한 값 대신 마지막 행을 채택하는 회귀(99999가 들어온다).
     """
     import logging
 
