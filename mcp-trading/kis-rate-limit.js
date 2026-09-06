@@ -163,8 +163,14 @@ export function formatKisRequestLog({
   const body = response?.data ?? error?.response?.data ?? null;
   const rtCd = body && typeof body === "object" ? body.rt_cd : undefined;
   // msg_cd/msg1 옆에 error_code/error_description을 함께 보는 이유: 토큰 발급
-  // (POST /oauth2/tokenP)의 실패 바디는 조회(GET)와 모양이 다른 OAuth 형식이라
-  // `{ error_code: "EGW00133", error_description: "..." }`으로 온다. 이 갈래를 안 보면
+  // (POST /oauth2/tokenP)의 실패 바디가 조회(GET)와 모양이 다른 OAuth 형식
+  // (`{ error_code: "EGW00133", error_description: "..." }`)일 가능성이다.
+  // **이 모양은 아직 확인되지 않았다**(런북 0절의 미확인 항목). 저장소의 증거는 오히려
+  // 반대를 가리킨다 — tests/kis-client.test.js:26의 픽스처가 이 경로 오류를
+  // "Access Token 발급 실패: EGW00133 ..."로 쓰는데, index.js가 그 문자열을 만드는 자리는
+  // error.response?.data?.msg1이라 msg1이 채워져 있어야만 나올 수 있는 모양이다.
+  // 그래서 한쪽으로 고르지 않고 둘 다 읽는다. 실측(런북 5.2)이 판정하기 전에는 ?? 를
+  // 한쪽 필드로 되돌리지 말 것. OAuth 갈래를 안 보면
   // 그 경로의 EGW00133이 class=other로 떨어지고, 게이트가 꺼진 기본 설정에서는
   // rateLimited가 false라 **줄이 아예 나가지 않는다**(index.js의 logKisRequest는
   // `KIS_REQUEST_LOG_ENABLED || rateLimited`일 때만 쓴다). 줄이 나빠지는 게 아니라
