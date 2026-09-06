@@ -45,16 +45,23 @@ function isAlnumStockOrderEnabled() {
 }
 
 // 주문 가능 코드 정책을 이루는 두 정규식. buildCashOrderBody() 안에 리터럴로 묻어
-// 두면 "지금 정책이 무엇인가"를 함수 본문을 읽어야만 알 수 있고, 테스트도 함수를
-// 통해서만 간접 확인할 수 있다. 이름을 붙여 내보내면 판정표
-// (tests/fixtures/orderable_code_policy.json)를 짝인 backend/stock_code.py와 맞출 때
-// 두 계층이 무엇을 비교하는지가 드러난다(#138, docs/issue-138-alnum-stock-code.md §6.2).
+// 두면 "지금 정책이 무엇인가"를 함수 본문을 읽어야만 알 수 있다. 이름을 붙여 올려
+// 두면 판정표(tests/fixtures/orderable_code_policy.json)를 짝인 backend/stock_code.py와
+// 맞출 때 두 계층이 무엇을 비교하는지가 드러난다(#138,
+// docs/issue-138-alnum-stock-code.md §6.2).
+//
+// 내보내지는 않는다. 정책을 드러내는 건 export가 아니라 이름이고, 내보내면 호출부가
+// 이 정규식으로 가드를 각자 재구현할 수 있어 "정책이 몇 군데에 있는가"를 grep으로만
+// 알게 된다 — backend/stock_code.py가 _ORDERABLE_STOCK_CODE_RE를 모듈 안에 두고
+// is_orderable_stock_code_strict()만 내보내는 것과 같은 이유다. 두 계층의 일치는
+// 상수를 읽어서가 아니라 buildCashOrderBody()를 실제로 호출해 판정표와 대조하는
+// 방식으로 확인한다(order.test.js, backend/tests/test_stock_code.py 양쪽 모두).
 // `/g` 플래그가 없으므로 모듈 상수로 재사용해도 lastIndex가 남지 않는다.
 //
 // 기본값(#73): 숫자 6~7자만 주문 가능. backend/stock_code.py의
 // _ORDERABLE_STOCK_CODE_RE와 짝이다. JS의 `\d`는 ASCII 전용이라 전각 숫자를 매치하지
 // 않지만, Python의 `\d`는 매치하므로 백엔드 쪽은 `[0-9]`로 명시해 둔다.
-export const ORDERABLE_STOCK_CODE_RE = /^\d{6,7}$/;
+const ORDERABLE_STOCK_CODE_RE = /^\d{6,7}$/;
 
 // 플래그 켜짐(KIS_ALNUM_STOCK_ORDER_ENABLED=true): 영숫자 6~7자·9자.
 // backend/stock_code.py의 _ORDERABLE_STOCK_CODE_ALNUM_RE와 짝이다. 8자는 종목마스터에
@@ -62,7 +69,7 @@ export const ORDERABLE_STOCK_CODE_RE = /^\d{6,7}$/;
 // 백엔드 정규식은 IGNORECASE가 없어 소문자를 거절하므로, 여기만 관용하면 같은 값에
 // 두 계층이 다른 판정을 내리고 소문자가 그대로 PDNO에 실린다(index.js는 upper 정규화를
 // 하지 않는다).
-export const ORDERABLE_STOCK_CODE_ALNUM_RE = /^(?:[0-9A-Z]{6,7}|[0-9A-Z]{9})$/;
+const ORDERABLE_STOCK_CODE_ALNUM_RE = /^(?:[0-9A-Z]{6,7}|[0-9A-Z]{9})$/;
 
 export function selectCashOrderTrId({ orderEnv, side }) {
   const env = normalizeOrderEnv(orderEnv);
