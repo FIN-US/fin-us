@@ -2946,19 +2946,28 @@ def test_parse_rlz_pl_quotes_reads_price_per_code():
 
 
 def test_parse_rlz_pl_quotes_omits_holdings_without_price():
-    """prpr이 비어 "현재가 -"로 나온 종목은 결과에서 빠진다.
+    """시세를 읽을 수 없는 두 형태 모두 결과에서 빠진다.
 
-    "-"를 0으로 읽으면 없던 시세가 생긴다(#122의 "0과 모름 구분"). 빠진 종목은
+    (1) prpr이 null이라 "현재가 -"로 나온 행(000000): 정규식이 매치되지 않는다.
+    (2) prpr이 "0"이라 "현재가 0원"으로 나온 행(123456): 정규식은 **매치된다**.
+        formatWon은 undefined·null·""에만 "-"를 내므로(formatters.js:7-10) "0"은
+        그대로 "0원"이 되고, 값을 보고 거르지 않으면 0.0이 신선한 현재가로 저장된다.
+        KIS는 거래정지·장 시작 전·신규 상장 종목에 prpr=0을 흔히 준다.
+
+    어느 쪽이든 0으로 읽으면 없던 시세가 생긴다(#122의 "0과 모름 구분"). 빠진 종목은
     기존 값이 그대로 남고 TTL이 지나면 스스로 "모름"이 된다.
 
-    이 테스트가 잡는 mutation: 파싱 실패 시 0.0을 채우는 회귀 → 000000이 0.0으로
-    들어와 딕셔너리 비교가 실패한다.
+    이 테스트가 잡는 mutation: 파싱 실패 시 0.0을 채우는 회귀(000000이 0.0으로
+    들어온다), 그리고 `if price <= 0` 가드 제거(123456이 0.0으로 들어온다). 둘 다
+    딕셔너리 비교가 실패한다.
     """
     from ..scheduler import _parse_rlz_pl_quotes
 
     quotes = _parse_rlz_pl_quotes(_rlz_pl_text("no_price"))
 
     assert quotes == {"005930": 71200.0}
+    # 0원 행이 "시세 0원"으로 살아 들어오지 않았음을 코드로도 못 박는다.
+    assert "123456" not in quotes
 
 
 def test_sync_portfolio_prices_writes_price_and_stamp(portfolio_session):

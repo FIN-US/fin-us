@@ -330,6 +330,10 @@ _RLZ_PL_INDEX_PREFIX_RE = re.compile(r"^\d+\. ")
 # formatWon이 toLocaleString("ko-KR")로 쉼표를 넣는다. prpr이 비면 "현재가 -"가 되고
 # 이 정규식에 매치되지 않아 그 종목은 결과에서 빠진다 — "-"를 0으로 읽으면 없던 시세가
 # 생긴다(#122의 "0과 모름 구분"). 소수 허용은 _AVG_PRICE_RE와 같은 이유의 보수적 선택이다.
+#
+# **정규식만으로는 부족하다**: formatWon은 undefined·null·""에만 "-"를 내므로
+# (formatters.js:7-10) prpr이 "0"이면 "현재가 0원"이 되어 이 정규식에 매치된다.
+# 0원을 걸러 내는 일은 정규식이 아니라 _parse_rlz_pl_quotes의 값 검사가 맡는다.
 _RLZ_PL_PRICE_RE = re.compile(r"현재가\s+([\d,]+(?:\.\d+)?)원")
 
 # get_balance_rlz_pl 연속 실패 횟수. get_balance의 _balance_failure_streak와 같은
@@ -627,11 +631,23 @@ def _parse_rlz_pl_quotes(report_text: str) -> dict[str, float]:
             priceless.append(name)
             continue
         try:
-            quotes[code] = float(price_match.group(1).replace(",", ""))
+            price = float(price_match.group(1).replace(",", ""))
         except ValueError:
-            # 숫자·쉼표만 매치된 문자열이라 도달하기 어렵지만, 도달했다면 0을 채우는
-            # 대신 건너뜁니다 — 파싱 실패는 "시세 없음"이지 "0원"이 아닙니다.
+            # 숫자·쉼표만 매치된 문자열이라 도달하기 어렵지만, 도달했다면 값을 채우는
+            # 대신 건너뜁니다.
             priceless.append(name)
+            continue
+        if price <= 0:
+            # prpr이 "0"이면 formatWon이 "0원"을 내므로 위 정규식은 매치된다
+            # (formatters.js:7-10은 undefined·null·""에만 "-"를 낸다). 그러나 0원짜리
+            # 보유 종목은 없다 — 거래정지·장 시작 전·신규 상장처럼 시세가 아직 없는
+            # 상태이지 "현재가가 0원"이 아니다. 그대로 쓰면 평가액 0원·수익률 -100%가
+            # price_known=True로, 즉 **신선하고 확실한 값**으로 나간다 — 이 이슈가
+            # 없애려는 결함 그 자체다. "-"와 같은 취급으로 결과에서 뺀다(#122의
+            # "0과 모름 구분"). 음수는 KIS가 낼 값이 아니지만 같은 이유로 함께 막는다.
+            priceless.append(name)
+            continue
+        quotes[code] = price
 
     if malformed:
         logger.warning(
