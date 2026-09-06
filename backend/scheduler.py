@@ -283,6 +283,63 @@ _QTY_RE = re.compile(r"\)\s*·\s*([\d,]+)주")
 _AVG_PRICE_RE = re.compile(r"평단가\s+([\d,]+(?:\.\d+)?)원")
 
 
+# ---------------------------------------------------------------------------
+# 시세 소스: get_balance_rlz_pl (inquire-balance-rlz-pl, TTTC8494R) — #196
+# ---------------------------------------------------------------------------
+#
+# get_balance(TTTC8434R)의 텍스트 리포트에는 현재가가 없다. 반면 실현손익 조회의
+# 리포트는 종목 줄 바로 아래에 "현재가 71,200원"을 낸다(balance-rlz-pl-report.js:54-55).
+# 이슈가 검토한 다른 선택지는 둘 다 막혀 있다: 옵션 A(get_balance output1에 현재가
+# 필드가 있는지 실계좌 실측)는 계좌 없이 확인할 수 없고, 옵션 B(종목마다
+# get_stock_quote, 호출당 1.1초 대기)는 유지보수자가 거부했다.
+#
+# 이미 등록된 도구를 텍스트로 읽는 대가는 명확하다 — 포맷이 바뀌면 조용히 0건이
+# 된다. 그래서 마커·정규식은 공유 픽스처(mcp-trading/tests/fixtures/
+# balance_rlz_pl_report.json)로 고정하고, 파싱 실패는 "쓰지 않음"으로 처리한다.
+
+# 실현손익 리포트의 보유 종목 섹션 헤더.
+#
+# balance.js의 "[보유 종목 리스트]"와 **의미가 다르다**: 저쪽은 0건에도 마커를 항상
+# 내므로 마커 부재가 곧 계약 위반이지만, 이쪽은 rows.length === 0이면 마커 자체를
+# 내지 않고 "- 보유 종목이 없습니다."만 낸다(balance-rlz-pl-report.js:38-48).
+# 그래서 마커 부재를 곧바로 오류로 보면 정상적인 빈 계좌가 10분마다 error 로그를
+# 쌓는다 — _RLZ_PL_EMPTY_MARKER를 먼저 확인해 두 경우를 가른다.
+# 두 리터럴은 부분 문자열로 겹치지 않는다("[보유 종목 리스트]"에는 "[보유 종목]"이
+# 들어 있지 않다 — "종목" 다음이 "]"가 아니라 공백이다).
+_RLZ_PL_HOLDINGS_MARKER = "[보유 종목]"
+_RLZ_PL_EMPTY_MARKER = "보유 종목이 없습니다"
+
+# 모의투자 계좌 대체 응답의 표지. get_balance_rlz_pl은 실전 계좌 전용이라
+# (mcp-trading/index.js:737) 모의투자(openapivts)에서는 index.js가 TR을 호출하지 않고
+# get_balance 요약을 대신 돌려주면서 이 문구를 덧붙인다(index.js:588-594).
+#
+# 이걸 따로 잡지 않으면 그 응답에는 "[보유 종목]" 마커가 없으므로 마커 부재 가드가
+# error를 남긴다 — 모의투자 배포에서는 그게 매 주기의 정상 동작이라 error가 아니다.
+# 시세를 못 얻는다는 결론은 같지만, 로그 수준과 운영자가 읽을 원인이 다르다.
+_RLZ_PL_PAPER_FALLBACK_MARKER = "잔고 요약으로 대체했습니다"
+
+# 종목 줄: "1. 삼성전자 (005930) · 현금"
+# STOCK_LINE_RE와 같은 이유로 코드 자리를 [0-9A-Z]{6,}로 제한한다 — [^()]*를 쓰면
+# "(합성)" 같은 이름 속 괄호가 코드로 잡혀 종목명이 잘린다(#157). name의 .+가
+# 탐욕적이라 마지막 " (코드) · "까지 물러나므로 이름 안의 괄호는 이름에 남는다.
+# pdno가 비어 formatter가 "-"를 낸 줄은 코드 자리에 매치되지 않아 형식 위반으로 걸린다.
+_RLZ_PL_STOCK_LINE_RE = re.compile(r"^\d+\. (?P<name>.+) \((?P<code>[0-9A-Z]{6,})\) · ")
+# 종목 줄 판별용 접두사. "- "로 판별하는 balance 파서와 달리 이쪽은 번호 매김이다.
+_RLZ_PL_INDEX_PREFIX_RE = re.compile(r"^\d+\. ")
+# 현재가: "   보유 10주 | 현재가 71,200원 | 평가 712,000원"
+# formatWon이 toLocaleString("ko-KR")로 쉼표를 넣는다. prpr이 비면 "현재가 -"가 되고
+# 이 정규식에 매치되지 않아 그 종목은 결과에서 빠진다 — "-"를 0으로 읽으면 없던 시세가
+# 생긴다(#122의 "0과 모름 구분"). 소수 허용은 _AVG_PRICE_RE와 같은 이유의 보수적 선택이다.
+_RLZ_PL_PRICE_RE = re.compile(r"현재가\s+([\d,]+(?:\.\d+)?)원")
+
+# get_balance_rlz_pl 연속 실패 횟수. get_balance의 _balance_failure_streak와 같은
+# 문제를 같은 방식으로 막는다 — 다만 이쪽은 상시 실패가 **정상인** 배포가 있다.
+# 모의투자 계좌에서는 도구가 매번 대체 응답을 주고, 실전 계좌라도 권한이 없으면 매
+# 주기 실패한다. 그 배포에서 error를 10분마다 쌓으면 로그가 무의미해진다.
+_quote_failure_streak = 0
+_last_quote_error: str | None = None
+
+
 @dataclass(frozen=True)
 class _BalanceHolding:
     """_parse_balance_holdings의 파싱 결과 단위."""
@@ -395,13 +452,18 @@ def _sync_portfolio_from_balance(
     잔고가 잘린 경우(is_balance_truncated) 동기화를 수행하면 아직 파악되지 않은
     보유 종목이 삭제될 수 있으므로, 동기화를 건너뛰고 기존 데이터를 보존합니다.
 
-    current_price는 이 함수가 **읽지도 쓰지도 않습니다.** get_balance(inquire-balance,
-    TTTC8434R) output1에 현재가 필드가 있는지가 **미확인**이기 때문입니다 — 실계좌
-    실측이 필요하며 저장소 안의 근거(balance-rlz-pl-report.js의 row.prpr)는 다른
-    TR(TTTC8494R)의 응답이라 증명이 되지 못합니다(#196). 그래서 신규 행은 모델
-    기본값 그대로 null이고, 기존 행의 값은 손대지 않은 채 보존됩니다.
+    current_price와 price_updated_at은 이 함수가 **읽지도 쓰지도 않습니다.**
+    get_balance(inquire-balance, TTTC8434R) output1에 현재가 필드가 있는지는 여전히
+    미확인이고, 시세를 쓰는 경로는 _sync_portfolio_prices_from_rlz_pl 하나뿐입니다(#196).
+    두 함수가 같은 컬럼을 쓰면 10분 주기마다 시세가 null로 덮이거나, 나이를 모르는
+    값에 새 타임스탬프가 찍혀 "모르는데 안다"가 됩니다. 그래서 신규 행은 모델 기본값
+    그대로 둘 다 null이고, 기존 행의 값은 손대지 않은 채 보존됩니다.
     null 수익률이 "실제 0%"와 혼동되지 않도록 /api/v1/portfolio 응답에서
     return_rate: null로 구분됩니다(이슈 #122).
+
+    updated_at은 반대로 매 주기 갱신됩니다 — 그 값의 뜻은 "잔고를 마지막으로 확인한
+    시각"이지 "시세를 마지막으로 갱신한 시각"이 아닙니다. 시세 나이는 price_updated_at
+    으로만 잽니다(#196).
 
     holdings: 호출처에서 이미 _parse_balance_holdings를 실행한 경우 그 결과를 전달하면
     재파싱을 건너뜁니다. None이면 balance_text에서 직접 파싱합니다.
@@ -460,14 +522,16 @@ def _sync_portfolio_from_balance(
         rows = existing.get(h.code)
         if rows:
             row = rows[0]
-            # 잔고 응답에서 온 필드만 갱신한다. current_price는 여기에 없으므로
-            # 건드리지 않는다 — 근거는 이 함수 docstring의 "upsert여야 하는 이유".
+            # 잔고 응답에서 온 필드만 갱신한다. current_price·price_updated_at은
+            # 여기에 없으므로 건드리지 않는다 — 근거는 이 함수 docstring의
+            # "upsert여야 하는 이유"와 #196의 시세 경로 분리.
             row.stock_name = h.name
             row.quantity = h.quantity
             row.avg_price = h.avg_price
         else:
-            # 신규 행. current_price를 넘기지 않으므로 모델 기본값 None이 된다 —
-            # 전량 교체 시절 명시적으로 current_price=None을 넘기던 것과 결과가 같다.
+            # 신규 행. current_price·price_updated_at을 넘기지 않으므로 모델 기본값
+            # None이 된다 — 전량 교체 시절 명시적으로 current_price=None을 넘기던 것과
+            # 결과가 같고, 다음 시세 갱신 주기가 두 값을 함께 채운다(#196).
             row = Portfolio(
                 stock_code=h.code,
                 stock_name=h.name,
@@ -499,6 +563,239 @@ def _sync_portfolio_from_balance(
     # 세면 호출처(#229의 PORTFOLIO_UPDATE holdings_count)가 보는 값이 바뀐다.
     logger.info("Portfolio 동기화 완료: %d개 종목", len(holdings))
     return len(holdings)
+
+
+def _parse_rlz_pl_quotes(report_text: str) -> dict[str, float]:
+    """get_balance_rlz_pl 텍스트에서 종목코드 → 현재가를 파싱합니다 (#196).
+
+    mcp-trading/balance-rlz-pl-report.js의 formatBalanceRlzPlReport()가 만드는 4줄
+    블록 형식에 의존합니다:
+      줄1: "{n}. {prdt_name} ({pdno}) · {trad_dvsn_name}"
+      줄2: "   보유 {hldg_qty}주 | 현재가 {prpr}원 | 평가 {evlu_amt}원"
+      줄3: "   평가손익 ... | 매입가 ..."
+      줄4: "   금일 매수 ... | 전일대비 ..."
+    현재가는 줄2에서만 읽습니다 — 줄3의 "매입가"를 현재가로 오인하지 않도록 검색
+    범위를 바로 다음 한 줄로 한정합니다(_parse_balance_holdings가 평단가를 다루는
+    방식과 같습니다).
+
+    **반환 키가 코드인 이유(중복 행 처리)**: KIS는 같은 종목이라도 매매구분
+    (trad_dvsn_name: 현금/신용 등)마다 행을 따로 줍니다. 즉 한 응답에 같은 pdno가
+    여러 번 나오는 것이 정상입니다. 그러나 prpr은 그 종목의 시장 가격이라 어느 행에서
+    읽어도 같은 값이어야 하므로, 코드를 키로 삼아 **첫 행만 채택**하고 뒤의 중복은
+    버립니다. 합산할 값이 아니므로 더하면 안 되고(그러면 현재가가 행 수만큼 부풀고),
+    Portfolio는 코드당 1행이라 매매구분별로 나눠 저장할 자리도 없습니다. 값이 서로
+    다르게 온다면 그것은 응답 자체의 이상이지 이 함수가 조정할 문제가 아니며, 그
+    경우에도 첫 행을 쓰는 편이 결정적입니다.
+
+    잘림·마커·모의투자 가드는 호출처(_sync_portfolio_prices_from_rlz_pl)가 담당하므로
+    이 함수는 있는 그대로 파싱합니다. 마커가 없으면 {} 반환.
+
+    현재가를 읽지 못한 종목은 **결과에서 뺍니다.** prpr이 비면 formatWon이 "-"를
+    내는데 그것을 0으로 읽으면 없던 시세가 생깁니다(#122의 "0과 모름 구분"). 빠진
+    종목의 기존 값은 호출처가 손대지 않으므로 그대로 남고, TTL이 지나면 스스로
+    "모름"이 됩니다 — 신선도 게이트를 붙인 이유가 그것입니다.
+    """
+    quotes: dict[str, float] = {}
+    if _RLZ_PL_HOLDINGS_MARKER not in report_text:
+        return quotes
+
+    section = report_text.split(_RLZ_PL_HOLDINGS_MARKER)[1]
+    lines = section.split("\n")
+    malformed: list[str] = []
+    priceless: list[str] = []
+
+    for i, line in enumerate(lines):
+        if _RLZ_PL_INDEX_PREFIX_RE.match(line) is None:
+            continue
+
+        match = _RLZ_PL_STOCK_LINE_RE.match(line)
+        if match is None:
+            malformed.append(line)
+            continue
+
+        name = match.group("name").strip()
+        code = match.group("code")
+        if not name:
+            continue
+        if code in quotes:
+            # 매매구분이 다른 같은 종목의 두 번째 행. 위 docstring 참고.
+            continue
+
+        price_line = lines[i + 1] if i + 1 < len(lines) else ""
+        price_match = _RLZ_PL_PRICE_RE.search(price_line)
+        if price_match is None:
+            priceless.append(name)
+            continue
+        try:
+            quotes[code] = float(price_match.group(1).replace(",", ""))
+        except ValueError:
+            # 숫자·쉼표만 매치된 문자열이라 도달하기 어렵지만, 도달했다면 0을 채우는
+            # 대신 건너뜁니다 — 파싱 실패는 "시세 없음"이지 "0원"이 아닙니다.
+            priceless.append(name)
+
+    if malformed:
+        logger.warning(
+            "예상치 못한 실현손익 종목 줄 형식 %d건을 건너뛰었습니다(예시 최대 3건): %r",
+            len(malformed), malformed[:3],
+        )
+    if priceless:
+        logger.warning(
+            "현재가를 읽지 못한 종목 %d건은 시세를 갱신하지 않습니다(예시 최대 3건): %r",
+            len(priceless), priceless[:3],
+        )
+    return quotes
+
+
+def _sync_portfolio_prices_from_rlz_pl(report_text: str, session: Session) -> int | None:
+    """get_balance_rlz_pl 응답으로 Portfolio의 시세와 그 갱신 시각을 채웁니다 (#196).
+
+    이 함수만 current_price와 price_updated_at을 씁니다. 잔고 동기화
+    (_sync_portfolio_from_balance)는 두 컬럼을 읽지도 쓰지도 않습니다 — 그래야
+    10분 주기 잔고 동기화가 방금 채운 시세를 null로 되돌리지 않습니다.
+
+    **행을 만들지도 지우지도 않습니다.** 어떤 종목을 보유하는지는 잔고 동기화의 몫이고,
+    이쪽이 없는 코드를 새로 넣으면 잔고에 없는 종목이 시세만 가진 유령 행으로 남습니다.
+    응답에 있으나 테이블에 없는 코드는 건너뜁니다 — 다음 잔고 동기화가 행을 넣어 주면
+    그 다음 주기에 시세가 붙습니다.
+
+    가드는 PR #342가 잔고 동기화에 세운 것과 같은 규율입니다 — **의심스러우면 쓰지
+    않는다.** 다만 파괴성의 형태가 다릅니다: 잔고 쪽은 잘못 쓰면 행이 지워지고,
+    이쪽은 잘못 쓰면 틀린 시세가 "신선함"으로 단언됩니다. 후자가 이 이슈가 없애려는
+    결함 그 자체이므로 같은 강도로 막습니다.
+
+    반환값:
+      - int: 시세를 갱신한 행 수 (0 포함 — 보유 0건이거나 매칭된 코드가 없을 때)
+      - None: 응답을 신뢰할 수 없어 아무것도 쓰지 않고 건너뛴 경우
+
+    건너뛰는 세 경우와 로그 수준:
+      1) 모의투자 대체 응답 — 그 배포에서는 매 주기의 정상 동작이므로 info.
+      2) 연속조회 잘림 — 부분 응답이라 warning. 얻은 종목만 써도 행이 지워지지는
+         않지만, 잘린 응답은 마지막 블록이 중간에서 끊겨 있을 수 있고 "의심스러운
+         응답으로는 쓰지 않는다"를 잔고 동기화와 갈라 둘 이유가 없습니다.
+      3) 마커 부재(빈 계좌 문구도 없음) — 응답을 읽지 못한 것이므로 error.
+    """
+    # 순서가 중요합니다. 모의투자 대체 응답에는 "[보유 종목]" 마커가 없으므로, 이
+    # 검사를 뒤로 미루면 마커 부재 가드가 먼저 걸려 정상 상황에 error가 남습니다.
+    if _RLZ_PL_PAPER_FALLBACK_MARKER in report_text:
+        logger.info(
+            "모의투자 계좌는 실현손익 TR을 지원하지 않아 이번 주기 시세 갱신을 건너뜁니다. "
+            "기존 시세와 갱신 시각을 유지합니다."
+        )
+        return None
+
+    if is_balance_truncated(report_text):
+        logger.warning(
+            "실현손익 연속조회가 잘려 이번 주기 시세 갱신을 건너뜁니다. "
+            "기존 시세와 갱신 시각을 유지합니다."
+        )
+        return None
+
+    if _RLZ_PL_HOLDINGS_MARKER not in report_text:
+        # 마커가 없는 정상 경우가 하나 있습니다: 보유 0건. balance.js와 달리 이
+        # 포맷터는 0건이면 마커를 아예 내지 않습니다(balance-rlz-pl-report.js:38-48).
+        if _RLZ_PL_EMPTY_MARKER in report_text:
+            logger.info("실현손익 응답에 보유 종목이 없어 갱신할 시세가 없습니다.")
+            return 0
+        logger.error(
+            "실현손익 응답에서 %r 섹션을 찾지 못해 시세 갱신을 건너뜁니다 "
+            "(응답 길이 %d). 기존 시세와 갱신 시각을 유지합니다.",
+            _RLZ_PL_HOLDINGS_MARKER,
+            len(report_text),
+        )
+        return None
+
+    quotes = _parse_rlz_pl_quotes(report_text)
+    if not quotes:
+        # 마커는 있는데 한 건도 파싱되지 않았습니다. 포맷 변경이거나 전 종목 prpr
+        # 누락이며, 어느 쪽이든 쓸 값이 없습니다. DB에 손대지 않고 0을 반환합니다
+        # (응답 자체는 읽었으므로 None이 아닙니다).
+        logger.warning(
+            "실현손익 응답에서 현재가를 한 건도 읽지 못했습니다. 기존 시세를 유지합니다."
+        )
+        return 0
+
+    now = datetime.now(timezone.utc)
+    updated = 0
+    for row in session.exec(select(Portfolio)).all():
+        price = quotes.pop(row.stock_code, None)
+        if price is None:
+            # 이 종목은 이번 응답에 없습니다. 기존 값을 지우지 않습니다 — 지우면
+            # 일시적인 누락이 곧바로 "시세 없음"이 됩니다. 대신 price_updated_at을
+            # 갱신하지 않으므로 TTL이 지나면 is_price_fresh가 스스로 "모름"으로
+            # 내립니다(#196).
+            continue
+        row.current_price = price
+        # 이 스탬프를 찍는 곳은 이 줄 하나뿐입니다. 다른 경로가 찍으면 "시세를 갱신한
+        # 시각"이라는 뜻이 무너지고 신선도 판정이 거짓말이 됩니다.
+        row.price_updated_at = now
+        updated += 1
+
+    session.commit()
+    if quotes:
+        # 잔고 동기화가 아직 넣지 않은 코드입니다. 다음 주기에 행이 생기면 붙습니다.
+        logger.info(
+            "실현손익 응답의 %d개 종목이 Portfolio에 없어 건너뛰었습니다: %r",
+            len(quotes), sorted(quotes)[:5],
+        )
+    logger.info("Portfolio 시세 갱신 완료: %d개 종목", updated)
+    return updated
+
+
+async def _refresh_portfolio_prices() -> int | None:
+    """get_balance_rlz_pl을 호출해 Portfolio 시세를 갱신합니다 (#196).
+
+    도구 호출 실패는 "이번 주기에 시세를 못 얻었다"이지 "시세를 영영 모른다"가
+    아닙니다. 예외를 삼키고 None을 반환해 잔고 동기화와 감시 루프가 그대로 돌게 합니다.
+    낡은 값은 지우지 않습니다 — price_updated_at이 그대로 남아 TTL이 지나면
+    is_price_fresh가 알아서 "모름"으로 내립니다.
+
+    실패 로그를 억제하는 이유는 get_balance(_balance_failure_streak)와 같지만 사정이
+    더 무겁습니다. 이 도구는 **실전 계좌 전용**(mcp-trading/index.js:737)이라
+    모의투자 배포에서는 매 주기 대체 응답이 오고, 권한이 없는 실전 계좌에서는 매 주기
+    실패합니다. 그런 배포에서 10분마다 error를 쌓으면 로그가 신호를 잃습니다. 수준도
+    error가 아니라 warning입니다 — 시세를 못 얻는 것은 감시도 주문도 막지 않습니다.
+
+    DB 쪽 예외는 삼키지 않고 호출처로 올립니다. 그쪽이 이미 "동기화 실패는 감시에
+    영향을 주지 않는다"는 격리를 갖고 있고, 여기서 또 삼키면 실패가 두 겹으로
+    조용해집니다.
+    """
+    global _quote_failure_streak, _last_quote_error
+
+    try:
+        report_text = await run_mcp_tool(TRADING_MCP_PARAMS, "get_balance_rlz_pl", {})
+    except Exception as e:
+        signature = f"{type(e).__name__}:{e}"
+        _quote_failure_streak += 1
+        # 6회 = 약 1시간(10분 주기). 첫 실패는 즉시, 원인이 바뀌면 즉시, 이후는
+        # 1시간에 한 번만 올립니다 — _balance_failure_streak와 같은 규칙입니다.
+        if (
+            _quote_failure_streak == 1
+            or signature != _last_quote_error
+            or _quote_failure_streak % 6 == 0
+        ):
+            logger.warning(
+                "시세 조회(get_balance_rlz_pl)에 실패해 이번 주기 시세 갱신을 건너뜁니다 "
+                "(기존 시세는 유지되며 TTL이 지나면 '모름'으로 내려갑니다, %d회 연속): %s",
+                _quote_failure_streak,
+                e,
+            )
+        else:
+            logger.debug(
+                "시세 조회 실패가 %d회 연속됩니다: %s", _quote_failure_streak, e
+            )
+        _last_quote_error = signature
+        return None
+
+    if _quote_failure_streak:
+        logger.info(
+            "시세 조회가 복구되었습니다. 직전까지 %d회 연속 실패해 시세 갱신을 건너뛰었습니다.",
+            _quote_failure_streak,
+        )
+        _quote_failure_streak = 0
+        _last_quote_error = None
+
+    with Session(engine) as session:
+        return _sync_portfolio_prices_from_rlz_pl(report_text, session)
 
 
 def _infer_catalyst_event_type(description: str) -> str:
@@ -1089,6 +1386,26 @@ async def _monitor_market_task(
                     len(owned_stocks),
                     notice.strip(),
                 )
+
+        # 2. 시세 갱신 (#196). get_balance_rlz_pl(TTTC8494R)의 리포트에서 종목별
+        # 현재가를 읽어 Portfolio.current_price와 price_updated_at을 채운다.
+        #
+        # 잔고 조회 성공(balance_ok) 밖에 두는 이유: 두 조회는 서로 다른 TR이고 서로의
+        # 전제가 아니다. 잔고가 실패해도 이미 저장된 행의 시세는 갱신할 수 있고, 그때
+        # 갱신을 함께 멈추면 KIS 장애 한 번이 잔고 공백에 더해 시세까지 TTL 밖으로
+        # 밀어낸다. 반대로 시세 조회가 실패해도 위 잔고 동기화는 이미 끝나 있다.
+        #
+        # 위치가 잔고 동기화 뒤인 것은 순서 때문이다 — 이번 주기에 새로 삽입된 행이
+        # 같은 주기에 시세를 받는다. 앞에 두면 신규 종목은 한 주기(10분) 동안
+        # price_known=False로 남는다.
+        #
+        # 예외를 격리하는 이유는 Portfolio 동기화와 같다: 시세 갱신 실패가 뉴스·공시
+        # 감시를 멈춰서는 안 된다. 도구 호출 실패 자체는 _refresh_portfolio_prices가
+        # 이미 삼키므로, 여기 걸리는 것은 DB 오류처럼 그보다 안쪽의 실패다.
+        try:
+            await _refresh_portfolio_prices()
+        except Exception as e:
+            logger.error("Portfolio 시세 갱신 중 오류 (감시는 계속): %s", e, exc_info=True)
 
         if watchlist_repo is None:
             watchlist_repo = SqliteWatchlistRepo(lambda: Session(engine))
