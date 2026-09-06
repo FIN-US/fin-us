@@ -12,7 +12,13 @@ from .catalyst_repo import (
     CatalystNotificationRepo,
     SqliteCatalystEventRepo,
 )
-from .filtered_signal_repo import FilteredSignalRecorder, SqliteFilteredSignalRepo
+from .filtered_signal_repo import (
+    FilteredSignalRecorder,
+    SqliteFilteredSignalRepo,
+    # SQLite에서 읽은 naive UTC와 tz-aware now를 같은 축으로 맞추는 보정(#196).
+    # 같은 보정을 여기서 다시 정의하면 한쪽만 고쳐질 때 두 모듈의 시각 축이 갈린다.
+    _as_utc_naive,
+)
 from .ws_manager import manager
 from .database import engine
 from .config import (
@@ -737,6 +743,68 @@ TRADE_NOTIFY_BATCH_LIMIT = 5
 # 두 배로 잘라 누수의 대가를 최대 두 주기로 묶는다. 한 주기가 이 시간을 넘길 일은 없다 —
 # 배치가 5건이고 첫 실패에서 끊는다.
 TRADE_NOTIFY_LOCK_TTL_SECONDS = TRADE_NOTIFY_INTERVAL_SECONDS * 2
+
+
+# ---------------------------------------------------------------------------
+# 시세 신선도 게이트 (#196)
+# ---------------------------------------------------------------------------
+
+# Portfolio.current_price를 "안다"고 말할 수 있는 최대 나이.
+#
+# 값의 근거는 갱신 주기와의 배수 관계다. 시세 갱신은 감시 잡(market_monitoring)에
+# 얹혀 돌므로 주기가 10분이고(start_scheduler의 interval, minutes=10), 이 상수는 그
+# 3배다. 배수마다 뜻이 있다:
+#   1배(10분): 주기와 같아 지터 몇 초만으로 신선/비신선이 뒤집힌다. 정상 갱신 중에도
+#              화면이 "앎"과 "모름" 사이를 깜빡인다.
+#   2배(20분): 갱신을 한 번 놓치면 곧바로 경계에 닿아 여유가 없다. KIS 일시 장애는
+#              드문 일이 아니다 — _balance_failure_streak가 그 전제 위에 있다.
+#   3배(30분): 연속 두 번의 갱신 실패까지 견딘다. 세 번 연속 실패했다면 그때는 실제로
+#              "모른다"고 말하는 편이 맞다.
+# 주기를 바꾸면 이 상수도 함께 봐야 한다 — 숫자 30이 아니라 이 배수 관계가 근거다.
+#
+# env로 빼지 않는다(리뷰어 요청). 배포마다 다르게 둘 이유가 없고, 운영 중 넓히면
+# 이 게이트가 없애려는 "모르는데 안다"가 설정 한 줄로 조용히 되살아난다.
+PRICE_FRESHNESS_TTL = timedelta(minutes=30)
+
+
+def is_price_fresh(price_updated_at: datetime | None, *, now: datetime) -> bool:
+    """Portfolio.current_price를 지금 "안다"고 말해도 되는지 판정한다 (#196).
+
+    NULL 분기와 TTL 분기를 한 함수에 묶는 이유: 두 판정이 각자의 호출처에 흩어지면
+    한쪽만 고쳐져 "TTL은 지켰는데 NULL은 신선으로 통과"하는 상태가 생긴다. 그 상태가
+    바로 이 이슈가 없애려는 결함이다.
+
+    price_updated_at이 NULL이면 **무조건 False**다. 이 컬럼이 없던 시절의 행은
+    current_price가 채워져 있어도 그것이 언제 채워진 값인지 알 수 없다 — 나이를 모르는
+    값을 신선하다고 단언하면 낡은 시세가 현재가로 나간다(#122·#162의 "0과 모름 구분"과
+    같은 기준). 신선하다고 말할 수 없는 것이지 값이 없다는 뜻은 아니며, 다음 시세 갱신
+    주기가 진짜 값을 채우면 그 행은 즉시 신선해진다.
+
+    미래 시각(now보다 뒤)은 신선으로 판정된다. 시계 역행이나 KIS/로컬 시각 오차로만
+    생기는 값이고, 그 경우 "방금 갱신됨"으로 읽는 편이 안전하다 — 반대로 막으면 시계가
+    조금 어긋난 배포에서 모든 시세가 영구히 "모름"이 된다.
+    """
+    if price_updated_at is None:
+        return False
+    # SQLite의 DATETIME은 오프셋을 저장하지 않아 읽어 온 값은 naive UTC다. now는
+    # datetime.now(timezone.utc)라 aware이므로, 맞추지 않고 빼면
+    # "can't compare offset-naive and offset-aware datetimes"로 죽는다.
+    age = _as_utc_naive(now) - _as_utc_naive(price_updated_at)
+    return age <= PRICE_FRESHNESS_TTL
+
+
+def format_price_updated_at(price_updated_at: datetime | None) -> str:
+    """API 응답에 실을 시세 갱신 시각 문자열. NULL이면 "" (#196).
+
+    is_price_fresh와 같은 자리에 두는 이유: 응답은 판정(bool)과 근거(시각)를 함께
+    내리는데, 둘이 다른 모듈에 있으면 한쪽만 축(naive/aware)이 바뀌어도 눈에 띄지 않는다.
+
+    저장된 값은 naive UTC이므로 그대로 isoformat()하면 오프셋 없는 문자열이 나가고,
+    소비자는 그것을 자기 로컬 시각으로 읽는다. tzinfo를 붙여 "+00:00"이 실리게 한다.
+    """
+    if price_updated_at is None:
+        return ""
+    return _as_utc_naive(price_updated_at).replace(tzinfo=timezone.utc).isoformat()
 
 
 def _default_trade_notification_repo() -> SqliteTradeNotificationRepo:

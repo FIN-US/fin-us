@@ -21,7 +21,12 @@ from .config import (
 )
 from .filtered_signal_repo import fill_score_axis, score_histogram
 from .ws_manager import manager
-from .scheduler import start_scheduler, stop_scheduler
+from .scheduler import (
+    format_price_updated_at,
+    is_price_fresh,
+    start_scheduler,
+    stop_scheduler,
+)
 from .telegram_commands import start_telegram_commands, stop_telegram_commands
 from .schemas import CommonResponse, DiaryCreate
 from .services import (
@@ -259,11 +264,23 @@ async def get_visualization_portfolio(session: Session = Depends(get_session)):
     Unity는 JsonUtility로 파싱하므로 nullable 값 타입(int?, float?)을 지원하지
     않습니다. JSON null은 JsonUtility에서 예외 없이 기본값(0)으로 처리됩니다.
     이를 방지하기 위해 각 nullable 필드에 대응하는 bool 플래그를 함께 내립니다:
-      - price_known: current_price가 실제 값인지 여부(이슈 #122)
+      - price_known: current_price를 **지금** 안다고 말할 수 있는지(이슈 #122·#196)
+        ※ 값이 있어도 신선하지 않으면 False입니다 — 아래 신선도 게이트 참고
       - return_rate_known: return_rate가 실제 계산된 값인지 여부(이슈 #122)
         ※ current_price는 알지만 avg_price <= 0이면 price_known=True·return_rate_known=False
+      - price_updated_at_known: price_updated_at이 실제 시각인지 여부(이슈 #196)
       - total_asset_is_estimate: total_asset이 현재가 없는 종목의 매입가 기준 추정값인지
       - total_return_rate_known: total_return_rate가 실제 계산된 값인지 여부
+
+    신선도 게이트(이슈 #196): current_price가 있어도 그 값을 언제 채웠는지
+    (price_updated_at) 모르거나 PRICE_FRESHNESS_TTL보다 오래됐으면 "모름"으로 내립니다.
+    시세 갱신은 10분 주기 감시 잡에 얹혀 도는데, KIS 장애로 며칠 멈춰도 마지막 값은
+    테이블에 그대로 남습니다. 나이를 보지 않으면 그 값이 계속 "현재가"로 나가
+    "모르는데 안다"가 됩니다. 판정은 scheduler.is_price_fresh 한 곳에서만 내립니다.
+
+    price_updated_at은 ISO 문자열(오프셋 포함)로 함께 내려, 소비자가 TTL 판정을
+    그대로 받아들이지 않고 스스로 나이를 계산할 수 있게 합니다. NULL이면 ""입니다
+    (JsonUtility가 null 문자열을 다루지 못하므로).
     """
     portfolios = session.exec(select(Portfolio)).all()
     holdings = []
@@ -271,28 +288,39 @@ async def get_visualization_portfolio(session: Session = Depends(get_session)):
     total_cost = 0.0
     total_market_for_return = 0.0
     any_price_unknown = False
+    # 한 응답 안의 모든 종목을 같은 시각으로 판정한다. 종목마다 now를 다시 읽으면
+    # TTL 경계에 걸친 종목들이 같은 응답 안에서 서로 다른 기준으로 판정될 수 있다.
+    now = datetime.now(timezone.utc)
 
     for portfolio in portfolios:
         avg_price = float(portfolio.avg_price)
         quantity = portfolio.quantity
-
-        if portfolio.current_price is not None:
-            # 현재가가 있는 종목: 평가금액과 수익률을 정확히 계산합니다.
-            current_price: float | None = float(portfolio.current_price)
+        price_updated_at = portfolio.price_updated_at
+        stored_price = portfolio.current_price
+        # 값의 존재와 값의 나이를 **함께** 봐야 "안다"가 성립한다(이슈 #196).
+        # 나이를 모르는 행(price_updated_at IS NULL)은 값이 있어도 모름이다.
+        # 두 조건을 한 줄의 bool로 합치지 않고 분기 조건에 그대로 두는 이유는,
+        # 그래야 타입 검사기가 아래 float(stored_price)에서 None을 배제할 수 있기
+        # 때문이다(bool 변수로 감싸면 좁히기가 끊긴다).
+        if stored_price is not None and is_price_fresh(price_updated_at, now=now):
+            # 현재가를 아는 종목: 평가금액과 수익률을 정확히 계산합니다.
+            price_known = True
+            current_price: float | None = float(stored_price)
             return_rate = _portfolio_return_rate(current_price, avg_price)
-            price_known = True  # current_price가 실제 값임을 보장 — 수익률 계산 가능 여부와 독립
             market_value = current_price * quantity
             total_asset += market_value
             if avg_price > 0:
                 total_cost += avg_price * quantity
                 total_market_for_return += market_value
         else:
-            # 현재가가 없는 종목: 수익률을 알 수 없으므로 None을 반환합니다.
-            # None을 반환해 "실제 0%"와 구분합니다(이슈 #122).
+            # 현재가를 모르는 종목(값이 없거나, 있어도 신선하지 않은 경우):
+            # 수익률을 알 수 없으므로 None을 반환해 "실제 0%"와 구분합니다(이슈 #122).
             # 총자산은 매입금액(avg_price × quantity) 기준 근사값을 사용합니다.
+            # 낡은 current_price를 평가금액에 쓰지 않는 것이 핵심입니다 — 그러면
+            # total_asset_is_estimate=False인 채로 낡은 값이 총자산에 섞입니다.
+            price_known = False
             current_price = None
             return_rate = None
-            price_known = False
             any_price_unknown = True
             total_asset += avg_price * quantity
 
@@ -308,13 +336,19 @@ async def get_visualization_portfolio(session: Session = Depends(get_session)):
             # current_price는 알지만 avg_price <= 0이면 price_known=True·return_rate_known=False.
             "price_known": price_known,
             "return_rate_known": return_rate is not None,
+            # 판정의 근거를 함께 내린다(이슈 #196). 소비자가 TTL을 그대로 받아들이지
+            # 않고 자기 기준으로 나이를 다시 잴 수 있어야, 이 게이트가 블랙박스가 되지
+            # 않는다. NULL은 ""로 내리고 price_updated_at_known=False로 구분한다.
+            "price_updated_at": format_price_updated_at(price_updated_at),
+            "price_updated_at_known": price_updated_at is not None,
         })
 
     # 종목별 return_rate와 같은 이유로 총수익률도 "모름"과 "실제 0%"를 구분한다(이슈 #122).
-    # 보유 종목은 있는데 현재가가 하나도 없으면 total_cost가 0으로 남는데, 이때 0.0을
-    # 돌려주면 소비자는 그것을 실제 수익률 0%로 읽는다. 현재 current_price 소스가 없어
-    # 항상 이 경우에 해당하므로(후속 이슈 참고), 여기서 0.0을 반환하면 종목별로 고친
-    # 구분이 계정 총계에서 그대로 무너진다.
+    # 보유 종목은 있는데 현재가를 아는 종목이 하나도 없으면 total_cost가 0으로 남는데,
+    # 이때 0.0을 돌려주면 소비자는 그것을 실제 수익률 0%로 읽는다. 시세 소스가 생긴
+    # 뒤에도(#196) 이 경로는 남는다 — KIS 장애로 갱신이 TTL을 넘겨 멈추면 전 종목이
+    # 다시 "모름"이 된다. 여기서 0.0을 반환하면 종목별로 고친 구분이 계정 총계에서
+    # 그대로 무너진다.
     total_return_rate: float | None
     if total_cost > 0:
         total_return_rate = round(((total_market_for_return - total_cost) / total_cost) * 100, 4)
