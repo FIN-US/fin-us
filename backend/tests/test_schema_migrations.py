@@ -772,3 +772,83 @@ def test_backfill_does_not_run_again_on_an_already_migrated_db(tmp_path, monkeyp
     ).fetchall()
     conn.close()
     assert [row[0] for row in pending] == ["NAVER"]
+
+
+# --- #196: 시세 신선도 컬럼 -------------------------------------------------
+
+
+def _create_old_schema_portfolio(db_path: str) -> None:
+    """price_updated_at 컬럼이 없던 시절의 portfolio 테이블을 재현한다.
+
+    current_price에 값이 들어 있는 행을 한 건 넣는다 — 이 이슈(#196)의 핵심은
+    "값은 있는데 언제 채운 값인지 모르는 행"이며, 백필 여부는 그 행에 대해서만
+    관측 가능하기 때문이다.
+
+    다른 테이블은 _create_old_schema_agentreport와 같은 이유로 최신 스키마 그대로 둔다.
+    """
+    from sqlmodel import SQLModel
+
+    setup_engine = create_engine(f"sqlite:///{db_path}")
+    SQLModel.metadata.create_all(setup_engine)
+
+    old_metadata = MetaData()
+    Table(
+        "portfolio",
+        old_metadata,
+        Column("id", Integer, primary_key=True),
+        Column("stock_code", String),
+        Column("stock_name", String),
+        Column("quantity", Integer),
+        Column("avg_price", Float),
+        Column("current_price", Float),
+        Column("updated_at", DateTime),
+    )
+    with setup_engine.begin() as conn:
+        conn.exec_driver_sql("DROP TABLE portfolio")
+    old_metadata.create_all(setup_engine)
+    with setup_engine.begin() as conn:
+        conn.exec_driver_sql(
+            "INSERT INTO portfolio "
+            "(stock_code, stock_name, quantity, avg_price, current_price, updated_at) "
+            "VALUES ('005930', '삼성전자', 10, 70000, 77000, '2026-01-01 00:00:00')"
+        )
+    setup_engine.dispose()
+
+
+def test_init_db_adds_nullable_price_updated_at_column(tmp_path, monkeypatch):
+    """구버전 DB에 portfolio.price_updated_at이 NULL 허용·DEFAULT 없이 추가되어야 한다.
+
+    백필은 **하지 않는다**. 이 컬럼이 없던 시절의 행은 current_price가 채워져 있어도
+    그 값이 언제 채워졌는지 알 수 없다. updated_at으로 백필하면 "잔고를 마지막으로
+    확인한 시각"이 "시세를 마지막으로 갱신한 시각"으로 둔갑해, 낡은 시세가 방금 갱신된
+    것처럼 보인다 — #196이 없애려는 "모르는데 안다"가 정확히 그 형태다.
+
+    이 테스트가 잡는 mutation: _PENDING_COLUMN_MIGRATIONS의 portfolio 항목 제거,
+    NOT NULL/DEFAULT 추가, 또는 "UPDATE portfolio SET price_updated_at = updated_at"
+    같은 백필 문장 추가.
+    """
+    db_path = tmp_path / "old_schema_portfolio.db"
+    _create_old_schema_portfolio(str(db_path))
+
+    test_engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
+    monkeypatch.setattr(database, "engine", test_engine)
+
+    database.init_db()
+
+    conn = sqlite3.connect(str(db_path))
+    cols = {row[1]: row for row in conn.execute("PRAGMA table_info(portfolio)")}
+    raw = conn.execute(
+        "SELECT current_price, price_updated_at FROM portfolio"
+    ).fetchall()
+    conn.close()
+
+    assert "price_updated_at" in cols, "price_updated_at 컬럼이 추가되지 않았다"
+    _, _, col_type, notnull, default, _pk = cols["price_updated_at"]
+    assert col_type.upper() == "DATETIME"
+    assert notnull == 0, "NOT NULL이면 '시세 나이 모름'을 표현할 수 없다"
+    assert default is None, "DEFAULT가 있으면 과거 행에 없던 신선도가 생긴다"
+
+    # 값이 있는 구버전 행도 나이는 NULL로 남아야 한다 (백필 금지).
+    assert raw == [(77000.0, None)], (
+        "구버전 행의 price_updated_at을 백필하면 낡은 시세가 신선한 것으로 단언된다"
+    )
