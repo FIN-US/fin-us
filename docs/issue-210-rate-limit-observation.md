@@ -234,7 +234,9 @@ grep 'class=rate_limit' kis-req.log | head -1        # 처음 걸린 시각과 t
 임계치가 나온다:
 
 ```bash
-grep '^\[kis-req\]' kis-req.log | sed -E 's/.*ts=([0-9-]+T[0-9]{2}:[0-9]{2}:[0-9]{2}).*/\1/' \
+# grep -o로 뽑는다. sed 's/.*ts=...*/\1/'는 패턴이 안 맞는 줄(ts=-)을 통째로 통과시켜
+# 버킷 하나를 오염시킨다.
+grep -oE 'ts=[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}' kis-req.log | cut -d= -f2 \
   | sort | uniq -c | sort -rn | head    # 초 단위 버킷별 요청 수의 최댓값
 ```
 
@@ -250,7 +252,10 @@ grep '^\[kis-req\]' kis-req.log | sed -E 's/.*ts=([0-9-]+T[0-9]{2}:[0-9]{2}:[0-9
 **뽑을 것:** `elapsed_ms`의 분포(중앙값·p95·최댓값)와 페이지 수.
 
 ```bash
-grep '^\[kis-req\]' kis-req.log | sed -E 's/.*elapsed_ms=([0-9]+).*/\1/' | sort -n \
+# grep -o로 뽑는다. sed 's/.*elapsed_ms=([0-9]+).*/\1/'는 elapsed_ms=-인 줄(측정값 부재,
+# kis-rate-limit.js의 ABSENT)을 매칭하지 못해 줄을 통째로 통과시키고, sort -n이 그것을
+# 0으로 취급해 중앙값·p95를 아래로 끌어내린다.
+grep -oE 'elapsed_ms=[0-9]+' kis-req.log | cut -d= -f2 | sort -n \
   | awk '{a[NR]=$1} END {print "n="NR, "med="a[int(NR/2)], "p95="a[int(NR*0.95)], "max="a[NR]}'
 ```
 
