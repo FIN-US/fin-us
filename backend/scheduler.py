@@ -337,6 +337,10 @@ _RLZ_PL_PAPER_FALLBACK_MARKER = "잔고 요약으로 대체했습니다"
 # 탐욕적이라 마지막 " (코드) · "까지 물러나므로 이름 안의 괄호는 이름에 남는다.
 # pdno가 비어 formatter가 "-"를 낸 줄은 코드 자리에 매치되지 않아 형식 위반으로 걸린다.
 _RLZ_PL_STOCK_LINE_RE = re.compile(r"^\d+\. (?P<name>.+) \((?P<code>[0-9A-Z]{6,})\) · ")
+# pdno가 비어 formatter가 "(-)"를 낸 줄. 위 정규식에 매치되지 않는다는 점은 같지만
+# **원인이 다르다**: 이쪽은 응답에 코드가 없는 데이터 조건이고, 저쪽(형식 위반)은 JS
+# 포맷터 회귀 신호다. 한 메시지로 묶으면 운영자가 있지도 않은 JS 회귀를 찾아 나선다.
+_RLZ_PL_NO_CODE_LINE_RE = re.compile(r"^\d+\. (?P<name>.+) \(-\) · ")
 # 종목 줄 판별용 접두사. "- "로 판별하는 balance 파서와 달리 이쪽은 번호 매김이다.
 _RLZ_PL_INDEX_PREFIX_RE = re.compile(r"^\d+\. ")
 # 현재가: "   보유 10주 | 현재가 71,200원 | 평가 712,000원"
@@ -624,6 +628,7 @@ def _parse_rlz_pl_quotes(report_text: str) -> dict[str, float]:
     section = report_text.split(_RLZ_PL_HOLDINGS_MARKER)[1]
     lines = section.split("\n")
     malformed: list[str] = []
+    codeless: list[str] = []
     priceless: list[str] = []
     divergent: list[tuple[str, float, float]] = []
 
@@ -633,13 +638,19 @@ def _parse_rlz_pl_quotes(report_text: str) -> dict[str, float]:
 
         match = _RLZ_PL_STOCK_LINE_RE.match(line)
         if match is None:
-            malformed.append(line)
+            no_code = _RLZ_PL_NO_CODE_LINE_RE.match(line)
+            if no_code is not None:
+                codeless.append(no_code.group("name").strip())
+            else:
+                malformed.append(line)
             continue
 
         name = match.group("name").strip()
         code = match.group("code")
-        if not name:
-            continue
+        # 종목명이 비었는지는 보지 않는다. formatter가 `${row.prdt_name || "-"}`를 내므로
+        # (balance-rlz-pl-report.js:54) 빈 이름은 사실상 나오지 않고, 설령 공백뿐인
+        # prdt_name으로 도달하더라도 name은 로그 표시용일 뿐이다 — 그것 때문에 멀쩡한
+        # 코드의 시세를 버리면 이름 하나 때문에 값을 잃는다.
         # 중복 코드 판정보다 **먼저** 값을 읽습니다. 두 번째 행을 곧바로 버리면
         # "prpr은 행마다 같다"는 전제가 틀렸을 때 그 사실이 흔적 없이 사라집니다.
         price_line = lines[i + 1] if i + 1 < len(lines) else ""
@@ -678,8 +689,15 @@ def _parse_rlz_pl_quotes(report_text: str) -> dict[str, float]:
 
     if malformed:
         logger.warning(
-            "예상치 못한 실현손익 종목 줄 형식 %d건을 건너뛰었습니다(예시 최대 3건): %r",
+            "예상치 못한 실현손익 종목 줄 형식 %d건을 건너뛰었습니다(예시 최대 3건): %r. "
+            "포맷터(balance-rlz-pl-report.js) 회귀일 수 있습니다.",
             len(malformed), malformed[:3],
+        )
+    if codeless:
+        logger.warning(
+            "pdno가 비어 종목 코드를 읽지 못한 %d건은 시세를 갱신하지 않습니다(예시 최대 3건): %r. "
+            "형식 위반이 아니라 응답에 코드가 없는 데이터 조건입니다 — 포맷터 회귀가 아닙니다.",
+            len(codeless), codeless[:3],
         )
     if priceless:
         logger.warning(
@@ -771,14 +789,21 @@ def _sync_portfolio_prices_from_rlz_pl(report_text: str, session: Session) -> in
 
     now = datetime.now(timezone.utc)
     updated = 0
+    # pop이 아니라 get으로 읽고 매칭된 코드를 따로 모은다. Portfolio.stock_code에는
+    # 아직 유니크 제약이 없어(models.Portfolio 주석) 같은 코드의 행이 둘 이상일 수
+    # 있는데, pop으로 소비하면 두 번째 행부터는 시세도 스탬프도 낡은 채 남는다.
+    # 잔고 동기화가 중복을 한 행으로 수렴시키지만 잘림·마커 부재·도구 실패 때는 돌지
+    # 않고, 이 시세 경로는 의도적으로 balance_ok 밖에서 돈다 — 즉 수렴을 기다릴 수 없다.
+    matched: set[str] = set()
     for row in session.exec(select(Portfolio)).all():
-        price = quotes.pop(row.stock_code, None)
+        price = quotes.get(row.stock_code)
         if price is None:
             # 이 종목은 이번 응답에 없습니다. 기존 값을 지우지 않습니다 — 지우면
             # 일시적인 누락이 곧바로 "시세 없음"이 됩니다. 대신 price_updated_at을
             # 갱신하지 않으므로 TTL이 지나면 is_price_fresh가 스스로 "모름"으로
             # 내립니다(#196).
             continue
+        matched.add(row.stock_code)
         row.current_price = price
         # 이 스탬프를 찍는 곳은 이 줄 하나뿐입니다. 다른 경로가 찍으면 "시세를 갱신한
         # 시각"이라는 뜻이 무너지고 신선도 판정이 거짓말이 됩니다.
@@ -786,11 +811,12 @@ def _sync_portfolio_prices_from_rlz_pl(report_text: str, session: Session) -> in
         updated += 1
 
     session.commit()
-    if quotes:
+    leftover = sorted(set(quotes) - matched)
+    if leftover:
         # 잔고 동기화가 아직 넣지 않은 코드입니다. 다음 주기에 행이 생기면 붙습니다.
         logger.info(
             "실현손익 응답의 %d개 종목이 Portfolio에 없어 건너뛰었습니다: %r",
-            len(quotes), sorted(quotes)[:5],
+            len(leftover), leftover[:5],
         )
     logger.info("Portfolio 시세 갱신 완료: %d개 종목", updated)
     return updated

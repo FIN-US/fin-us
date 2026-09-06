@@ -2998,6 +2998,102 @@ def test_parse_rlz_pl_quotes_warns_when_duplicate_rows_disagree(caplog):
     assert "99999" in message
 
 
+def test_parse_rlz_pl_quotes_separates_missing_code_from_malformed(caplog):
+    """pdno가 비어 "(-)"로 나온 줄은 형식 위반과 다른 메시지로 보고한다.
+
+    둘 다 종목 줄 정규식에 매치되지 않지만 운영자가 취할 행동이 다르다. 형식 위반은
+    포맷터(balance-rlz-pl-report.js) 회귀 신호이고, 코드 없음은 응답에 pdno가 없는
+    데이터 조건이다. 한 메시지로 묶으면 있지도 않은 JS 회귀를 찾아 나서게 된다.
+
+    이 테스트가 잡는 mutation: 코드 없는 줄을 다시 malformed로 합치는 회귀.
+    """
+    import logging
+
+    from ..scheduler import _parse_rlz_pl_quotes
+
+    with caplog.at_level(logging.WARNING, logger="backend.scheduler"):
+        quotes = _parse_rlz_pl_quotes(_rlz_pl_text("no_code"))
+
+    assert quotes == {"005930": 71200.0}
+    messages = [r.getMessage() for r in caplog.records]
+    codeless = [m for m in messages if "pdno가 비어" in m]
+    assert len(codeless) == 1
+    assert "코드없음" in codeless[0]
+    assert not [m for m in messages if "예상치 못한 실현손익 종목 줄 형식" in m], (
+        "코드 없음은 형식 위반이 아니므로 포맷터 회귀 경고를 내면 안 된다"
+    )
+
+
+def test_sync_portfolio_prices_updates_every_duplicate_row(portfolio_session):
+    """같은 코드의 Portfolio 행이 둘이면 **둘 다** 시세와 스탬프를 받는다.
+
+    stock_code에는 아직 유니크 제약이 없다(models.Portfolio 주석). 응답의 시세를
+    pop으로 소비하면 두 번째 행부터는 낡은 값과 낡은 스탬프가 그대로 남아, 신선도
+    게이트가 낡은 값을 "신선함"으로 통과시킨다. 잔고 동기화가 중복을 수렴시키긴 하지만
+    잘림·마커 부재·도구 실패 때는 돌지 않고, 이 시세 경로는 의도적으로 balance_ok
+    밖에서 돈다 — 수렴을 기다릴 수 없다.
+
+    이 테스트가 잡는 mutation: quotes.get을 quotes.pop으로 되돌리는 회귀 → 두 번째
+    행의 current_price가 60000, price_updated_at이 None으로 남는다.
+    """
+    from sqlmodel import select
+
+    from ..models import Portfolio
+    from ..scheduler import _sync_portfolio_prices_from_rlz_pl
+
+    for _ in range(2):
+        portfolio_session.add(
+            Portfolio(
+                stock_code="005930",
+                stock_name="삼성전자",
+                quantity=10,
+                avg_price=70000,
+                current_price=60000,
+            )
+        )
+    portfolio_session.commit()
+
+    updated = _sync_portfolio_prices_from_rlz_pl(_rlz_pl_text("normal"), portfolio_session)
+
+    rows = portfolio_session.exec(
+        select(Portfolio).where(Portfolio.stock_code == "005930")
+    ).all()
+    assert len(rows) == 2
+    assert updated == 2
+    for row in rows:
+        assert row.current_price == 71200.0
+        assert row.price_updated_at is not None
+
+
+def test_sync_portfolio_prices_leftover_log_excludes_matched_codes(portfolio_session, caplog):
+    """매칭된 코드는 "Portfolio에 없어 건너뛰었다" 로그에 들어가지 않는다.
+
+    pop 대신 get으로 읽게 되면서 quotes가 소비되지 않으므로, 남은 코드 계산을 별도
+    집합으로 하지 않으면 방금 갱신한 종목까지 "없는 코드"로 보고된다.
+
+    이 테스트가 잡는 mutation: leftover를 sorted(quotes)로 되돌리는 회귀 → 005930이
+    로그에 섞여 아래 단언이 실패한다.
+    """
+    import logging
+
+    from ..models import Portfolio
+    from ..scheduler import _sync_portfolio_prices_from_rlz_pl
+
+    portfolio_session.add(
+        Portfolio(stock_code="005930", stock_name="삼성전자", quantity=10, avg_price=70000)
+    )
+    portfolio_session.commit()
+
+    with caplog.at_level(logging.INFO, logger="backend.scheduler"):
+        _sync_portfolio_prices_from_rlz_pl(_rlz_pl_text("normal"), portfolio_session)
+
+    leftover = [r.getMessage() for r in caplog.records if "Portfolio에 없어" in r.getMessage()]
+    assert len(leftover) == 1
+    # NAVER(035420)만 없는 코드다. 방금 갱신한 005930이 섞이면 안 된다.
+    assert "035420" in leftover[0]
+    assert "005930" not in leftover[0]
+
+
 def test_sync_portfolio_prices_writes_price_and_stamp(portfolio_session):
     """시세와 갱신 시각을 함께 쓴다. 둘 중 하나만 쓰면 게이트가 무너진다.
 

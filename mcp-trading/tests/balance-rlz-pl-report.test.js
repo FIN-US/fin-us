@@ -103,7 +103,7 @@ test("isPaperTradingKisUrl detects mock trading host", () => {
 // 포맷터가 바뀌면 JS 스위트는 초록으로 남고 Python만 빨개진다 — 형식을 소유한 쪽이
 // 아니라 소비하는 쪽이 깨진다. 아래 단언이 포맷터 변경을 이 파일에서 먼저 잡는다.
 // 픽스처를 고칠 때는 Python 쪽 파서 계약도 함께 확인하세요.
-for (const key of ["normal", "divergent_price", "no_price", "truncated", "empty"]) {
+for (const key of ["normal", "divergent_price", "no_price", "no_code", "truncated", "empty"]) {
   test(`formatBalanceRlzPlReport output matches shared fixture — ${key} (fixtures/balance_rlz_pl_report.json)`, () => {
     const { input, expected_text } = rlzPlFixture[key];
     assert.equal(formatBalanceRlzPlReport(input), expected_text);
