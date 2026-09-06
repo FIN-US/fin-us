@@ -22,6 +22,7 @@ import {
   isPaperTradingKisUrl,
 } from "./formatters.js";
 import { kisOrderPost } from "./kis-client.js";
+import { formatKisRequestLog, maskLongDigitRuns, readKisRequestLogEnv } from "./kis-rate-limit.js";
 import {
   OrderDedupStore,
   createOrderDedupKey,
@@ -111,6 +112,12 @@ const BALANCE_RLZ_PL_TIME_BUDGET_MS = 90_000;
 const BALANCE_RLZ_PL_PAGE_DELAY_MS = readPageDelayMsEnv("BALANCE_RLZ_PL_PAGE_DELAY_MS", 0, {
   maxMs: BALANCE_RLZ_PL_TIME_BUDGET_MS,
 });
+// 이슈 #210: 요청별 타이밍 로그 게이트. 위 기본값 0을 언제 올려야 하는지는 실측 없이는
+// 알 수 없고, 실측은 실계좌에서만 가능하다 — 그 실측을 "가능하게" 만드는 스위치다.
+// 기본은 꺼짐: 연속조회를 쓰는 도구가 셋이고 그 페이지 상한의 합이 120이라(50+50+20)
+// 상시로 켜면 로그가 잠긴다.
+// 유량 제한 분류만은 이 스위치와 무관하게 항상 남긴다(logKisRequest).
+const KIS_REQUEST_LOG_ENABLED = readKisRequestLogEnv();
 const PSBL_ORDER_PATH = "/uapi/domestic-stock/v1/trading/inquire-psbl-order";
 // 매수가능조회 TR ID. 연속조회가 없는 단건 조회라 페이지 상한·시간 예산이 없다.
 // 오버라이드 이름은 KIS_TR_ID_DAILY_CCLD / KIS_TR_ID_BALANCE_RLZ_PL과 같은 관례를 따른다
@@ -173,7 +180,7 @@ async function getAccessToken({ lockWaitMs } = {}) {
 
   return tokenCache.getOrIssue(async () => {
     // 만료 시각은 요청 "전" 시각에서 센다. 응답이 늦게 오면 그만큼 캐시 수명을
-    // 짧게 잡는 쪽이 안전하다.
+    // 짧게 잡는 쪽이 안전하다. 요청 소요 시간(elapsedMs)의 기준 시각도 같은 값이다.
     const now = Date.now();
     try {
       const response = await kisAxios.post(`${KIS_URL}/oauth2/tokenP`, {
@@ -181,6 +188,16 @@ async function getAccessToken({ lockWaitMs } = {}) {
         appkey: KIS_API_KEY,
         appsecret: KIS_API_SECRET,
       });
+      // 이슈 #210: 토큰 발급도 KIS 요청이므로 kisApiGet과 같은 줄로 남긴다. 이 경로가
+      // 5.3(프로세스 간 버스트)에서 가장 중요하다 — mcp-trading은 도구 호출 1건마다 새로
+      // 뜨는 단명 프로세스라, 캐시가 비었거나 만료된 순간 동시에 뜬 프로세스들이 전부
+      // 여기로 몰린다. 계측하지 않으면 그 버스트가 로그에 아예 보이지 않는다. 저장소에서
+      // EGW00133이 관측될 수 있는 곳도 사실상 이 경로뿐이다(tests/kis-client.test.js의
+      // 픽스처 문구가 그 코드를 토큰 발급 응답으로 쓴다).
+      // formatKisRequestLog는 화이트리스트(rt_cd/msg_cd/msg1/error_code/error_description/
+      // status/code)만 읽으므로
+      // 응답 바디의 access_token은 줄에 실리지 않는다.
+      logKisRequest({ trId: "tokenP", elapsedMs: Date.now() - now, response });
 
       const expiresIn = Number(response.data.expires_in || 86_400);
       return {
@@ -188,29 +205,93 @@ async function getAccessToken({ lockWaitMs } = {}) {
         expiresAt: now + expiresIn * 1000,
       };
     } catch (error) {
-      throw new Error(`Access Token 발급 실패: ${error.response?.data?.msg1 || error.message}`);
+      logKisRequest({ trId: "tokenP", elapsedMs: Date.now() - now, error });
+      // kisApiGet의 오류 메시지와 같은 마스킹을 씌운다. 이 경로의 요청 바디는
+      // { grant_type, appkey, appsecret }뿐이라 계좌 컨텍스트가 없고, 그래서 CANO가
+      // 되울려 올 자리도 사실상 없다. 그런데도 씌우는 이유는 대칭성이다 — 헬퍼는 이미
+      // 이 파일에 들어와 있고, 한 곳만 비워 두면 다음 사람이 "왜 여기만 다른가"를
+      // 매번 다시 유도해야 한다.
+      // **남는 위험은 마스킹이 닫아 주지 않는다.** 이 엔드포인트에서 되울려 올 법한 값은
+      // appkey이고, appkey는 영숫자라 maskLongDigitRuns(연속 숫자 8자리 이상)에 걸리지
+      // 않는다. 씌우든 안 씌우든 그 위험은 그대로 남는다.
+      throw new Error(`Access Token 발급 실패: ${maskLongDigitRuns(error.response?.data?.msg1 || error.message)}`);
     }
   }, { lockWaitMs });
 }
 
+// 이슈 #210: KIS 요청 1건을 stderr 한 줄로 남긴다. 줄 만들기는 kis-rate-limit.js가 하고
+// (비밀 위생 계약이 그 안에 있다) 여기서는 "언제 내보내는가"만 정한다.
+// 유량 제한 분류는 게이트와 무관하게 항상 내보낸다 — 드물게 나고, 이슈 #210이 찾는 신호
+// 자체다. 그 밖의 요청별 타이밍 줄은 KIS_REQUEST_LOG로 켤 때만 나간다.
+// stdout은 MCP JSON-RPC 채널이므로 console.error(stderr)만 쓴다. 이 stderr는 MCP Python
+// SDK가 자식 프로세스를 띄울 때 부모 stderr로 그대로 이어 준다
+// (docs/issue-210-rate-limit-observation.md).
+// 로깅이 원래 오류를 대체하지 않게 통째로 감싼다. 이 함수는 kisApiGet과 getAccessToken의
+// catch 안에서도 불리는데, 여기서 무언가 던지면 KIS가 준 진짜 실패 대신 로깅 쪽 예외가
+// 위로 올라가 진단이 통째로 사라진다. formatKisRequestLog에서 도달 가능한 throw는 찾지
+// 못했지만(순수 문자열 연산이고 Date 변환은 그쪽에서 이미 try로 감쌌다), 이 자리에서
+// 예외가 나면 대가가 비대칭적으로 크다. 줄이 조용히 사라지는 회귀는
+// tests/page-delay-env-wiring.test.js의 유량 제한 프로브가 잡는다.
+function logKisRequest(input) {
+  try {
+    const { line, rateLimited } = formatKisRequestLog({ ...input, pid: process.pid });
+    if (KIS_REQUEST_LOG_ENABLED || rateLimited) console.error(line);
+  } catch {
+    // 삼킨다. 여기서 다시 stderr에 쓰려 들면 그 쓰기 자체가 실패 원인일 때 같은 자리로 돌아온다.
+  }
+}
+
+// 계측 지점을 fetchAllPaged가 아니라 여기(kisApiGet)에 두는 것은 의도적이다. 이 프로세스가
+// KIS를 치는 여섯 개 **조회(GET)** 경로가 전부 이 함수를 지나므로(연속조회 두 루프 +
+// getBalance + 단건 kisGet들), 서로 다른 프로세스에서 뜬 도구 호출들의 요청이 시각 순으로
+// 한 줄씩 남는다 — PR #264 리뷰가 제기한 "유량 제한이 계좌 단위인가"를 확인하려면 그 겹침을
+// 봐야 한다. fetchAllPaged 안에 두면 단건 조회가 통째로 빠지고, balance.js도 건드려야 한다.
+//
+// "전부"는 조회 경로에 한정된 말이다. 이 함수를 지나지 않는 KIS POST가 셋 있다.
+//   - /oauth2/tokenP (getAccessToken) — 위에서 같은 방식으로 계측한다(tr_id=tokenP).
+//   - kis-client.js:16 hashkey POST, kis-client.js:113 주문 POST — **계측되지 않는다.**
+//     kis-client.js가 이 PR의 범위 밖이라 손대지 않았다. 실측 집계에서 place_order 1건이
+//     실제로 만드는 KIS 요청 2건은 빠져 있다는 뜻이다(런북 2절에 같은 내용을 적어 두었다).
+//     애초에 런북 4절이 "주문 API로 유량 제한을 때리지 말 것"이라 측정 대상도 아니지만,
+//     겹침을 셀 때 그 2건이 로그에 없다는 사실은 알고 세야 한다.
 async function kisApiGet(pathname, trId, params, { trCont = "" } = {}) {
   const token = await getAccessToken();
-  const response = await kisAxios.get(`${KIS_URL}${pathname}`, {
-    headers: {
-      "Content-Type": "application/json",
-      authorization: `Bearer ${token}`,
-      appkey: KIS_API_KEY,
-      appsecret: KIS_API_SECRET,
-      tr_id: trId,
-      tr_cont: trCont,
-      custtype: "P",
-    },
-    params,
-  });
+  const startedAt = Date.now();
+  let response;
+  try {
+    response = await kisAxios.get(`${KIS_URL}${pathname}`, {
+      headers: {
+        "Content-Type": "application/json",
+        authorization: `Bearer ${token}`,
+        appkey: KIS_API_KEY,
+        appsecret: KIS_API_SECRET,
+        tr_id: trId,
+        tr_cont: trCont,
+        custtype: "P",
+      },
+      params,
+    });
+  } catch (error) {
+    logKisRequest({ trId, elapsedMs: Date.now() - startedAt, error });
+    throw error;
+  }
+  logKisRequest({ trId, elapsedMs: Date.now() - startedAt, response });
 
   const data = response.data;
   if (data.rt_cd !== "0") {
-    throw new Error(`KIS API 오류: ${data.msg1 || data.msg_cd || "알 수 없는 오류"}`);
+    // msg1이 있으면 이 메시지가 msg_cd를 버린다. 그래도 여기서 error에 msg_cd를 따로
+    // 태깅하지는 않는다 — 읽는 쪽이 없어서 죽은 값이 되기 때문이다(kis-client.js의
+    // kisOrderRejected는 order-submit.js:17이 실제로 읽는다). 버려지던 msg_cd는 이 PR이
+    // 붙인 위 `[kis-req]` 줄의 `msg_cd=` 필드가 이미 싣고 나간다.
+    //
+    // msg1에는 maskLongDigitRuns를 씌운다. KIS가 되울려 주는 msg1에 계좌번호가 실려 오고
+    // (관측된 예: "... 계좌 50123456"), 이 error.message는 그대로 여러 갈래로 새어 나간다 —
+    // balance.js:207의 stderr 줄, MCP 도구 결과 텍스트, backend services.short_error를
+    // 거쳐 텔레그램까지. [kis-req] 줄만 가리고 정작 원본 메시지가 안 가려지면 마스킹이
+    // 반쪽이 된다. 여기 한 군데를 가리면 그 하위 소비자가 전부 함께 닫힌다.
+    // (kis-client.js:125의 같은 모양 주문 경로와 도구 결과 전반의 마스킹은 #230/#231
+    //  PII 작업의 몫이라 이 PR 범위 밖이다.)
+    throw new Error(`KIS API 오류: ${maskLongDigitRuns(data.msg1) || data.msg_cd || "알 수 없는 오류"}`);
   }
 
   const nextTrCont = response.headers?.tr_cont || response.headers?.["tr-cont"] || "";
