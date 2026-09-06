@@ -128,7 +128,9 @@ export function classifyKisError(input = {}) {
  * headers(appkey, appsecret, authorization: Bearer 토큰)를 통째로 들고 있다(balance.js:201-206이
  * 같은 이유로 error.message만 남긴다). 그래서 이 함수는 입력에서 아래 화이트리스트만 읽는다.
  *   response.status / error.response.status          — 숫자
- *   response.data.{rt_cd,msg_cd,msg1} / error.response.data.{...} — KIS가 준 응답 바디
+ *   response.data.{rt_cd,msg_cd,msg1} / error.response.data.{...} — KIS가 준 조회 응답 바디
+ *   response.data.{error_code,error_description} / error.response.data.{...}
+ *                                                    — 토큰 발급(OAuth) 실패 바디의 같은 두 값
  *   error.code                                       — axios 에러 코드(ECONNABORTED 등)
  * error.config, error.request, error.message, headers, params는 읽지 않는다. error.message를
  * 뺀 이유도 같다 — 축적된 문자열이라 무엇이 섞여 있는지 이 함수가 보장할 수 없다. 대신

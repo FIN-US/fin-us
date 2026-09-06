@@ -194,7 +194,8 @@ async function getAccessToken({ lockWaitMs } = {}) {
       // 여기로 몰린다. 계측하지 않으면 그 버스트가 로그에 아예 보이지 않는다. 저장소에서
       // EGW00133이 관측될 수 있는 곳도 사실상 이 경로뿐이다(tests/kis-client.test.js의
       // 픽스처 문구가 그 코드를 토큰 발급 응답으로 쓴다).
-      // formatKisRequestLog는 화이트리스트(rt_cd/msg_cd/msg1/status/code)만 읽으므로
+      // formatKisRequestLog는 화이트리스트(rt_cd/msg_cd/msg1/error_code/error_description/
+      // status/code)만 읽으므로
       // 응답 바디의 access_token은 줄에 실리지 않는다.
       logKisRequest({ trId: "tokenP", elapsedMs: Date.now() - now, response });
 
