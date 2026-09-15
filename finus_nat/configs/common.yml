@@ -3,20 +3,18 @@
 # base: 자체는 deep-merge 상속이 맞다(nat/utils/io/yaml_tools.py, scripts/run.sh:120).
 # 다만 에이전트끼리 이어진 base: 체인은 파생 관계가 아니라 라우터가 6개 에이전트를 한 config로
 # 모으기 위한 경로다 - diary -> strategy -> recommend -> news -> monitoring -> trading -> common.
-# 여러 에이전트가 공유하는 도구 정의(kis-trading-mcp-tool*)를 이 파일에 둔 것도 그래서다 (#284).
+# 여러 에이전트가 공유하는 도구 정의(kis-trading-mcp-tool-readonly)를 이 파일에 둔 것도 그래서다 (#284).
 functions:
-  # KIS Trading MCP 래퍼 2종. trading/monitoring은 전체 권한, news/recommend/strategy는
-  # 조회 전용을 참조한다 (#66). 여러 에이전트가 공유하므로 공용 파일에서 한 번만 정의한다 (#284).
-  kis-trading-mcp-tool:
-    _type: finus_account_balance
-    mcp_transport: sse
-    mcp_url: ${FINUS_KIS_TRADING_MCP_URL:-http://host.docker.internal:3300/sse}
-    trading_tool_name: ${FINUS_KIS_TRADING_TOOL_NAME:-domestic_stock}
-
-  # #66: news/recommend/strategy 에이전트용 조회 전용 래퍼를 별도 이름으로 등록한다.
-  # 병합된 라우터 설정에서 functions 딕셔너리는 이름이 전역인 평평한 네임스페이스이므로,
-  # 한 이름에 인스턴스는 하나뿐이다. 따라서 trading/monitoring의 kis-trading-mcp-tool
-  # (전체 권한 finus_account_balance)을 건드리지 않고 별도 이름으로 분리해야 한다.
+  # KIS Trading MCP 조회 전용 래퍼(#66). 채팅 에이전트 다섯(trading/monitoring/news/
+  # recommend/strategy)이 모두 이것 하나를 참조한다. 여러 에이전트가 공유하므로 공용 파일에서
+  # 한 번만 정의한다 (#284).
+  #
+  # 전체 권한 래퍼(_type: finus_account_balance, 주문 가능)는 **어디에도 등록하지 않는다**
+  # (#380). 등록해 두면 tool_names에 이름 한 줄만 붙여도 backend 하드 한도·확정 버튼을
+  # 전부 우회하는 주문 권한이 되살아난다 — 조회 전용과 이름이 접미사 하나 차이라 실수하기
+  # 쉽다. 등록이 없으면 그 참조는 설정 로드 시점에 "없는 함수"로 실패한다. 주문은 텔레그램
+  # /buy·/sell·/advise(확정 버튼 경로)로만 나간다. 어떤 설정도 이 타입을 싣지 않는다는 것은
+  # finus_nat/tests/test_agent_configs.py의 전수 스캔이 지킨다.
   kis-trading-mcp-tool-readonly:
     _type: finus_account_balance_readonly
     mcp_transport: sse

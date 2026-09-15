@@ -952,6 +952,15 @@ class FinusAccountBalanceConfig(FunctionBaseConfig, name="finus_account_balance"
     """원격 Kis Trading MCP — `call_tool` 에 `api_type`·`params` 만 전달.
 
     `tool_name` 생략 시 YAML `trading_tool_name`. Upstream: `open-trading-api`/`MCP/Kis Trading MCP`.
+
+    **이 타입 자체(전체 권한, 주문 가능)는 어떤 설정에도 등록하지 않는다 (#380).** 채팅 주문은
+    backend 하드 한도·확정 버튼을 전부 우회하므로, 에이전트는 조회 전용 서브클래스
+    (:class:`FinusAccountBalanceReadonlyConfig`)만 쓰고 주문은 텔레그램 ``/buy``·``/sell``·
+    ``/advise``로 안내한다. 타입 등록(``@register_function``)과 공용 헬퍼는 남긴다 — 조회 전용
+    래퍼가 이 클래스를 상속하고, 종류 검사(#338)·지정가 괴리 가드(#365)는 KIS로 나가는 모든
+    호출이 지나는 ``_call_kis_mcp_and_record``에 걸린 방어 심층이라 테스트가 이 래퍼로 직접
+    검증한다. 어떤 설정도 이 타입을 싣지 않는다는 것은 ``test_agent_configs.py``의 전수 스캔이
+    지킨다.
     """
 
     # 이 Config가 허용하는 trading_tool_name 집합 — 서브클래스가 좁힐 수 있다.
@@ -1366,8 +1375,9 @@ async def _build_kis_mcp_description(doc: str, config: FinusAccountBalanceConfig
 class FinusAccountBalanceReadonlyConfig(FinusAccountBalanceConfig, name="finus_account_balance_readonly"):
     """finus_account_balance 조회 전용 래퍼 — allowlist 방식 api_type 차단 (#66).
 
-    비-trading 에이전트(news/recommend/strategy/diary)가 잔고·시세 조회 능력은 유지하되
-    허용 목록(:func:`_is_readonly_api_type`)에 없는 api_type은 fail-closed로 차단한다.
+    채팅 에이전트 전부(trading/monitoring/news/recommend/strategy — trading·monitoring은
+    #380부터)가 잔고·시세 조회 능력은 유지하되 허용 목록(:func:`_is_readonly_api_type`)에
+    없는 api_type은 fail-closed로 차단한다.
     """
 
     # readonly 래퍼는 auth를 런타임에 차단하므로, 설정 시점에도 받지 않는다.

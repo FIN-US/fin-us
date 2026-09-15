@@ -163,13 +163,15 @@ def test_system_prompt_only_names_real_tools(config_path: Path, function_name: s
     assert quoted <= tools, f"프롬프트가 보유하지 않은 도구를 안내함: {sorted(quoted - tools)}"
 
 
-# monitoring/trading은 tool_names가 완전히 같아(kis-trading-mcp-tool,
+# monitoring/trading은 tool_names가 완전히 같아(kis-trading-mcp-tool-readonly,
 # mcp-news-get-market-news, mcp-dart-get-disclosure-signal, add_user_memory, get_user_memory)
 # system_prompt를 의도적으로 바이트 단위로 동일하게 유지한다.
-# #66 수정으로 strategy_agent는 kis-trading-mcp-tool-readonly를 tool_names에 쓰게 되어
-# system_prompt가 이 둘과 분기했으므로 비교 대상에서 제외한다.
-# #284 이후로는 둘 다 configs/prompts/react_kis_full.md 하나를 file://로 참조하므로 복제가
-# 사라졌고, 이 동일성은 구조적으로 보장된다 - 아래 테스트는 그래서 지금은 실패할 수 없다.
+# strategy_agent도 같은 조회 전용 도구를 쓰지만 채팅 주문 안내(#380)가 없는
+# react_kis_readonly.md를 쓴다 — /v1/propose-order의 제안 JSON에 주문 명령 안내가 섞이지
+# 않게 하려는 분기라 비교 대상에서 제외한다.
+# #284 이후로는 둘 다 configs/prompts/react_kis_chat.md(#380 전에는 react_kis_full.md) 하나를
+# file://로 참조하므로 복제가 사라졌고, 이 동일성은 구조적으로 보장된다 - 아래 테스트는
+# 그래서 지금은 실패할 수 없다.
 _IDENTICAL_SYSTEM_PROMPT_AGENTS = [
     ("monitoring_agent.yml", "monitoring_agent"),
     ("trading_agent.yml", "trading_agent_react"),
@@ -177,43 +179,21 @@ _IDENTICAL_SYSTEM_PROMPT_AGENTS = [
 
 
 # ---------------------------------------------------------------------------
-# #66 회귀 가드 — 두 KIS 함수의 타입과 에이전트별 tool_names 참조를 고정
+# #66·#380 회귀 가드 — KIS 함수의 타입과 에이전트별 tool_names 참조를 고정
 # ---------------------------------------------------------------------------
 
 _ROUTER_PATHS = (CONFIGS_ROOT / "router.yml", CONFIGS_ROOT / "router_nomemory.yml")
 
-# kis-trading-mcp-tool-readonly(조회 전용)가 scope에 있어야 하는 설정.
+# kis-trading-mcp-tool-readonly(조회 전용)가 scope에 있어야 하는 설정 — 전부다.
 # diary_agent는 tool_names에 포함하지 않지만 scope에 정의되어 있으므로 타입을 고정한다.
-# 단독 로드 + 프로덕션 라우터 양쪽에서 검사한다 — 이름을 분리했으므로 라우터 deep-merge가
-# trading/monitoring의 kis-trading-mcp-tool(전체 권한)을 덮어쓰지 않음을 함께 보증한다.
-_NON_TRADING_KIS_CONFIGS = [
-    AGENTS_DIR / "news_agent.yml",
-    AGENTS_DIR / "recommend_agent.yml",
-    AGENTS_DIR / "strategy_agent.yml",
-    AGENTS_DIR / "diary_agent.yml",
-    *_ROUTER_PATHS,
-]
-
-# kis-trading-mcp-tool(전체 권한 finus_account_balance)이어야 하는 설정.
-# 단독 로드뿐 아니라 프로덕션 라우터도 포함 — 이름 분리로 news_agent.yml의 readonly 함수가
-# 이 함수를 덮어쓰지 않음을 라우터 병합 결과에서 직접 확인한다.
-_TRADING_KIS_CONFIGS = [
-    AGENTS_DIR / "trading_agent.yml",
-    AGENTS_DIR / "monitoring_agent.yml",
-    *_ROUTER_PATHS,
-]
-
-_NON_TRADING_KIS_IDS = [p.name for p in _NON_TRADING_KIS_CONFIGS]
-_TRADING_KIS_IDS = [p.name for p in _TRADING_KIS_CONFIGS]
+# 단독 로드 + 프로덕션 라우터 양쪽에서 검사한다.
+_KIS_CONFIGS = [*(path for path, _ in DIRECT_AGENT_CONFIGS), *_ROUTER_PATHS]
+_KIS_CONFIG_IDS = [p.name for p in _KIS_CONFIGS]
 
 
-@pytest.mark.parametrize("config_path", _NON_TRADING_KIS_CONFIGS, ids=_NON_TRADING_KIS_IDS)
-def test_non_trading_agents_kis_tool_is_readonly(config_path: Path):
-    """#66: kis-trading-mcp-tool-readonly는 어떤 설정에서 로드해도 finus_account_balance_readonly여야 한다.
-
-    news_agent.yml이 별도 이름(kis-trading-mcp-tool-readonly)으로 조회 전용 래퍼를 등록하므로,
-    라우터 deep-merge 결과에서도 전체 권한 kis-trading-mcp-tool을 건드리지 않는다.
-    """
+@pytest.mark.parametrize("config_path", _KIS_CONFIGS, ids=_KIS_CONFIG_IDS)
+def test_kis_tool_is_readonly_in_every_config(config_path: Path):
+    """#66: kis-trading-mcp-tool-readonly는 어떤 설정에서 로드해도 finus_account_balance_readonly여야 한다."""
     import nat_finus_nat.register  # noqa: F401
     from nat.runtime.loader import load_config
     from nat_finus_nat.finus_api import FinusAccountBalanceReadonlyConfig
@@ -226,58 +206,42 @@ def test_non_trading_agents_kis_tool_is_readonly(config_path: Path):
     )
 
 
-@pytest.mark.parametrize("config_path", _TRADING_KIS_CONFIGS, ids=_TRADING_KIS_IDS)
-def test_trading_agents_kis_tool_is_full(config_path: Path):
-    """#66: kis-trading-mcp-tool은 어떤 설정에서 로드해도 전체 권한(finus_account_balance)이어야 한다.
+@pytest.mark.parametrize("config_path", _KIS_CONFIGS, ids=_KIS_CONFIG_IDS)
+def test_full_permission_kis_tool_is_not_registered(config_path: Path):
+    """#380: 전체 권한 이름 kis-trading-mcp-tool은 어떤 설정에도 없어야 한다.
 
-    이름 분리 후에는 news_agent.yml의 readonly 함수가 별도 키(kis-trading-mcp-tool-readonly)에
-    등록되므로 kis-trading-mcp-tool(전체 권한)이 라우터 병합으로 덮이지 않는다.
+    #66 시절에는 trading/monitoring이 이 이름으로 전체 권한(주문 가능) 래퍼를 참조했고,
+    이 테스트 자리는 "전체 권한이어야 한다"를 고정했다. #380으로 채팅 주문 경로를 닫으면서
+    반대로 뒤집었다. 이름만 보는 이 검사는 입구일 뿐이고, 다른 이름으로 같은 타입을 싣는
+    경우까지는 아래 전수 스캔(``test_no_config_can_reach_an_order_capable_tool``)이 잡는다.
     """
     import nat_finus_nat.register  # noqa: F401
     from nat.runtime.loader import load_config
-    from nat_finus_nat.finus_api import FinusAccountBalanceConfig, FinusAccountBalanceReadonlyConfig
 
     config = load_config(config_path)
-    tool_config = config.functions["kis-trading-mcp-tool"]
-    assert not isinstance(tool_config, FinusAccountBalanceReadonlyConfig), (
-        f"{config_path.name}: kis-trading-mcp-tool은 readonly가 아닌 finus_account_balance여야 합니다."
-    )
-    assert isinstance(tool_config, FinusAccountBalanceConfig), (
-        f"{config_path.name}: kis-trading-mcp-tool은 finus_account_balance여야 합니다. "
-        f"실제 타입: {type(tool_config).__name__}"
-    )
+    assert "kis-trading-mcp-tool" not in config.functions
 
 
 # 각 에이전트의 tool_names가 권한에 맞는 KIS 도구를 참조하는지 고정한다.
-# 타입만 검사하면 tool_names 드리프트(예: news_agent가 kis-trading-mcp-tool-readonly 대신
-# kis-trading-mcp-tool을 참조)를 놓칠 수 있다 — 참조 고정으로 이중 보증한다.
+# 타입만 검사하면 tool_names 드리프트를 놓칠 수 있다 — 참조 고정으로 이중 보증한다.
+_KIS_AGENT_FUNCTIONS = (
+    "trading_agent_react", "monitoring_agent", "news_agent", "recommend_agent", "strategy_agent",
+)
 _AGENT_KIS_TOOL_REFS = [
-    # (config_path, agent_fn, expected_tool_name_in_tool_names)
-    (AGENTS_DIR / "trading_agent.yml", "trading_agent_react", "kis-trading-mcp-tool"),
-    (AGENTS_DIR / "monitoring_agent.yml", "monitoring_agent", "kis-trading-mcp-tool"),
-    (AGENTS_DIR / "news_agent.yml", "news_agent", "kis-trading-mcp-tool-readonly"),
-    (AGENTS_DIR / "recommend_agent.yml", "recommend_agent", "kis-trading-mcp-tool-readonly"),
-    (AGENTS_DIR / "strategy_agent.yml", "strategy_agent", "kis-trading-mcp-tool-readonly"),
-    (CONFIGS_ROOT / "router.yml", "trading_agent_react", "kis-trading-mcp-tool"),
-    (CONFIGS_ROOT / "router.yml", "monitoring_agent", "kis-trading-mcp-tool"),
-    (CONFIGS_ROOT / "router.yml", "news_agent", "kis-trading-mcp-tool-readonly"),
-    (CONFIGS_ROOT / "router.yml", "recommend_agent", "kis-trading-mcp-tool-readonly"),
-    (CONFIGS_ROOT / "router.yml", "strategy_agent", "kis-trading-mcp-tool-readonly"),
-    (CONFIGS_ROOT / "router_nomemory.yml", "trading_agent_react", "kis-trading-mcp-tool"),
-    (CONFIGS_ROOT / "router_nomemory.yml", "monitoring_agent", "kis-trading-mcp-tool"),
-    (CONFIGS_ROOT / "router_nomemory.yml", "news_agent", "kis-trading-mcp-tool-readonly"),
-    (CONFIGS_ROOT / "router_nomemory.yml", "recommend_agent", "kis-trading-mcp-tool-readonly"),
-    (CONFIGS_ROOT / "router_nomemory.yml", "strategy_agent", "kis-trading-mcp-tool-readonly"),
+    # (config_path, agent_fn, expected_tool_name_in_tool_names) — 단독 로드는 그 함수가 정의된 파일에서.
+    (config_path, agent_fn, "kis-trading-mcp-tool-readonly")
+    for agent_fn in _KIS_AGENT_FUNCTIONS
+    for config_path in (AGENTS_DIR / AGENT_YAML[agent_fn], *_ROUTER_PATHS)
 ]
 _AGENT_KIS_TOOL_REF_IDS = [f"{p.name}::{a}::{t}" for p, a, t in _AGENT_KIS_TOOL_REFS]
 
 
 @pytest.mark.parametrize("config_path,agent_fn,expected_tool", _AGENT_KIS_TOOL_REFS, ids=_AGENT_KIS_TOOL_REF_IDS)
 def test_agent_references_expected_kis_tool(config_path: Path, agent_fn: str, expected_tool: str):
-    """#66: 에이전트 tool_names가 권한에 맞는 KIS 도구를 참조하는지 고정한다.
+    """#66·#380: 에이전트 tool_names가 조회 전용 KIS 도구 하나만 참조하는지 고정한다.
 
-    kis-trading-mcp-tool(전체 권한)은 trading/monitoring만, kis-trading-mcp-tool-readonly는
-    news/recommend/strategy만 참조해야 한다. 라우터 설정에서도 동일하게 검사한다.
+    #380 전에는 trading/monitoring이 전체 권한 kis-trading-mcp-tool을 참조했다. 지금은
+    다섯 에이전트 모두 kis-trading-mcp-tool-readonly다. 라우터 설정에서도 동일하게 검사한다.
     """
     import nat_finus_nat.register  # noqa: F401
     from nat.runtime.loader import load_config
@@ -529,7 +493,7 @@ def test_memory_router_wraps_the_transcript_agent_below_the_trace_agent():
 def test_kis_agents_share_identical_system_prompt():
     """monitoring/trading의 최종 system_prompt는 의도적으로 바이트 동일하다.
 
-    #284로 둘 다 같은 configs/prompts/react_kis_full.md를 참조하게 되면서 이 테스트는 현재
+    #284로 둘 다 같은 프롬프트 파일(#380부터 configs/prompts/react_kis_chat.md)을 참조하게 되면서 이 테스트는 현재
     실패할 수 없다 - 참조가 갈라지는 시나리오는 test_agent_references_expected_prompt_file이
     먼저 잡는다. 그래도 남겨 두는 이유는 이 테스트만이 "파일 참조"가 아니라 **로드된 최종
     문자열**을 비교하기 때문이다: 프롬프트를 다시 블록 스칼라로 인라인하거나 두 에이전트를
@@ -554,12 +518,13 @@ def test_kis_agents_share_identical_system_prompt():
 PROMPTS_DIR = CONFIGS_ROOT / "prompts"
 
 # (yaml 파일명, 그 안의 react_agent 함수, 참조해야 하는 프롬프트 파일명).
-# trading/monitoring이 react_kis_full.md를 공유하는 것이 바로 위
+# trading/monitoring이 react_kis_chat.md를 공유하는 것이 바로 위
 # test_kis_agents_share_identical_system_prompt가 지키는 "바이트 동일"의 구조적 근거다 -
-# 둘 중 하나가 다른 파일을 가리키게 바뀌면 여기서 먼저 잡힌다.
+# 둘 중 하나가 다른 파일을 가리키게 바뀌면 여기서 먼저 잡힌다. react_kis_chat.md는 #380 전의
+# react_kis_full.md(전체 권한 도구 안내)를 대체한다 — 조회 전용 도구 + 채팅 주문 안내.
 _AGENT_PROMPT_FILES = [
-    ("trading_agent.yml", "trading_agent_react", "react_kis_full.md"),
-    ("monitoring_agent.yml", "monitoring_agent", "react_kis_full.md"),
+    ("trading_agent.yml", "trading_agent_react", "react_kis_chat.md"),
+    ("monitoring_agent.yml", "monitoring_agent", "react_kis_chat.md"),
     ("strategy_agent.yml", "strategy_agent", "react_kis_readonly.md"),
     ("news_agent.yml", "news_agent", "react_news.md"),
     ("recommend_agent.yml", "recommend_agent", "react_recommend.md"),
@@ -592,9 +557,9 @@ def test_agent_references_expected_prompt_file(yaml_name: str, function_name: st
 
     `load_config`는 `file://`를 이미 내용으로 치환해 돌려주므로 참조 자체를 볼 수 없다 - 그래서
     로더를 거치지 않고 `yaml.safe_load`로 원문을 읽는다. 이 검사가 없으면 프롬프트를 다시
-    블록 스칼라로 인라인해 되돌리거나(A-2 되돌리기), readonly 에이전트가 실수로
-    `react_kis_full.md`(전체 권한 도구 이름을 안내하는 프롬프트)를 가리키게 바뀌어도
-    - 두 프롬프트 모두 그 자체로는 유효하므로 - 다른 테스트가 전부 green이다.
+    블록 스칼라로 인라인해 되돌리거나(A-2 되돌리기), strategy가 실수로 채팅 주문 안내가
+    든 `react_kis_chat.md`를 가리키게 바뀌어도 - 두 프롬프트 모두 그 자체로는 유효하므로 -
+    다른 테스트가 전부 green이다.
     """
     import yaml
 
