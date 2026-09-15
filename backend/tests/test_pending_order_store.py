@@ -17,6 +17,7 @@ from backend.redis_state import (
     CONFIRM_UPDATE_MARKER_TTL_SEC,
     PENDING_ORDER_TTL_SEC,
     InMemoryPendingOrderStore,
+    RedisKeys,
     RedisPendingOrderStore,
 )
 from backend.trading_orders import OrderExecutionResult, PendingOrder
@@ -775,6 +776,25 @@ async def test_redis_confirm_update_marker_outlives_telegram_update_retention():
 
     assert list(redis.expiries.values()) == [CONFIRM_UPDATE_MARKER_TTL_SEC]
     assert CONFIRM_UPDATE_MARKER_TTL_SEC >= 24 * 60 * 60
+
+
+@pytest.mark.asyncio
+async def test_redis_confirm_update_marker_lives_outside_the_pending_order_namespace():
+    """표지 키는 대기 주문 네임스페이스 밖에 둔다 (PR #385 리뷰).
+
+    ``pending_order:`` 아래에 있으면 그 패턴으로 대기 주문을 훑는 코드가 표지까지 잡아
+    PendingOrder로 역직렬화하다 실패한다.
+
+    이 테스트가 잡는 mutation: 표지 키를 ``pending_order:`` 아래로 되돌림.
+    """
+    redis = FakeRedis()
+    store = RedisPendingOrderStore(redis)
+
+    await store.mark_confirm_update("123", 41, "process-a")
+
+    pending_order_prefix = RedisKeys().pending_order("")
+    assert list(redis.store) == [RedisKeys().confirm_update("123", 41)]
+    assert not any(key.startswith(pending_order_prefix) for key in redis.store)
 
 
 @pytest.mark.asyncio

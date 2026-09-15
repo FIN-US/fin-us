@@ -123,7 +123,9 @@ class RedisKeys:
         return f"{self.prefix}:pending_order:{chat_id}"
 
     def confirm_update(self, chat_id: str, update_id: int) -> str:
-        return f"{self.prefix}:pending_order:confirm_update:{chat_id}:{update_id}"
+        # pending_order: 아래에 두지 않는다. 그 패턴으로 대기 주문을 훑는 코드가 생기면 표지까지
+        # 잡혀 PendingOrder로 역직렬화하다 실패한다 (PR #385 리뷰).
+        return f"{self.prefix}:confirm_update:{chat_id}:{update_id}"
 
     def telegram_poller_state(self) -> str:
         return f"{self.prefix}:telegram:poller_state"
@@ -651,8 +653,10 @@ class RedisPendingOrderStore:
     scheduler.py의 Redis fallback(fail-open)은 멱등 모니터링 작업이라 가능하다.
     주문 확인/취소는 금전이 오가는 경로이므로 같은 기준을 적용할 수 없다.
 
-    키 패턴: ``finus:pending_order:{chat_id}``
-    TTL: PENDING_ORDER_TTL_SEC (600초 = 10분)
+    키 패턴과 TTL:
+    - 대기 주문 ``finus:pending_order:{chat_id}`` — PENDING_ORDER_TTL_SEC (600초 = 10분)
+    - /confirm 재실행 표지 ``finus:confirm_update:{chat_id}:{update_id}`` —
+      CONFIRM_UPDATE_MARKER_TTL_SEC (24시간, #383). 값은 처리를 시작한 프로세스의 owner 문자열이다.
     """
 
     def __init__(
