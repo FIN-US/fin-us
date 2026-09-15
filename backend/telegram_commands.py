@@ -899,15 +899,21 @@ class TelegramCommandHandler:
         곧바로 끝나고 주문을 실행하거나 대기 주문을 건드리지 않는다. 실제 notifier는 답 실패를
         False로 접어 오므로, 그대로 버리면 사용자는 버튼을 눌렀는데 아무 반응도 받지 못한다.
         뒤에 메시지를 이어 보내는 분기가 ``text``를 싣게 되면 이 규칙이 중복 통지를 만든다 —
-        그런 분기는 텍스트 없는 답을 쓴다.
+        그런 분기는 텍스트 없는 답을 쓴다. 이 규칙("``text``를 실은 호출 바로 뒤는 return이거나
+        함수 끝")은 test_every_callback_answer_with_text_ends_its_branch가 구조로 고정한다.
 
         텍스트 없는 답(스피너 해제)은 대체 전송하지 않는다. 뒤따르는 sendMessage가 결과를 전한다.
 
         대체 전송은 _send_text_settled다. 이 분기들은 재실행해도 같은 문구에 도달하므로
         _send_text_or_raise로 update를 재시도해도 되지만, 그러면 답 자체도 다시 나간다.
         settled는 인플레이스 재시도로 429를 흡수하고 끝내 실패하면 settled_send로 센다
-        (delivery_alarm). 대가: 답이 타임아웃으로 False였지만 실제로는 배달된 경우 토스트와
-        메시지가 둘 다 보인다 — 주문 상태를 바꾸지 않는 안내 문구라 받아들인다.
+        (delivery_alarm).
+
+        대가 (주문 상태를 바꾸지 않는 안내 문구라 둘 다 받아들인다):
+        - 답이 타임아웃으로 False였지만 실제로는 배달된 경우 토스트와 메시지가 둘 다 보인다.
+        - 답이 오래돼서 실패하는 경우. offset이 redis에 영속화되므로 폴러가 오래 내려가 있다
+          올라오면 그동안 쌓인 콜백이 다시 배달되고, 그 답은 "query is too old"(400)로 반드시
+          실패한다. 그러면 문구를 싣는 분기마다 대체 메시지가 뒤늦게 한 건씩 나간다.
         """
         if not callback_query_id:
             return
