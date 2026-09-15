@@ -44,11 +44,30 @@
 
 ## 2. 무엇을 켜는가
 
-루트 `.env`에 한 줄을 넣고 재배포한다.
+루트 `.env`에 한 줄을 넣고 두 서비스 **컨테이너를 다시 만든다**(이미지 재빌드는 필요 없다).
 
 ```
 KIS_REQUEST_LOG=1
 ```
+
+```bash
+docker compose up -d backend finus-nat    # restart가 아니라 up -d — 아래 이유
+```
+
+**`docker compose restart`로는 새 값이 들어가지 않는다.** 경로가 이렇다:
+
+1. compose의 `env_file: ./.env`는 **컨테이너를 만들 때만** 읽혀 컨테이너 환경에 박힌다.
+   `restart`는 같은 컨테이너를 다시 띄울 뿐이라 그 환경이 그대로 남는다.
+2. mcp-trading은 그 환경을 물려받는다 — `backend/config.py`와 `finus_api.py`의
+   `_MCP_ENV_ALLOWED_PREFIXES`가 둘 다 `KIS_`를 자식에게 넘긴다.
+3. `.env` 파일 자체는 bind mount라 컨테이너 안에서도 새 내용이 보이지만, 그것을 읽는
+   `backend/config.py`의 `load_dotenv`도 `mcp-trading/index.js`의 `dotenv.config`도
+   `override`를 하지 않는다. 이미 물려받은 옛 값이 이긴다.
+
+값을 바꿀 때마다(5.1의 대기값 스윕 포함) 같은 명령으로 재생성한다. 재생성하면 컨테이너가
+바뀌어 3절의 `logs -f`가 끊길 수 있으니, 끊겼으면 `tee -a`로 다시 건다(`tee`로 걸면 앞선
+수집분이 지워진다). systemd 등 compose 밖에서 띄웠다면 서비스 프로세스를 재시작한다 —
+`load_dotenv`가 프로세스 시작 시점에 한 번 읽기 때문이다.
 
 - 별칭 `FINUS_KIS_REQUEST_LOG`도 같다. `KIS_` 쪽을 먼저 읽는다
   (`mcp-trading/balance.js`의 `readPageDelayMsEnv`와 같은 관례).
@@ -291,8 +310,32 @@ grep '^\[kis-req\]' kis-req.log | grep -vE 'tr_id=(tokenP|-)' | grep -c 'tr_id='
 
 **방법:** `KIS_DAILY_CCLD_PAGE_DELAY_MS`를 큰 값에서 작은 값으로 내리면서 연속조회를
 반복 실행한다(예: `500` → `300` → `200` → `150` → `100` → `50` → `0`). 각 값에서
-`get_today_daily_orders`를 여러 번 돌린다. 재배포 없이 값만 바꿔 넣을 수 있게 만들어 둔
-것이 PR #340의 env다.
+`get_today_daily_orders`를 여러 번 돌린다. 코드 수정·이미지 재빌드 없이 값만 바꿔 넣을 수
+있게 만들어 둔 것이 PR #340의 env다 — **다만 컨테이너 재생성은 필요하다.**
+
+**한 단계마다:**
+
+1. `.env`의 `KIS_DAILY_CCLD_PAGE_DELAY_MS`를 다음 값으로 바꾼다.
+2. `docker compose up -d backend finus-nat`으로 재생성한다. `restart`로는 옛 값이 그대로
+   남는다(2절). 이 단계를 빠뜨려도 **아무 경고가 없어서** 같은 대기값을 일곱 번 재게 된다.
+3. `get_today_daily_orders`를 한 번 돌리고 **새 값이 반영됐는지 로그로 확인한 뒤** 본 측정을
+   시작한다.
+
+**반영 확인:** `ts`는 요청 *완료* 시각이므로, 같은 `pid`(= 같은 도구 호출) 안에서 연속한
+두 페이지 줄의 `ts` 간격은 `대기값 + 뒤 요청의 elapsed_ms`다. 그러니 간격이 **설정한
+대기값 이상**이어야 하고, `간격 - 뒤 요청의 elapsed_ms`가 대략 대기값이어야 한다.
+
+```bash
+# 같은 pid·tr_id 안의 연속 줄 간격. wait_ms가 방금 넣은 대기값 근처가 아니면 반영이 안 된 것이다.
+# 줄이 하나뿐인 호출(P <= 1)은 아무것도 찍히지 않는다 — 5.0으로 돌아간다.
+# ts는 UTC라 장 시작(09:00 KST = 00:00 UTC) 직후에는 자정을 넘는 쌍의 간격이 음수로 나온다. 그 쌍은 버린다.
+grep '^\[kis-req\]' kis-req.log | grep -vE 'tr_id=(tokenP|-)' \
+  | sed -nE 's/^\[kis-req\] ts=[0-9-]+T([0-9]{2}):([0-9]{2}):([0-9.]+)Z pid=([^ ]+) tr_id=([^ ]+) elapsed_ms=([0-9]+).*/\4 \5 \1 \2 \3 \6/p' \
+  | awk '{t=($3*3600+$4*60+$5)*1000; k=$1" "$2; if (k in last) print k, "gap_ms="int(t-last[k]), "wait_ms="int(t-last[k]-$6); last[k]=t}'
+```
+
+`wait_ms`가 이전 단계의 값(첫 단계라면 기본값 `0`) 근처에 머물러 있으면 재생성이 안 된
+것이다. 2단계부터 다시 한다.
 
 **뽑을 것:**
 
