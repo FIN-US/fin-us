@@ -45,6 +45,12 @@ MAX_OFFSET = 2**31
 # 이슈 #63이 "5~10분" 범위를 제안했고, ORDER_EXPIRES_AFTER의 10× 여유를 택한다.
 PENDING_ORDER_TTL_SEC = 60 * 10
 
+# /confirm 재실행 표지 TTL: 24시간 (#383).
+# 표지가 막는 것은 "재시작 전에 처리를 시작한 /confirm update가 재배달돼 다시 실행되는 것"이다.
+# Telegram 서버는 미확정 update를 24시간 보관하므로 그보다 먼저 표지가 사라지면 늦게 도착한
+# 재배달이 표지 없이 통과한다. 표지는 /confirm 한 번에 키 하나라 24시간을 쥐어도 무해하다.
+CONFIRM_UPDATE_MARKER_TTL_SEC = 60 * 60 * 24
+
 # redis 소켓 하나가 응답을 기다릴 수 있는 상한 (#268).
 # redis-py asyncio 기본값은 socket_timeout·socket_connect_timeout 둘 다 None = 무한 대기다.
 # 호스트가 RST 없이 패킷을 drop하는 부류의 장애(네트워크 blackhole, 호스트 freeze, redis 스왑
@@ -115,6 +121,9 @@ class RedisKeys:
 
     def pending_order(self, chat_id: str) -> str:
         return f"{self.prefix}:pending_order:{chat_id}"
+
+    def confirm_update(self, chat_id: str, update_id: int) -> str:
+        return f"{self.prefix}:pending_order:confirm_update:{chat_id}:{update_id}"
 
     def telegram_poller_state(self) -> str:
         return f"{self.prefix}:telegram:poller_state"
@@ -559,6 +568,14 @@ class PendingOrderStore(Protocol):
 
     async def has(self, chat_id: str) -> bool: ...
 
+    async def mark_confirm_update(self, chat_id: str, update_id: int, owner: str) -> bool:
+        """이 /confirm update를 ``owner``가 처리해도 되면 True (#383).
+
+        처음 보는 update면 owner를 표지로 남기고 True, 같은 owner가 이미 남겼으면(프로세스 안의
+        재시도) True, 다른 owner가 남겼으면(재시작 전 프로세스가 처리를 시작했다) False다.
+        """
+        ...
+
 
 class InMemoryPendingOrderStore:
     """테스트 전용 인메모리 pending_order 저장소.
@@ -574,6 +591,7 @@ class InMemoryPendingOrderStore:
 
     def __init__(self) -> None:
         self._store: dict[str, "PendingOrder"] = {}
+        self._confirm_updates: dict[tuple[str, int], str] = {}
 
     async def get(self, chat_id: str) -> "PendingOrder | None":
         return self._store.get(chat_id)
@@ -597,6 +615,10 @@ class InMemoryPendingOrderStore:
             return False
         self._store[chat_id] = order
         return True
+
+    async def mark_confirm_update(self, chat_id: str, update_id: int, owner: str) -> bool:
+        """PendingOrderStore.mark_confirm_update. 처음 남긴 owner만 통과시킨다 (#383)."""
+        return self._confirm_updates.setdefault((chat_id, update_id), owner) == owner
 
     # 동기 dict 인터페이스: 테스트의 store[...] 접근용
     def __getitem__(self, chat_id: str) -> "PendingOrder":
@@ -715,6 +737,25 @@ class RedisPendingOrderStore:
 
     async def has(self, chat_id: str) -> bool:
         return bool(await self.redis.exists(self._keys.pending_order(chat_id)))
+
+    async def mark_confirm_update(self, chat_id: str, update_id: int, owner: str) -> bool:
+        """/confirm update의 처리 표지를 SET NX로 남긴다 (#383).
+
+        NX가 이기면 이 호출이 처음이다. 지면 이미 남은 owner와 비교한다 — 같으면 같은 프로세스의
+        재시도, 다르면 재시작 전 프로세스가 처리를 시작한 update의 재배달이다. 표지 값은 한 번
+        쓰이면 바뀌지 않으므로 SET NX와 GET 사이에 경합이 끼어들 자리가 없다. GET이 None이면
+        (TTL이 그 사이 끝난 경우뿐이다) 판정 근거가 없으므로 False — 실행하지 않는 쪽이다.
+
+        대기 주문과 같은 fail-closed다. redis 오류는 그대로 올라가고 호출부가 "주문 저장소
+        오류"로 끝낸다.
+        """
+        key = self._keys.confirm_update(chat_id, update_id)
+        if await self.redis.set(key, owner, ex=CONFIRM_UPDATE_MARKER_TTL_SEC, nx=True):
+            return True
+        existing = await self.redis.get(key)
+        if isinstance(existing, bytes):
+            existing = existing.decode()
+        return existing == owner
 
 
 def create_redis_client() -> Any:

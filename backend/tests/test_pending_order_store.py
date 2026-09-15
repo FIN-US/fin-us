@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from backend.redis_state import (
+    CONFIRM_UPDATE_MARKER_TTL_SEC,
     PENDING_ORDER_TTL_SEC,
     InMemoryPendingOrderStore,
     RedisPendingOrderStore,
@@ -715,6 +716,65 @@ async def test_redis_store_set_if_absent_returns_false_and_preserves_original():
     recovered = await store.get("123")
     assert recovered is not None
     assert recovered.callback_token == "tok-a"
+
+
+# ---------------------------------------------------------------------------
+# /confirm 재실행 표지 (#383)
+# ---------------------------------------------------------------------------
+
+
+class _ExpiryRecordingRedis(FakeRedis):
+    def __init__(self):
+        super().__init__()
+        self.expiries: dict = {}
+
+    async def set(self, key, value, *, ex=None, nx=False):
+        result = await super().set(key, value, ex=ex, nx=nx)
+        if result:
+            self.expiries[key] = ex
+        return result
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "make_store",
+    [InMemoryPendingOrderStore, lambda: RedisPendingOrderStore(FakeRedis())],
+    ids=["memory", "redis"],
+)
+async def test_confirm_update_marker_lets_only_the_first_owner_through(make_store):
+    """처음 표지를 남긴 owner만 통과한다 (#383).
+
+    이 테스트가 잡는 mutation: NX 제거(다른 owner가 표지를 덮어써 통과), owner 비교 제거
+    (같은 프로세스의 재시도까지 거절).
+    """
+    store = make_store()
+
+    assert await store.mark_confirm_update("123", 41, "process-a") is True
+    # 같은 프로세스의 재시도
+    assert await store.mark_confirm_update("123", 41, "process-a") is True
+    # 재시작 뒤 같은 update의 재배달
+    assert await store.mark_confirm_update("123", 41, "process-b") is False
+    # 표지를 덮어쓰지 않았다 — 원래 프로세스의 재시도는 여전히 통과한다
+    assert await store.mark_confirm_update("123", 41, "process-a") is True
+    # 새 /confirm과 다른 채팅은 각자의 표지다
+    assert await store.mark_confirm_update("123", 42, "process-b") is True
+    assert await store.mark_confirm_update("456", 41, "process-b") is True
+
+
+@pytest.mark.asyncio
+async def test_redis_confirm_update_marker_outlives_telegram_update_retention():
+    """표지는 Telegram이 미확정 update를 보관하는 24시간 동안 남는다 (#383).
+
+    이 테스트가 잡는 mutation: ex 인자 제거(키가 영구히 쌓인다), 보관 기간보다 짧은 TTL
+    (늦게 도착한 재배달이 표지 없이 통과한다).
+    """
+    redis = _ExpiryRecordingRedis()
+    store = RedisPendingOrderStore(redis)
+
+    await store.mark_confirm_update("123", 41, "process-a")
+
+    assert list(redis.expiries.values()) == [CONFIRM_UPDATE_MARKER_TTL_SEC]
+    assert CONFIRM_UPDATE_MARKER_TTL_SEC >= 24 * 60 * 60
 
 
 @pytest.mark.asyncio

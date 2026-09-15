@@ -118,6 +118,13 @@ UNRESOLVED_STOCK_WARNING = (
 # ORDER_CONFIRM_CALLBACK, ORDER_CANCEL_CALLBACK, order_reply_markup → trading_orders.py (#314).
 # 스케줄러의 자동 제안도 같은 버튼을 써야 해서 옮겼다. 이름은 여기서 계속 읽을 수 있다.
 ORDER_STALE_CALLBACK_TEXT = "이전 주문 버튼입니다. 최신 주문 메시지에서 다시 선택하세요."
+# 재시작 전에 처리를 시작한 /confirm이 재배달됐을 때의 안내 (#383). 원래 실행의 결과 메시지가
+# 사라졌을 수 있으므로 직전 주문 확인을 함께 권한다.
+CONFIRM_REPLAY_REFUSED_TEXT = (
+    "이 /confirm은 재시작 전에 이미 처리를 시작한 요청이라 다시 실행하지 않았습니다.\n"
+    "직전 주문 결과는 증권사 앱에서 확인하고, 확정할 대기 주문이 남아 있으면 "
+    "주문 메시지의 확정 버튼을 누르거나 /confirm을 새로 보내세요."
+)
 ALERT_CALLBACK_PREFIX = "alerts:"
 LEVEL_CALLBACK_PREFIX = "level:"
 BALANCE_REFRESH_CALLBACK = "balance:refresh"
@@ -616,6 +623,10 @@ class TelegramCommandHandler:
             )
             pending_order_store = InMemoryPendingOrderStore()
         self.pending_orders: PendingOrderStore = pending_order_store
+        # /confirm 재실행 표지의 owner (#383). 폴러는 프로세스마다 핸들러를 한 번 만들므로
+        # (TelegramCommandPoller.run) 이 값이 곧 "이 프로세스"다 — 같은 값이면 프로세스 안의
+        # 재시도, 다르면 재시작 뒤의 재배달이다.
+        self._confirm_owner = secrets.token_hex(8)
         self.market_callbacks: dict[str, tuple[str, str]] = {}
 
     async def handle_update(self, update: dict[str, Any]) -> None:
@@ -692,7 +703,16 @@ class TelegramCommandHandler:
             await self._handle_order_command("SELL", argument, str(chat.get("id", "")).strip())
             return
         if self._matches_command(command, bot_username, "/confirm"):
-            await self._handle_confirm(str(chat.get("id", "")).strip())
+            update_id = update.get("update_id")
+            await self._handle_confirm(
+                str(chat.get("id", "")).strip(),
+                # bool은 int의 하위 타입이다. True가 update_id로 새면 표지 키가 1로 뭉친다.
+                update_id=(
+                    update_id
+                    if isinstance(update_id, int) and not isinstance(update_id, bool)
+                    else None
+                ),
+            )
             return
         if self._matches_command(command, bot_username, "/cancel"):
             await self._handle_cancel(str(chat.get("id", "")).strip())
@@ -1501,15 +1521,54 @@ class TelegramCommandHandler:
         # 대기 주문이 삭제된 뒤다 — 재실행은 "취소할 대기 주문이 없습니다"로 끝난다 (#247).
         await self._send_text_settled("대기 주문을 취소했습니다.")
 
-    async def _handle_confirm(self, chat_id: str) -> None:
+    async def _handle_confirm(self, chat_id: str, *, update_id: int | None = None) -> None:
+        """대기 주문을 claim해 실행한다.
+
+        ``update_id``는 텍스트 /confirm에서만 넘어온다 (#383). 재시작 전에 처리를 시작한 텍스트
+        /confirm이 재배달되면 claim하지 않고 끝낸다. claim(GETDEL)은 **같은** 주문을 두 번 주지
+        않을 뿐, 재실행이 그사이 생긴 **다른** 대기 주문(자동 제안·새 /buy)을 받는 것은 막지
+        않는다 — 사용자가 본 적도 없는 주문이 확정 없이 실행된다. 메시지를 보낸 뒤 생긴 주문은
+        그 메시지로 확정할 수 없다는 것이 막으려는 규칙이다.
+
+        판정은 대기 주문이 아니라 update에 붙인다. 주문을 보고 판정하면(예: message.date와
+        created_at 비교) 텔레그램·호스트 시계 오차가 오판 방향을 정하고, 판정과 claim 사이의
+        틈을 원자적으로 닫으려면 조건부 GETDEL이 필요하다. update 표지는 claim 전에 끝나 대기
+        주문을 건드리지 않으므로 둘 다 필요 없다. 표지는 owner(프로세스)를 담아 프로세스 안의
+        재시도(전송 실패 뒤 폴러 재시도)는 그대로 통과시킨다.
+
+        버튼 콜백은 ``update_id``를 넘기지 않는다. 버튼에는 주문마다 다른 토큰이 실려 있어
+        _handle_order_callback이 다른 주문의 확정을 이미 거절한다.
+
+        남는 경우: 표지를 남기기 전에 죽은 실행의 재배달은 막지 않는다. 그 실행은 claim 전이라
+        주문을 소비하지 않았으므로, 재배달은 봇이 내려가 있던 동안 쌓인 /confirm과 같은 처음
+        실행이다.
+        """
         # order_gateway 부재 체크를 claim 전에 수행해 주문이 소비되지 않게 한다.
         if self.order_gateway is None:
             await self._send_text_or_raise("주문 실행 설정이 준비되지 않았습니다.")
             return
+        if update_id is not None:
+            try:
+                first_run = await self.pending_orders.mark_confirm_update(
+                    chat_id, update_id, self._confirm_owner
+                )
+            except Exception as exc:
+                # 판정하지 못하면 실행하지 않는다. claim과 같은 저장소라 이 오류는 곧 claim의
+                # 오류이기도 하다.
+                await self._send_text_or_raise(f"주문 저장소 오류: {_short_error(exc)}")
+                return
+            if not first_run:
+                logger.warning(
+                    "재시작 전에 처리를 시작한 /confirm update %s가 재배달돼 실행하지 않는다",
+                    update_id,
+                )
+                await self._send_text_or_raise(CONFIRM_REPLAY_REFUSED_TEXT)
+                return
         try:
             await self._drop_expired_pending_order(chat_id, self.now_factory())
-            # claim(GETDEL): 원자적 읽기+삭제. 재시작 후 재전송된 Telegram update나
-            # 멀티워커 경합에서 정확히 하나의 호출만 order를 받고 나머지는 None을 받는다.
+            # claim(GETDEL): 원자적 읽기+삭제. 멀티워커 경합이나 프로세스 안의 재시도에서 정확히
+            # 하나의 호출만 order를 받고 나머지는 None을 받는다. 재시작 뒤 재배달은 위 표지가
+            # 먼저 걸러낸다(#383).
             order = await self.pending_orders.claim(chat_id)
         except Exception as exc:
             await self._send_text_or_raise(f"주문 저장소 오류: {_short_error(exc)}")
@@ -1606,6 +1665,10 @@ class TelegramCommandHandler:
         # 무응답이 되므로 확정하지 않는다. 나머지 settled 경로(/buy 프롬프트·/cancel·403·
         # 불명확)도 같은 이유로 여기에 넣지 않았다 — 되살릴 원장이 없는 메시지에서 먼저
         # 영속화하면 오표시 한 줄을 무응답과 바꾸는 거래가 된다.
+        #
+        # 그 경로들의 재실행 창은 수용했다(#383). 재시작이 settled 전송(최대 20초)과 겹칠 때만
+        # 열리고 피해는 오표시 한 줄로 유계다. 수용하지 않은 것은 재실행된 텍스트 /confirm이
+        # 그사이 생긴 다른 대기 주문을 실행하는 경우 하나이고, 이 메서드 첫머리의 표지가 막는다.
         await self._mark_update_settled()
 
         try:
@@ -2482,7 +2545,8 @@ class TelegramCommandPoller:
         분기가 COMMITTED로 받아 재시도하지 않는다. 그 전송이 실패했을 때 무엇으로
         되살리는지는 경로마다 다르다 — /confirm 체결 성공은 원장에 남은 미통지 행과
         scheduler.trade_notification_task가 받고(#259 2단계), 나머지 settled 경로는
-        _send_text_settled의 인플레이스 재시도가 전부다.
+        _send_text_settled의 인플레이스 재시도가 전부다. 그 전송 도중 재시작하면 update가
+        재배달·재실행되는데, 이 창은 수용했다(#383 — _commit_update 참조).
 
         반대로 부수효과 이전의 전송 실패는 변환 경로(except Exception)에 삼켜지지 않고
         반드시 여기 도달한다 — 전송을 본문에 둔 try는 TelegramSendError를 재던져야 하고,
@@ -2600,6 +2664,16 @@ class TelegramCommandPoller:
         # 남아 scheduler.trade_notification_task가 배달한다. 나머지 settled 경로(/buy 프롬프트·
         # /cancel·/confirm 403·불명확)에는 받아줄 원장이 없어 창을 그대로 둔다 — 거기서 먼저
         # 쓰면 재실행이 내보내는 오표시 한 줄 대신 메시지 자체가 사라진다.
+        #
+        # 남긴 창은 수용 판단이다(#383). 발동 조건이 재시작과 settled 전송 창(최대
+        # SETTLED_SEND_TIMEOUT_SECONDS, 20초)의 겹침이라 드물고, 피해가 유계다 — 주문 경로는
+        # 오표시 한 줄(대기 주문 존재는 다음 /buy·/cancel로 드러난다), 자연어·/earnings·/advise는
+        # LLM·제안 에이전트 재호출 한 번과 중복 답변이다. 경로마다 멱등 표지와 결과 재구성을 두는
+        # 비용이 그 피해보다 크다. 재시작이 잦아지는 등 재과금이 커질 징후가 보이면 다시 본다.
+        #
+        # 예외가 하나 있다. 재실행된 텍스트 /confirm이 그사이 생긴 다른 대기 주문(자동 제안·새
+        # /buy)을 claim하면 사용자가 본 적 없는 주문이 확정 없이 실행된다. 오표시로 유계가 아니라
+        # 수용하지 않고, _handle_confirm이 update 표지로 막는다.
         await self._persist_state()
 
     def _retry_delay(self) -> float:
