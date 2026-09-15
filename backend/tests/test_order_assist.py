@@ -1636,6 +1636,48 @@ async def test_post_json_raises_on_http_error(mock_httpx):
 
 
 @pytest.mark.asyncio
+async def test_advise_records_the_prompt_message_id_on_the_pending_order(monkeypatch):
+    """/advise의 확정 프롬프트 id가 대기 주문에 남는다 (#386).
+
+    텍스트 /confirm은 그 id보다 뒤에 보낸 것일 때만 주문을 실행한다. 남지 않으면 /advise
+    주문은 텍스트 /confirm으로 영영 확정되지 않는다(버튼만 된다).
+
+    이 테스트가 잡는 mutation: _handle_advise가 id 없는 전송(_send_text_settled)으로 되돌아감.
+    """
+    from backend.order_assist import OrderAssistResult
+    from backend.telegram_notifier import SendReceipt
+    from backend.trading_orders import PendingOrder
+
+    order = PendingOrder(
+        chat_id="123",
+        stock_name="삼성전자",
+        stock_code="005930",
+        side="BUY",
+        quantity=10,
+        price=74_500,
+        created_at=MARKET_OPEN_NOW,
+        callback_token="tok123",
+    )
+    handler, notifier = _advise_handler(
+        monkeypatch, OrderAssistResult(status="approved", message="제안 본문", order=order)
+    )
+    # run_order_assist가 하는 저장의 대역. fake_run은 저장하지 않는다.
+    assert await handler.pending_orders.set_if_absent("123", order)
+
+    async def send_text_receipt(text, *, reply_markup=None):
+        sent = await notifier.send_text(text, reply_markup=reply_markup)
+        return SendReceipt(sent=sent, message_id=4242)
+
+    monkeypatch.setattr(notifier, "send_text_receipt", send_text_receipt, raising=False)
+
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/advise 삼성전자"}})
+
+    stored = await handler.pending_orders.get("123")
+    assert stored is not None
+    assert stored.prompt_message_id == 4242
+
+
+@pytest.mark.asyncio
 async def test_advise_deletes_the_pending_order_when_the_prompt_never_sends(monkeypatch):
     """프롬프트가 안 나갔으면 대기 주문도 남기지 않는다 — 사용자는 그 존재를 모른다."""
     from backend.order_assist import OrderAssistResult
