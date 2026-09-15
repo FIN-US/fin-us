@@ -20,9 +20,25 @@ VISUALIZATION_URL=http://100.x.y.z:8080/
 """
 
 
+# 실제 .env.example처럼 FINUS_API_KEY 줄을 빈 값으로 둔 예시.
+API_KEY_EXAMPLE_ENV = EXAMPLE_ENV + """
+# Security
+FINUS_API_KEY=
+"""
+
+
 def write(path: Path, text: str) -> Path:
     path.write_text(text, encoding="utf-8")
     return path
+
+
+def answer(*values: str):
+    replies = iter(values)
+    return lambda _prompt: next(replies)
+
+
+def written_api_key(root: Path) -> str | None:
+    return setup_env.parse_env_values((root / ".env").read_text(encoding="utf-8")).get("FINUS_API_KEY")
 
 
 def test_write_env_file_creates_env_from_example(tmp_path):
@@ -232,6 +248,133 @@ def test_existing_secret_prompt_uses_readable_label(tmp_path):
 
     assert "기존 OpenAI API 키가 설정되어 있습니다" in prompts[0]
     assert "OPENAI_API_KEY" not in prompts[0]
+
+
+def test_new_install_starts_with_api_auth_on(tmp_path):
+    """`.env`가 없는 새 설치는 난수 키가 채워져 인증이 켜진 채 시작합니다 (#266).
+
+    잡는 mutation: 키 생성을 건너뛰는 회귀 — FINUS_API_KEY가 예시 그대로 빈 값으로 남는다.
+    """
+    from backend.main import unsafe_key_characters
+
+    write(tmp_path / ".env.example", API_KEY_EXAMPLE_ENV)
+    messages: list[str] = []
+
+    setup_env.run_setup(
+        root_dir=tmp_path,
+        input_fn=answer("sk-live", "n", "n", "n", "n"),
+        output_fn=messages.append,
+        timestamp="20260701T120000",
+    )
+
+    key = written_api_key(tmp_path)
+    assert key is not None
+    assert not setup_env.is_placeholder(key)
+    assert len(key) >= 32
+    # 이 값은 nginx 설정에 치환된 뒤 쿠키로 나간다. backend가 경고할 문자가 섞이면 새 설치의
+    # 대시보드가 첫 화면부터 401이다 — 판정은 backend의 함수를 그대로 쓴다.
+    assert unsafe_key_characters(key) == []
+    joined = "\n".join(messages)
+    assert "API 인증" in joined
+    assert "켜짐" in joined
+    # 키 전체를 터미널에 찍지 않는다(다른 비밀값의 mask_value와 같은 규칙).
+    assert key not in joined
+    # 키를 가려 출력하므로, 헤더에 실을 값은 화면이 아니라 .env에 있다고 가리켜야 한다.
+    # 치환되지 않은 자리표시자가 그대로 나가는 회귀(f 접두사 누락)도 여기서 걸린다.
+    assert "X-API-Key 헤더에 .env의 FINUS_API_KEY 값을" in joined
+    assert "{API_KEY_ENV}" not in joined
+
+
+def test_generated_api_key_differs_per_install(tmp_path):
+    """잡는 mutation: 난수 대신 고정 문자열을 넣는 회귀 — 모든 설치가 같은 키를 갖는다."""
+    keys = set()
+    for name in ("first", "second"):
+        root = tmp_path / name
+        root.mkdir()
+        write(root / ".env.example", API_KEY_EXAMPLE_ENV)
+        setup_env.run_setup(
+            root_dir=root,
+            input_fn=answer("sk-live", "n", "n", "n", "n"),
+            output_fn=lambda _message: None,
+            timestamp="20260701T120000",
+        )
+        keys.add(written_api_key(root))
+
+    assert len(keys) == 2
+
+
+@pytest.mark.parametrize(
+    "existing_env",
+    [
+        "OPENAI_API_KEY=sk-existing\nFINUS_API_KEY=\n",
+        # 2단계 이전의 .env — 키 줄 자체가 없다.
+        "OPENAI_API_KEY=sk-existing\n",
+    ],
+)
+def test_existing_env_is_not_switched_on_by_rerunning_setup(tmp_path, existing_env):
+    """이미 `.env`가 있는 배포는 키가 비어 있어도 채우지 않습니다.
+
+    운영자가 모르는 사이에 인증이 켜지면 헤더 없이 부르던 호출이 이유 모를 401이 된다.
+    잡는 mutation: 새 설치 판정(`.env` 존재 여부)을 빼는 회귀.
+    """
+    write(tmp_path / ".env.example", API_KEY_EXAMPLE_ENV)
+    write(tmp_path / ".env", existing_env)
+    messages: list[str] = []
+
+    setup_env.run_setup(
+        root_dir=tmp_path,
+        input_fn=answer("", "n", "n", "n", "n"),
+        output_fn=messages.append,
+        timestamp="20260701T120000",
+    )
+
+    assert written_api_key(tmp_path) == ""
+    assert "꺼짐" in "\n".join(messages)
+
+
+def test_rerunning_setup_keeps_the_generated_api_key(tmp_path):
+    """새 설치 뒤 설정을 다시 돌려도 키가 바뀌지 않습니다.
+
+    바뀌면 backend·frontend 컨테이너를 다시 만들기 전까지 대시보드가 낡은 키를 보내고,
+    X-API-Key를 적어 둔 호출도 전부 끊긴다.
+    """
+    write(tmp_path / ".env.example", API_KEY_EXAMPLE_ENV)
+    setup_env.run_setup(
+        root_dir=tmp_path,
+        input_fn=answer("sk-live", "n", "n", "n", "n"),
+        output_fn=lambda _message: None,
+        timestamp="20260701T120000",
+    )
+    first = written_api_key(tmp_path)
+
+    setup_env.run_setup(
+        root_dir=tmp_path,
+        input_fn=answer("", "n", "n", "n", "n"),
+        output_fn=lambda _message: None,
+        timestamp="20260701T120001",
+    )
+
+    assert written_api_key(tmp_path) == first
+
+
+def test_api_auth_is_not_reported_on_when_example_has_no_key_line(tmp_path):
+    """예시 파일에 키 줄이 없으면 켜졌다고 알리지 않습니다.
+
+    render_env는 예시에 있는 키만 쓰므로, 생성만 하고 보고하면 파일에는 없는 키를 켰다고
+    말하게 된다. 잡는 mutation: 예시에 키 줄이 있는지 보는 조건을 빼는 회귀.
+    """
+    write(tmp_path / ".env.example", EXAMPLE_ENV)
+    messages: list[str] = []
+
+    setup_env.run_setup(
+        root_dir=tmp_path,
+        input_fn=answer("sk-live", "n", "n", "n", "n"),
+        output_fn=messages.append,
+        timestamp="20260701T120000",
+    )
+
+    assert written_api_key(tmp_path) is None
+    assert "켜짐" not in "\n".join(messages)
 
 
 def test_shell_wrapper_invokes_python_setup_script_through_backend_uv_project():

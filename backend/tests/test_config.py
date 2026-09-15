@@ -317,7 +317,7 @@ def test_bad_signal_threshold_env_is_logged_too(monkeypatch, restore_config, cap
 
 
 def test_api_key_is_empty_when_unset(monkeypatch, restore_config):
-    """미설정이 기본값이고, 그 기본값은 "인증 꺼짐"이다.
+    """이 모듈에서 키가 비어 있으면 "인증 꺼짐"이다(키를 채우는 것은 새 설치의 setup_env 몫).
 
     delenv가 아니라 빈 문자열을 넣는다. config.py는 모듈 최상단에서 레포 루트의 실제
     `.env`를 load_dotenv로 읽는데, 그 호출은 override는 하지 않아도 **환경에 없는 키는

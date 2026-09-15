@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import secrets
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -12,6 +13,7 @@ USER_ADDED_SECTION = "# User-added settings"
 SECRET_KEY_PARTS = ("API_KEY", "API_SECRET", "TOKEN", "SECRET")
 URL_KEYS = {"KIS_URL", "VISUALIZATION_URL", "OLLAMA_BASE_URL", "OPENAI_API_BASE_URL", "OPENAI_BASE_URL"}
 BOOLEAN_KEYS = {"KIS_REAL_ORDER_ENABLED", "DB_ECHO"}
+API_KEY_ENV = "FINUS_API_KEY"
 InputFn = Callable[[str], str]
 OutputFn = Callable[[str], None]
 
@@ -275,6 +277,8 @@ def run_setup(
         output_fn=output_fn,
     )
     validate_settings(values, real_order_confirmation=real_order_confirmation)
+    # write_env_file이 .env를 만들므로 새 설치 판정은 반드시 그 전에 한다.
+    api_key_generated = _fill_api_key_for_new_install(env_path, values, updates)
     result = write_env_file(
         example_path=example_path,
         env_path=env_path,
@@ -288,10 +292,56 @@ def run_setup(
     capabilities = _enabled_capabilities(values, set(existing_values) | set(updates))
     output_fn("설정된 기능:")
     output_fn("  " + (", ".join(capabilities) if capabilities else "아직 설정된 선택 기능이 없습니다."))
+    _report_api_auth(values, generated=api_key_generated, output_fn=output_fn)
     output_fn("다음 단계:")
     output_fn("  bash scripts/setup_deps.sh")
     output_fn("  bash scripts/run_stack.sh")
     return result
+
+
+def generate_api_key() -> str:
+    """FINUS_API_KEY로 쓸 난수 키를 만듭니다.
+
+    token_urlsafe의 문자 집합은 `A-Z a-z 0-9 - _`뿐이다. 이 값은 nginx 설정 텍스트에 치환된 뒤
+    쿠키 값으로 나가는데, 그 두 자리에서 깨지는 문자(backend/main.py의 _UNSAFE_KEY_CHARS)가
+    하나도 없다. 길이는 .env.example이 권하는 명령과 같다.
+    """
+    return secrets.token_urlsafe(32)
+
+
+def _fill_api_key_for_new_install(env_path: Path, values: dict[str, str], updates: dict[str, str]) -> bool:
+    """`.env`가 아직 없는 새 설치에서만 FINUS_API_KEY를 채웁니다 (#266).
+
+    정적 키에는 비어 있지 않은 기본값이라는 것이 없다 — 코드나 .env.example에 적힌 값은
+    아무나 아는 키다. 그래서 "처음부터 켜짐"은 설정 파일을 처음 만드는 이 자리에서만 만들 수
+    있다.
+
+    이미 `.env`가 있으면 비어 있어도 채우지 않는다. 그 배포는 지금 무인증으로 동작 중이고,
+    설정 스크립트를 다시 돌렸다는 이유로 인증이 켜지면 헤더 없이 부르던 호출과 Unity 에디터
+    플레이 모드가 이유 모를 401이 된다. 켜는 것은 그 운영자의 명시적 행위로 남긴다.
+
+    예시 파일에 키 줄이 없으면 채우지 않는다. render_env는 예시에 있는 키만 쓰므로, 채웠다고
+    보고하면서 실제로는 파일에 없는 상태가 된다.
+    """
+    if env_path.exists() or API_KEY_ENV not in values:
+        return False
+    key = generate_api_key()
+    updates[API_KEY_ENV] = key
+    values[API_KEY_ENV] = key
+    return True
+
+
+def _report_api_auth(values: dict[str, str], *, generated: bool, output_fn: OutputFn) -> None:
+    output_fn("API 인증:")
+    if generated:
+        masked = mask_value(API_KEY_ENV, values[API_KEY_ENV])
+        output_fn(f"  켜짐 — 새 설치라 {API_KEY_ENV}에 난수 키를 만들어 넣었습니다({masked}).")
+        output_fn(f"  대시보드(8080)는 그대로 동작합니다. curl 등으로 /api/를 직접 부를 때는 X-API-Key 헤더에 .env의 {API_KEY_ENV} 값을 실으세요.")
+        output_fn(f"  Unity 에디터 플레이 모드는 키를 싣지 못하므로, 에디터로 테스트하는 동안에는 .env의 {API_KEY_ENV}를 비우세요.")
+    elif is_placeholder(values.get(API_KEY_ENV)):
+        output_fn(f"  꺼짐 — {API_KEY_ENV}가 비어 있어 /api/ 전체가 무인증입니다. 켜려면 값을 채우세요(.env.example 참고).")
+    else:
+        output_fn("  켜짐")
 
 
 def _is_true(value: str | None) -> bool:

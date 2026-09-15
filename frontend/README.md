@@ -141,7 +141,7 @@ docker compose up frontend
 | `.wasm` MIME | `application/wasm` (`nginx.conf.template`에서 명시) |
 | API 프록시 | `/api/`·`/health` → `http://backend:8000` (이슈 #245) |
 | 레이트리밋 | `/api/` 2r/s, `/api/v1/analyze` 6r/m + 동시 2건, 초과 시 429 (이슈 #266 1단계) |
-| API 인증 | `FINUS_API_KEY`를 채운 배포에서만 (이슈 #266 2·3단계) — nginx가 키를 쿠키로 내려 주므로 **번들 재빌드 없이 동작합니다**, 아래 참고 |
+| API 인증 | `FINUS_API_KEY`를 채운 배포에서 (이슈 #266) — 새 설치는 `scripts/setup_env.sh`가 난수 키를 채웁니다. nginx가 키를 쿠키로 내려 주므로 **번들 재빌드 없이 동작합니다**, 아래 참고 |
 | backend 의존 | `depends_on` 없음 — backend가 아직 없어도 nginx는 뜨고 정적 화면이 먼저 보입니다 |
 
 ### `/api` 리버스 프록시 (#245)
@@ -203,7 +203,7 @@ backend를 기다리지 않아도 됩니다. backend가 없는 동안에는 `/ap
 
 ### 레이트리밋 (#266 1단계)
 
-`/api/v1/analyze`는 **인증이 없으면서** 호출 한 번이 LLM(OpenAI/Anthropic) 또는 NAT 멀티
+`/api/v1/analyze`는 **인증을 끈 배포에서는 무인증이면서** 호출 한 번이 LLM(OpenAI/Anthropic) 또는 NAT 멀티
 에이전트를 태워 직접 과금으로 이어집니다. CORS는 이 위험의 방어가 되지 않습니다 — 응답을
 *읽는* 것만 막고 요청 *실행*은 막지 못하므로, 임의 페이지의
 `fetch(..., { mode: "no-cors" })` 한 줄이면 호출이 실제로 나갑니다. 그래서 제한은 프록시
@@ -254,8 +254,13 @@ backend를 기다리지 않아도 됩니다. backend가 없는 동안에는 `/ap
 
 위 레이트리밋은 **비용의 뚜껑**이지 접근 제어가 아닙니다. 접근 제어는 backend의 정적 API 키가
 맡습니다(`backend/main.py`). `.env`의 `FINUS_API_KEY`를 채우면 `/api/` 아래 모든 요청과
-`/api/v1/ws` 핸드셰이크가 이 키를 요구합니다. 비워 두면(기본값) 인증이 꺼지고 backend 기동
-로그에 경고가 남습니다.
+`/api/v1/ws` 핸드셰이크가 이 키를 요구합니다. `scripts/setup_env.sh`가 `.env`를 처음 만들 때
+난수 키를 채워 넣으므로 **새 설치는 인증이 켜진 채 시작합니다**(이미 있는 `.env`는 건드리지
+않습니다). 비워 두면 인증이 꺼지고 backend 기동 로그에 경고가 남습니다.
+
+> 에디터 플레이 모드는 위의 `http://localhost:8000` 폴백으로 nginx를 거치지 않아 아래 쿠키를
+> 받지 못하므로, 키를 채운 배포에서는 `/api/`가 401입니다. 에디터로 테스트하는 동안에는
+> `FINUS_API_KEY`를 비우세요.
 
 키가 서버에 닿는 경로는 둘입니다.
 
