@@ -1336,11 +1336,20 @@ def reset_balance_failure_streak(monkeypatch):
     시세 조회 카운터(#196)도 함께 고정한다. 잔고 카운터와 같은 모듈 전역이고, 억제
     조건이 "첫 실패 / 원인 변경 / 6회마다"라 앞 테스트가 남긴 값에 따라 같은 코드가
     로그를 남기기도 하고 안 남기기도 한다.
+
+    파서·동기화 쪽 억제 카운터(_priceless_streak·_codeless_streak·_paper_fallback_streak)도
+    같은 이유로 여기서 고정한다. 테스트마다 따로 0으로 두면 빠뜨린 테스트가 생긴다 —
+    앞 테스트가 _priceless_streak를 1로 남기면 뒤 테스트에서 경고가 debug로 내려가,
+    "경고에 이름이 불리지 않는다"를 단언하는 테스트가 필터를 지워도 통과했다(PR #367 리뷰).
     """
     monkeypatch.setattr("backend.scheduler._balance_failure_streak", 0)
     monkeypatch.setattr("backend.scheduler._last_balance_error", None)
     monkeypatch.setattr("backend.scheduler._quote_failure_streak", 0)
     monkeypatch.setattr("backend.scheduler._last_quote_error", None)
+    monkeypatch.setattr("backend.scheduler._priceless_streak", 0)
+    monkeypatch.setattr("backend.scheduler._codeless_streak", 0)
+    monkeypatch.setattr("backend.scheduler._paper_fallback_streak", 0)
+    monkeypatch.setattr("backend.scheduler._paper_fallback_skip_remaining", 0)
 
 
 def _make_balance_failure_mocks(monkeypatch, mock_run_mcp_tool_fn):
@@ -3477,6 +3486,91 @@ def test_sync_portfolio_prices_suppresses_repeated_paper_fallback_info(
     assert "1회 연속" in infos[0].getMessage()
     assert "6회 연속" in infos[1].getMessage()
     assert scheduler_module._paper_fallback_streak == 7
+
+
+@pytest.mark.asyncio
+async def test_refresh_portfolio_prices_skips_calls_after_paper_fallback(monkeypatch):
+    """모의투자 대체 응답을 받으면 이후 다섯 주기는 도구를 부르지 않는다.
+
+    모의투자 분기(index.js의 getBalanceRlzPl)는 TR 대신 getBalance()로 전체 잔고를
+    다시 페이징하고, 백엔드는 받은 뒤에야 버린다. 로그 억제만으로는 그 호출이 줄지 않아
+    기본 개발 구성에서 잔고 TR 호출과 node 서브프로세스 기동이 매 주기 두 배였다(PR #367 리뷰).
+
+    이 테스트가 잡는 mutation: 건너뛰기 분기 제거(7주기 중 7회 호출), 스킵 카운터를
+    세우지 않는 회귀(마찬가지로 7회), 카운터를 줄이지 않아 영구히 끊기는 회귀(1회).
+    """
+    from ..scheduler import _refresh_portfolio_prices
+
+    calls: list[str] = []
+    paper_text = (
+        _make_balance_text(("삼성전자", "005930", 10, 70000))
+        + "\n\n[안내] 모의투자(openapivts) 계좌는 실현손익 TR(v1_국내주식-041)을 "
+        "지원하지 않아 잔고 요약으로 대체했습니다."
+    )
+
+    async def mock_run_mcp_tool(params, name, args):
+        calls.append(name)
+        return paper_text
+
+    monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
+
+    for _ in range(7):
+        assert await _refresh_portfolio_prices() is None
+
+    # 1주기에 호출, 2~6주기 건너뜀, 7주기(약 1시간 뒤)에 다시 확인.
+    assert calls == ["get_balance_rlz_pl", "get_balance_rlz_pl"], calls
+
+
+def test_sync_portfolio_prices_does_not_repeat_empty_warning_for_priceless(
+    portfolio_session, caplog
+):
+    """전 종목 현재가 없음이면 "한 건도 읽지 못했다" 경고를 따로 쌓지 않는다.
+
+    PR 본문의 퇴화 시나리오(전 종목 prpr이 비어 옴)가 바로 이 모양이라 매 주기 탄다.
+    그 상황은 파서의 현재가 없음 경고가 연속 횟수로 억제된 채 이미 설명하므로, 여기서
+    억제 없는 warning을 더하면 하루 약 144건이 그대로 쌓인다(PR #367 리뷰). 반면
+    종목 줄이 전부 형식 위반이면 파서가 억제된 경고로 설명하지 않으므로 warning을 낸다.
+
+    이 테스트가 잡는 mutation: 분기를 걷어 내 항상 warning을 내는 회귀(7회 중 7건),
+    항상 debug로 내리는 회귀(형식 위반 경우의 warning이 사라진다).
+    """
+    import logging
+
+    from ..scheduler import _sync_portfolio_prices_from_rlz_pl
+
+    priceless_text = (
+        "[보유 종목]\n"
+        "1. 삼성전자 (005930) · 현금\n"
+        "   보유 10주 | 현재가 - | 평가 -\n"
+    )
+    malformed_text = (
+        "[보유 종목]\n"
+        "1. 삼성전자 005930 현금\n"
+        "   보유 10주 | 현재가 71,200원 | 평가 712,000원\n"
+    )
+
+    def _empty_warnings():
+        return [
+            r for r in caplog.records
+            if r.levelno == logging.WARNING and "한 건도 읽지 못했습니다" in r.getMessage()
+        ]
+
+    with caplog.at_level(logging.DEBUG, logger="backend.scheduler"):
+        for _ in range(7):
+            assert _sync_portfolio_prices_from_rlz_pl(priceless_text, portfolio_session) == 0
+
+    assert _empty_warnings() == [], [r.getMessage() for r in _empty_warnings()]
+    priceless_warnings = [
+        r for r in caplog.records
+        if r.levelno == logging.WARNING and "현재가를 읽지 못한" in r.getMessage()
+    ]
+    assert len(priceless_warnings) == 2, "상황 설명은 억제된 현재가 없음 경고가 맡는다"
+
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG, logger="backend.scheduler"):
+        assert _sync_portfolio_prices_from_rlz_pl(malformed_text, portfolio_session) == 0
+
+    assert len(_empty_warnings()) == 1, "파서가 설명하지 않는 0건은 warning이어야 한다"
 
 
 def test_sync_portfolio_from_balance_preserves_price_columns(portfolio_session):

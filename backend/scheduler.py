@@ -17,7 +17,8 @@ from .filtered_signal_repo import (
     SqliteFilteredSignalRepo,
     # SQLite에서 읽은 naive UTC와 tz-aware now를 같은 축으로 맞추는 보정(#196).
     # 같은 보정을 여기서 다시 정의하면 한쪽만 고쳐질 때 두 모듈의 시각 축이 갈린다.
-    _as_utc_naive,
+    # 모듈 밖에서 쓰므로 밑줄 없는 공개 이름이다(PR #367 리뷰).
+    as_utc_naive,
 )
 from .ws_manager import manager
 from .database import engine
@@ -368,6 +369,19 @@ _last_quote_error: str | None = None
 # 필요하다 — 실패는 드물지만 모의투자 대체 응답은 **기본 개발 구성에서 매 주기 항상**
 # 온다. 억제하지 않으면 10분마다 같은 info가 영구히 쌓여 로그가 신호를 잃는다.
 _paper_fallback_streak = 0
+
+# 모의투자 대체 응답을 받은 뒤 도구 호출 자체를 건너뛸 주기 수. 위 억제는 로그만 줄일 뿐
+# 호출은 줄이지 못한다 — 모의투자 분기(index.js의 getBalanceRlzPl 첫 분기)는 TR 대신
+# getBalance()를 다시 불러 전체 잔고를 페이징하고, 백엔드는 그 응답을 받은 뒤에야 버린다.
+# 그대로 두면 같은 주기의 get_balance 동기화와 합쳐 잔고 TR 호출과 node 서브프로세스
+# 기동이 기본 개발 구성에서 매 주기 두 배가 된다.
+#
+# 5 = 한 번 받고 다섯 주기를 쉰다 → 호출은 약 1시간(10분 × 6)에 한 번. 영구히 끊지 않는
+# 것은 보수적 선택이다: 대체 응답이 끝나면 최대 한 시간 안에 시세 갱신이 돌아온다.
+# 이 카운터는 _refresh_portfolio_prices(스케줄러 경로)만 본다. _sync_portfolio_prices_from_rlz_pl
+# 은 받은 텍스트를 처리할 뿐 호출 여부를 정하지 않는다.
+_PAPER_FALLBACK_SKIP_CYCLES = 5
+_paper_fallback_skip_remaining = 0
 
 # 코드 없음·현재가 없음 경고의 연속 횟수. 둘 다 **데이터 조건**이라 한 번 생기면
 # 그 종목을 팔기 전까지 매 주기 그대로 재현된다. 시세 갱신은 monitor_market_task 안에서
@@ -802,8 +816,9 @@ def _sync_portfolio_prices_from_rlz_pl(report_text: str, session: Session) -> in
 
     건너뛰는 세 경우와 로그 수준:
       1) 모의투자 대체 응답 — 그 배포에서는 매 주기의 정상 동작이므로 info이고,
-         게다가 **항상** 오므로 연속 횟수로 억제한다(첫 회와 이후 1시간에 한 번).
+         게다가 **항상** 오므로 연속 횟수로 억제한다(받은 응답 기준 첫 회와 이후 6회마다).
          억제 강도가 실패 경로보다 높은 것이 맞다 — 실패는 드물고 이쪽은 상시다.
+         호출 자체를 줄이는 일은 호출처(_refresh_portfolio_prices)가 맡는다.
       2) 연속조회 잘림 — 부분 응답이라 warning. 얻은 종목만 써도 행이 지워지지는
          않지만, 잘린 응답은 마지막 블록이 중간에서 끊겨 있을 수 있고 "의심스러운
          응답으로는 쓰지 않는다"를 잔고 동기화와 갈라 둘 이유가 없습니다.
@@ -815,8 +830,10 @@ def _sync_portfolio_prices_from_rlz_pl(report_text: str, session: Session) -> in
     # 검사를 뒤로 미루면 마커 부재 가드가 먼저 걸려 정상 상황에 error가 남습니다.
     if _RLZ_PL_PAPER_FALLBACK_MARKER in report_text:
         _paper_fallback_streak += 1
-        # 6회 = 약 1시간(10분 주기). _quote_failure_streak와 같은 규칙이되 이쪽이 더
-        # 절실합니다 — 실패는 드물지만 모의투자에서는 이 분기가 **매 주기 정상**입니다.
+        # _quote_failure_streak와 같은 규칙이되 이쪽이 더 절실합니다 — 실패는 드물지만
+        # 모의투자에서는 이 분기가 **매 주기 정상**입니다. 이 카운터는 "받은 대체 응답 수"
+        # 라서, 스케줄러 경로에서는 _PAPER_FALLBACK_SKIP_CYCLES가 호출을 약 1시간에 한 번으로
+        # 줄인 뒤 첫 회 + 약 6시간에 한 번이 됩니다.
         if _paper_fallback_streak == 1 or _paper_fallback_streak % 6 == 0:
             logger.info(
                 "모의투자 계좌는 실현손익 TR을 지원하지 않아 이번 주기 시세 갱신을 건너뜁니다 "
@@ -862,9 +879,20 @@ def _sync_portfolio_prices_from_rlz_pl(report_text: str, session: Session) -> in
         # 마커는 있는데 한 건도 파싱되지 않았습니다. 포맷 변경이거나 전 종목 prpr
         # 누락이며, 어느 쪽이든 쓸 값이 없습니다. DB에 손대지 않고 0을 반환합니다
         # (응답 자체는 읽었으므로 None이 아닙니다).
-        logger.warning(
-            "실현손익 응답에서 현재가를 한 건도 읽지 못했습니다. 기존 시세를 유지합니다."
-        )
+        #
+        # 전 종목이 현재가 없음·코드 없음인 데이터 조건이면 파서가 방금 그 상황을 연속
+        # 횟수로 억제한 경고로 이미 설명했습니다(카운터가 0이 아니면 이번 파싱에서 해당
+        # 종목이 있었다는 뜻입니다). 여기서 매 주기 warning을 더하면 그 억제가 무의미해져
+        # 하루 약 144건이 그대로 쌓입니다(PR #367 리뷰). 파서가 설명하지 않는 경우 — 형식
+        # 위반뿐이거나 종목 줄이 아예 없는 경우 — 에만 warning을 냅니다.
+        if _priceless_streak or _codeless_streak:
+            logger.debug(
+                "실현손익 응답에서 현재가를 한 건도 읽지 못했습니다(현재가 없음·코드 없음 경고 참고)."
+            )
+        else:
+            logger.warning(
+                "실현손익 응답에서 현재가를 한 건도 읽지 못했습니다. 기존 시세를 유지합니다."
+            )
         return 0
 
     now = datetime.now(timezone.utc)
@@ -888,12 +916,12 @@ def _sync_portfolio_prices_from_rlz_pl(report_text: str, session: Session) -> in
         # 이 스탬프를 찍는 곳은 이 줄 하나뿐입니다. 다른 경로가 찍으면 "시세를 갱신한
         # 시각"이라는 뜻이 무너지고 신선도 판정이 거짓말이 됩니다.
         #
-        # _as_utc_naive를 통과시켜 "UTC" 계약을 관례가 아니라 구조로 만듭니다.
+        # as_utc_naive를 통과시켜 "UTC" 계약을 관례가 아니라 구조로 만듭니다.
         # SQLAlchemy의 SQLite DATETIME은 오프셋을 **변환하지 않고 버립니다** —
         # +09:00의 15:00을 넣으면 15:00이 그대로 저장돼 조용히 9시간이 틀어집니다.
         # 지금은 now가 항상 UTC라 도달하지 않지만, 이 한 줄이 그 사고를 구조적으로
         # 막습니다(is_price_fresh·format_price_updated_at도 같은 헬퍼를 씁니다).
-        row.price_updated_at = _as_utc_naive(now)
+        row.price_updated_at = as_utc_naive(now)
         updated += 1
 
     session.commit()
@@ -928,8 +956,30 @@ async def _refresh_portfolio_prices() -> int | None:
     DB 쪽 예외는 삼키지 않고 호출처로 올립니다. 그쪽이 이미 "동기화 실패는 감시에
     영향을 주지 않는다"는 격리를 갖고 있고, 여기서 또 삼키면 실패가 두 겹으로
     조용해집니다.
+
+    모의투자 대체 응답을 받으면 이후 _PAPER_FALLBACK_SKIP_CYCLES 주기는 도구를 부르지
+    않습니다. 로그 억제만으로는 모의투자 분기가 매 주기 다시 페이징하는 잔고 조회가
+    줄지 않기 때문입니다(상수 주석 참고).
+
+    **알려진 한계 — 호출 타임아웃이 도구의 시간 예산보다 짧습니다(#369).**
+    run_mcp_tool은 30초에서 끊는데(backend/services.py), 이 도구의 연속조회 예산
+    BALANCE_RLZ_PL_TIME_BUDGET_MS는 NAT의 120초 호출자를 기준으로 잡은 90초입니다
+    (mcp-trading/index.js). get_balance가 예산을 15초로 둔 이유가 바로 이 30초입니다
+    (mcp-trading/balance.js의 BALANCE_TIME_BUDGET_MS 주석). 그래서 연속조회가 30초를
+    넘는 계좌에서는 JS가 잘림 안내를 내기 전에 타임아웃이 나고, 잘림 가드가 아니라 위
+    실패 경로(504 응답 타임아웃)로 빠져 매 주기 시세를 얻지 못합니다. 아무것도 쓰지
+    않으므로 안전하게 퇴화하지만, 경고의 원인이 "예산 불일치"로 읽히지 않습니다.
+    스케줄러 호출에서만 예산을 낮추려면 도구 스키마를 바꿔야 해 이 PR에서 분리했습니다.
     """
-    global _quote_failure_streak, _last_quote_error
+    global _quote_failure_streak, _last_quote_error, _paper_fallback_skip_remaining
+
+    if _paper_fallback_skip_remaining > 0:
+        _paper_fallback_skip_remaining -= 1
+        logger.debug(
+            "모의투자 대체 응답을 받은 뒤라 이번 주기 시세 조회를 건너뜁니다(남은 %d주기).",
+            _paper_fallback_skip_remaining,
+        )
+        return None
 
     try:
         report_text = await run_mcp_tool(TRADING_MCP_PARAMS, "get_balance_rlz_pl", {})
@@ -963,6 +1013,9 @@ async def _refresh_portfolio_prices() -> int | None:
         )
         _quote_failure_streak = 0
         _last_quote_error = None
+
+    if _RLZ_PL_PAPER_FALLBACK_MARKER in report_text:
+        _paper_fallback_skip_remaining = _PAPER_FALLBACK_SKIP_CYCLES
 
     with Session(engine) as session:
         return _sync_portfolio_prices_from_rlz_pl(report_text, session)
@@ -1259,7 +1312,7 @@ def is_price_fresh(price_updated_at: datetime | None, *, now: datetime) -> bool:
     # SQLite의 DATETIME은 오프셋을 저장하지 않아 읽어 온 값은 naive UTC다. now는
     # datetime.now(timezone.utc)라 aware이므로, 맞추지 않고 빼면
     # "can't compare offset-naive and offset-aware datetimes"로 죽는다.
-    age = _as_utc_naive(now) - _as_utc_naive(price_updated_at)
+    age = as_utc_naive(now) - as_utc_naive(price_updated_at)
     return -PRICE_FRESHNESS_TTL <= age <= PRICE_FRESHNESS_TTL
 
 
@@ -1274,7 +1327,7 @@ def format_price_updated_at(price_updated_at: datetime | None) -> str:
     """
     if price_updated_at is None:
         return ""
-    return _as_utc_naive(price_updated_at).replace(tzinfo=timezone.utc).isoformat()
+    return as_utc_naive(price_updated_at).replace(tzinfo=timezone.utc).isoformat()
 
 
 def _default_trade_notification_repo() -> SqliteTradeNotificationRepo:

@@ -18,7 +18,7 @@ from .models import FilteredSignal
 logger = logging.getLogger(__name__)
 
 
-def _as_utc_naive(value: datetime) -> datetime:
+def as_utc_naive(value: datetime) -> datetime:
     """tz-aware 값을 UTC로 옮기고 tzinfo를 떼어 낸다.
 
     SQLite의 DATETIME 컬럼은 오프셋을 저장하지 않는다 — SQLAlchemy가 bind 시점에
@@ -142,7 +142,7 @@ class SqliteFilteredSignalRepo:
 
         워커가 여럿이어도 안전하다: 같은 조건으로 두 번 지우면 두 번째는 0건이다.
         """
-        cutoff = _as_utc_naive(
+        cutoff = as_utc_naive(
             (now or datetime.now(timezone.utc)) - timedelta(days=retention_days)
         )
         with self._session_factory() as session:
@@ -181,7 +181,7 @@ def score_histogram(
     if stock_name is not None:
         filters.append(col(FilteredSignal.stock_name) == stock_name)
     if since is not None:
-        filters.append(col(FilteredSignal.created_at) >= _as_utc_naive(since))
+        filters.append(col(FilteredSignal.created_at) >= as_utc_naive(since))
 
     bucket_query = select(FilteredSignal.score, func.count()).group_by(
         col(FilteredSignal.score)
