@@ -2047,6 +2047,202 @@ async def test_tokenless_old_confirm_button_does_not_execute_current_pending_ord
     assert "123" in _orders(handler)
 
 
+class _CallbackAnswerFailingNotifier(FakeNotifier):
+    """answerCallbackQuery가 거부되는 notifier (#382).
+
+    실제 TelegramNotifier는 답 실패를 logger.error 후 False로 접는다. 예외를 던지는 대역은
+    그 경로를 재현하지 못한다 — 예외는 폴러의 update 재시도로 따로 흡수된다.
+    """
+
+    async def answer_callback_query(self, callback_query_id, text=None):
+        self.callback_answers.append((callback_query_id, text))
+        return False
+
+
+def _stale_order_callback_update():
+    # 대기 주문이 없으므로 어떤 토큰이든 만료 버튼이다.
+    return {
+        "callback_query": {
+            "id": "stale-callback",
+            "data": "order:confirm:old-token",
+            "message": {"chat": {"id": 123}},
+        }
+    }
+
+
+@pytest.mark.asyncio
+async def test_stale_order_button_falls_back_to_a_message_when_the_callback_answer_fails(
+    monkeypatch,
+):
+    """콜백 답이 유일한 통지인 분기에서 답이 실패하면 같은 문구를 메시지로 한 번 보낸다 (#382).
+
+    대체하지 않으면 사용자는 버튼을 눌렀는데 아무 반응도 받지 못한다.
+    """
+    notifier = _CallbackAnswerFailingNotifier()
+    handler = TelegramCommandHandler(notifier=notifier)
+    _capture_settled_sleeps(monkeypatch, handler)
+
+    await handler.handle_update(_stale_order_callback_update())
+
+    assert notifier.callback_answers == [
+        ("stale-callback", telegram_commands.ORDER_STALE_CALLBACK_TEXT)
+    ]
+    assert notifier.messages == [telegram_commands.ORDER_STALE_CALLBACK_TEXT]
+    assert delivery_metrics.count("settled_send") == 0
+
+
+@pytest.mark.asyncio
+async def test_callback_answer_fallback_that_also_fails_is_counted_as_settled_send(monkeypatch):
+    """대체 전송까지 실패하면 settled_send로 한 건 센다 (#382).
+
+    답 실패만으로는 어느 전송 실패 분류에도 들지 않았다 — 대체 전송이 settled 경로라서 그
+    메트릭 체계에 들어간다.
+    """
+    notifier = _CallbackAnswerFailingNotifier(send_text_result=False)
+    handler = TelegramCommandHandler(notifier=notifier)
+    _capture_settled_sleeps(monkeypatch, handler)
+    settled_failures_before = delivery_metrics.count("settled_send")
+
+    await handler.handle_update(_stale_order_callback_update())
+
+    assert set(notifier.messages) == {telegram_commands.ORDER_STALE_CALLBACK_TEXT}
+    assert delivery_metrics.count("settled_send") == settled_failures_before + 1
+
+
+@pytest.mark.asyncio
+async def test_textless_callback_answer_failure_sends_no_fallback(monkeypatch):
+    """텍스트 없는 답(스피너 해제)이 실패해도 대체 전송하지 않는다 (#382).
+
+    뒤따르는 메시지가 결과를 전하므로, 대체 전송은 빈 메시지 시도나 settled_send 오집계만 남긴다.
+    """
+    notifier = _CallbackAnswerFailingNotifier()
+    handler = TelegramCommandHandler(notifier=notifier)
+    _capture_settled_sleeps(monkeypatch, handler)
+
+    await handler.handle_update(
+        {
+            "callback_query": {
+                "id": "trade-menu",
+                "data": "trade:menu",
+                "message": {"chat": {"id": 123}},
+            }
+        }
+    )
+
+    assert notifier.callback_answers == [("trade-menu", None)]
+    assert notifier.messages == [TRADE_COMMAND_HELP]
+    assert delivery_metrics.count("settled_send") == 0
+
+
+def _callback_answers_with_text_not_ending_branch(
+    source: str | None = None,
+) -> tuple[list[int], int]:
+    """``text``를 실은 _answer_callback_query 호출 중 곧바로 끝나지 않는 것의 행 번호와 검사 수.
+
+    답 실패 시 대체 전송은 그 답이 유일한 통지라는 전제에 선다 (#382). 뒤에 메시지를 이어
+    보내는 분기가 ``text``를 실으면 답이 실패했을 때 대체 메시지와 본 메시지가 중복으로 나간다.
+    그래서 호출 문장 바로 다음이 ``return``이거나, 호출이 함수 본문의 마지막 문장이어야 한다.
+
+    source를 주면 그 소스를, 없으면 telegram_commands.py를 본다 — 위반 검출 테스트가 판정
+    로직을 다시 구현하지 않고 이 함수를 직접 부르게 하기 위해서다(PR #253 3차 리뷰의 전례).
+
+    fail-closed: ``await self._answer_callback_query(...)`` 한 문장이 아닌 형태(대입·식 안의
+    호출 등)로 ``text``를 실으면 위반으로 본다. 함수 끝에 닿는 if 본문의 마지막 호출처럼
+    실제로는 안전한 형태도 위반으로 잡힌다 — 그런 분기는 ``return``을 붙이면 된다.
+
+    한계: 함수 안만 본다. 이 호출을 담은 핸들러가 돌아온 뒤 호출자가 메시지를 이어 보내면
+    잡지 못한다(지금 디스패처는 핸들러 호출 직후 모두 return한다).
+    """
+
+    def text_answer_call(node: ast.AST) -> bool:
+        return (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "_answer_callback_query"
+            and any(
+                keyword.arg == "text"
+                and not (isinstance(keyword.value, ast.Constant) and keyword.value.value is None)
+                for keyword in node.keywords
+            )
+        )
+
+    def statement_call(statement: ast.stmt) -> ast.AST | None:
+        if (
+            isinstance(statement, ast.Expr)
+            and isinstance(statement.value, ast.Await)
+            and text_answer_call(statement.value.value)
+        ):
+            return statement.value.value
+        return None
+
+    tree = ast.parse(
+        source
+        if source is not None
+        else Path(telegram_commands.__file__).read_text(encoding="utf-8")
+    )
+    calls = [
+        node for node in ast.walk(tree) if isinstance(node, ast.Call) and text_answer_call(node)
+    ]
+    ending: set[int] = set()
+    for parent in ast.walk(tree):
+        is_function = isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef))
+        for field in ("body", "orelse", "finalbody"):
+            statements = getattr(parent, field, None)
+            if not isinstance(statements, list):
+                continue
+            for index, statement in enumerate(statements):
+                call = statement_call(statement)
+                if call is None:
+                    continue
+                is_last = index == len(statements) - 1
+                if (is_last and is_function and field == "body") or (
+                    not is_last and isinstance(statements[index + 1], ast.Return)
+                ):
+                    ending.add(id(call))
+    violations = sorted(call.lineno for call in calls if id(call) not in ending)
+    return violations, len(calls)
+
+
+def test_every_callback_answer_with_text_ends_its_branch():
+    """``text``를 실은 콜백 답은 곧바로 끝나는 분기에서만 쓴다 (#382, PR #384 리뷰).
+
+    답 실패 시 대체 전송이 그 전제에 서 있는데 독스트링만으로는 지켜지지 않는다. 검사 수가
+    0이면 메서드 이름이 바뀌어 가드가 빈 채로 초록인 것이므로 함께 막는다.
+    """
+    violations, checked = _callback_answers_with_text_not_ending_branch()
+
+    assert violations == []
+    assert checked > 0
+
+
+def test_the_callback_answer_branch_guard_actually_detects_a_violation():
+    """위 가드가 tautology가 아님을 고정한다 — 뒤에 전송이 이어지는 형태를 실제로 잡는다."""
+    source = textwrap.dedent(
+        """
+        async def followed_by_send(self):
+            await self._answer_callback_query(qid, text="안내")
+            await self._send_text_or_raise("본 메시지")
+
+        async def falls_through_if(self, flag):
+            if flag:
+                await self._answer_callback_query(qid, text="안내")
+            await self._send_text_or_raise("본 메시지")
+
+        async def returns_right_after(self, flag):
+            if flag:
+                await self._answer_callback_query(qid, text="안내")
+                return
+            await self._answer_callback_query(qid)
+            await self._send_text_or_raise("본 메시지")
+
+        async def last_statement(self):
+            await self._answer_callback_query(qid, text="안내")
+        """
+    )
+
+    assert _callback_answers_with_text_not_ending_branch(source) == ([3, 8], 4)
+
+
 @pytest.mark.asyncio
 async def test_confirm_gateway_success_recorder_failure_clears_pending_order():
     async def mcp_runner(server_params, tool_name, arguments):

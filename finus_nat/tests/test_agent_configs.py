@@ -303,6 +303,7 @@ def test_agent_references_expected_kis_tool(config_path: Path, agent_fn: str, ex
     "inquire_investor",
     "search_stock_info",
     "find_api_detail",
+    "pension_inquire_psbl_order",  # 접두사 밖 조회 TR — 괴리 가드(#365) 오인 방지 (PR #379 리뷰)
 ], ids=lambda x: x)
 def test_readonly_api_type_allows_read_only(api_type: str):
     """#66: 조회 계열 api_type은 _is_readonly_api_type이 True를 반환해야 한다."""

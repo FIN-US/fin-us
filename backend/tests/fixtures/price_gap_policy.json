@@ -1,0 +1,15 @@
+{
+  "_comment": "지정가 괴리 판정표 (#365). backend order_assist.evaluate_hard_limits와 finus_nat order_price_guard.price_gap_exceeds가 같은 표를 읽는다. 판정은 abs(price - current_price) / current_price > max_price_gap_ratio 이면 초과(양방향, 경계는 통과). 한쪽만 바꾸면 그쪽 스위트가 red가 된다. 시장가(단가 없음)는 괴리 대상이 아니므로 이 표에 넣지 않고 양쪽 스위트가 따로 고정한다.",
+  "cases": [
+    {"name": "same_price", "price": 68900, "current_price": 68900, "max_price_gap_ratio": 0.03, "exceeds": false},
+    {"name": "issue_365_total_value_in_unit_price", "price": 12345000, "current_price": 68900, "max_price_gap_ratio": 0.03, "exceeds": true},
+    {"name": "realistic_within_above", "price": 70900, "current_price": 68900, "max_price_gap_ratio": 0.03, "exceeds": false},
+    {"name": "realistic_over_above", "price": 71000, "current_price": 68900, "max_price_gap_ratio": 0.03, "exceeds": true},
+    {"name": "upper_boundary_is_allowed", "price": 103, "current_price": 100, "max_price_gap_ratio": 0.03, "exceeds": false},
+    {"name": "just_over_upper_boundary", "price": 104, "current_price": 100, "max_price_gap_ratio": 0.03, "exceeds": true},
+    {"name": "lower_boundary_is_allowed", "price": 97, "current_price": 100, "max_price_gap_ratio": 0.03, "exceeds": false},
+    {"name": "just_under_lower_boundary", "price": 96, "current_price": 100, "max_price_gap_ratio": 0.03, "exceeds": true},
+    {"name": "zero_ratio_same_price", "price": 100, "current_price": 100, "max_price_gap_ratio": 0.0, "exceeds": false},
+    {"name": "zero_ratio_any_difference", "price": 101, "current_price": 100, "max_price_gap_ratio": 0.0, "exceeds": true}
+  ]
+}
