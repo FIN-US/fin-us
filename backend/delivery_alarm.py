@@ -53,10 +53,11 @@ logger = logging.getLogger(__name__)
 
 
 DeliveryFailureKind = Literal[
-    # send_text_settled가 끝내 False를 돌려준 경우. /buy 프롬프트·/cancel·/confirm 403·불명확·
-    # /earnings·자연어 답변과 자연어·/earnings·/advise의 실패 통지(#259 4단계)·자동 제안 승인
-    # 프롬프트가 여기로 온다. 되살릴 근거가 없는
-    # 메시지들이라(send_text_settled 독스트링) 알람은 걸지 않고 횟수만 센다.
+    # send_text_settled가 끝내 False를 돌려준 경우. 여기로 오는 메시지:
+    # - 주문: /buy 프롬프트·/cancel·/confirm 403·불명확, 자동 제안 승인 프롬프트
+    # - 답변: 자연어·/earnings
+    # - 실패 통지: 자연어·/earnings·/advise (#259 4단계)
+    # 되살릴 근거가 없는 메시지들이라(send_text_settled 독스트링) 알람은 걸지 않고 횟수만 센다.
     "settled_send",
     # /confirm 체결 성공의 첫 전송 실패. 통지는 outbox가 받으므로 이것만으로는 사용자
     # 피해가 없다. 늘어나면 outbox가 일하고 있다는 뜻이다.
