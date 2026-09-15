@@ -170,7 +170,7 @@ test("HTTP 오류 응답의 바디에서도 유량 제한을 잡는다", () => {
 // 관측될 수 있는 곳은 사실상 이 경로"라고 못 박는데, 정작 이 경로의 줄 모양을 고정하는
 // 테스트가 하나도 없었다. 게다가 이 경로의 실패 바디 모양은 아직 미확인이다 — OAuth
 // 형식이라 msg_cd/msg1이 아니라 error_code/error_description으로 온다는 서술이 있지만
-// 확인된 바 없고, 저장소 픽스처(tests/kis-client.test.js:26)는 오히려 msg1이 채워진
+// 확인된 바 없고, 저장소 픽스처(tests/kis-client.test.js의 "pre-flight failure" 테스트)는 오히려 msg1이 채워진
 // 모양을 가리킨다(런북 0·2절). 그래서 아래 테스트들은 두 모양을 모두 고정한다.
 // ---------------------------------------------------------------------------
 
@@ -310,7 +310,7 @@ test("msg1의 개행은 접히고 긴 문자열은 잘린다", () => {
 // ---------------------------------------------------------------------------
 
 // 실제 axios 에러의 모양 그대로 만든다 — error.config에 params(CANO)와 headers(appkey,
-// appsecret, authorization: Bearer)가 통째로 붙어 있다(balance.js:201-206이 기록한 그대로).
+// appsecret, authorization: Bearer)가 통째로 붙어 있다(balance.js fetchAllPaged의 catch 주석이 기록한 그대로).
 function realisticAxiosError() {
   const error = new Error("Request failed with status code 500");
   error.name = "AxiosError";

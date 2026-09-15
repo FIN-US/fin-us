@@ -125,7 +125,7 @@ export function classifyKisError(input = {}) {
  * KIS 요청 1건을 stderr 한 줄로 만든다.
  *
  * **비밀 위생이 이 함수의 계약이다.** axios 에러 객체는 error.config에 params(CANO 계좌번호)와
- * headers(appkey, appsecret, authorization: Bearer 토큰)를 통째로 들고 있다(balance.js:201-206이
+ * headers(appkey, appsecret, authorization: Bearer 토큰)를 통째로 들고 있다(balance.js의 fetchAllPaged가
  * 같은 이유로 error.message만 남긴다). 그래서 이 함수는 입력에서 아래 화이트리스트만 읽는다.
  *   response.status / error.response.status          — 숫자
  *   response.data.{rt_cd,msg_cd,msg1} / error.response.data.{...} — KIS가 준 조회 응답 바디
@@ -166,7 +166,7 @@ export function formatKisRequestLog({
   // (POST /oauth2/tokenP)의 실패 바디가 조회(GET)와 모양이 다른 OAuth 형식
   // (`{ error_code: "EGW00133", error_description: "..." }`)일 가능성이다.
   // **이 모양은 아직 확인되지 않았다**(런북 0절의 미확인 항목). 저장소의 증거는 오히려
-  // 반대를 가리킨다 — tests/kis-client.test.js:26의 픽스처가 이 경로 오류를
+  // 반대를 가리킨다 — tests/kis-client.test.js "pre-flight failure" 테스트의 픽스처가 이 경로 오류를
   // "Access Token 발급 실패: EGW00133 ..."로 쓰는데, index.js가 그 문자열을 만드는 자리는
   // error.response?.data?.msg1이라 msg1이 채워져 있어야만 나올 수 있는 모양이다.
   // 그래서 한쪽으로 고르지 않고 둘 다 읽는다. 실측(런북 5.2)이 판정하기 전에는 ?? 를

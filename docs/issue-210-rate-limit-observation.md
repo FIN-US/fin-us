@@ -89,8 +89,8 @@ KIS 요청 1건마다 stderr에 정확히 한 줄이 나간다.
 |---|---|---|
 | `index.js`의 `kisApiGet` — 여섯 개 **조회(GET)** 경로가 전부 여기를 지난다(연속조회 두 루프 + `get_balance` + 단건 조회들) | 실제 TR ID | ✅ |
 | `index.js`의 `getAccessToken` — `POST /oauth2/tokenP` | `tokenP` | ✅ |
-| `kis-client.js:16` — hashkey `POST` | — | ❌ **안 나온다** |
-| `kis-client.js:113` — 주문 `POST` | — | ❌ **안 나온다** |
+| `kis-client.js`의 `createKisHashKey` — hashkey `POST` | — | ❌ **안 나온다** |
+| `kis-client.js`의 `kisOrderPost` — 주문 `POST` | — | ❌ **안 나온다** |
 
 - 5.3의 계좌 단위 가설을 보려면 단건 조회들이 함께 찍혀야 하는데, `kisApiGet` 한 곳이
   그것을 전부 덮는다.
@@ -100,8 +100,8 @@ KIS 요청 1건마다 stderr에 정확히 한 줄이 나간다.
 - 토큰 발급 **실패** 바디의 모양은 **미확인이다.** OAuth 형식이라 `msg_cd`/`msg1`이 아니라
   `error_code`/`error_description`으로 온다(`{"error_code":"EGW00133", ...}`)는 서술을 이
   저장소는 확인한 적이 없다. 5.2가 이 경로의 줄을 그대로 보여 주므로 거기서 확인한다.
-  **오히려 저장소의 증거는 반대쪽을 가리킨다** — `mcp-trading/tests/kis-client.test.js:26`의
-  픽스처가 이 경로의 오류를 `"Access Token 발급 실패: EGW00133 초당 거래건수를
+  **오히려 저장소의 증거는 반대쪽을 가리킨다** — `mcp-trading/tests/kis-client.test.js`의
+  "pre-flight failure" 테스트 픽스처가 이 경로의 오류를 `"Access Token 발급 실패: EGW00133 초당 거래건수를
   초과하였습니다."`로 쓰는데, `getAccessToken`이 그 문자열을 만드는 자리는
   `error.response?.data?.msg1`이라 **`msg1`이 채워져 있어야만** 나올 수 있는 모양이다
   (뒤에 붙은 `|| error.message` 폴백은 axios가 만드는 영어 문구라 이 모양이 아니다).
@@ -163,7 +163,8 @@ mcp-trading은 백엔드가 **도구 호출 1건마다 새로 띄우는 단명 �
 > `async def stdio_client(server: StdioServerParameters, errlog: TextIO = sys.stderr):`이다.
 > 그 값은 `:128`의 `errlog=errlog` → `:239`의 `errlog: TextIO = sys.stderr` → `:254`의
 > `stderr=errlog`로 흘러 자식 프로세스의 `stderr=`가 된다. 두 호출부
-> (`backend/services.py:1092`, `finus_nat/src/nat_finus_nat/finus_api.py:539`) 중 어느 쪽도
+> (`backend/services.py`의 `run_mcp_tool`, `finus_nat/src/nat_finus_nat/finus_api.py`의
+> `_mcp_call_tool` — 둘 다 안쪽 `async with stdio_client(...)`) 중 어느 쪽도
 > `errlog`를 넘기지 않는다. 윈도우 spawn 갈래
 > (`mcp/os/win32/utilities.py:140,176,187,199,213`)도 기본값이 같으므로 로컬 윈도우에서
 > 재도 결과가 같다. `finus_nat`이 따로 잠근 `1.27.0`(`finus_nat/uv.lock:1486`)은 한 패치
