@@ -107,8 +107,22 @@ const BALANCE_RLZ_PL_TR_ID = (() => {
 const BALANCE_RLZ_PL_MAX_PAGES = 50;
 // inquire-balance-rlz-pl 연속조회 전체 시간 예산. DAILY_CCLD_TIME_BUDGET_MS와 같은 근거.
 // 두 TR의 호출자·상한·요청당 타임아웃이 동일하므로 동일한 값을 쓴다.
+//
+// 이슈 #369: 이 값은 get_balance_rlz_pl의 기본 예산이자 time_budget_ms 인자의 상한이다.
+// 더 짧은 벽시계 상한 아래에서 부르는 호출자(backend 스케줄러 — run_mcp_tool 30초)는
+// 인자로 예산을 낮춘다(backend/scheduler.py의 _RLZ_PL_TIME_BUDGET_MS). 인자는 LLM에도
+// 노출되는 도구 스키마라 늘리는 방향은 막는다 — 이 값을 넘기면 NAT 120초 상한 안에
+// 든다는 위 근거가 깨진다.
 const BALANCE_RLZ_PL_TIME_BUDGET_MS = 90_000;
+// time_budget_ms 인자의 하한. 첫 페이지는 예산과 무관하게 항상 요청되므로(fetchAllPaged의
+// budgetExhausted가 pages > 0을 요구한다) 이보다 작은 값은 "연속조회 없이 1페이지"와
+// 구별되지 않는다. 초 단위로 착각한 값(15)이 조용히 1페이지 조회가 되지 않게 거부한다.
+const BALANCE_RLZ_PL_MIN_TIME_BUDGET_MS = 1_000;
 // 이슈 #210: DAILY_CCLD_PAGE_DELAY_MS와 같은 이유로 기본값 0, 같은 env 패턴으로 오버라이드.
+// 이슈 #369: 상한은 기본 예산(90초) 기준이다. time_budget_ms로 예산을 낮춘 호출에서는
+// 이 지연이 그 예산 이상이면 readPageDelayMsEnv 주석 (a)처럼 1페이지로 잘리고, 대기 뒤
+// 재확인(#307)이 요청은 막지만 이미 들어간 대기는 호출자의 벽시계 상한을 그대로 먹는다.
+// 스케줄러 쪽 한도는 backend/scheduler.py의 _RLZ_PL_TIME_BUDGET_MS 주석에 적었다.
 const BALANCE_RLZ_PL_PAGE_DELAY_MS = readPageDelayMsEnv("BALANCE_RLZ_PL_PAGE_DELAY_MS", 0, {
   maxMs: BALANCE_RLZ_PL_TIME_BUDGET_MS,
 });
@@ -628,7 +642,7 @@ async function getTodayDailyOrders({
   return formatDailyOrderCcldReport({ ...result, stockLabel });
 }
 
-async function fetchAllBalanceRlzPl() {
+async function fetchAllBalanceRlzPl({ timeBudgetMs = BALANCE_RLZ_PL_TIME_BUDGET_MS } = {}) {
   requireKisCredentials({ accountRequired: true });
 
   const baseParams = {
@@ -653,7 +667,7 @@ async function fetchAllBalanceRlzPl() {
     ),
     {
       maxPages: BALANCE_RLZ_PL_MAX_PAGES,
-      timeBudgetMs: BALANCE_RLZ_PL_TIME_BUDGET_MS,
+      timeBudgetMs,
       label: "실현손익 연속조회",
       pageDelayMs: BALANCE_RLZ_PL_PAGE_DELAY_MS,
     },
@@ -662,7 +676,14 @@ async function fetchAllBalanceRlzPl() {
   return { rows, summary, pages, truncated, trId: BALANCE_RLZ_PL_TR_ID };
 }
 
-async function getBalanceRlzPl({ stock_name: stockName } = {}) {
+// time_budget_ms는 등록 스키마(balanceRlzPlSchema)가 검증하고 기본값도 채운다. 여기의
+// 기본값은 스키마를 거치지 않는 호출에서도 NAT 기준 예산이 유지되게 하는 보조 장치다.
+// 모의투자 분기는 이 예산을 쓰지 않는다 — getBalance는 자기 예산(balance.js의
+// BALANCE_TIME_BUDGET_MS, 15초)으로 돈다.
+async function getBalanceRlzPl({
+  stock_name: stockName,
+  time_budget_ms: timeBudgetMs = BALANCE_RLZ_PL_TIME_BUDGET_MS,
+} = {}) {
   if (isPaperTradingKisUrl(KIS_URL)) {
     const balanceText = await getBalance();
     // 모의투자 대체 안내 문구. 주의: backend/scheduler.py의 _RLZ_PL_PAPER_FALLBACK_MARKER가
@@ -676,7 +697,7 @@ async function getBalanceRlzPl({ stock_name: stockName } = {}) {
     return `${balanceText}${note}`;
   }
 
-  const result = await fetchAllBalanceRlzPl();
+  const result = await fetchAllBalanceRlzPl({ timeBudgetMs });
   let { rows } = result;
   let stockLabel = "";
 
@@ -692,8 +713,22 @@ async function getBalanceRlzPl({ stock_name: stockName } = {}) {
 const stockNameSchema = z.object({
   stock_name: z.string().describe("주식 종목명 또는 6자리 종목코드"),
 });
-const optionalStockNameSchema = z.object({
+// 이슈 #369: time_budget_ms는 줄이는 방향만 받는다 — 상한이 기본값이므로 생략과 최댓값이
+// 같은 동작이다. 범위 밖·비정수는 clamp하지 않고 거부한다. readPageDelayMsEnv가 상한 초과를
+// 잘라 쓰지 않는 것과 같은 이유다(조용히 고치면 호출자가 넘긴 값과 실제 동작이 갈라진다).
+// 거부는 SDK의 입력 검증이 isError 결과("Input validation error")로 돌려준다.
+const balanceRlzPlSchema = z.object({
   stock_name: z.string().optional().describe("주식 종목명 또는 6자리 종목코드"),
+  time_budget_ms: z
+    .number()
+    .int()
+    .min(BALANCE_RLZ_PL_MIN_TIME_BUDGET_MS)
+    .max(BALANCE_RLZ_PL_TIME_BUDGET_MS)
+    .default(BALANCE_RLZ_PL_TIME_BUDGET_MS)
+    .describe(
+      "연속조회 시간 예산(ms). 기본값이 최댓값이며 줄이는 방향만 허용합니다. "
+        + "호출 타임아웃이 짧은 호출자만 넘기세요. 예산을 넘기면 결과에 잘림 안내가 붙습니다.",
+    ),
 });
 const todayOrdersSchema = z.object({
   trade_date: z.string().optional().describe("조회일 YYYYMMDD. 생략 시 당일(KST)"),
@@ -823,7 +858,7 @@ server.registerTool(
   {
     description:
       "주식잔고조회_실현손익(v1_국내주식-041)으로 보유·평가·실현손익을 조회합니다. 실전 계좌 전용.",
-    inputSchema: optionalStockNameSchema,
+    inputSchema: balanceRlzPlSchema,
   },
   async (args) => callTradingTool("get_balance_rlz_pl", args),
 );

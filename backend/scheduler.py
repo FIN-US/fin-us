@@ -362,6 +362,28 @@ _RLZ_PL_INDEX_PREFIX_RE = re.compile(r"^\d+\. ")
 # 0원을 걸러 내는 일은 정규식이 아니라 _parse_rlz_pl_quotes의 값 검사가 맡는다.
 _RLZ_PL_PRICE_RE = re.compile(r"현재가\s+([\d,]+(?:\.\d+)?)원")
 
+# get_balance_rlz_pl에 도구 인자 time_budget_ms로 넘기는 연속조회 시간 예산(ms) — #369.
+#
+# 도구의 기본 예산은 NAT의 120초 호출자를 기준으로 잡은 90초다(mcp-trading/index.js의
+# BALANCE_RLZ_PL_TIME_BUDGET_MS). 이 호출은 run_mcp_tool(backend/services.py)이 30초에서
+# 끊으므로, 기본 예산으로 부르면 연속조회가 30초를 넘는 계좌에서 JS가 잘림 안내를 내기 전에
+# 타임아웃이 나고 잘림 가드가 아니라 실패 경로(504)로 빠져 매 주기 시세를 얻지 못한다.
+# 예산을 30초 안으로 낮추면 그 계좌는 잘림 안내를 받고, _sync_portfolio_prices_from_rlz_pl의
+# 잘림 가드가 "부분 응답이라 쓰지 않는다"는 원인 그대로의 warning을 남긴다.
+#
+# 값은 get_balance의 BALANCE_TIME_BUDGET_MS(mcp-trading/balance.js)와 같은 15초이고 근거도
+# 같다. 예산 판정은 페이지 경계에서만 하므로 판정 직전에 나간 요청 1회가 kisAxios 타임아웃
+# (8초)만큼 더 걸릴 수 있고, MCP 서브프로세스 기동·핸드셰이크(~1-2초)를 더해도
+# 15 + 8 + 2 = 25초로 30초 안에 든다. 도구가 받는 범위는 1,000~90,000ms 정수다(범위 밖이면
+# 도구가 거부해 실패 경로로 빠진다).
+#
+# 페이지 간 지연(KIS_BALANCE_RLZ_PL_PAGE_DELAY_MS)이 있으면 최악은 15초 + max(8초, 지연) +
+# 기동이다. fetchAllPaged가 대기 뒤 예산을 다시 봐서(#307) 예산이 끝난 뒤에는 요청을 내지
+# 않지만, 이미 들어간 대기는 끝까지 기다린다. 기본값 0이나 8초 이하 지연이면 위 25초가
+# 그대로다. 그 env의 상한은 도구 기본 예산(90초) 기준이라 약 13초를 넘는 지연도 받아들여지고,
+# 그런 설정에서는 이 호출이 여전히 30초에 걸릴 수 있다.
+_RLZ_PL_TIME_BUDGET_MS = 15_000
+
 # get_balance_rlz_pl 연속 실패 횟수. get_balance의 _balance_failure_streak와 같은
 # 문제를 같은 방식으로 막는다 — 다만 이쪽은 상시 실패가 **정상인** 배포가 있다.
 # 모의투자 계좌에서는 도구가 매번 대체 응답을 주고, 실전 계좌라도 권한이 없으면 매
@@ -965,15 +987,11 @@ async def _refresh_portfolio_prices() -> int | None:
     않습니다. 로그 억제만으로는 모의투자 분기가 매 주기 다시 페이징하는 잔고 조회가
     줄지 않기 때문입니다(상수 주석 참고).
 
-    **알려진 한계 — 호출 타임아웃이 도구의 시간 예산보다 짧습니다(#369).**
-    run_mcp_tool은 30초에서 끊는데(backend/services.py), 이 도구의 연속조회 예산
-    BALANCE_RLZ_PL_TIME_BUDGET_MS는 NAT의 120초 호출자를 기준으로 잡은 90초입니다
-    (mcp-trading/index.js). get_balance가 예산을 15초로 둔 이유가 바로 이 30초입니다
-    (mcp-trading/balance.js의 BALANCE_TIME_BUDGET_MS 주석). 그래서 연속조회가 30초를
-    넘는 계좌에서는 JS가 잘림 안내를 내기 전에 타임아웃이 나고, 잘림 가드가 아니라 위
-    실패 경로(504 응답 타임아웃)로 빠져 매 주기 시세를 얻지 못합니다. 아무것도 쓰지
-    않으므로 안전하게 퇴화하지만, 경고의 원인이 "예산 불일치"로 읽히지 않습니다.
-    스케줄러 호출에서만 예산을 낮추려면 도구 스키마를 바꿔야 해 이 PR에서 분리했습니다.
+    연속조회 시간 예산은 도구 기본값(90초, NAT 호출자 기준)이 아니라
+    _RLZ_PL_TIME_BUDGET_MS(15초)를 time_budget_ms 인자로 넘깁니다(#369). run_mcp_tool이
+    30초에서 끊기 때문입니다(backend/services.py). 예산을 넘는 계좌는 504 타임아웃이 아니라
+    도구의 잘림 안내를 받고, _sync_portfolio_prices_from_rlz_pl의 잘림 가드가 원인 그대로
+    처리합니다. 값의 근거와 페이지 간 지연이 있을 때의 한도는 상수 주석에 있습니다.
     """
     global _quote_failure_streak, _last_quote_error, _paper_fallback_skip_remaining
 
@@ -986,7 +1004,11 @@ async def _refresh_portfolio_prices() -> int | None:
         return None
 
     try:
-        report_text = await run_mcp_tool(TRADING_MCP_PARAMS, "get_balance_rlz_pl", {})
+        report_text = await run_mcp_tool(
+            TRADING_MCP_PARAMS,
+            "get_balance_rlz_pl",
+            {"time_budget_ms": _RLZ_PL_TIME_BUDGET_MS},
+        )
     except Exception as e:
         signature = f"{type(e).__name__}:{e}"
         _quote_failure_streak += 1

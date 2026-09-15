@@ -135,6 +135,9 @@ function startKisStub(kisPath, {
   tokenIssueStatus = 200,
   // 그 번째 페이지 GET을 HTTP 500으로 돌려준다 — 같은 이유로 kisApiGet의 catch로 들어간다.
   httpErrorOnPage = 0,
+  // 정상 페이지 응답을 이만큼 늦춘다(요청 도착 시각은 늦추지 않는다). 시간 예산 배선
+  // 프로브(#369)가 "요청 자체가 예산을 소진한다"를 벽시계로 만들 때 쓴다.
+  pageResponseDelayMs = 0,
 } = {}) {
   const requestTimes = [];
   const server = createServer((req, res) => {
@@ -169,20 +172,27 @@ function startKisStub(kisPath, {
         res.end(JSON.stringify({ rt_cd: "1", msg_cd: "EGW00201", msg1: rateLimitMsg1 }));
         return;
       }
-      res.writeHead(200, {
-        "Content-Type": "application/json",
-        // "F"면 다음 페이지가 있다는 뜻이고, "D"면 마지막이다(balance.js의 isContinuationTrCont).
-        tr_cont: isFirstPage ? "F" : "D",
-      });
-      res.end(JSON.stringify({
-        rt_cd: "0",
-        msg_cd: "MCA00000",
-        msg1: "정상처리 되었습니다.",
-        output1: [],
-        output2: {},
-        ctx_area_fk100: isFirstPage ? "FK1" : "",
-        ctx_area_nk100: isFirstPage ? "NK1" : "",
-      }));
+      const respond = () => {
+        res.writeHead(200, {
+          "Content-Type": "application/json",
+          // "F"면 다음 페이지가 있다는 뜻이고, "D"면 마지막이다(balance.js의 isContinuationTrCont).
+          tr_cont: isFirstPage ? "F" : "D",
+        });
+        res.end(JSON.stringify({
+          rt_cd: "0",
+          msg_cd: "MCA00000",
+          msg1: "정상처리 되었습니다.",
+          output1: [],
+          output2: {},
+          ctx_area_fk100: isFirstPage ? "FK1" : "",
+          ctx_area_nk100: isFirstPage ? "NK1" : "",
+        }));
+      };
+      if (pageResponseDelayMs > 0) {
+        setTimeout(respond, pageResponseDelayMs);
+      } else {
+        respond();
+      }
       return;
     }
     res.writeHead(404).end();
@@ -489,4 +499,116 @@ test("전송 실패한 조회도 [kis-req] 줄을 남긴다 (kisApiGet의 catch)
   );
   assert.ok(!line.includes("tr_id=tokenP"), `조회 줄이어야 한다. 실제: ${line}`);
   assert.match(line, /class=other/);
+});
+
+// ---------------------------------------------------------------------------
+// 이슈 #369: get_balance_rlz_pl의 time_budget_ms 인자. backend 스케줄러는 run_mcp_tool이
+// 30초에서 끊으므로 90초 기본 예산 대신 이 인자로 예산을 낮춘다. 스키마 모양(정수·범위·
+// 기본값·생략 가능)은 tests/mcp-server.test.js가 listTools로 고정한다. 여기서는 그 스키마가
+// 실제 호출에서 거부하는지와, 받은 값이 fetchAllPaged의 timeBudgetMs로 실제 전달되는지를
+// 위 pageDelayMs 배선 프로브와 같은 방식(자식 프로세스 + KIS 스텁)으로 본다.
+const RLZ_PL_KIS_PATH = PAGED_TOOLS[1].kisPath;
+
+async function connectRlzPlClient(t, port, clientName) {
+  const tokenCachePath = path.join(os.tmpdir(), `finus-time-budget-probe-${randomUUID()}.json`);
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: ["index.js"],
+    cwd: process.cwd(),
+    stderr: "pipe",
+    env: {
+      ...process.env,
+      KIS_URL: `http://127.0.0.1:${port}`,
+      KIS_API_KEY: "stub-appkey",
+      KIS_API_SECRET: "stub-appsecret",
+      KIS_ACCOUNT_NO: "5012345601",
+      KIS_TOKEN_CACHE_PATH: tokenCachePath,
+      // 개발자 .env의 지연이 끼면 요청 수·경과가 달라진다. 이 프로브는 지연 0을 전제한다.
+      KIS_BALANCE_RLZ_PL_PAGE_DELAY_MS: "0",
+      FINUS_KIS_BALANCE_RLZ_PL_PAGE_DELAY_MS: "0",
+    },
+  });
+  const client = new Client({ name: clientName, version: "1.0.0" });
+  t.after(async () => {
+    await client.close().catch(() => {});
+    await rm(tokenCachePath, { force: true });
+    await rm(`${tokenCachePath}.lock`, { force: true, recursive: true });
+  });
+  await client.connect(transport);
+  transport.stderr?.resume();
+  return client;
+}
+
+test("get_balance_rlz_pl은 범위 밖·비정수 time_budget_ms를 KIS 호출 없이 거부한다 (#369)", { timeout: PROBE_TEST_TIMEOUT_MS }, async (t) => {
+  const { server, port, requestTimes } = await startKisStub(RLZ_PL_KIS_PATH);
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const client = await connectRlzPlClient(t, port, "time-budget-validation-test");
+
+  // 999: 하한 미만(초 단위 착각을 1페이지 조회로 만들지 않는다). 90001: 기본 예산 초과 —
+  // 늘리는 방향은 NAT 120초 근거를 깨므로 막는다. 1500.5: 비정수. "15000": 문자열.
+  for (const value of [999, 90_001, 1500.5, "15000"]) {
+    const result = await client.callTool({
+      name: "get_balance_rlz_pl",
+      arguments: { time_budget_ms: value },
+    });
+    const text = result.content?.[0]?.text ?? "";
+    assert.equal(result.isError, true, `time_budget_ms=${JSON.stringify(value)}는 거부되어야 한다. 실제: ${text}`);
+    assert.match(text, /Input validation error/, `스키마 검증에서 거부되어야 한다. 실제: ${text}`);
+    assert.match(text, /time_budget_ms/, `어느 인자가 틀렸는지 드러나야 한다. 실제: ${text}`);
+  }
+  assert.equal(requestTimes.length, 0, "거부된 호출은 KIS 조회를 내보내지 않아야 한다");
+
+  // 역방향 가드: "무엇이든 거부한다"로 통과하는 상태가 아님을 경계값으로 확인한다.
+  for (const value of [1_000, 90_000]) {
+    const result = await client.callTool({
+      name: "get_balance_rlz_pl",
+      arguments: { time_budget_ms: value },
+    });
+    assert.equal(
+      result.isError,
+      undefined,
+      `경계값 ${value}는 받아야 한다. 실제: ${result.content?.[0]?.text}`,
+    );
+  }
+  assert.ok(requestTimes.length > 0, "받아들인 호출은 KIS 조회까지 가야 한다");
+});
+
+test("get_balance_rlz_pl은 time_budget_ms를 연속조회 예산으로 쓰고, 생략하면 기본 예산을 쓴다 (#369)", { timeout: PROBE_TEST_TIMEOUT_MS }, async (t) => {
+  // 첫 페이지 응답이 1.2초 걸린다. 예산 1초면 첫 페이지 뒤 예산이 이미 끝나 2페이지를
+  // 요청하지 않고 time_budget으로 잘린다 — 첫 페이지는 예산과 무관하게 항상 나간다.
+  // 같은 스텁에서 인자를 생략하면(기본 90초) 2페이지까지 받고 잘림 안내가 없어야 한다.
+  const PAGE_RESPONSE_DELAY_MS = 1_200;
+  const SHORT_BUDGET_MS = 1_000;
+  const { server, port, requestTimes } = await startKisStub(RLZ_PL_KIS_PATH, {
+    pageResponseDelayMs: PAGE_RESPONSE_DELAY_MS,
+  });
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const client = await connectRlzPlClient(t, port, "time-budget-wiring-test");
+
+  const shortResult = await client.callTool({
+    name: "get_balance_rlz_pl",
+    arguments: { time_budget_ms: SHORT_BUDGET_MS },
+  });
+  const shortText = shortResult.content?.[0]?.text ?? "";
+  assert.equal(shortResult.isError, undefined, `잘림은 실패가 아니다. 실제: ${shortText}`);
+  assert.equal(
+    requestTimes.length,
+    1,
+    `예산 ${SHORT_BUDGET_MS}ms가 fetchAllPaged에 전달됐다면 첫 페이지(${PAGE_RESPONSE_DELAY_MS}ms) 뒤 멈춰야 한다`,
+  );
+  assert.ok(
+    shortText.includes("[안내] 조회 시간 예산을 초과하여"),
+    `잘림 사유가 시간 예산이어야 한다. 실제: ${shortText}`,
+  );
+  // backend/scheduler.py의 is_balance_truncated가 이 리터럴로 잘림을 감지한다.
+  assert.ok(shortText.includes("조회가 중단되어"), `backend 잘림 마커가 있어야 한다. 실제: ${shortText}`);
+
+  // 스텁의 첫 페이지 판정은 requestTimes.length === 1이라 비우면 다시 2페이지를 유도한다.
+  requestTimes.length = 0;
+
+  const defaultResult = await client.callTool({ name: "get_balance_rlz_pl", arguments: {} });
+  const defaultText = defaultResult.content?.[0]?.text ?? "";
+  assert.equal(defaultResult.isError, undefined, `tool call failed: ${defaultText}`);
+  assert.equal(requestTimes.length, 2, "인자를 생략하면 기본 예산 안에서 2페이지를 모두 받아야 한다");
+  assert.ok(!defaultText.includes("[안내]"), `기본 예산에서는 잘림 안내가 없어야 한다. 실제: ${defaultText}`);
 });

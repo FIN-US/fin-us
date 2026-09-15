@@ -3522,6 +3522,38 @@ async def test_refresh_portfolio_prices_skips_calls_after_paper_fallback(monkeyp
     assert calls == ["get_balance_rlz_pl", "get_balance_rlz_pl"], calls
 
 
+@pytest.mark.asyncio
+async def test_refresh_portfolio_prices_passes_time_budget_within_call_timeout(monkeypatch):
+    """시세 갱신은 도구 기본 예산(90초)이 아니라 30초 호출 타임아웃 안의 예산을 넘긴다 (#369).
+
+    run_mcp_tool은 30초에서 끊는다(backend/services.py). 인자를 빼면 도구가 NAT 기준
+    90초 예산으로 돌아, 연속조회가 30초를 넘는 계좌는 잘림 안내 대신 504 타임아웃으로
+    빠진다. 값의 근거(15 + 8 + 2 = 25초)는 _RLZ_PL_TIME_BUDGET_MS 주석에 있다.
+
+    상수를 import해 비교하지 않고 15000을 직접 적는다 — 상수를 30초 이상으로 올리는
+    회귀도 이 테스트가 잡아야 하기 때문이다.
+
+    이 테스트가 잡는 mutation: 인자 없이 {}로 부르는 회귀(#369 이전), 인자 이름을
+    바꾸는 회귀(도구 스키마가 모르는 키는 버려져 90초 예산으로 돈다), 값을 바꾸는 회귀.
+    """
+    from ..scheduler import _refresh_portfolio_prices
+
+    calls: list[tuple[str, dict]] = []
+
+    async def mock_run_mcp_tool(params, name, args):
+        calls.append((name, args))
+        return _rlz_pl_text("normal")
+
+    monkeypatch.setattr("backend.scheduler.run_mcp_tool", mock_run_mcp_tool)
+    monkeypatch.setattr(
+        "backend.scheduler._sync_portfolio_prices_from_rlz_pl", lambda report_text, session: 1
+    )
+
+    assert await _refresh_portfolio_prices() == 1
+
+    assert calls == [("get_balance_rlz_pl", {"time_budget_ms": 15_000})], calls
+
+
 def test_sync_portfolio_prices_does_not_repeat_empty_warning_for_priceless(
     portfolio_session, caplog
 ):
