@@ -665,6 +665,12 @@ async function fetchAllBalanceRlzPl() {
 async function getBalanceRlzPl({ stock_name: stockName } = {}) {
   if (isPaperTradingKisUrl(KIS_URL)) {
     const balanceText = await getBalance();
+    // 모의투자 대체 안내 문구. 주의: backend/scheduler.py의 _RLZ_PL_PAPER_FALLBACK_MARKER가
+    // 아래 "잔고 요약으로 대체했습니다" 리터럴을 문자열 매칭해 이 대체 응답을 가려낸다.
+    // 이 문구를 바꾸면 backend 감지가 조용히 무력화되어, 모의투자 배포에서 마커 부재 error가
+    // 10분마다 쌓이고 _PAPER_FALLBACK_SKIP_CYCLES의 호출 건너뛰기도 꺼진다.
+    // 이 리터럴을 JS 쪽에서 고정하는 테스트는 없으므로, 바꿔야 한다면 그 상수와
+    // backend/tests/test_scheduler.py에 인라인으로 복사된 대체 응답 문구(3곳)를 함께 고친다.
     const note =
       "\n\n[안내] 모의투자(openapivts) 계좌는 실현손익 TR(v1_국내주식-041)을 지원하지 않아 잔고 요약으로 대체했습니다.";
     return `${balanceText}${note}`;

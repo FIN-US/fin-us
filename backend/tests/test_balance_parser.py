@@ -53,7 +53,7 @@ class TestBalanceExtraction(unittest.TestCase):
         주의: 이 테스트는 파서 쪽 계약만 고정합니다. 포매터 쪽에는 "[보유 종목 리스트]"
         구간 안에서 종목 줄이 아닌 어떤 줄도 "- " 로 시작해서는 안 된다는 불변식이
         있어야 하며, 그 가드는 mcp-trading 쪽 테스트 스위트에 있어야 합니다.
-        mcp-trading/tests/order.test.js 에서, "- " 로 시작하는 종목 줄만 걸러냈을 때
+        mcp-trading/tests/balance.test.js 에서, "- " 로 시작하는 종목 줄만 걸러냈을 때
         페이지 상한 안내 문구("[안내]", "상한")가 섞여 들어오지 않는지 확인하는 테스트를
         찾아 확인하세요 — 정확한 테스트 이름 대신 이 동작을 기준으로 찾아야 테스트명이
         브랜치마다 바뀌어도 근거가 깨지지 않습니다.
@@ -253,7 +253,7 @@ class TestBalanceExtraction(unittest.TestCase):
 #   - 생성부: mcp-trading/balance.js 의 formatTruncationNote() — 사유별 reasons 맵과
 #     고정 접두/접미 리터럴("[안내] " / " 조회가 중단되어 일부 보유 종목이 위 목록에서
 #     누락되었을 수 있습니다. 실제 잔고는 별도로 확인하세요.")
-#   - 결합 고정부: mcp-trading/tests/order.test.js 의 잘림 노트 테스트가
+#   - 결합 고정부: mcp-trading/tests/balance.test.js 의 잘림 노트 테스트가
 #     `assert.match(text, /조회가 중단되어/)`로 이 리터럴을 직접 단언한다. 이 픽스처는
 #     JS 출력을 손으로 베낀 사본이라 그 자체로는 드리프트를 못 잡지만(JS가 바뀌어도
 #     통과), JS 쪽 단언이 리터럴을 고정하므로 결합이 실제로 깨진다.

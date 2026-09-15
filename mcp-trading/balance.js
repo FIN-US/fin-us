@@ -359,7 +359,7 @@ function calculateAccountReturnRate(summary, holdings) {
 //
 // 또한 backend/scheduler.py의 is_balance_truncated()가 아래 "조회가 중단되어" 리터럴을
 // 문자열 매칭해 잘림을 감지한다. 이 문구를 바꾸면 backend 감지가 조용히 무력화되므로,
-// 같은 파일 tests/order.test.js의 잘림 노트 테스트가 이 리터럴을 직접 단언해 고정한다.
+// tests/balance.test.js의 잘림 노트 테스트가 이 리터럴을 직접 단언해 고정한다.
 function formatTruncationNote(truncated, pages) {
   if (!truncated) return "";
   const reasons = {

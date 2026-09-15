@@ -3429,8 +3429,9 @@ def test_sync_portfolio_prices_treats_paper_fallback_as_no_quote(portfolio_sessi
     portfolio_session.commit()
 
     # index.js의 getBalanceRlzPl가 실제로 붙이는 문구. get_balance 리포트
-    # 뒤에 안내가 따라온다. index.js 쪽에는 이 매칭을 알리는 주석이 없으므로, 저 문구가
-    # 바뀌면 이 테스트가 유일한 조기 경보다 — scheduler.py의 표지 상수 주석 참고.
+    # 뒤에 안내가 따라온다. index.js에 역참조 주석은 있지만 양쪽 리터럴을 함께 고정하는
+    # 테스트는 없다 — 이 테스트는 복사해 둔 문구로 파이썬 쪽 매칭만 고정하므로, index.js의
+    # 문구가 바뀌어도 통과한다. scheduler.py의 표지 상수 주석 참고.
     paper_text = (
         _make_balance_text(("삼성전자", "005930", 10, 70000))
         + "\n\n[안내] 모의투자(openapivts) 계좌는 실현손익 TR(v1_국내주식-041)을 "
