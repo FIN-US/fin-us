@@ -2550,10 +2550,65 @@ async def test_poller_does_not_rerun_llm_when_nat_response_send_fails(monkeypatc
     assert settled_sleeps == list(telegram_commands.SETTLED_SEND_RETRY_BACKOFF_SECONDS)
     # 맨 앞은 진행 메시지 한 건(#260), 그 뒤가 settled 재시도만큼 반복된 답변이다.
     # 진행 메시지가 **한 번뿐**인 것이 이 테스트의 일부다 — update가 재시도됐다면
-    # _handle_chat_fallback이 처음부터 다시 돌아 진행 메시지도 매번 새로 나간다 (#275).
+    # _handle_chat_fallback이 처음부터 다시 돌아 진행 메시지도 매번 새로 나간다. LLM 실패
+    # 통지 경로의 같은 성질은 아래 테스트가 고정한다 (#259 4단계).
     assert notifier.messages == [NAT_PROGRESS_MESSAGE] + ["NAT 응답"] * (len(settled_sleeps) + 1)
     assert poller.offset == 42
     assert poller._failures == {}
+
+
+@pytest.mark.asyncio
+async def test_poller_does_not_rerun_llm_when_llm_failure_notice_send_fails(monkeypatch):
+    """LLM 실패 통지의 전송이 끝내 실패해도 update를 재시도하지 않는다 (#259 4단계, #275).
+
+    예전에는 이 통지만 재시도 가능한 전송이라, 전송 실패가 update 재시도로 번져
+    _handle_chat_fallback이 처음부터 다시 돌았다 — 진행 메시지가 새로 나가고 LLM이 다시
+    호출됐다. 지금은 답변과 같은 settled 전송이라 그 자리에서만 재시도하고 offset은 전진한다.
+
+    대가는 이 통지를 사용자가 못 받는 것이고, 그 한 건이 조용히 사라지지 않고
+    settled_send 메트릭에 남는다는 것까지 함께 고정한다 (#259 5단계).
+    """
+    calls = []
+    notifier = FakeNotifier(send_text_result=False)
+    notifier.enabled = True
+    notifier.bot_token = "token"
+
+    async def failing_llm_runner(provider, text, *, conversation_id=None):
+        calls.append((provider, text, conversation_id))
+        raise RuntimeError("LLM 장애")
+
+    handler = TelegramCommandHandler(notifier=notifier, llm_runner=failing_llm_runner)
+    settled_sleeps = _capture_settled_sleeps(monkeypatch, handler)
+    poller = _make_poller(notifier, handler=handler)
+    polls = 0
+
+    async def fake_get_updates():
+        nonlocal polls
+        polls += 1
+        if polls > 1:
+            raise asyncio.CancelledError
+        return [{"update_id": 41, "message": {"chat": {"id": 123}, "text": "질문"}}]
+
+    async def unexpected_backoff(delay):
+        raise pytest.fail.Exception(f"폴러가 재시도 대기에 들어갔다 (delay={delay})")
+
+    monkeypatch.setattr(poller, "_get_updates", fake_get_updates)
+    monkeypatch.setattr(poller, "_sleep", unexpected_backoff)
+    settled_failures_before = delivery_metrics.count("settled_send")
+
+    with pytest.raises(asyncio.CancelledError):
+        await poller.run()
+
+    assert calls == [("nat", "질문", "telegram:123")]
+    assert settled_sleeps == list(telegram_commands.SETTLED_SEND_RETRY_BACKOFF_SECONDS)
+    failure_notice = f"응답 생성 실패: {telegram_commands._short_error(RuntimeError('LLM 장애'))}"
+    # 진행 메시지는 한 번뿐이고, 그 뒤가 settled 재시도만큼 반복된 실패 통지다.
+    assert notifier.messages == [NAT_PROGRESS_MESSAGE] + [failure_notice] * (
+        len(settled_sleeps) + 1
+    )
+    assert poller.offset == 42
+    assert poller._failures == {}
+    assert delivery_metrics.count("settled_send") == settled_failures_before + 1
 
 
 # 가짜 벽시계의 기준점. monotonic 기준점(0.0)과 멀찍이 떨어뜨려야, 저장된 벽시계 값을
