@@ -762,7 +762,10 @@ async def health_check():
 
 @app.get("/api/v1/system/delivery", response_model=CommonResponse, tags=["System"])
 async def delivery_status():
-    """텔레그램 전송 최종 실패의 누적 횟수와 체결 통지 정지 상태 (#259 5단계).
+    """주문·체결 통지 경로의 텔레그램 전송 최종 실패 누적 횟수와 체결 통지 정지 상태 (#259 5단계).
+
+    세는 범위가 텔레그램 전송 전체가 아니다(delivery_alarm 모듈 독스트링, README "전송 실패
+    신호"). 0은 "이 경로들에서 실패 없음"이지 "전송 실패 없음"이 아니다.
 
     /health에 싣지 않는다. 그쪽은 /api/ 접두사 밖이라 인증 없이 열려 있고(require_api_key
     독스트링), #252 리뷰에서 내부 정보를 걷어낸 자리다. 실패 횟수와 trade_id는 키 뒤에 둔다.

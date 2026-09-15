@@ -15,6 +15,16 @@
 시작하는 줄을 남기고(``[kis-req]``와 같은 방식 — grep 한 줄로 셀 수 있다),
 ``GET /api/v1/system/delivery``가 같은 값을 돌려준다.
 
+세는 범위는 **주문·체결 통지 경로**다 — ``send_text_settled``를 거치는 모든 전송과 체결
+통지(첫 전송·재배달·마킹). ``send_text``를 직접 부르고 결과를 로그로만 남기는 경로(긴급 분석
+알림·촉매 알림·모닝 브리핑·자동 제안 거부 통지·진행 메시지·폴러의 건너뜀 안내·정지 알람 자체)는
+세지 않는다. 그 메시지들은 되살릴 근거도, 놓쳤을 때 주문 상태를 오인할 위험도 없어서다
+(촉매 알림은 자기 마킹으로 이미 재배달된다). 그래서 0이 "텔레그램 전송 실패 없음"을 뜻하지
+않는다 — README "전송 실패 신호"가 같은 말을 적는다 (PR #375 리뷰).
+
+단위는 **사용자가 받지 못한 메시지 한 건**이다. 재시도 시도마다(settled_send)나 재배달
+주기마다(fill_redelivery) 세지 않는다.
+
 **알람**(``OutboxStallTracker``)은 조건이다. 체결 통지 outbox의 맨 앞 행이 임계 시간 동안
 연속으로 실패하면 **정지 한 건에 한 번** 울리고, 그 정지가 끝날 때 어떻게 끝났는지(배달됐는가,
 창을 벗어나 포기됐는가)를 한 번 더 알린다. 실패마다 울리는 알람은 위의 error 줄과 다를 게
@@ -50,12 +60,24 @@ DeliveryFailureKind = Literal[
     # /confirm 체결 성공의 첫 전송 실패. 통지는 outbox가 받으므로 이것만으로는 사용자
     # 피해가 없다. 늘어나면 outbox가 일하고 있다는 뜻이다.
     "fill_notify",
-    # outbox 재배달 실패. 같은 행에서 이어지면 정지 알람이 된다.
+    # outbox 재배달 실패. 같은 행에서 이어지면 정지 알람이 된다. **체결 한 건당 한 번만** 센다
+    # (_COUNTED_ONCE_PER_TRADE).
     "fill_redelivery",
     # 전송은 나갔는데 notified_at 마킹이 실패한 경우. 다음 주기에 같은 체결이 한 번 더 나간다.
+    # 발생마다 센다 — 한 번의 마킹 실패가 사용자 화면에 나가는 중복 메시지 한 건이다.
     "fill_mark",
 ]
 DELIVERY_FAILURE_KINDS: tuple[DeliveryFailureKind, ...] = get_args(DeliveryFailureKind)
+
+# 같은 체결을 두 번 세지 않는 종류 (PR #375 리뷰).
+#
+# 재배달은 1분 주기로 같은 행을 다시 시도한다. 주기마다 세면 24시간 막힌 체결 한 건이 약
+# 1440건으로 부풀어, 메트릭의 단위("사용자가 못 받은 메시지")가 settled_send의 "재시도마다
+# 세지 않는다"와 어긋난다. 반복 실패가 이어지는지는 last_failed_at과 정지 알람이 말한다.
+#
+# fill_mark는 넣지 않는다. 마킹 실패는 다음 주기에 실제로 한 번 더 나가는 메시지를 예고하므로
+# 발생마다 세는 것이 같은 단위다.
+_COUNTED_ONCE_PER_TRADE: frozenset[DeliveryFailureKind] = frozenset({"fill_redelivery"})
 
 
 def _utcnow() -> datetime:
@@ -86,6 +108,9 @@ class DeliveryMetrics:
         self._last_failed_at: dict[DeliveryFailureKind, datetime | None] = {
             kind: None for kind in DELIVERY_FAILURE_KINDS
         }
+        # _COUNTED_ONCE_PER_TRADE 종류에서 이미 센 (종류, trade_id). 크기는 이 프로세스 동안
+        # 재배달에 실패한 체결 수로 묶인다 — 주문 봇의 체결 수라 비울 필요가 없다.
+        self._counted_trades: set[tuple[DeliveryFailureKind, int]] = set()
 
     def record_failure(self, kind: DeliveryFailureKind, *, trade_id: int | None = None) -> None:
         """실패 한 건을 센다.
@@ -97,8 +122,16 @@ class DeliveryMetrics:
         호출부는 전부 "예외를 올리면 안 되는" 자리다(확정된 부수효과 뒤의 전송, 스케줄러 잡).
         그래서 이 메서드는 I/O 없이 dict 갱신과 로그 한 줄로 끝난다.
         """
-        self._counts[kind] += 1
+        # 시각은 반복 실패에도 갱신한다. "아직도 실패 중인가"는 횟수가 아니라 이 값이 말한다.
         self._last_failed_at[kind] = self._now_factory()
+        if trade_id is not None and kind in _COUNTED_ONCE_PER_TRADE:
+            key = (kind, trade_id)
+            if key in self._counted_trades:
+                # 줄도 남기지 않는다. [delivery-fail] 줄 수와 API의 횟수가 같아야 grep이 곧
+                # 집계다. 매 주기의 원인 줄은 호출부의 error가 계속 남긴다.
+                return
+            self._counted_trades.add(key)
+        self._counts[kind] += 1
         suffix = "" if trade_id is None else f" trade_id={trade_id}"
         logger.warning("[delivery-fail] kind=%s count=%d%s", kind, self._counts[kind], suffix)
 

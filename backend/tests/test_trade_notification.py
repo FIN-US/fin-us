@@ -562,7 +562,12 @@ async def test_stall_alarm_is_sent_once_even_when_it_fails_to_send(caplog):
 
 @pytest.mark.asyncio
 async def test_task_counts_redelivery_and_marking_failures():
-    await _run_task(FakeRepo([_pending(7)]), FakeNotifier(results=[False]))
+    """막힌 체결은 주기마다가 아니라 한 번 센다 (PR #375 리뷰)."""
+    failing = FakeRepo([_pending(7)])
+    notifier = FakeNotifier(results=[False] * 3)
+    for minutes in (0, 1, 2):
+        await _run_task_at(failing, notifier, timedelta(minutes=minutes))
+    assert len(notifier.messages) == 3  # 매 주기 실제로 다시 시도했다
     await _run_task(FakeRepo([_pending(8)], mark_error=RuntimeError("db locked")), FakeNotifier())
 
     assert delivery_metrics.count("fill_redelivery") == 1

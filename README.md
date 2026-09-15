@@ -304,9 +304,9 @@ Backend는 `GET /api/v1/disclosures?stock=삼성전자`로 DART 지분공시 sig
 
 ### 전송 실패 신호
 
-텔레그램 전송이 끝내 실패하면 두 종류의 줄이 backend 로그에 남습니다(#259).
+주문·체결 통지 경로의 텔레그램 전송이 끝내 실패하면 두 종류의 줄이 backend 로그에 남습니다(#259).
 
-- `[delivery-fail] kind=... count=...` — 실패 한 건마다 한 줄. `kind`는 `settled_send`(주문 프롬프트·취소 확인·분석 답변 등), `fill_notify`(체결 통지 첫 전송), `fill_redelivery`(체결 통지 재배달), `fill_mark`(전송 후 통지 완료 기록 실패 — 같은 통지가 한 번 더 나갈 수 있음)입니다.
+- `[delivery-fail] kind=... count=...` — 사용자가 받지 못한 메시지 한 건마다 한 줄. `kind`는 `settled_send`(주문 프롬프트·취소 확인·분석 답변·자동 제안 승인 요청 등), `fill_notify`(체결 통지 첫 전송), `fill_redelivery`(체결 통지 재배달 — 1분마다 다시 시도해도 **체결 한 건당 한 번**), `fill_mark`(전송 후 통지 완료 기록 실패 — 같은 통지가 한 번 더 나가므로 발생마다)입니다.
 - `[delivery-alarm] kind=stalled|delivered|expired|cleared` — 체결 통지 재배달이 **같은 체결에서 10분 연속** 실패하면 `stalled`가 한 번 울리고, 그 체결이 결국 배달되면 `delivered`, 24시간 창을 벗어나 포기되면 `expired`가 남습니다. `stalled`·`expired`는 텔레그램으로도 한 번 알립니다(종목명 없이 체결 시각만).
 
 ```bash
@@ -314,6 +314,8 @@ docker compose logs -f --no-log-prefix backend | grep -E '\[delivery-(fail|alarm
 ```
 
 누적 횟수와 현재 정지 상태는 `GET /api/v1/system/delivery`(API 키 필요)로도 볼 수 있습니다. 값은 backend 프로세스가 뜬 뒤로 센 것이며, 응답의 `started_at`이 그 시점입니다.
+
+**세지 않는 전송도 있습니다.** 긴급 분석 알림·촉매 이벤트 알림·모닝 브리핑·자동 제안 거부 통지·자연어 답변의 진행 메시지·폴러의 요청 건너뜀 안내, 그리고 정지 알람 자체는 실패해도 위 횟수에 들어가지 않고 각자의 에러 로그만 남깁니다. API가 0을 돌려줘도 텔레그램 전송 전체가 성공했다는 뜻은 아닙니다.
 
 <a id="telegram-test" name="telegram-test"></a>
 

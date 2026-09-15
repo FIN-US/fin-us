@@ -165,7 +165,7 @@ def test_record_failure_counts_per_kind_and_leaves_a_countable_line(caplog):
 
     with caplog.at_level(logging.WARNING, logger="backend.delivery_alarm"):
         metrics.record_failure("fill_redelivery", trade_id=7)
-        metrics.record_failure("fill_redelivery", trade_id=7)
+        metrics.record_failure("fill_redelivery", trade_id=8)
         metrics.record_failure("settled_send")
 
     assert metrics.count("fill_redelivery") == 2
@@ -174,9 +174,36 @@ def test_record_failure_counts_per_kind_and_leaves_a_countable_line(caplog):
     lines = [record.getMessage() for record in caplog.records]
     assert lines == [
         "[delivery-fail] kind=fill_redelivery count=1 trade_id=7",
-        "[delivery-fail] kind=fill_redelivery count=2 trade_id=7",
+        "[delivery-fail] kind=fill_redelivery count=2 trade_id=8",
         "[delivery-fail] kind=settled_send count=1",
     ]
+
+
+def test_redelivery_failure_is_counted_once_per_trade(caplog):
+    """재배달은 1분마다 같은 행을 다시 시도한다 (PR #375 리뷰).
+
+    주기마다 세면 24시간 막힌 체결 한 건이 약 1440건으로 부푼다. 반면 마킹 실패는 매번
+    사용자 화면에 중복 메시지 한 건을 만들므로 발생마다 센다 — 둘을 같은 규칙으로 묶으면
+    한쪽 단위가 깨진다.
+    """
+    clock = [NOW]
+    metrics = DeliveryMetrics(now_factory=lambda: clock[0])
+
+    with caplog.at_level(logging.WARNING, logger="backend.delivery_alarm"):
+        metrics.record_failure("fill_redelivery", trade_id=7)
+        clock[0] = NOW + timedelta(minutes=5)
+        metrics.record_failure("fill_redelivery", trade_id=7)
+        metrics.record_failure("fill_mark", trade_id=7)
+        metrics.record_failure("fill_mark", trade_id=7)
+
+    assert metrics.count("fill_redelivery") == 1
+    assert metrics.count("fill_mark") == 2
+    # grep 한 줄이 곧 한 건이어야 로그 집계와 API 값이 같다.
+    assert len([r for r in caplog.records if "[delivery-fail]" in r.getMessage()]) == 3
+    # 횟수는 그대로여도 "아직 실패 중"은 시각이 말한다.
+    failures = metrics.snapshot()["failures"]
+    assert isinstance(failures, dict)
+    assert failures["fill_redelivery"]["last_failed_at"] == clock[0].isoformat()
 
 
 def test_snapshot_carries_when_counting_started():
