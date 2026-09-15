@@ -569,3 +569,124 @@ def test_agent_references_expected_prompt_file(yaml_name: str, function_name: st
         f"{yaml_name}::{function_name}: system_prompt는 'file://../prompts/{prompt_file}' 여야 합니다. "
         f"실제: {system_prompt!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# #380 전수 스캔 가드 — 어떤 설정도 주문 가능한 도구에 닿지 않는다
+# ---------------------------------------------------------------------------
+#
+# 위 참조 고정(_AGENT_KIS_TOOL_REFS)은 **아는 에이전트·아는 이름**만 본다. 새 에이전트 YAML을
+# 추가하거나 전체 권한 타입을 다른 이름으로 등록하면 그대로 green이다. 여기서는 configs/
+# 아래 YAML을 **전부** 로드해 등록된 함수 하나하나의 타입을 본다.
+
+# 새 파일이 생기면 자동으로 스캔 대상이 된다. 목록을 손으로 적지 않는 것이 이 가드의 요점이다.
+_SCANNED_CONFIG_FILES = sorted(CONFIGS_ROOT.rglob("*.yml"))
+
+# 주문을 낼 수 없다고 **검토한** 함수 타입(`_type`). fail-closed다 — 여기 없는 타입이 설정에
+# 나타나면 실패한다. 새 도구 타입을 붙일 때는 그 도구가 주문(또는 주문 도구 호출)에 닿는지
+# 확인하고 근거와 함께 여기에 추가한다. 전체 권한 KIS 래퍼 finus_account_balance는 **넣지
+# 않는다** — 주문 가능한 유일한 타입이다(#380).
+_REVIEWED_NON_ORDER_TYPES = {
+    # KIS Trading MCP 조회 전용 — tool_name·api_type 허용 목록 fail-closed (#66, #380)
+    "finus_account_balance_readonly",
+    # fin-us/mcp-trading stdio — 호출할 MCP 도구 이름을 코드에 고정한 조회(place_order에 닿지 않는다)
+    "finus_mcp_trading_get_balance",
+    "finus_mcp_trading_balance_rlz_pl",
+    "finus_mcp_trading_today_orders",
+    # 공개 정보 MCP(뉴스·공시·실적)
+    "finus_market_news",
+    "finus_disclosure_signal",
+    "finus_earnings_report",
+    # backend 매매일지 — DB에 쓰지만 주문이 아니다
+    "finus_save_diary",
+    "finus_list_diaries",
+    # 메모리
+    "add_memory",
+    "get_memory",
+    "finus_memory_disabled",
+    "auto_memory_agent",
+    # 에이전트·라우팅 래퍼 — 스스로 외부를 부르지 않고 tool_names의 도구만 부른다(아래에서 따로 검사)
+    "react_agent",
+    "fe_branch",
+    "finus_supervisor_agent",
+    "finus_sqlite_transcript_agent",
+    "finus_reasoning_trace_agent",
+    # 주문 검증자(#299) — 도구 없이 판정만 돌려준다
+    "finus_order_verifier",
+    # agents/*.yml 단독 로드 시의 빈 workflow
+    "EmptyFunctionConfig",
+}
+
+
+def _registered_components(config) -> list[tuple[str, str, object]]:
+    """(구역, 이름, 설정) — 함수·함수 그룹·workflow 전부. 함수 그룹(MCP 클라이언트 등)도
+    MCP 도구를 에이전트에 직접 노출할 수 있어 같이 본다."""
+    items: list[tuple[str, str, object]] = [
+        ("functions", str(name), fn) for name, fn in (config.functions or {}).items()
+    ]
+    items += [("function_groups", str(name), fg) for name, fg in (config.function_groups or {}).items()]
+    items.append(("workflow", "workflow", config.workflow))
+    return items
+
+
+def test_config_scan_is_not_empty():
+    """스캔 대상이 0개면 아래 파라미터 테스트는 **skip**으로 조용히 사라진다 — 여기서 실패시킨다.
+
+    뮤테이션: ``_SCANNED_CONFIG_FILES``의 glob을 ``*.yaml``로 바꾸면 red.
+    """
+    scanned = set(_SCANNED_CONFIG_FILES)
+    expected = {CONFIGS_ROOT / "common.yml", *_ROUTER_PATHS, *(path for path, _ in DIRECT_AGENT_CONFIGS)}
+    assert expected <= scanned, f"스캔에서 빠진 프로덕션 설정: {sorted(p.name for p in expected - scanned)}"
+
+
+@pytest.mark.parametrize(
+    "config_path", _SCANNED_CONFIG_FILES, ids=[str(p.relative_to(CONFIGS_ROOT)) for p in _SCANNED_CONFIG_FILES]
+)
+def test_no_config_can_reach_an_order_capable_tool(config_path: Path):
+    """#380: 어떤 설정도 주문 가능한 도구를 등록하거나 참조하지 않는다.
+
+    세 가지를 본다.
+
+    1. 등록된 함수가 전체 권한 KIS 래퍼(``FinusAccountBalanceConfig``이면서 조회 전용
+       서브클래스가 아님)가 아니다 — 이름과 무관하게 타입으로 판정한다.
+    2. 모든 타입이 검토 목록(``_REVIEWED_NON_ORDER_TYPES``)에 있다 — 주문할 수 있는 새 도구
+       타입이 검토 없이 들어오지 못한다.
+    3. 에이전트의 ``tool_names``가 전부 이 설정에 등록된 이름이다 — ``kis-trading-mcp-tool``처럼
+       등록이 사라진 이름을 참조하면 로드는 되지만 빌드에서야 터지므로 여기서 잡는다.
+
+    뮤테이션: common.yml에 ``kis-order-tool: {_type: finus_account_balance, …}``을 다시 넣으면
+    8개 설정 전부 red. ``agents/``에 같은 등록만 담은 새 YAML을 추가해도 그 파일이 red.
+    trading_agent.yml의 tool_names를 ``kis-trading-mcp-tool``로 되돌리면 3번에서 red.
+    """
+    import nat_finus_nat.register  # noqa: F401
+    from nat.runtime.loader import load_config
+    from nat_finus_nat.finus_api import FinusAccountBalanceConfig, FinusAccountBalanceReadonlyConfig
+
+    config = load_config(config_path)
+    components = _registered_components(config)
+
+    order_capable = [
+        f"{section}:{name}"
+        for section, name, cfg in components
+        if isinstance(cfg, FinusAccountBalanceConfig) and not isinstance(cfg, FinusAccountBalanceReadonlyConfig)
+    ]
+    assert not order_capable, f"주문 가능한 전체 권한 KIS 래퍼가 등록돼 있습니다: {order_capable}"
+
+    unreviewed = sorted(
+        f"{section}:{name} (_type={type(cfg).static_type()})"
+        for section, name, cfg in components
+        if type(cfg).static_type() not in _REVIEWED_NON_ORDER_TYPES
+    )
+    assert not unreviewed, (
+        f"주문 가능 여부를 검토하지 않은 도구 타입: {unreviewed}. 주문에 닿지 않는지 확인한 뒤 "
+        "_REVIEWED_NON_ORDER_TYPES에 근거와 함께 추가하세요."
+    )
+
+    registered = {name for section, name, _ in components if section != "workflow"}
+    dangling = sorted(
+        f"{name} -> {tool}"
+        for section, name, cfg in components
+        for tool in (str(t) for t in getattr(cfg, "tool_names", None) or [])
+        if tool not in registered
+    )
+    assert not dangling, f"등록되지 않은 도구를 참조하는 에이전트: {dangling}"

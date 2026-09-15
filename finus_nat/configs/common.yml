@@ -12,9 +12,10 @@ functions:
   # 전체 권한 래퍼(_type: finus_account_balance, 주문 가능)는 **어디에도 등록하지 않는다**
   # (#380). 등록해 두면 tool_names에 이름 한 줄만 붙여도 backend 하드 한도·확정 버튼을
   # 전부 우회하는 주문 권한이 되살아난다 — 조회 전용과 이름이 접미사 하나 차이라 실수하기
-  # 쉽다. 등록이 없으면 그 참조는 설정 로드 시점에 "없는 함수"로 실패한다. 주문은 텔레그램
-  # /buy·/sell·/advise(확정 버튼 경로)로만 나간다. 어떤 설정도 이 타입을 싣지 않는다는 것은
-  # finus_nat/tests/test_agent_configs.py의 전수 스캔이 지킨다.
+  # 쉽다. 등록이 없으면 그 참조는 워크플로를 빌드할 때 "없는 함수"로 실패한다. 주문은
+  # 텔레그램 /buy·/sell·/advise(확정 버튼 경로)로만 나간다. 어떤 설정도 이 타입을 싣지 않고
+  # 등록되지 않은 도구를 참조하지 않는다는 것은 finus_nat/tests/test_agent_configs.py의
+  # 전수 스캔(test_no_config_can_reach_an_order_capable_tool)이 지킨다.
   kis-trading-mcp-tool-readonly:
     _type: finus_account_balance_readonly
     mcp_transport: sse
