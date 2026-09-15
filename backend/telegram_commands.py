@@ -1595,6 +1595,10 @@ class TelegramCommandHandler:
         # "확정할 대기 주문이 없습니다"로 체결을 오표시할 뿐이다. 그래서 전송보다 먼저 폴러가
         # offset을 영속화하게 한다.
         #
+        # 대가: 영속화 대기가 전송 뒤에서 앞으로 옮겨 왔다. redis가 멈추면 "주문 완료"가
+        # 최대 STATE_STORE_TIMEOUT_SECONDS(3초)만큼 늦게 나간다(PR #376 리뷰). 상한이 있고
+        # 저장 실패는 삼켜지므로 통지 자체를 막지는 않는다.
+        #
         # 기록 뒤여야 한다. 위 기록 실패 경로는 원장이 없어 먼저 확정하면 그 경로에서 죽을 때
         # 무응답이 되므로 확정하지 않는다. 나머지 settled 경로(/buy 프롬프트·/cancel·403·
         # 불명확)도 같은 이유로 여기에 넣지 않았다 — 되살릴 원장이 없는 메시지에서 먼저
@@ -1604,11 +1608,11 @@ class TelegramCommandHandler:
         try:
             sent = await self.notifier.send_text(f"주문 완료: {result.message}")
         except Exception as exc:
-            # 이 경로가 예외를 올리면 폴러가 update를 재실행하고, claim이 비어 체결된 주문이
-            # "확정할 대기 주문이 없습니다"로 오표시된다 (#247). 실제 notifier는 실패를
-            # False로 접어 오지만 계약을 여기서 닫는다 — _handle_one_update의 독스트링이
-            # "확정 뒤의 전송은 예외를 던지지 않는다"에 기대고 있고, _send_text_settled를
-            # 걷어내면서 그 보장을 대신 서 주던 자리도 함께 사라졌다.
+            # 예외를 여기서 받는 이유는 재실행 방지가 아니다 — 위에서 이미 확정했으므로 예외가
+            # 올라가도 폴러는 COMMITTED로 받아 재실행하지 않는다(#259 3단계). 받는 이유는
+            # 실패의 흔적이다: 올려 보내면 폴러의 일반 로그 한 줄로 끝나 trade_id와
+            # delivery_metrics 집계가 남지 않는다. 실제 notifier는 실패를 False로 접어 오므로
+            # 아래 sent is False 분기와 같은 기록을 남긴다.
             #
             # CancelledError는 BaseException이라 여기 걸리지 않는다. 폴러의 graceful
             # shutdown이 막히지 않고, 그 경우 행은 미통지로 남아 재시작 뒤 배달된다.
@@ -2456,11 +2460,14 @@ class TelegramCommandPoller:
         update: dict[str, Any],
         update_id: Any,
     ) -> _UpdateOutcome:
-        """update 처리 결과를 반환한다: 완료 / 재시도 대기 / 예산 소진 후 스킵 (#241).
+        """update 처리 결과를 반환한다: 완료 / 재시도 대기 / 예산 소진 후 스킵 / 처리 도중 확정
+        (#241, #259 3단계).
 
         재시도는 handle_update가 멱등하다는 전제 위에 있고, 그 전제는 핸들러가 지킨다:
         부수효과가 확정된 뒤의 전송은 예외를 던지지 않으므로 여기까지 오지 않는다. 즉
-        재실행되는 것은 부수효과 이전 구간뿐이다 (#247). 그 전송이 실패했을 때 무엇으로
+        재실행되는 것은 부수효과 이전 구간뿐이다 (#247). /confirm 체결 성공은 이 전제에 기대지
+        않는다 — 전송 전에 _update_settled_hook으로 확정하므로, 그 뒤의 예외는 아래 committed
+        분기가 COMMITTED로 받아 재시도하지 않는다. 그 전송이 실패했을 때 무엇으로
         되살리는지는 경로마다 다르다 — /confirm 체결 성공은 원장에 남은 미통지 행과
         scheduler.trade_notification_task가 받고(#259 2단계), 나머지 settled 경로는
         _send_text_settled의 인플레이스 재시도가 전부다.
