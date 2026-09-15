@@ -1082,6 +1082,13 @@ async def _llm_nat_chat(user_msg: str, *, conversation_id: str | None = None) ->
     return NatAnswer(message, routed_agent=routed_agent, tools_used=tools_used)
 
 
+# run_mcp_tool 호출 전체(서브프로세스 기동·핸드셰이크 포함)의 벽시계 상한(초). 무기한 블로킹을
+# 막는다. 연속조회 도구에 이보다 짧은 예산을 넘기는 호출자가 이 값에 기대므로
+# (scheduler._RLZ_PL_TIME_BUDGET_MS, mcp-trading/balance.js의 BALANCE_TIME_BUDGET_MS)
+# 바꾸면 그 산정도 함께 본다. 시세 갱신 쪽 관계는 test_scheduler.py가 고정한다(#369).
+MCP_TOOL_TIMEOUT_SECONDS = 30.0
+
+
 async def run_mcp_tool(
     server_params: StdioServerParameters,
     tool_name: str,
@@ -1104,13 +1111,13 @@ async def run_mcp_tool(
                 return getattr(block, "text", str(block))
 
     try:
-        # MCP 서브프로세스 호출에 30초 타임아웃 적용 — 무기한 블로킹 방지
-        return await asyncio.wait_for(_call(), timeout=30.0)
+        # MCP 서브프로세스 호출에 타임아웃 적용 — 무기한 블로킹 방지
+        return await asyncio.wait_for(_call(), timeout=MCP_TOOL_TIMEOUT_SECONDS)
     except asyncio.TimeoutError as exc:
         logger.error("MCP call_tool timed out for %s", tool_name)
         raise HTTPException(
             status_code=504,
-            detail=f"데이터 공급원({tool_name}) 응답 타임아웃 (30초)",
+            detail=f"데이터 공급원({tool_name}) 응답 타임아웃 ({MCP_TOOL_TIMEOUT_SECONDS:g}초)",
         ) from exc
     except HTTPException:
         raise

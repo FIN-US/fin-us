@@ -55,7 +55,7 @@ test("registers trading tools with preserved required schemas", async () => {
 });
 
 // 이슈 #369: time_budget_ms는 backend 스케줄러(run_mcp_tool 30초)가 연속조회 예산을 낮추려고
-// 넘기는 인자다. 도구 스키마는 LLM에도 노출되므로 줄이는 방향만 받는다 — 상한과 기본값이
+// 넘기는 인자다. 도구 스키마는 LLM에 노출될 수 있으므로 줄이는 방향만 받는다 — 상한과 기본값이
 // 같은 90초(NAT 120초 호출자 기준)다. 생략 가능해야 stock_name만 넘기는 NAT 경로
 // (finus_nat의 finus_api.py)가 그대로다.
 test("get_balance_rlz_pl exposes time_budget_ms as an optional reduce-only integer", async () => {

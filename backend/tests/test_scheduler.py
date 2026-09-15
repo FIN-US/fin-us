@@ -1350,6 +1350,7 @@ def reset_balance_failure_streak(monkeypatch):
     monkeypatch.setattr("backend.scheduler._codeless_streak", 0)
     monkeypatch.setattr("backend.scheduler._paper_fallback_streak", 0)
     monkeypatch.setattr("backend.scheduler._paper_fallback_skip_remaining", 0)
+    monkeypatch.setattr("backend.scheduler._rlz_truncation_streak", 0)
 
 
 def _make_balance_failure_mocks(monkeypatch, mock_run_mcp_tool_fn):
@@ -3528,10 +3529,10 @@ async def test_refresh_portfolio_prices_passes_time_budget_within_call_timeout(m
 
     run_mcp_tool은 30초에서 끊는다(backend/services.py). 인자를 빼면 도구가 NAT 기준
     90초 예산으로 돌아, 연속조회가 30초를 넘는 계좌는 잘림 안내 대신 504 타임아웃으로
-    빠진다. 값의 근거(15 + 8 + 2 = 25초)는 _RLZ_PL_TIME_BUDGET_MS 주석에 있다.
+    빠진다. 값의 근거(18 + 8 + 2 = 28초)는 _RLZ_PL_TIME_BUDGET_MS 주석에 있다.
 
-    상수를 import해 비교하지 않고 15000을 직접 적는다 — 상수를 30초 이상으로 올리는
-    회귀도 이 테스트가 잡아야 하기 때문이다.
+    상수를 import해 비교하지 않고 18000을 직접 적는다 — 값이 조용히 바뀌는 회귀를
+    잡기 위해서다. 호출 타임아웃과의 관계는 아래 부등식 테스트가 따로 본다.
 
     이 테스트가 잡는 mutation: 인자 없이 {}로 부르는 회귀(#369 이전), 인자 이름을
     바꾸는 회귀(도구 스키마가 모르는 키는 버려져 90초 예산으로 돈다), 값을 바꾸는 회귀.
@@ -3551,7 +3552,116 @@ async def test_refresh_portfolio_prices_passes_time_budget_within_call_timeout(m
 
     assert await _refresh_portfolio_prices() == 1
 
-    assert calls == [("get_balance_rlz_pl", {"time_budget_ms": 15_000})], calls
+    assert calls == [("get_balance_rlz_pl", {"time_budget_ms": 18_000})], calls
+
+
+def test_rlz_pl_time_budget_fits_inside_mcp_call_timeout():
+    """시세 갱신 예산 + 진행 중 요청 1회 + 기동이 run_mcp_tool 호출 타임아웃보다 짧다 (#369).
+
+    이 관계를 벗어나면 연속조회가 긴 계좌는 잘림 안내 대신 504로 빠진다. 값만 고정한 위
+    테스트는 호출 타임아웃(services.py)이나 kisAxios 타임아웃(index.js)이 바뀌어도 초록이라
+    (PR #378 리뷰), 세 값을 각자의 출처에서 읽어 부등식을 단언한다.
+
+    kisAxios 타임아웃은 index.js 소스에서 읽는다 — index.js는 import 시점에 stdio 서버를
+    띄워 불러올 수 없고, 값을 여기 베껴 두면 JS만 바뀌는 드리프트를 못 잡는다. 기동 2초는
+    실측(0.55~0.67초)보다 보수적으로 둔 여유다(_RLZ_PL_TIME_BUDGET_MS 주석).
+
+    이 테스트가 잡는 mutation: MCP_TOOL_TIMEOUT_SECONDS를 20으로 내림, kisAxios 타임아웃을
+    15초로 올림, 예산을 25초로 올림.
+    """
+    import re
+    from pathlib import Path
+
+    from ..scheduler import _RLZ_PL_TIME_BUDGET_MS
+    from ..services import MCP_TOOL_TIMEOUT_SECONDS
+
+    index_js = (Path(__file__).resolve().parents[2] / "mcp-trading" / "index.js").read_text(
+        encoding="utf-8"
+    )
+    match = re.search(r"const kisAxios = axios\.create\(\{ timeout: (\d+) \}\);", index_js)
+    assert match, "index.js의 kisAxios 타임아웃 선언을 찾지 못했다 — 선언 모양이 바뀌면 이 테스트도 고친다"
+    kis_request_timeout_s = int(match.group(1)) / 1000
+    spawn_allowance_s = 2.0
+
+    worst_case_s = _RLZ_PL_TIME_BUDGET_MS / 1000 + kis_request_timeout_s + spawn_allowance_s
+    assert worst_case_s < MCP_TOOL_TIMEOUT_SECONDS, (
+        f"예산 {_RLZ_PL_TIME_BUDGET_MS}ms + 요청 {kis_request_timeout_s}s + 기동 "
+        f"{spawn_allowance_s}s = {worst_case_s}s가 호출 타임아웃 {MCP_TOOL_TIMEOUT_SECONDS}s 이상이다"
+    )
+
+
+@pytest.mark.parametrize(
+    "reason_text",
+    ["페이지 상한(20회)에 도달하여", "조회 시간 예산을 초과하여"],
+)
+def test_sync_portfolio_prices_truncation_warning_carries_reason(
+    portfolio_session, caplog, reason_text
+):
+    """실현손익 잘림 경고는 JS 안내 줄을 그대로 실어 사유를 드러낸다 (#369, PR #378 리뷰).
+
+    #369의 목표는 시세를 못 얻는 원인이 로그에서 "예산 초과"로 읽히는 것이다. 고정 문구만
+    남기면 time_budget·max_pages·error를 구분할 수 없다. 잔고 잘림 경고와 같은 방식이다.
+
+    공유 픽스처의 잘림 응답(max_pages)과, 그 사유만 시간 예산 문구로 바꾼 응답을 쓴다. 시간
+    예산 문구는 balance-rlz-pl-report.js의 reasons.time_budget이고, 도구가 실제로 그 줄을
+    내는 것은 mcp-trading의 time_budget_ms 배선 테스트(page-delay-env-wiring.test.js)가 고정한다.
+
+    이 테스트가 잡는 mutation: 경고를 사유 없는 고정 문구로 되돌리는 회귀, 안내 줄 추출이
+    빈 문자열을 돌려주는 회귀.
+    """
+    import logging
+
+    from ..scheduler import _sync_portfolio_prices_from_rlz_pl
+
+    report_text = _rlz_pl_text("truncated").replace("페이지 상한(20회)에 도달하여", reason_text)
+    assert reason_text in report_text
+
+    with caplog.at_level(logging.WARNING, logger="backend.scheduler"):
+        assert _sync_portfolio_prices_from_rlz_pl(report_text, portfolio_session) is None
+
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any(reason_text in m and "조회가 중단되어" in m for m in warnings), warnings
+
+
+def test_sync_portfolio_prices_suppresses_repeated_truncation_warning(portfolio_session, caplog):
+    """매 주기 잘리는 계좌의 경고는 연속 횟수로 억제하고, 잘리지 않은 응답이 오면 다시 센다.
+
+    #369에서 예산을 18초로 낮추면 연속조회가 그보다 긴 계좌는 매 주기 잘린다. 그 계좌가 전에
+    빠지던 504 실패 경로는 _quote_failure_streak로 억제돼 있었으므로, 억제 없는 잘림 경고는
+    이 변경이 새로 만드는 10분마다의 warning이다.
+
+    이 테스트가 잡는 mutation: 억제를 걷어 내 매번 warning(7회 중 7건), 첫 회를 삼키는
+    회귀(1회차가 debug), 잘리지 않은 응답에서 카운터를 되돌리지 않는 회귀(8회차가 억제됨).
+    """
+    import logging
+
+    from .. import scheduler as scheduler_module
+    from ..scheduler import _sync_portfolio_prices_from_rlz_pl
+
+    truncated_text = _rlz_pl_text("truncated")
+
+    def _truncation_warnings():
+        return [
+            r.getMessage() for r in caplog.records
+            if r.levelno == logging.WARNING and "실현손익 연속조회가 잘려" in r.getMessage()
+        ]
+
+    with caplog.at_level(logging.DEBUG, logger="backend.scheduler"):
+        for _ in range(7):
+            assert _sync_portfolio_prices_from_rlz_pl(truncated_text, portfolio_session) is None
+
+    warnings = _truncation_warnings()
+    assert len(warnings) == 2, warnings
+    assert "1회 연속" in warnings[0]
+    assert "6회 연속" in warnings[1]
+
+    # 잘리지 않은 응답(보유 0건)이 오면 카운터가 되돌아가 다음 잘림은 다시 첫 회로 올라온다.
+    assert _sync_portfolio_prices_from_rlz_pl(_rlz_pl_text("empty"), portfolio_session) == 0
+    assert scheduler_module._rlz_truncation_streak == 0
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG, logger="backend.scheduler"):
+        assert _sync_portfolio_prices_from_rlz_pl(truncated_text, portfolio_session) is None
+    assert len(_truncation_warnings()) == 1
 
 
 def test_sync_portfolio_prices_does_not_repeat_empty_warning_for_priceless(

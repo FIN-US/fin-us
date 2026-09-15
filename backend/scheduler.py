@@ -271,6 +271,23 @@ def is_balance_truncated(balance_text: str) -> bool:
     return _BALANCE_TRUNCATION_MARKER in balance_text
 
 
+def truncation_notice(report_text: str) -> str:
+    """잘림 안내 줄("[안내] <사유> 조회가 중단되어 ...")을 그대로 돌려줍니다. 없으면 "".
+
+    잘림 사유(time_budget/max_pages/error/...)마다 운영 대응이 다르므로 경고에 이 줄을
+    싣는다. 사유 문자열을 따로 파싱하지 않으므로 JS에 새 사유가 추가돼도 따라간다.
+    잔고(balance.js)와 실현손익(balance-rlz-pl-report.js) 두 포맷이 같은 판별자를 쓴다.
+    """
+    return next(
+        (
+            line.strip()
+            for line in report_text.splitlines()
+            if _BALANCE_TRUNCATION_MARKER in line
+        ),
+        "",
+    )
+
+
 # balance.js formatBalanceReport()의 종목 줄 형식에서 수량과 평단가를 추출하는 정규식.
 #
 # 수량(hldg_qty): "- 삼성전자 (005930) · 3주" 줄 끝의 "N주" 부분.
@@ -365,24 +382,36 @@ _RLZ_PL_PRICE_RE = re.compile(r"현재가\s+([\d,]+(?:\.\d+)?)원")
 # get_balance_rlz_pl에 도구 인자 time_budget_ms로 넘기는 연속조회 시간 예산(ms) — #369.
 #
 # 도구의 기본 예산은 NAT의 120초 호출자를 기준으로 잡은 90초다(mcp-trading/index.js의
-# BALANCE_RLZ_PL_TIME_BUDGET_MS). 이 호출은 run_mcp_tool(backend/services.py)이 30초에서
-# 끊으므로, 기본 예산으로 부르면 연속조회가 30초를 넘는 계좌에서 JS가 잘림 안내를 내기 전에
-# 타임아웃이 나고 잘림 가드가 아니라 실패 경로(504)로 빠져 매 주기 시세를 얻지 못한다.
-# 예산을 30초 안으로 낮추면 그 계좌는 잘림 안내를 받고, _sync_portfolio_prices_from_rlz_pl의
-# 잘림 가드가 "부분 응답이라 쓰지 않는다"는 원인 그대로의 warning을 남긴다.
+# BALANCE_RLZ_PL_TIME_BUDGET_MS). 이 호출은 run_mcp_tool이 MCP_TOOL_TIMEOUT_SECONDS(30초,
+# backend/services.py)에서 끊으므로, 기본 예산으로 부르면 연속조회가 30초를 넘는 계좌는 JS가
+# 잘림 안내를 내기 전에 서브프로세스째 끊겨 504 실패로 빠진다. 예산을 30초 안으로 낮추면 그
+# 계좌는 예산에서 멈춰 잘림 안내를 받고, _sync_portfolio_prices_from_rlz_pl의 잘림 경고가
+# 사유("조회 시간 예산을 초과하여")를 그대로 싣는다. 시세를 못 얻는 결과는 504 때와 같다 —
+# 잘린 응답은 쓰지 않는다. 달라지는 것은 원인이 로그에 드러나고, 호출이 30초 타임아웃이
+# 아니라 예산 근처에서 끝난다는 점이다.
 #
-# 값은 get_balance의 BALANCE_TIME_BUDGET_MS(mcp-trading/balance.js)와 같은 15초이고 근거도
-# 같다. 예산 판정은 페이지 경계에서만 하므로 판정 직전에 나간 요청 1회가 kisAxios 타임아웃
-# (8초)만큼 더 걸릴 수 있고, MCP 서브프로세스 기동·핸드셰이크(~1-2초)를 더해도
-# 15 + 8 + 2 = 25초로 30초 안에 든다. 도구가 받는 범위는 1,000~90,000ms 정수다(범위 밖이면
-# 도구가 거부해 실패 경로로 빠진다).
+# 값: 30초에서 판정 직전에 나간 요청 1회의 kisAxios 타임아웃(8초)과 서브프로세스
+# 기동·핸드셰이크(2초)를 빼면 20초이고, 2초를 남겨 18초로 잡았다. 예산 판정은 페이지
+# 경계에서만 하므로 최악은 18 + 8 + 2 = 28초다. 기동 2초는 보수적 추정이다 — backend와 같은
+# 경로(TRADING_MCP_PARAMS + stdio_client)로 로컬(Windows)에서 잰 기동·핸드셰이크는
+# 0.55~0.67초였다(8회, PR #378 리뷰 반영 때 실측). "예산 + 8초 + 2초 < 호출 타임아웃"은
+# test_scheduler.py가 세 값을 읽어 고정한다. 도구가 받는 범위는 1,000~90,000ms 정수다.
 #
-# 페이지 간 지연(KIS_BALANCE_RLZ_PL_PAGE_DELAY_MS)이 있으면 최악은 15초 + max(8초, 지연) +
+# 대가(PR #378 리뷰): 기본 예산으로는 약 28초까지 끝나던 연속조회가 이제 18초에서 잘린다.
+# 연속조회가 18~28초 걸리는 계좌는 전에는 받던 시세를 매 주기 못 받고, TTL(30분)이 지나면
+# price_known=false로 남는다. 같은 30초 상한 아래의 get_balance 선례(balance.js의
+# BALANCE_TIME_BUDGET_MS, 15초)보다 여유를 더 써서 18초로 잡은 것은 이 구간을 좁히기 위해서다.
+#
+# 제외한 경우: 토큰이 판정 경계에서 만료되면 kisApiGet이 GET 앞에 토큰 발급(최대 8초)을
+# 붙이고, 발급 락 경합이면 DEFAULT_LOCK_WAIT_MS(10초, mcp-trading/token-cache.js)가 더 붙어
+# 30초를 넘을 수 있다. 드물고, balance.js의 15초 산정도 같은 전제를 둔다.
+#
+# 페이지 간 지연(KIS_BALANCE_RLZ_PL_PAGE_DELAY_MS)이 있으면 최악은 18초 + max(8초, 지연) +
 # 기동이다. fetchAllPaged가 대기 뒤 예산을 다시 봐서(#307) 예산이 끝난 뒤에는 요청을 내지
-# 않지만, 이미 들어간 대기는 끝까지 기다린다. 기본값 0이나 8초 이하 지연이면 위 25초가
-# 그대로다. 그 env의 상한은 도구 기본 예산(90초) 기준이라 약 13초를 넘는 지연도 받아들여지고,
-# 그런 설정에서는 이 호출이 여전히 30초에 걸릴 수 있다.
-_RLZ_PL_TIME_BUDGET_MS = 15_000
+# 않지만, 이미 들어간 대기는 끝까지 기다린다. 기본값 0이나 8초 이하 지연이면 위 28초가
+# 그대로다. 그 env의 상한은 도구 기본 예산(90초) 기준이라 약 10초를 넘는 지연도 받아들여지고,
+# 그런 설정에서는 이 호출이 여전히 30초에 걸린다 — #210에 기록했다.
+_RLZ_PL_TIME_BUDGET_MS = 18_000
 
 # get_balance_rlz_pl 연속 실패 횟수. get_balance의 _balance_failure_streak와 같은
 # 문제를 같은 방식으로 막는다 — 다만 이쪽은 상시 실패가 **정상인** 배포가 있다.
@@ -395,6 +424,11 @@ _last_quote_error: str | None = None
 # 필요하다 — 실패는 드물지만 모의투자 대체 응답은 **기본 개발 구성에서 매 주기 항상**
 # 온다. 억제하지 않으면 10분마다 같은 info가 영구히 쌓여 로그가 신호를 잃는다.
 _paper_fallback_streak = 0
+
+# 실현손익 연속조회 잘림 연속 횟수(#369, PR #378 리뷰). 예산(_RLZ_PL_TIME_BUDGET_MS)을 넘는
+# 계좌는 매 주기 잘리므로 _quote_failure_streak와 같은 규칙(첫 회와 이후 6회마다)으로 억제한다.
+# 잘리지 않은 응답을 받으면 0으로 되돌린다.
+_rlz_truncation_streak = 0
 
 # 모의투자 대체 응답을 받은 뒤 도구 호출 자체를 건너뛸 주기 수. 위 억제는 로그만 줄일 뿐
 # 호출은 줄이지 못한다 — 모의투자 분기(index.js의 getBalanceRlzPl 첫 분기)는 TR 대신
@@ -850,7 +884,7 @@ def _sync_portfolio_prices_from_rlz_pl(report_text: str, session: Session) -> in
          응답으로는 쓰지 않는다"를 잔고 동기화와 갈라 둘 이유가 없습니다.
       3) 마커 부재(빈 계좌 문구도 없음) — 응답을 읽지 못한 것이므로 error.
     """
-    global _paper_fallback_streak
+    global _paper_fallback_streak, _rlz_truncation_streak
 
     # 순서가 중요합니다. 모의투자 대체 응답에는 "[보유 종목]" 마커가 없으므로, 이
     # 검사를 뒤로 미루면 마커 부재 가드가 먼저 걸려 정상 상황에 error가 남습니다.
@@ -880,11 +914,28 @@ def _sync_portfolio_prices_from_rlz_pl(report_text: str, session: Session) -> in
         _paper_fallback_streak = 0
 
     if is_balance_truncated(report_text):
-        logger.warning(
-            "실현손익 연속조회가 잘려 이번 주기 시세 갱신을 건너뜁니다. "
-            "기존 시세와 갱신 시각을 유지합니다."
-        )
+        # 사유(시간 예산·페이지 상한·오류)를 JS 안내 줄 그대로 싣는다. #369에서 예산을 낮춘 뒤
+        # 이 경고가 "예산 초과"를 드러내는 곳이다(PR #378 리뷰).
+        #
+        # 연속 횟수로 억제한다(첫 회와 이후 6회마다). 연속조회가 예산을 넘는 계좌는 매 주기
+        # 잘리는데, 예산을 낮추기 전 그 계좌가 빠지던 504 실패 경로는 _quote_failure_streak로
+        # 억제돼 있었다 — 억제 없이 두면 이 PR이 10분마다 쌓이는 warning을 새로 만든다.
+        _rlz_truncation_streak += 1
+        notice = truncation_notice(report_text)
+        if _rlz_truncation_streak == 1 or _rlz_truncation_streak % 6 == 0:
+            logger.warning(
+                "실현손익 연속조회가 잘려 이번 주기 시세 갱신을 건너뜁니다(%d회 연속) — %s "
+                "기존 시세와 갱신 시각을 유지합니다.",
+                _rlz_truncation_streak,
+                notice,
+            )
+        else:
+            logger.debug(
+                "실현손익 연속조회 잘림이 %d회 연속됩니다 — %s", _rlz_truncation_streak, notice
+            )
         return None
+
+    _rlz_truncation_streak = 0
 
     if _RLZ_PL_HOLDINGS_MARKER not in report_text:
         # 마커가 없는 정상 경우가 하나 있습니다: 보유 0건. balance.js와 달리 이
@@ -988,10 +1039,11 @@ async def _refresh_portfolio_prices() -> int | None:
     줄지 않기 때문입니다(상수 주석 참고).
 
     연속조회 시간 예산은 도구 기본값(90초, NAT 호출자 기준)이 아니라
-    _RLZ_PL_TIME_BUDGET_MS(15초)를 time_budget_ms 인자로 넘깁니다(#369). run_mcp_tool이
-    30초에서 끊기 때문입니다(backend/services.py). 예산을 넘는 계좌는 504 타임아웃이 아니라
-    도구의 잘림 안내를 받고, _sync_portfolio_prices_from_rlz_pl의 잘림 가드가 원인 그대로
-    처리합니다. 값의 근거와 페이지 간 지연이 있을 때의 한도는 상수 주석에 있습니다.
+    _RLZ_PL_TIME_BUDGET_MS(18초)를 time_budget_ms 인자로 넘깁니다(#369). run_mcp_tool이
+    30초에서 끊기 때문입니다(backend/services.py의 MCP_TOOL_TIMEOUT_SECONDS). 예산을 넘는
+    계좌는 504 타임아웃이 아니라 도구의 잘림 안내를 받고, _sync_portfolio_prices_from_rlz_pl의
+    잘림 경고가 사유를 싣습니다. 값의 근거, 18~28초 계좌가 치르는 대가, 페이지 간 지연이
+    있을 때의 한도(#210)는 상수 주석에 있습니다.
     """
     global _quote_failure_streak, _last_quote_error, _paper_fallback_skip_remaining
 
@@ -1722,21 +1774,12 @@ async def _monitor_market_task(
                 logger.error("Portfolio 동기화 중 오류 (감시는 계속): %s", e, exc_info=True)
 
             if is_balance_truncated(balance_text):
-                # 잘림 사유(max_pages/time_budget/error/...)마다 운영 대응이 다르므로,
-                # 안내 문구 줄을 그대로 실어 사유가 로그에 남게 한다. 사유 문자열을 따로
-                # 파싱하지 않으므로 balance.js에 새 사유가 추가돼도 자동으로 따라간다.
-                notice = next(
-                    (
-                        line
-                        for line in balance_text.splitlines()
-                        if _BALANCE_TRUNCATION_MARKER in line
-                    ),
-                    "",
-                )
+                # 잘림 사유(max_pages/time_budget/error/...)마다 운영 대응이 다르므로 안내
+                # 문구 줄을 그대로 싣는다(truncation_notice — 실현손익 잘림 경고와 공유).
                 logger.warning(
                     "잔고 연속조회가 잘려 감시 대상이 불완전할 수 있습니다: 보유 종목 %d건만 확보 — %s",
                     len(owned_stocks),
-                    notice.strip(),
+                    truncation_notice(balance_text),
                 )
 
         # 2. 시세 갱신 (#196). get_balance_rlz_pl(TTTC8494R)의 리포트에서 종목별
