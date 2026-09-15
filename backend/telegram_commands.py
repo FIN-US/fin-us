@@ -1291,7 +1291,10 @@ class TelegramCommandHandler:
             )
         except Exception as exc:
             await self._clear_progress_message(progress_message_id)
-            await self._send_text_or_raise(f"주문 보조 실패: {_short_error(exc)}")
+            # 자연어 폴백의 LLM 실패 통지와 같은 이유로 settled다 (#259 4단계, PR #377 리뷰).
+            # 재시도 가능한 전송이면 전송 실패가 update 재시도로 번져 진행 메시지가 다시 나가고,
+            # 예외가 제안 왕복 뒤(냉각 마킹 등)에서 났다면 제안 에이전트까지 다시 호출된다.
+            await self._send_text_settled(f"주문 보조 실패: {_short_error(exc)}")
             return
         await self._clear_progress_message(progress_message_id)
 
@@ -2059,7 +2062,10 @@ class TelegramCommandHandler:
                 conversation_id=f"telegram:{chat_id}:earnings:{_url_quote(stock, safe='')}",
             )
         except Exception as exc:
-            await self._send_text_or_raise(f"조회 실패: {_short_error(exc)}")
+            # 답변과 같은 이유로 settled다 (#259 4단계, PR #377 리뷰). 재시도 가능한 전송이면
+            # 전송 실패가 update 재시도로 번져 DART·뉴스 조회와(실패가 LLM 쪽이었다면) LLM
+            # 호출까지 되풀이한다.
+            await self._send_text_settled(f"조회 실패: {_short_error(exc)}")
             return
 
         # LLM 호출이 끝난 뒤다 — 재실행은 DART·뉴스 조회와 LLM 호출을 그대로 반복해
@@ -2223,10 +2229,16 @@ class TelegramCommandHandler:
                 conversation_id=f"telegram:{chat_id}",
             )
         except Exception as exc:
-            # 통지보다 먼저 치운다 — 아래 전송이 실패해 재시도로 넘어가도
-            # "분석 중"이 채팅에 남지 않는다 (#260).
+            # 통지보다 먼저 치운다 — 아래 전송이 끝내 실패해도 "분석 중"이 채팅에 남지
+            # 않는다 (#260).
             await self._clear_progress_message(progress_message_id)
-            await self._send_text_or_raise(f"응답 생성 실패: {_short_error(exc)}")
+            # 실패 통지도 답변과 같은 settled 전송이다 (#259 4단계, #275). 재시도 가능한
+            # 전송으로 두면 전송 실패가 update 재시도로 번져 이 메서드가 처음부터 다시 돈다 —
+            # 진행 메시지가 새로 나가고 LLM이 다시 호출된다(실패가 타임아웃이면 이미 과금됐을
+            # 수 있다). 대가는 LLM 실패와 통지 전송 최종 실패가 겹칠 때 사용자가 실패 사실을
+            # 못 받는 것인데, 주문 상태를 오인할 메시지가 아니고 재질문으로 복구된다. 그 한
+            # 건은 settled_send 메트릭에 남는다.
+            await self._send_text_settled(f"응답 생성 실패: {_short_error(exc)}")
             return
         # LLM 호출이 끝난 뒤다. 재실행은 같은 conversation_id로 NAT를 다시 호출해 대화
         # 이력을 오염시키고 예산만큼 재과금된다 — 전송 실패 예산으로는 최대 10회다 (#247).
@@ -2478,12 +2490,13 @@ class TelegramCommandPoller:
         (#249). 그 가드는 직접 호출만 보므로, 전송을 감싼 헬퍼를 try 안에서 부르는 코드가
         생기면 이 전제가 조용히 깨진다.
 
-        자연어 경로(_handle_chat_fallback)에는 사용자에게 보이는 부수효과가 하나 더
-        있다 — 진행 메시지다 (#260). 답변 전송은 _send_text_settled라 여기 도달하지
-        않지만, LLM 실패 통지는 _send_text_or_raise이므로 그 전송이 실패하면 재시도가
-        걸리고 진행 메시지가 매번 새로 나간다. 진행 메시지 전송 실패는 notifier가 삼켜
-        예산에도 잡히지 않으므로 같은 채팅의 rate limit을 추가로 소모한다. 예산을 손볼
-        때 함께 보라 (PR #263 리뷰, #275).
+        비싼 호출을 태우는 경로 — 자연어 폴백(_handle_chat_fallback)·/advise·/earnings — 는
+        그 호출 뒤의 전송이 답변이든 실패 통지든 _send_text_settled라 여기 도달하지 않는다.
+        재시도되면 LLM·제안 에이전트·DART 조회가 되풀이되고, 자연어·/advise는 진행
+        메시지(#260)까지 매번 새로 나가며 그 전송 실패는 notifier가 삼켜 예산에도 잡히지
+        않는다. 실패 통지는 예전에 _send_text_or_raise였고 #259 4단계에서 settled로 옮겼다
+        (PR #263 리뷰, #275, PR #377 리뷰). /balance·/quote·/trend처럼 MCP 조회 한 번 뒤의
+        실패 통지는 재시도해도 조회 한 번이 되풀이될 뿐이라 재시도 가능한 전송으로 남긴다.
         """
         committed = False
 
