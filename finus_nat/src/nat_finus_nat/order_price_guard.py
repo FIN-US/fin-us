@@ -67,6 +67,10 @@ _QUOTABLE_TOOL = "domestic_stock"
 _UNIT_PRICE_SUFFIXES = frozenset({"UNPR", "PRC"})
 
 _PRICE_TEXT_RE = re.compile(r"\d+(?:\.\d+)?")
+# 기준 현재가를 읽는 자리 — parse_current_price가 쓴다. Kis Trading MCP ``inquire_price``의
+# 응답 모양은 실호출로 확인하지 못했고 저장소에 응답 샘플도 없어 키 탐색을 관대하게 뒀다.
+# 모의투자 계정으로 실응답을 받아 테스트 픽스처로 고정하고 파서를 좁히는 일은 #381이다.
+# 틀려도 결과는 거부(fail-closed)이지 우회가 아니다.
 _CURRENT_PRICE_KEY = "stck_prpr"
 _CURRENT_PRICE_TEXT_RE = re.compile(
     r"""["']?stck_prpr["']?\s*[:=]\s*["']?([\d,]+(?:\.\d+)?)""", re.IGNORECASE
