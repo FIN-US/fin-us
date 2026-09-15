@@ -53,8 +53,7 @@ description: "GitHub 이슈를 생성합니다. '이슈 올려줘', '이슈 만�
 
 - `우선순위: P0`~`P3`를 **반드시 하나** 단다. 판단이 서지 않으면 `P2`.
 - `상태: 논의 중`·`상태: 보류`는 해당할 때만 단다.
-- 담당자는 사용자가 지정하지 않았으면 `gh api user --jq .login`으로 조회한 현재 인증 계정을 쓴다.
-  "요청한 사람"을 추측하지 않는다.
+- 담당자는 걸지 않는다. 사용자가 명시적으로 지정했을 때만 `--assignee`를 붙인다.
 - `bug`·`enhancement` 라벨은 쓰지 않는다 — 옛 템플릿 잔재이고 `유형:` 라벨과 중복이다.
 
 ## 생성
@@ -64,7 +63,7 @@ description: "GitHub 이슈를 생성합니다. '이슈 올려줘', '이슈 만�
 ```bash
 gh issue create -R "<OWNER>" \
   --title "<제목>" --body-file "<본문 파일 경로>" \
-  --assignee "<담당자>" --label "<유형>" --label "<우선순위>"
+  --label "<유형>" --label "<우선순위>"
 ```
 
 > **Git Bash 경로 변환 주의.** MSYS는 `/`로 시작하는 인자를 Windows 경로로 바꾼다.
@@ -72,4 +71,4 @@ gh issue create -R "<OWNER>" \
 > `/`로 시작하는 문자열이 인자에 들어가면 `MSYS_NO_PATHCONV=1`을 앞에 붙이거나 PowerShell로 호출한다.
 
 `<OWNER>`는 `gh repo view --json nameWithOwner -q .nameWithOwner`로 확정한다.
-생성 전 제목·본문·라벨·담당자를 보여주고 확인받는다. 확인 없이 올리지 않는다.
+생성 전 제목·본문·라벨을 보여주고 확인받는다. 확인 없이 올리지 않는다.
