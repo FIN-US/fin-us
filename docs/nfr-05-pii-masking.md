@@ -861,11 +861,27 @@ pass-through 주문에는 rationale이 없어 "rationale이 비어 있으면 REJ
 (`finus_nat/src/nat_finus_nat/order_price_guard.py`). `finus_api._call_kis_mcp_and_record`
 (KIS로 나가는 모든 호출이 지나는 자리)에서 보내기 직전에 판정한다.
 
-- **대상 api_type** — 읽기 전용 allowlist(`inquire_*`·`search_*`·`find_api_detail`, #66)에 없는
-  api_type **전부**다. 주문 TR 이름 목록으로 고르면 목록에 없는 쓰기성 TR이 조용히 우회한다.
-- **대상 필드** — 단가 필드(`*_UNPR`·`*_PRC`)에 0보다 큰 값이 실린 경우. backend는 시장가의
-  괴리를 보지 않고, KIS 시장가는 단가 0으로 나가므로 단가 0이나 빈 값은 대상이 아니다. 취소처럼
-  단가가 없는 쓰기 TR도 그대로 통과한다.
+- **대상 api_type** — 읽기 전용 allowlist(`inquire_*`·`search_*`, 정확 값 `find_api_detail`·
+  `pension_inquire_psbl_order`, #66)에 없는 api_type **전부**다. 주문 TR 이름 목록으로 고르면
+  목록에 없는 쓰기성 TR이 조용히 우회한다. `pension_inquire_psbl_order`(퇴직연금 주문가능조회,
+  TR `TTTC0503R`)는 `inquire_`로 시작하지 않는 조회 TR인데 `pdno`·`ord_unpr`를 입력으로 받아,
+  목록에 넣지 않으면 조회가 괴리 가드에 막힌다(PR #379 리뷰). upstream `examples_llm` 333개 TR 중
+  이런 TR은 이것 하나다. 목록은 조회 전용 래퍼와 가드가 함께 쓴다.
+- **대상 필드** — 단가 필드(`*_UNPR`·`*_PRC`)에 0보다 큰 값이 실린 경우. `pii_guard`가 `AMOUNT`
+  자리표시자를 되돌려 넣는 마디와 같다. 다음은 대상이 아니다:
+  - 단가 0이나 빈 값 — backend는 시장가의 괴리를 보지 않고, KIS 시장가는 단가 0으로 나간다.
+  - `FID_*` 필드 — 시세 조회 조건 입력이다. upstream에서 `*_PRC`로 끝나는 인자는 전부
+    `fid_org_adj_prc`(수정주가 반영 여부 0/1 플래그)였다. `investor_trade_by_stock_daily` 같은
+    조회가 이 플래그 때문에 막히지 않게 뺐다.
+  - 선물옵션의 `unit_price`·`fm_*_pric` 같은 다른 마디 — 가드가 보지 않는다. 대신 `pii_guard`가
+    이 필드에는 자리표시자 복원을 거부하므로(`field_does_not_accept_placeholders`) #365의 맞바꿈
+    자체가 일어나지 않는다.
+- **정정·취소** — 원주문을 가리키는 호출(`ORGN_ODNO`)에서 `RVSE_CNCL_DVSN_CD=02`(취소)는 새 주문을
+  만들지 않으므로 단가와 무관하게 통과한다. 국내주식 `order_rvsecncl`은 스키마에 `PDNO`가 없어
+  가격 정정(`01`)의 기준가를 알 수 없다. 원주문 조회로 종목을 찾는 대신 전용 사유
+  `amend_stock_code_unknown`으로 거부하고 "취소 후 재주문"을 안내한다. 원주문 조회 응답도 실측하지
+  않은 모양이라(#381과 같은 문제) 거기서 종목을 잘못 짚으면 엉뚱한 기준가로 통과시키는 쪽으로
+  무너지기 때문이다. `PDNO`가 있는 정정(채권·해외·예약주문 정정취소)은 일반 주문과 같이 판정한다.
 - **기준가** — 주문 직전 같은 KIS MCP로 조회한 현재가(`inquire_price`의 `stck_prpr`).
 - **식** — `abs(단가 - 현재가) / 현재가 > 임계값`이면 거부. 양방향이고 경계는 통과한다.
 - **임계값** — backend와 **같은 env 이름** `ORDER_MAX_PRICE_GAP_RATIO`를 NAT가 직접 읽는다.
@@ -875,8 +891,11 @@ pass-through 주문에는 rationale이 없어 "rationale이 비어 있으면 REJ
   `test_order_price_guard.py`가 backend 소스를 정적으로 읽어 대조하고, 판정 의미는 판정표
   `backend/tests/fixtures/price_gap_policy.json`을 두 스위트가 함께 읽어 고정한다(#138 방식).
 
-**fail-closed.** 현재가 조회·파싱 실패, 종목코드(`PDNO`) 없음, 단가를 숫자로 읽지 못함, 기준가를
-조회할 수 없는 상품(국내주식 외)의 단가 있는 주문은 전부 보내지 않는다. 오류 JSON에는 사유
+**fail-closed.** 현재가 조회·파싱 실패, 종목코드(`PDNO`) 없음(종목명만 준 경우 포함 — 종목명을
+코드로 바꾸는 것은 MCP 서버 안에서 일어나 가드가 볼 수 없다), 종목코드 없는 가격 정정, 단가를
+숫자로 읽지 못함, 기준가를 조회할 수 없는 상품(국내주식 외)의 `*_UNPR`·`*_PRC` 단가 있는 주문은
+전부 보내지 않는다. 기준가 조회는 주문 params의 `env_dv`를 따르고, 없으면 MCP 서버의 기본값과 같은
+`demo`로 조회한다. 오류 JSON에는 사유
 코드(`reason`)·필드 이름·힌트만 싣고 가격 원값은 로그에만 남긴다 — 위 거부 메시지와 같은 이유다.
 
 **택하지 않은 것.** 자리표시자에 라벨을 붙이는 안은 라벨이 정보를 흘려 F-17 범위 재판정이
@@ -886,7 +905,9 @@ pass-through 주문에는 rationale이 없어 "rationale이 비어 있으면 REJ
 
 **동작 변화.** 채팅 `trading_agent`(와 같은 도구를 쓰는 `monitoring_agent`) 주문에 backend 주문
 보조(`/advise`·룰 트리거)와 같은 지정가 괴리 한도가 새로 걸린다. backend `/buy`에는 괴리 한도가
-없다.
+없다. 채팅에서 국내주식 **가격 정정은 할 수 없다** — 취소 후 새 주문으로 안내한다(취소는 그대로
+된다). 퇴직연금 주문가능조회는 조회 전용 래퍼(news·recommend·strategy 에이전트)에서도 새로 쓸 수
+있다.
 
 **남는 것.**
 

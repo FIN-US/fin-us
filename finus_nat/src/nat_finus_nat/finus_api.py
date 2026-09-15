@@ -1123,10 +1123,21 @@ _KIS_BALANCE_LEDGER_NAME: str = "finus_account_balance"
 # 허용 정확 값:
 #   find_api_detail — TR 스키마 조회 (에이전트 자기교정 루프용; 읽기 전용)
 #
+#   pension_inquire_psbl_order — 퇴직연금 주문가능조회(TR TTTC0503R, 조회). ``inquire_``로
+#     시작하지 않는 조회 TR인데 ``pdno``·``ord_unpr``를 입력으로 받는다. 이 목록 밖이면
+#     지정가 괴리 가드(#365, ``_order_price_gap_rejection``)가 주문으로 보고 조회 자체를
+#     막는다(PR #379 리뷰). upstream examples_llm 333개 TR을 훑어, tr_id가 조회(…R)이면서
+#     단가 인자가 있고 위 접두사에 걸리지 않는 TR은 이것 하나뿐임을 확인했다.
+#
 # 운영자 추가 방법: 새 조회 TR이 위 접두사 패턴을 벗어나면
 # _READONLY_API_ALLOWLIST_EXACT에 추가하거나 접두사를 확장하세요.
+# 이 목록은 조회 전용 래퍼(#66)와 지정가 괴리 가드(#365)가 **함께** 쓴다 — 두 판정이
+# "무엇이 조회인가"를 따로 들고 있으면 한쪽만 고쳐져 어긋난다.
 _READONLY_API_ALLOWLIST_PREFIXES: tuple[str, ...] = ("inquire_", "search_")
-_READONLY_API_ALLOWLIST_EXACT: frozenset[str] = frozenset({"find_api_detail"})
+_READONLY_API_ALLOWLIST_EXACT: frozenset[str] = frozenset({
+    "find_api_detail",
+    "pension_inquire_psbl_order",
+})
 
 # _READONLY_TOOL_ALLOWLIST는 _KIS_TRADING_TOOL_NAMES와 함께 위에서 정의되어 있다.
 # (FinusAccountBalanceConfig 클래스 정의 직전 — 단일 출처 유지를 위해 이동)
@@ -1176,8 +1187,11 @@ async def _order_price_gap_rejection(
     **대상은 읽기 전용 allowlist 밖의 api_type 전부다.** 주문 TR 이름 목록(``order_*``)으로
     고르면, 목록에 없는 쓰기성 TR이 이 검사를 조용히 우회한다. #66이 readonly 래퍼에서
     택한 fail-closed 판정(:func:`_is_readonly_api_type`)을 그대로 뒤집어 쓴다 — "읽기
-    전용이라고 확인된 것만 빼고 전부 주문일 수 있다". 단가가 없는 쓰기 TR(시장가·취소 등)은
-    :func:`~nat_finus_nat.order_price_guard.check_order_price_gap`이 그대로 통과시킨다.
+    전용이라고 확인된 것만 빼고 전부 주문일 수 있다". 그 안에서 무엇을 통과시키고 무엇을
+    막는지는 :func:`~nat_finus_nat.order_price_guard.check_order_price_gap`이 정한다:
+    단가가 0이거나 없는 호출(시장가)과 원주문 취소(``ORGN_ODNO`` + ``RVSE_CNCL_DVSN_CD=02``)는
+    단가와 무관하게 통과하고, 종목코드가 없는 가격 정정(국내주식 ``order_rvsecncl``은
+    스키마에 ``PDNO``가 없다)은 기준가를 알 수 없어 전용 사유로 거부한다(PR #379 리뷰).
 
     판정 의미·임계값·fail-closed 규칙의 근거는 ``order_price_guard`` 모듈 docstring.
 
@@ -1192,8 +1206,10 @@ async def _order_price_gap_rejection(
 
     async def _fetch_quote(stock_code: str, env_dv: str) -> str:
         # 인자는 _KIS_TRADING_TOOL_GUIDE가 에이전트에게 알려 주는 국내 주식 현재가 조회
-        # 기본값과 같다. _mcp_call_tool_remote는 실패를 예외가 아니라 오류 JSON으로
-        # 돌려주고, 그 경우 현재가를 읽지 못해 거부로 떨어진다.
+        # 기본값과 같다. env_dv는 주문 params의 값을 그대로 따르고, 없으면 MCP 서버와 같은
+        # "demo"다 — 조회를 주문과 같은 환경(같은 인증)으로 태운다. _mcp_call_tool_remote는
+        # 실패를 예외가 아니라 오류 JSON으로 돌려주고, 그 경우 현재가를 읽지 못해 거부로
+        # 떨어진다.
         return await _mcp_call_tool_remote(
             transport=config.mcp_transport,
             url=config.mcp_url,

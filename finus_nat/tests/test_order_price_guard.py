@@ -264,8 +264,11 @@ class TestKisOrderPriceGapGuard:
     async def test_current_price_placeholder_still_orders(self, remote, mapping_box, ledger):
         """정상 단가는 통과하고, 기준가는 주문 종목의 현재가로 조회한다.
 
+        주문 params에 ``env_dv``가 없으면 Kis Trading MCP와 같은 ``demo``로 조회한다 — 주문과
+        조회가 같은 환경을 탄다(PR #379 리뷰 후속).
+
         뮤테이션: 괴리 판정을 건너뛰고 단가가 있으면 무조건 거부하게 바꾸면 red. 조회 인자의
-        종목코드를 ``PDNO``가 아닌 값으로 바꿔도 red.
+        종목코드를 ``PDNO``가 아닌 값으로 바꿔도 red. 조회 기본 환경을 ``real``로 되돌려도 red.
         """
         _, price = self._placeholders(mapping_box)
 
@@ -276,7 +279,7 @@ class TestKisOrderPriceGapGuard:
         assert len(remote.orders) == 1
         assert remote.orders[0]["arguments"]["params"]["ORD_UNPR"] == "68900"
         assert [q["arguments"]["params"] for q in remote.quotes] == [
-            {"fid_cond_mrkt_div_code": "J", "fid_input_iscd": "005930", "env_dv": "real"}
+            {"fid_cond_mrkt_div_code": "J", "fid_input_iscd": "005930", "env_dv": "demo"}
         ]
         assert remote.quotes[0]["tool_name"] == "domestic_stock"
 
@@ -389,3 +392,126 @@ class TestKisOrderPriceGapGuard:
         await self._call("order_cash", {"PDNO": "005930", "ORD_QTY": "1", "ORD_UNPR": "71000"})
 
         assert len(remote.orders) == 1
+
+    async def test_order_env_dv_is_used_for_the_reference_quote(self, remote, mapping_box, ledger):
+        """실전 주문이면 기준가도 실전 환경으로 조회한다.
+
+        뮤테이션: 조회 ``env_dv``를 주문 params와 무관한 상수로 바꾸면 red.
+        """
+        await self._call(
+            "order_cash", {"PDNO": "005930", "ORD_QTY": "1", "ORD_UNPR": "68900", "env_dv": "real"}
+        )
+
+        assert [q["arguments"]["params"]["env_dv"] for q in remote.quotes] == ["real"]
+        assert len(remote.orders) == 1
+
+    # --- 정정·취소 (PR #379 리뷰) -------------------------------------------------------------
+    # upstream examples_llm/domestic_stock/order_rvsecncl 시그니처 그대로 싣는다 — PDNO가 없다.
+
+    _RVSECNCL_BASE = {
+        "KRX_FWDG_ORD_ORGNO": "06010",
+        "ORGN_ODNO": "0000117057",
+        "ORD_DVSN": "00",
+        "ORD_QTY": "0",
+        "QTY_ALL_ORD_YN": "Y",
+    }
+
+    async def test_cancel_of_an_original_order_passes_regardless_of_unit_price(
+        self, remote, mapping_box, ledger
+    ):
+        """취소는 새 주문을 만들지 않는다 — 원주문가든 엉뚱한 값이든 단가에 실려도 나간다.
+
+        뮤테이션: ``check_order_price_gap`` 첫머리의 취소 면제를 빼면 종목코드가 없어 거부돼 red.
+        """
+        observation = await self._call(
+            "order_rvsecncl",
+            {**self._RVSECNCL_BASE, "RVSE_CNCL_DVSN_CD": "02", "ORD_UNPR": "12345000"},
+        )
+
+        assert remote.quotes == []
+        assert len(remote.orders) == 1, observation
+
+    async def test_price_amend_without_stock_code_is_rejected_with_a_cancel_and_reorder_hint(
+        self, remote, mapping_box, ledger
+    ):
+        """국내주식 정정 TR에는 PDNO가 없다 — "PDNO를 넣으라"는 안내는 스키마 밖으로 유도한다.
+
+        뮤테이션: ``amend_stock_code_unknown`` 분기를 빼면 ``stock_code_missing``으로 떨어져 red.
+        """
+        observation = await self._call(
+            "order_rvsecncl",
+            {**self._RVSECNCL_BASE, "RVSE_CNCL_DVSN_CD": "01", "ORD_UNPR": "70000"},
+        )
+
+        assert remote.calls == []
+        payload = json.loads(observation)
+        assert (payload["error"], payload["reason"]) == (ERROR_UNVERIFIABLE, "amend_stock_code_unknown")
+        assert "RVSE_CNCL_DVSN_CD=02" in payload["hint"]
+        assert "PDNO를 추가해 재시도하지 말고" in payload["hint"]
+
+    @pytest.mark.parametrize(
+        "params",
+        [
+            {"RVSE_CNCL_DVSN_CD": "02", "ORD_UNPR": "12345000"},
+            {"ORGN_ODNO": "0000117057", "RVSE_CNCL_DVSN_CD": "00", "ORD_UNPR": "12345000"},
+        ],
+        ids=["cancel_code_without_original_order", "code_00_is_not_a_cancel"],
+    )
+    async def test_cancel_is_recognised_only_with_original_order_and_code_02(
+        self, remote, mapping_box, ledger, params
+    ):
+        """취소 면제가 가격 검사를 우회하는 통로가 되지 않는다.
+
+        ``00``은 해외주식 ``order_resv``가 같은 필드를 신규 주문에 쓰는 값이다.
+
+        뮤테이션: 취소 판정에서 ``ORGN_ODNO`` 요구를 빼면 첫 행이, 코드 대조를 ``!= "01"``로
+        느슨하게 하면 둘째 행이 통과해 red.
+        """
+        observation = await self._call("order_rvsecncl", {"ORD_QTY": "1", **params})
+
+        assert remote.orders == []
+        assert json.loads(observation)["error"] == ERROR_UNVERIFIABLE
+
+    async def test_amend_carrying_a_stock_code_is_gap_checked(self, remote, mapping_box, ledger):
+        """종목코드가 실린 정정은 일반 주문과 같이 괴리로 판정한다.
+
+        뮤테이션: 원주문번호만 보고 PDNO 유무와 무관하게 ``amend_stock_code_unknown``으로
+        거부하게 바꾸면 red.
+        """
+        observation = await self._call(
+            "order_rvsecncl",
+            {**self._RVSECNCL_BASE, "PDNO": "005930", "RVSE_CNCL_DVSN_CD": "01", "ORD_UNPR": "12345000"},
+        )
+
+        assert remote.orders == []
+        assert json.loads(observation)["error"] == ERROR_GAP_EXCEEDED
+
+    # --- 조회 TR 오인 (PR #379 리뷰) ----------------------------------------------------------
+
+    async def test_pension_orderable_inquiry_is_not_gap_checked(self, remote, mapping_box, ledger):
+        """퇴직연금 주문가능조회(TR TTTC0503R)는 ``inquire_``로 시작하지 않지만 조회다.
+
+        뮤테이션: ``_READONLY_API_ALLOWLIST_EXACT``에서 ``pension_inquire_psbl_order``를 빼면
+        괴리 초과로 조회가 막혀 red.
+        """
+        await self._call(
+            "pension_inquire_psbl_order", {"PDNO": "069500", "ORD_UNPR": "12345000", "ORD_DVSN": "00"}
+        )
+
+        assert remote.quotes == []
+        assert [c["arguments"]["api_type"] for c in remote.calls] == ["pension_inquire_psbl_order"]
+
+    async def test_quote_condition_flag_is_not_a_unit_price(self, remote, mapping_box, ledger):
+        """``FID_ORG_ADJ_PRC``(수정주가 반영 여부 0/1)는 마디가 PRC여도 단가가 아니다.
+
+        뮤테이션: ``order_unit_prices``의 ``FID_*`` 제외를 빼면 종목코드 없는 주문으로 보고
+        조회를 막아 red.
+        """
+        assert order_unit_prices({"FID_ORG_ADJ_PRC": "1", "fid_input_iscd": "005930"}) == ([], [])
+
+        await self._call(
+            "investor_trade_by_stock_daily",
+            {"fid_cond_mrkt_div_code": "J", "fid_input_iscd": "005930", "fid_org_adj_prc": "1"},
+        )
+
+        assert [c["arguments"]["api_type"] for c in remote.calls] == ["investor_trade_by_stock_daily"]

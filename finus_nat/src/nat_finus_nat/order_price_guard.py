@@ -19,7 +19,11 @@
 ## 판정 의미 — backend ``evaluate_hard_limits``의 거울
 
 - **대상**: 단가가 있는 주문. backend는 ``LIMIT``만 보고 ``MARKET``은 보지 않는다. KIS
-  시장가는 단가 0으로 나가므로 단가 0이나 빈 값은 대상이 아니다.
+  시장가는 단가 0으로 나가므로 단가 0이나 빈 값은 대상이 아니다. 시세 조회 조건 입력
+  (``FID_*``)은 마디가 같아도 단가가 아니다.
+- **정정·취소**: 원주문 취소(``ORGN_ODNO`` + ``RVSE_CNCL_DVSN_CD=02``)는 새 주문을 만들지
+  않으므로 단가와 무관하게 통과한다. 종목코드가 없는 가격 정정은 기준가를 알 수 없어 전용
+  사유로 거부하고 "취소 후 재주문"을 안내한다(PR #379 리뷰).
 - **기준가**: 주문 직전 조회한 현재가(``stck_prpr``). backend도 시세 조회의 현재가다.
 - **식**: ``abs(단가 - 현재가) / 현재가 > 임계값``이면 초과다. 양방향이고 경계는 통과한다.
 - **임계값**: 같은 env 이름 :data:`PRICE_GAP_RATIO_ENV`, 같은 기본값, 같은 해석 규칙
@@ -31,8 +35,8 @@
 
 ## fail-closed
 
-검증할 수 없는 주문은 보내지 않는다. 현재가 조회·파싱 실패, 종목코드 없음, 단가를 숫자로
-읽지 못함, 기준가를 조회할 수 없는 상품(국내주식 외)이 전부 거부다. "확인하지 못했다"가
+검증할 수 없는 주문은 보내지 않는다. 현재가 조회·파싱 실패, 종목코드 없음, 종목코드 없는
+가격 정정, 단가를 숫자로 읽지 못함, 기준가를 조회할 수 없는 상품(국내주식 외)이 전부 거부다. "확인하지 못했다"가
 "괜찮다"로 바뀌는 지점을 남기지 않는다 — backend ``order_assist``의 규칙과 같다.
 """
 from __future__ import annotations
@@ -65,6 +69,25 @@ _QUOTABLE_TOOL = "domestic_stock"
 # 따르되 금액(*_AMT)과 현재가(*_PRPR)는 뺐다 — 둘 다 주문 단가가 아니라 현재가와 비교하면
 # 뜻이 없다. 대소문자는 가리지 않는다(Kis Trading MCP 래퍼는 소문자 인자를 받는다).
 _UNIT_PRICE_SUFFIXES = frozenset({"UNPR", "PRC"})
+
+# 시세 조회 **조건** 입력의 접두사. ``FID_ORG_ADJ_PRC``(수정주가 반영 여부 0/1)처럼 마디가
+# PRC로 끝나도 주문 단가가 아니다. upstream examples_llm 333개 TR에서 ``*_PRC`` 인자는 전부
+# 이 플래그였고 주문 TR에는 FID_ 필드가 없다. 빼지 않으면 읽기 전용 접두사 밖의 시세 조회
+# (``investor_trade_by_stock_daily``)가 종목코드 없는 주문으로 오인돼 막힌다(PR #379 리뷰 후속).
+_QUOTE_CONDITION_PREFIX = "FID_"
+
+# 원주문을 가리키는 정정·취소 호출. 국내주식·선물옵션 ``order_rvsecncl``의 정정취소구분코드는
+# ``01``=정정, ``02``=취소다. 해외주식 ``order_resv``처럼 같은 필드를 ``00``(신규)으로 쓰는 TR이
+# 있어, 취소는 원주문번호와 ``02``가 **함께** 있을 때만 인정한다.
+_ORIGINAL_ORDER_FIELD = "ORGN_ODNO"
+_CANCEL_CODE_FIELD = "RVSE_CNCL_DVSN_CD"
+_CANCEL_CODE = "02"
+
+# 주문 params에 env_dv가 없을 때 기준가 조회에 쓸 환경. Kis Trading MCP는 env_dv가 없으면
+# "demo"로 실행하므로(tools/base.py의 ``params.pop("env_dv", "demo")``) 같은 값을 써야 주문과
+# 조회가 같은 환경·같은 인증을 탄다. "real"로 두면 모의투자만 설정한 배포에서 조회 인증이
+# 실패해 모든 지정가 주문이 막힌다.
+_DEFAULT_ENV_DV = "demo"
 
 _PRICE_TEXT_RE = re.compile(r"\d+(?:\.\d+)?")
 # 기준 현재가를 읽는 자리 — parse_current_price가 쓴다. Kis Trading MCP ``inquire_price``의
@@ -143,12 +166,16 @@ class PriceField(NamedTuple):
 def order_unit_prices(params: Mapping[str, Any]) -> tuple[list[PriceField], list[str]]:
     """``(단가가 0보다 큰 단가 필드, 숫자로 읽지 못한 단가 필드)``.
 
-    단가가 0이거나 비어 있는 필드는 어느 쪽에도 들지 않는다 — 시장가다.
+    단가가 0이거나 비어 있는 필드는 어느 쪽에도 들지 않는다 — 시장가다. 시세 조회 조건
+    (``FID_*``)은 단가 필드가 아니다(:data:`_QUOTE_CONDITION_PREFIX`).
     """
     prices: list[PriceField] = []
     unreadable: list[str] = []
     for field, value in params.items():
-        if str(field).strip().upper().rsplit("_", 1)[-1] not in _UNIT_PRICE_SUFFIXES:
+        name = str(field).strip().upper()
+        if name.startswith(_QUOTE_CONDITION_PREFIX):
+            continue
+        if name.rsplit("_", 1)[-1] not in _UNIT_PRICE_SUFFIXES:
             continue
         number = _as_price(value)
         if number is None:
@@ -240,8 +267,15 @@ _UNVERIFIABLE_HINTS: dict[str, str] = {
         "사용자에게 안내하세요."
     ),
     "stock_code_missing": (
-        "단가가 있는 주문에는 종목코드(PDNO)가 필요합니다. 기준 현재가를 조회할 수 없어 "
-        "주문을 보내지 않았습니다. PDNO를 넣어 다시 시도하세요."
+        "단가가 있는 주문에는 종목코드(PDNO, 6자리)가 필요합니다. 기준 현재가를 조회할 수 없어 "
+        "주문을 보내지 않았습니다. 종목명(stock_name)만으로는 검증할 수 없으니 PDNO에 종목코드를 "
+        "넣어 다시 시도하세요."
+    ),
+    "amend_stock_code_unknown": (
+        "이 정정 주문에는 원주문의 종목코드가 없어(국내주식 정정취소 TR에는 PDNO 필드가 "
+        "없습니다) 새 단가를 현재가와 대조할 수 없었고, 그래서 보내지 않았습니다. 채팅에서는 "
+        "가격 정정을 할 수 없습니다. PDNO를 추가해 재시도하지 말고, 원주문을 취소"
+        "(RVSE_CNCL_DVSN_CD=02)한 뒤 새 단가로 새 주문을 내거나 사용자에게 그렇게 안내하세요."
     ),
     "current_price_unavailable": (
         "주문 직전 이 종목의 현재가를 확인하지 못해 단가를 검증할 수 없었고, 검증할 수 없는 "
@@ -264,6 +298,17 @@ def _gap_exceeded_hint(ratio: float) -> str:
 QuoteFetcher = Callable[[str, str], Awaitable[str]]
 
 
+def _is_cancel_of_original_order(params: Mapping[str, Any]) -> bool:
+    """원주문번호와 취소 코드(``02``)가 함께 실린 호출인가.
+
+    둘 중 하나라도 없으면 취소로 보지 않는다 — 이 면제가 가격 검사를 우회하는 통로가 되지
+    않게 좁게 잡는다(:data:`_CANCEL_CODE` 위 주석).
+    """
+    return bool(_param(params, _ORIGINAL_ORDER_FIELD)) and (
+        _param(params, _CANCEL_CODE_FIELD) == _CANCEL_CODE
+    )
+
+
 async def check_order_price_gap(
     *,
     tool_name: str,
@@ -277,6 +322,11 @@ async def check_order_price_gap(
     *fetch_quote*는 ``(종목코드, env_dv)``를 받아 현재가 조회 응답 원문을 돌려준다.
     *api_type*은 로그에만 쓴다.
     """
+    if _is_cancel_of_original_order(params):
+        # 취소는 새 주문을 만들지 않는다. KIS 정정취소 TR은 취소에도 주문단가를 필수로 받아
+        # (upstream order_rvsecncl) 원주문가가 실리는 것이 정상인데, 그것을 단가로 막으면 오주문을
+        # 거둬들이는 경로가 막힌다 — 안전 방향으로도 역효과다(PR #379 리뷰).
+        return None
     prices, unreadable = order_unit_prices(params)
     if unreadable:
         return GapRejection(
@@ -306,9 +356,15 @@ async def check_order_price_gap(
 
     stock_code = _param(params, "PDNO")
     if not stock_code:
+        # 원주문을 가리키는 호출(정정)에 "PDNO를 넣으라"고 안내하면 틀린다 — 국내주식 정정취소
+        # TR에는 그 필드가 없어, MCP가 인자를 거부하거나 원주문과 무관하게 LLM이 고른 종목의
+        # 현재가로 괴리를 재게 된다(PR #379 리뷰). 원주문 조회로 종목을 찾는 대신 거부한다 —
+        # 그 조회 응답도 실측하지 않은 모양이라(#381) 종목을 잘못 짚으면 통과 쪽으로 무너진다.
+        if _param(params, _ORIGINAL_ORDER_FIELD):
+            return _unverifiable("amend_stock_code_unknown")
         return _unverifiable("stock_code_missing")
 
-    env_dv = _param(params, "ENV_DV") or "real"
+    env_dv = _param(params, "ENV_DV") or _DEFAULT_ENV_DV
     try:
         quote = await fetch_quote(stock_code, env_dv)
     except Exception:  # noqa: BLE001 — 어떤 실패든 "괜찮다"로 흐르면 안 된다.
