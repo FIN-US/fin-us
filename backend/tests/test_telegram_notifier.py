@@ -376,10 +376,14 @@ async def test_send_text_returning_id_extracts_message_id(mock_httpx):
 @pytest.mark.asyncio
 async def test_send_text_returning_id_returns_none_on_unusable_body(mock_httpx):
     """본문을 읽을 수 없으면 전송은 성공했어도 '편집 불가'로 떨어뜨린다."""
-    mock_httpx(httpx.Response(200, text="not json"))
+    recorded = mock_httpx(httpx.Response(200, text="not json"))
     notifier = TelegramNotifier("token", "123")
 
     assert await notifier.send_text_returning_id("⏳") is None
+    # 실패 경로는 결과만 보면 요청 전에 난 예외(예: 클라이언트 생성 인자 오류)도 관문의
+    # except Exception에 접혀 같은 None이 된다. 요청이 실제로 나갔는지까지 봐야 이 응답
+    # 때문에 None인 것이다 (PR #374 리뷰). 아래 실패 경로 테스트들도 같은 이유다.
+    assert len(recorded.requests) == 1
 
 
 @pytest.mark.asyncio
@@ -389,18 +393,22 @@ async def test_send_text_returning_id_rejects_a_body_that_says_not_ok(mock_httpx
     ok:false면 result가 무엇이든 그 메시지는 만들어지지 않았다. 그 id로 삭제·편집을
     시도하면 남의 메시지를 건드리거나 조용히 실패한다.
     """
-    mock_httpx(httpx.Response(200, json={"ok": False, "result": {"message_id": 4242}}))
+    recorded = mock_httpx(
+        httpx.Response(200, json={"ok": False, "result": {"message_id": 4242}})
+    )
     notifier = TelegramNotifier("token", "123")
 
     assert await notifier.send_text_returning_id("⏳") is None
+    assert len(recorded.requests) == 1
 
 
 @pytest.mark.asyncio
 async def test_send_text_returning_id_returns_none_on_send_failure(mock_httpx):
-    mock_httpx(httpx.Response(500))
+    recorded = mock_httpx(httpx.Response(500))
     notifier = TelegramNotifier("token", "123")
 
     assert await notifier.send_text_returning_id("⏳") is None
+    assert len(recorded.requests) == 1
 
 
 @pytest.mark.asyncio
@@ -545,12 +553,13 @@ async def test_a_long_analysis_alert_is_split_not_truncated(mock_httpx):
 @pytest.mark.asyncio
 async def test_edit_message_text_returns_false_on_failure(mock_httpx):
     """편집 실패는 예외가 아니라 False — 호출부가 새 메시지로 폴백한다."""
-    mock_httpx(
+    recorded = mock_httpx(
         httpx.Response(400, json={"ok": False, "description": "Bad Request: message is too old"})
     )
     notifier = TelegramNotifier("token", "123")
 
     assert await notifier.edit_message_text(4242, "최종 답변") is False
+    assert len(recorded.requests) == 1
 
 
 @pytest.mark.asyncio
@@ -578,7 +587,7 @@ async def test_delete_message_posts_delete_payload(mock_httpx):
 @pytest.mark.asyncio
 async def test_delete_message_returns_false_on_failure(mock_httpx):
     """삭제 거부는 예외가 아니라 False — 호출부가 종료 표시 편집으로 폴백한다."""
-    mock_httpx(
+    recorded = mock_httpx(
         httpx.Response(
             400, json={"ok": False, "description": "Bad Request: message can't be deleted"}
         )
@@ -586,6 +595,7 @@ async def test_delete_message_returns_false_on_failure(mock_httpx):
     notifier = TelegramNotifier("token", "123")
 
     assert await notifier.delete_message(4242) is False
+    assert len(recorded.requests) == 1
 
 
 @pytest.mark.asyncio
@@ -686,9 +696,7 @@ async def test_send_text_logs_retry_after_on_429(monkeypatch, caplog):
 
 
 @pytest.mark.asyncio
-async def test_call_telegram_api_raises_error_without_token(
-    monkeypatch, failing_telegram_client
-):
+async def test_call_telegram_api_raises_error_without_token(mock_httpx):
     """상태 오류를 URL 없는 예외로 바꿔 던진다 — allowlist를 없앨 수 있는 근거다 (#257).
 
     httpx의 HTTPStatusError는 메시지에 요청 URL을 담고, 텔레그램 URL의 경로가 곧 봇
@@ -696,16 +704,17 @@ async def test_call_telegram_api_raises_error_without_token(
     하고, 그 목록은 두 번 뚫렸다 (PR #253 1·2차 리뷰).
     """
     token = "8666951614:SECRET"
-    monkeypatch.setattr(
-        "backend.telegram_notifier.httpx.AsyncClient",
-        failing_telegram_client(
+    # 진짜 429 응답이다. raise_for_status가 실제로 나간 요청의 URL — 따라서 토큰 — 을 담은
+    # HTTPStatusError를 만든다. URL을 테스트가 지어내지 않아야 누출 경로를 그대로 탄다.
+    mock_httpx(
+        httpx.Response(
             429,
-            {
+            json={
                 "ok": False,
                 "description": "Too Many Requests: retry after 42",
                 "parameters": {"retry_after": 42},
             },
-        ),
+        )
     )
 
     with pytest.raises(TelegramApiError) as excinfo:
@@ -725,35 +734,14 @@ async def test_call_telegram_api_raises_error_without_token(
 
 
 @pytest.mark.asyncio
-async def test_send_text_succeeds_when_200_body_is_not_json(monkeypatch):
+async def test_send_text_succeeds_when_200_body_is_not_json(mock_httpx):
     """본문을 쓰지 않는 호출은 200의 본문이 JSON이 아니어도 성공해야 한다 (#257 자가리뷰).
 
     무조건 response.json()을 부르면 본문을 읽지도 않는 sendMessage가 파싱 실패로 실패한다 —
     리팩터링 전에는 없던 동작이고, send_text가 False를 돌려주면 _send_text_settled가
     최대 4회 재시도한다. call_telegram_api/fetch_telegram_api 분리가 그 비대칭을 막는다.
     """
-
-    class FakeResponse:
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            raise ValueError("Expecting value: line 1 column 1 (char 0)")
-
-    class FakeAsyncClient:
-        def __init__(self, *, timeout):
-            self.timeout = timeout
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, traceback):
-            return None
-
-        async def post(self, url, **kwargs):
-            return FakeResponse()
-
-    monkeypatch.setattr("backend.telegram_notifier.httpx.AsyncClient", FakeAsyncClient)
+    recorded = mock_httpx(httpx.Response(200, text="not json"))
     notifier = TelegramNotifier("token", "123")
 
     assert await notifier.send_text("안녕") is True
@@ -762,38 +750,20 @@ async def test_send_text_succeeds_when_200_body_is_not_json(monkeypatch):
     # "update 없음"으로 읽고 로그도 백오프도 없이 다음 폴링으로 넘어간다.
     with pytest.raises(TelegramApiError):
         await fetch_telegram_api("token", "getUpdates", payload={})
+    # 요청 전에 난 예외도 같은 TelegramApiError로 접힌다 — 두 번째 요청이 실제로 나갔는지
+    # 까지 봐야 파싱 실패 때문에 던진 것이다 (PR #374 리뷰).
+    assert len(recorded.requests) == 2
 
 
 @pytest.mark.asyncio
-async def test_call_telegram_api_returns_none_so_body_readers_cannot_use_it(monkeypatch):
+async def test_call_telegram_api_returns_none_so_body_readers_cannot_use_it(mock_httpx):
     """본문이 필요한 호출부가 call_telegram_api를 고르면 조용히가 아니라 즉시 깨져야 한다.
 
     플래그 하나짜리 API였다면 빠뜨린 호출부가 빈 dict를 받아 getUpdates는 "update 없음",
     getMe는 username ""으로 조용히 퇴화한다. 반환형을 나눠 그 실수를 불가능하게 만든
     것이 이 분리의 목적이다 (#257 자가리뷰).
     """
-
-    class FakeResponse:
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return {"ok": True, "result": [{"update_id": 1}]}
-
-    class FakeAsyncClient:
-        def __init__(self, *, timeout):
-            self.timeout = timeout
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, traceback):
-            return None
-
-        async def post(self, url, **kwargs):
-            return FakeResponse()
-
-    monkeypatch.setattr("backend.telegram_notifier.httpx.AsyncClient", FakeAsyncClient)
+    mock_httpx(httpx.Response(200, json={"ok": True, "result": [{"update_id": 1}]}))
 
     assert await call_telegram_api("token", "getUpdates", payload={}) is None
     assert await fetch_telegram_api("token", "getUpdates", payload={}) == {
@@ -803,7 +773,7 @@ async def test_call_telegram_api_returns_none_so_body_readers_cannot_use_it(monk
 
 
 @pytest.mark.asyncio
-async def test_call_telegram_api_redacts_token_from_transport_error_message(monkeypatch):
+async def test_call_telegram_api_redacts_token_from_transport_error_message(mock_httpx):
     """상태 오류가 아닌 실패도 토큰을 흘리지 않아야 한다 (#257).
 
     httpx의 전송 계층 예외는 대개 URL을 담지 않지만 전부는 아니다 — UnsupportedProtocol,
@@ -812,22 +782,13 @@ async def test_call_telegram_api_redacts_token_from_transport_error_message(monk
     """
     token = "8666951614:SECRET"
 
-    class ExplodingAsyncClient:
-        def __init__(self, *, timeout):
-            self.timeout = timeout
+    def unsupported_protocol(request: httpx.Request) -> httpx.Response:
+        # URL은 지어내지 않고 실제로 나간 요청에서 읽는다.
+        raise httpx.UnsupportedProtocol(
+            f"Request URL has an unsupported protocol: {request.url}"
+        )
 
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, traceback):
-            return None
-
-        async def post(self, url, **kwargs):
-            raise httpx.UnsupportedProtocol(f"Request URL has an unsupported protocol: {url}")
-
-    monkeypatch.setattr(
-        "backend.telegram_notifier.httpx.AsyncClient", ExplodingAsyncClient
-    )
+    mock_httpx(unsupported_protocol)
 
     with pytest.raises(TelegramApiError) as excinfo:
         await call_telegram_api(token, "getUpdates", payload={})
@@ -839,9 +800,7 @@ async def test_call_telegram_api_redacts_token_from_transport_error_message(monk
 
 
 @pytest.mark.asyncio
-async def test_send_text_failure_log_redacts_bot_token(
-    monkeypatch, caplog, failing_telegram_client
-):
+async def test_send_text_failure_log_redacts_bot_token(caplog, mock_httpx):
     """전송 실패 로그에 봇 토큰이 평문으로 남지 않아야 한다 (PR #253 1차 리뷰, #257).
 
     _post_message가 실제로 URL을 만들고 raise_for_status가 도는 경로를 그대로 태운다.
@@ -849,10 +808,7 @@ async def test_send_text_failure_log_redacts_bot_token(
     없어야 통과한다 — 즉 목록을 지워도 이 테스트가 남는다.
     """
     token = "SECRET-BOT-TOKEN-123"
-    monkeypatch.setattr(
-        "backend.telegram_notifier.httpx.AsyncClient",
-        failing_telegram_client(429, {"ok": False, "parameters": {"retry_after": 42}}),
-    )
+    mock_httpx(httpx.Response(429, json={"ok": False, "parameters": {"retry_after": 42}}))
     notifier = TelegramNotifier(token, "123")
 
     with caplog.at_level(logging.ERROR):

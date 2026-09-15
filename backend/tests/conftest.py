@@ -1,4 +1,5 @@
 import json
+from collections.abc import Callable
 from typing import Any
 
 import httpx
@@ -6,6 +7,9 @@ import pytest
 
 from backend import services, stock_code, telegram_commands
 from backend.trading_orders import TradeRecorder
+
+# mock_httpx가 받는 응답 지정: 그대로 돌려줄 응답, 또는 요청을 받아 응답을 만들거나 던지는 함수.
+_ResponseSpec = httpx.Response | Callable[[httpx.Request], httpx.Response]
 
 
 class RecordedHttpx:
@@ -47,6 +51,10 @@ def mock_httpx(monkeypatch):
     ``responses``를 요청 순서대로 돌려준다. 마지막 응답은 이후 요청에서 계속 재사용되고,
     비우면 ``{"ok": True}`` 200이다. 반환값은 :class:`RecordedHttpx`.
 
+    응답 자리에 ``httpx.Request``를 받는 함수를 넣을 수도 있다. 전송 계층 예외처럼 응답이
+    아니라 예외가 필요한 경우다 — 함수가 던지면 ``client.post``에서 그대로 올라온다. 예외
+    메시지에 URL을 싣고 싶으면 테스트가 지어내지 말고 받은 ``request.url``을 쓴다.
+
     패치 대상은 **전역 httpx 모듈**이다(``backend.telegram_notifier.httpx``도
     ``backend.order_assist.httpx``도 같은 객체). 테스트 도중 만들어지는 다른 클라이언트도
     같은 transport를 탄다.
@@ -60,13 +68,15 @@ def mock_httpx(monkeypatch):
     # "진짜"가 첫 번째 래퍼가 된다 (PR #359 리뷰).
     real_client = httpx.AsyncClient
 
-    def _install(*responses: httpx.Response) -> RecordedHttpx:
+    def _install(*responses: _ResponseSpec) -> RecordedHttpx:
         recorded = RecordedHttpx()
         templates = list(responses) or [httpx.Response(200, json={"ok": True})]
 
         def _dispatch(request: httpx.Request) -> httpx.Response:
             recorded.requests.append(request)
             template = templates[min(len(recorded.requests) - 1, len(templates) - 1)]
+            if callable(template):
+                return template(request)
             # 응답은 요청마다 새로 만든다 — 한 httpx.Response 객체를 여러 요청이 나눠 쓰지
             # 않게 한다.
             return httpx.Response(
@@ -86,48 +96,6 @@ def mock_httpx(monkeypatch):
         return recorded
 
     return _install
-
-
-@pytest.fixture
-def failing_telegram_client():
-    """텔레그램 호출을 상태 오류로 실패시키는 가짜 httpx 클라이언트 팩토리 (#257).
-
-    호출부가 만든 URL을 그대로 받아 httpx 응답을 세우고 raise_for_status를 태운다.
-    URL을 테스트가 지어내지 않는 것이 핵심이다 — 토큰이 실제로 URL에 실려 나가고
-    예외 메시지에 들어앉는 경로를 그대로 통과시켜야 리댁션을 검증한 것이 된다.
-
-    전송(telegram_notifier)과 폴링(telegram_commands) 양쪽이 같은 팩토리를 쓴다.
-    """
-
-    def _factory(status_code, body):
-        class FakeResponse:
-            def __init__(self, url):
-                self._inner = httpx.Response(
-                    status_code, json=body, request=httpx.Request("POST", url)
-                )
-
-            def raise_for_status(self):
-                self._inner.raise_for_status()
-
-            def json(self):
-                return body
-
-        class FakeAsyncClient:
-            def __init__(self, *, timeout):
-                self.timeout = timeout
-
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, exc_type, exc, traceback):
-                return None
-
-            async def post(self, url, **kwargs):
-                return FakeResponse(url)
-
-        return FakeAsyncClient
-
-    return _factory
 
 
 @pytest.fixture(autouse=True)

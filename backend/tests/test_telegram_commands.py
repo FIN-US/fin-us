@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from typing import NamedTuple, cast
 from zoneinfo import ZoneInfo
 
+import httpx
 import pytest
 from fastapi import HTTPException
 
@@ -2335,9 +2336,7 @@ async def test_alerts_command_ignores_other_chats():
 
 
 @pytest.mark.asyncio
-async def test_polling_failure_log_has_no_bot_token(
-    monkeypatch, caplog, failing_telegram_client
-):
+async def test_polling_failure_log_has_no_bot_token(monkeypatch, caplog, mock_httpx):
     """폴러의 getUpdates 실패 로그에 봇 토큰이 남지 않아야 한다 (PR #253 2차 리뷰, #257).
 
     401(토큰 폐기)·409(인스턴스 중복 또는 웹훅 병행)·429·5xx에서 폴링 루프가 5초마다
@@ -2353,10 +2352,8 @@ async def test_polling_failure_log_has_no_bot_token(
     notifier.bot_token = token
     poller = _make_poller(notifier, handler=TelegramCommandHandler(notifier=notifier))
 
-    monkeypatch.setattr(
-        "backend.telegram_notifier.httpx.AsyncClient",
-        failing_telegram_client(409, {"ok": False, "description": "Conflict"}),
-    )
+    # 진짜 409 응답이다. raise_for_status의 예외에 실제로 나간 요청의 URL(토큰)이 실린다.
+    mock_httpx(httpx.Response(409, json={"ok": False, "description": "Conflict"}))
 
     async def stop_after_first_failure(delay):
         raise pytest.fail.Exception("stop after first failed polling iteration")
