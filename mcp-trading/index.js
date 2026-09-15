@@ -670,7 +670,7 @@ async function getBalanceRlzPl({ stock_name: stockName } = {}) {
     // 이 문구를 바꾸면 backend 감지가 조용히 무력화되어, 모의투자 배포에서 마커 부재 error가
     // 10분마다 쌓이고 _PAPER_FALLBACK_SKIP_CYCLES의 호출 건너뛰기도 꺼진다.
     // 이 리터럴을 JS 쪽에서 고정하는 테스트는 없으므로, 바꿔야 한다면 그 상수와
-    // backend/tests/test_scheduler.py의 대체 응답 픽스처를 함께 고친다.
+    // backend/tests/test_scheduler.py에 인라인으로 복사된 대체 응답 문구(3곳)를 함께 고친다.
     const note =
       "\n\n[안내] 모의투자(openapivts) 계좌는 실현손익 TR(v1_국내주식-041)을 지원하지 않아 잔고 요약으로 대체했습니다.";
     return `${balanceText}${note}`;
