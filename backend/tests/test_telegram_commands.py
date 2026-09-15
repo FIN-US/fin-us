@@ -2047,6 +2047,93 @@ async def test_tokenless_old_confirm_button_does_not_execute_current_pending_ord
     assert "123" in _orders(handler)
 
 
+class _CallbackAnswerFailingNotifier(FakeNotifier):
+    """answerCallbackQuery가 거부되는 notifier (#382).
+
+    실제 TelegramNotifier는 답 실패를 logger.error 후 False로 접는다. 예외를 던지는 대역은
+    그 경로를 재현하지 못한다 — 예외는 폴러의 update 재시도로 따로 흡수된다.
+    """
+
+    async def answer_callback_query(self, callback_query_id, text=None):
+        self.callback_answers.append((callback_query_id, text))
+        return False
+
+
+def _stale_order_callback_update():
+    # 대기 주문이 없으므로 어떤 토큰이든 만료 버튼이다.
+    return {
+        "callback_query": {
+            "id": "stale-callback",
+            "data": "order:confirm:old-token",
+            "message": {"chat": {"id": 123}},
+        }
+    }
+
+
+@pytest.mark.asyncio
+async def test_stale_order_button_falls_back_to_a_message_when_the_callback_answer_fails(
+    monkeypatch,
+):
+    """콜백 답이 유일한 통지인 분기에서 답이 실패하면 같은 문구를 메시지로 한 번 보낸다 (#382).
+
+    대체하지 않으면 사용자는 버튼을 눌렀는데 아무 반응도 받지 못한다.
+    """
+    notifier = _CallbackAnswerFailingNotifier()
+    handler = TelegramCommandHandler(notifier=notifier)
+    _capture_settled_sleeps(monkeypatch, handler)
+
+    await handler.handle_update(_stale_order_callback_update())
+
+    assert notifier.callback_answers == [
+        ("stale-callback", telegram_commands.ORDER_STALE_CALLBACK_TEXT)
+    ]
+    assert notifier.messages == [telegram_commands.ORDER_STALE_CALLBACK_TEXT]
+    assert delivery_metrics.count("settled_send") == 0
+
+
+@pytest.mark.asyncio
+async def test_callback_answer_fallback_that_also_fails_is_counted_as_settled_send(monkeypatch):
+    """대체 전송까지 실패하면 settled_send로 한 건 센다 (#382).
+
+    답 실패만으로는 어느 전송 실패 분류에도 들지 않았다 — 대체 전송이 settled 경로라서 그
+    메트릭 체계에 들어간다.
+    """
+    notifier = _CallbackAnswerFailingNotifier(send_text_result=False)
+    handler = TelegramCommandHandler(notifier=notifier)
+    _capture_settled_sleeps(monkeypatch, handler)
+    settled_failures_before = delivery_metrics.count("settled_send")
+
+    await handler.handle_update(_stale_order_callback_update())
+
+    assert set(notifier.messages) == {telegram_commands.ORDER_STALE_CALLBACK_TEXT}
+    assert delivery_metrics.count("settled_send") == settled_failures_before + 1
+
+
+@pytest.mark.asyncio
+async def test_textless_callback_answer_failure_sends_no_fallback(monkeypatch):
+    """텍스트 없는 답(스피너 해제)이 실패해도 대체 전송하지 않는다 (#382).
+
+    뒤따르는 메시지가 결과를 전하므로, 대체 전송은 빈 메시지 시도나 settled_send 오집계만 남긴다.
+    """
+    notifier = _CallbackAnswerFailingNotifier()
+    handler = TelegramCommandHandler(notifier=notifier)
+    _capture_settled_sleeps(monkeypatch, handler)
+
+    await handler.handle_update(
+        {
+            "callback_query": {
+                "id": "trade-menu",
+                "data": "trade:menu",
+                "message": {"chat": {"id": 123}},
+            }
+        }
+    )
+
+    assert notifier.callback_answers == [("trade-menu", None)]
+    assert notifier.messages == [TRADE_COMMAND_HELP]
+    assert delivery_metrics.count("settled_send") == 0
+
+
 @pytest.mark.asyncio
 async def test_confirm_gateway_success_recorder_failure_clears_pending_order():
     async def mcp_runner(server_params, tool_name, arguments):
