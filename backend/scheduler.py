@@ -243,7 +243,7 @@ def extract_stocks_from_balance(balance_text: str) -> list[str]:
 # get_balance는 MCP 텍스트 응답만 backend로 넘어오고 truncated 값 자체(구조화된
 # 필드)는 MCP 경계를 넘어오지 않으므로, 이 함수는 문자열 매칭에 의존할 수밖에
 # 없다. mcp-trading/balance.js의 리터럴이 바뀌면 이 매칭도 함께 깨진다 — 그
-# 결합을 mcp-trading/tests/order.test.js의 잘림 노트 테스트가 `조회가 중단되어`를
+# 결합을 mcp-trading/tests/balance.test.js의 잘림 노트 테스트가 `조회가 중단되어`를
 # 직접 단언해 고정하고, backend/tests/test_balance_parser.py가 픽스처로 재현한다.
 _BALANCE_TRUNCATION_MARKER = "조회가 중단되어"
 
