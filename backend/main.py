@@ -38,6 +38,7 @@ from .services import (
     perform_stock_analysis
 )
 from .database import init_db, get_session
+from .delivery_alarm import delivery_metrics, trade_outbox_stall
 from .models import Portfolio, TradeHistory, AgentReport, Diary, CatalystEvent
 from .timeutil import today_kst
 
@@ -757,6 +758,28 @@ async def health_check():
     # 중계하면서 내부 토폴로지가 외부에 노출되는 경로가 생겼다. compose 헬스체크는
     # 상태코드만 보고, 이 필드를 읽는 코드도 없다(PR #252 리뷰).
     return {"status": "alive"}
+
+
+@app.get("/api/v1/system/delivery", response_model=CommonResponse, tags=["System"])
+async def delivery_status():
+    """주문·체결 통지 경로의 텔레그램 전송 최종 실패 누적 횟수와 체결 통지 정지 상태 (#259 5단계).
+
+    세는 범위가 텔레그램 전송 전체가 아니다(delivery_alarm 모듈 독스트링, README "전송 실패
+    신호"). 0은 "이 경로들에서 실패 없음"이지 "전송 실패 없음"이 아니다.
+
+    /health에 싣지 않는다. 그쪽은 /api/ 접두사 밖이라 인증 없이 열려 있고(require_api_key
+    독스트링), #252 리뷰에서 내부 정보를 걷어낸 자리다. 실패 횟수와 trade_id는 키 뒤에 둔다.
+
+    값은 이 프로세스가 뜬 뒤로 센 것이다(delivery_alarm 모듈 독스트링). started_at이 함께
+    나가므로 0을 "실패 없음"으로 읽기 전에 언제부터 센 값인지 볼 수 있다.
+    """
+    return {
+        "status": "success",
+        "data": {
+            **delivery_metrics.snapshot(),
+            "trade_outbox_stall": trade_outbox_stall.snapshot(),
+        },
+    }
 
 
 def is_allowed_ws_origin(origin: str | None) -> bool:

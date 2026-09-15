@@ -22,6 +22,12 @@ from .filtered_signal_repo import (
 )
 from .ws_manager import manager
 from .database import engine
+from .delivery_alarm import (
+    StallCandidate,
+    StallEvent,
+    delivery_metrics,
+    trade_outbox_stall,
+)
 from .config import (
     NEWS_MCP_PARAMS,
     TRADING_MCP_PARAMS,
@@ -1261,6 +1267,15 @@ TRADE_NOTIFY_BATCH_LIMIT = 5
 # 두 배로 잘라 누수의 대가를 최대 두 주기로 묶는다. 한 주기가 이 시간을 넘길 일은 없다 —
 # 배치가 5건이고 첫 실패에서 끊는다.
 TRADE_NOTIFY_LOCK_TTL_SECONDS = TRADE_NOTIFY_INTERVAL_SECONDS * 2
+# 정지 알람의 임계 (#259 5단계). 재배달의 맨 앞 행이 이만큼 **연속으로** 실패하면 한 번 울린다.
+#
+# 짧으면 일시 장애에 울린다. 이 경로의 지배적 실패는 채팅 단위 429이고, 그 flood-wait은
+# _send_part_settled 주석이 적은 대로 흔히 30초 이상이다 — 1~2주기를 잃는 것은 정상 범위다.
+# 10분은 주기로 열 번 연속 실패한 것이라 그 범위를 넘는다.
+#
+# 길면 알람의 뜻이 사라진다. 이 알람이 없을 때의 최악은 TRADE_NOTIFY_MAX_AGE(24시간)
+# 동안 매 주기 error 한 줄뿐인 정지였고, 사용자는 그동안 "주문이 나갔나?"를 모른다.
+TRADE_NOTIFY_STALL_ALARM_AFTER = timedelta(minutes=10)
 
 
 # ---------------------------------------------------------------------------
@@ -1435,34 +1450,125 @@ async def trade_notification_task(
         logger.error("체결 통지 재배달 대상 조회 중 오류: %s", e)
         return
 
-    for trade in pending:
+    # 정지 판정의 재료 (#259 5단계). 전송이 나간 행(마킹 실패 포함)과, 맨 앞 행이 실패했다면 그 행.
+    delivered: set[int] = set()
+    failed_head: StallCandidate | None = None
+    for position, trade in enumerate(pending):
         try:
             sent = await notifier.send_text(_format_trade_notification(trade))
         except Exception as e:
             # send_text는 실패를 False로 접어 오므로 여기 걸리는 것은 duck-typed notifier뿐이다.
             logger.error("[%s] 체결 통지 재배달 중 오류: %s", trade.stock_name, e)
+            failed = True
+        else:
+            failed = sent is False
+            if failed:
+                # 마킹하지 않는 것이 곧 재시도다 — 다음 주기가 같은 행을 다시 집는다.
+                #
+                # 남은 건을 계속 보내지 않고 배치를 끊는다. 이 경로의 지배적 실패 원인은 채팅
+                # 단위 rate limit이라, 실패 뒤의 전송은 성공할 가능성이 낮으면서 ban만 늘린다.
+                #
+                # 대가: 목록이 오래된 순이라 맨 앞 행이 계속 실패하면 그 뒤의 신규 통지가 함께
+                # 막힌다. rate limit이라는 전제에서는 뒤엣것도 어차피 못 나가므로 손해가 없지만,
+                # 전제가 깨져 특정 행만 실패하는 경우(그 행 하나 때문에 뒤가 밀리는 경우)에는
+                # head-of-line 정지가 된다. 영구하지는 않다 — 막는 행이 TRADE_NOTIFY_MAX_AGE를
+                # 넘기면 목록에서 빠지고 뒤가 흐른다. 즉 최악이 24시간이다.
+                #
+                # 그 정지를 조용히 두지 않는 것이 아래 trade_outbox_stall이다 (#259 5단계).
+                logger.error("체결 통지 재배달 실패 — 다음 주기로 미룬다 (trade_id=%s)", trade.id)
+        if failed:
+            delivery_metrics.record_failure("fill_redelivery", trade_id=trade.id)
+            if position == 0:
+                failed_head = StallCandidate(trade_id=trade.id, trade_date=trade.trade_date)
             break
-        if sent is False:
-            # 마킹하지 않는 것이 곧 재시도다 — 다음 주기가 같은 행을 다시 집는다.
-            #
-            # 남은 건을 계속 보내지 않고 배치를 끊는다. 이 경로의 지배적 실패 원인은 채팅
-            # 단위 rate limit이라, 실패 뒤의 전송은 성공할 가능성이 낮으면서 ban만 늘린다.
-            #
-            # 대가: 목록이 오래된 순이라 맨 앞 행이 계속 실패하면 그 뒤의 신규 통지가 함께
-            # 막힌다. rate limit이라는 전제에서는 뒤엣것도 어차피 못 나가므로 손해가 없지만,
-            # 전제가 깨져 특정 행만 실패하는 경우(그 행 하나 때문에 뒤가 밀리는 경우)에는
-            # 조용한 head-of-line 정지가 된다. 영구하지는 않다 — 막는 행이
-            # TRADE_NOTIFY_MAX_AGE를 넘기면 목록에서 빠지고 뒤가 흐른다. 즉 최악이
-            # 24시간이고, 그동안 신호는 이 로그 한 줄뿐이다. 드러내는 것은 #259 5단계
-            # (전송 최종 실패의 알람·메트릭)의 몫이다.
-            logger.error("체결 통지 재배달 실패 — 다음 주기로 미룬다 (trade_id=%s)", trade.id)
-            break
+        delivered.add(trade.id)
         try:
             await repo.mark_notified(trade.id, notified_at=now)
         except Exception as e:
             # 전송은 이미 나갔다. 마킹만 실패하면 다음 주기가 같은 체결을 한 번 더 알린다.
             # 문구가 재전송임을 밝히므로 중복은 읽을 수 있는 형태로 드러난다.
             logger.error("체결 통지 마킹 실패 — 중복 배달 가능 (trade_id=%s): %s", trade.id, e)
+            delivery_metrics.record_failure("fill_mark", trade_id=trade.id)
+
+    event = trade_outbox_stall.observe(
+        failed_head=failed_head,
+        delivered_ids=delivered,
+        now=now,
+        alarm_after=TRADE_NOTIFY_STALL_ALARM_AFTER,
+        max_age=TRADE_NOTIFY_MAX_AGE,
+    )
+    if event is not None:
+        await _report_trade_outbox_stall(event, notifier)
+
+
+def _format_trade_outbox_stall_alarm(event: StallEvent) -> str | None:
+    """정지 알람의 텔레그램 문구. 사용자에게 알릴 것이 없는 이벤트는 None.
+
+    **종목·수량을 싣지 않는다.** 이 알람이 텔레그램으로 닿는 경우는 사실상 하나다 — 채팅
+    전체가 막힌 rate limit이면 이 메시지도 같이 실패하므로, 닿았다면 실패가 그 행에만
+    걸려 있다는 뜻이고 그 원인으로 가장 먼저 의심할 것이 행의 내용(재배달 문구)이다. 같은
+    내용을 다시 실으면 알람이 같은 이유로 막힌다. 체결 시각만으로 증권사 앱에서 찾을 수 있다.
+    """
+    when = _as_kst(event.trade_date)
+    if event.kind == "stalled":
+        minutes = int(event.failing_for.total_seconds() // 60)
+        return "\n".join(
+            [
+                "⚠️ 체결 통지가 전달되지 않고 있습니다",
+                f"- 체결 시각: {when:%Y-%m-%d %H:%M} KST",
+                f"- 재배달 실패: {minutes}분째 (계속 시도합니다)",
+                "증권사 앱에서 체결 내역을 확인하세요.",
+            ]
+        )
+    if event.kind == "expired":
+        hours = int(TRADE_NOTIFY_MAX_AGE.total_seconds() // 3600)
+        return "\n".join(
+            [
+                "⚠️ 체결 통지 1건을 끝내 전달하지 못했습니다",
+                f"- 체결 시각: {when:%Y-%m-%d %H:%M} KST",
+                f"- 체결 후 {hours}시간이 지나 더 시도하지 않습니다",
+                "증권사 앱에서 체결 내역을 확인하세요.",
+            ]
+        )
+    # delivered: 사용자는 방금 재배달된 통지 자체를 받았다. 덧붙일 말이 없다.
+    # cleared: 이 잡이 보낸 것이 아니라 사용자에게 할 말이 없다. 운영 쪽 로그로 충분하다.
+    return None
+
+
+async def _report_trade_outbox_stall(event: StallEvent, notifier: TelegramTextSender) -> None:
+    """정지 이벤트를 로그와 텔레그램으로 내보낸다 (#259 5단계).
+
+    로그는 ``[delivery-alarm]``으로 시작한다. 이 봇에 텔레그램 밖의 운영 채널은 없다 —
+    그래서 이 줄이 grep·로그 기반 경보가 붙을 자리이고, 텔레그램이 막힌 경우의 유일한 신호다.
+
+    텔레그램 전송은 **한 번만** 시도하고 실패해도 다시 보내지 않는다. 이 함수는 재배달이
+    방금 실패한 주기에 불리므로, 위의 "실패 뒤의 전송은 ban만 늘린다"와 부딪친다. 정지
+    한 건에 한 번이라 추가 요청이 유계이고, 닿기만 하면 사용자가 증권사 앱을 열 이유가
+    생긴다는 쪽을 골랐다. 알람을 재시도하기 시작하면 그것이 새 정지의 원인이 된다.
+    """
+    level = logging.CRITICAL if event.kind in ("stalled", "expired") else logging.WARNING
+    logger.log(
+        level,
+        "[delivery-alarm] kind=%s trade_id=%s failing_for=%ds failing_since=%s",
+        event.kind,
+        event.trade_id,
+        int(event.failing_for.total_seconds()),
+        event.failing_since.isoformat(),
+    )
+    text = _format_trade_outbox_stall_alarm(event)
+    if text is None:
+        return
+    try:
+        sent = await notifier.send_text(text)
+    except Exception as e:
+        logger.error("체결 통지 정지 알람 전송 중 오류 (trade_id=%s): %s", event.trade_id, e)
+        return
+    if sent is False:
+        logger.error(
+            "체결 통지 정지 알람을 텔레그램으로 보내지 못했습니다 — 위 [delivery-alarm] 줄이 "
+            "유일한 신호입니다 (trade_id=%s)",
+            event.trade_id,
+        )
 
 
 async def monitor_market_task(
