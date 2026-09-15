@@ -60,17 +60,18 @@ def extract_stock_name(resolved_text: str) -> str | None:
 _STOCK_CODE_RE = re.compile(r"\A(?:[0-9A-Z]{6,7}|[0-9A-Z]{9})\Z")
 
 # ──────────────────────────────────────────────────────────────────────────
-# 주문 가능 코드 판정 — mcp-trading/order.js:77-84 정책의 백엔드 복제본
+# 주문 가능 코드 판정 — mcp-trading/order.js buildCashOrderBody() 정책의 백엔드 복제본
 # ──────────────────────────────────────────────────────────────────────────
 # order.js의 buildCashOrderBody()는 두 가드가 함께 "숫자 6~7자만 주문 가능"을 이룬다:
-#   첫 번째(line 77): /^[0-9A-Z]{6,7}$/i && !/^\d{6,7}$/ → 영숫자 코드 전용 메시지
-#   두 번째(line 84): !/^\d{6,7}$/               → 실제 범위 확정 (9자 펀드 포함 거절)
+#   첫 번째: /^[0-9A-Z]{6,7}$/i && !ORDERABLE_STOCK_CODE_RE → 영숫자 코드 전용 메시지
+#   두 번째: !ORDERABLE_STOCK_CODE_RE                       → 실제 범위 확정 (9자 펀드 포함 거절)
+# (줄 번호로 가리키지 않는다 — order.js가 조금만 움직여도 주석이 엉뚱한 줄을 가리킨다.)
 # 이 상수는 두 번째 가드(`/^\d{6,7}$/`)를 백엔드에서 복제한다.
 # 백엔드가 조기 거절하므로 영숫자·9자 코드는 /confirm 전에 막힌다.
 # 영숫자 코드 주문 미지원은 #73에서 확정된 정책이다.
 #
-# ⚠️  결합 유지 필수: 이 상수와 mcp-trading/order.js:77-84 가드는 쌍을 이루므로
-#     한쪽만 바꾸면 해당 계층에서 조용히 계속 막힌다(#138 참조).
+# ⚠️  결합 유지 필수: 이 상수와 mcp-trading/order.js buildCashOrderBody()의 두 가드는
+#     쌍을 이루므로 한쪽만 바꾸면 해당 계층에서 조용히 계속 막힌다(#138 참조).
 #     영숫자 코드 주문 지원을 검토할 때(#138)는 order.js 두 가드와 이 상수를
 #     **모두** 함께 바꿔야 한다.
 #
@@ -83,8 +84,11 @@ _STOCK_CODE_RE = re.compile(r"\A(?:[0-9A-Z]{6,7}|[0-9A-Z]{9})\Z")
 # 실호출 확인은 아님"). 실계좌 없이는 판정할 수 없으므로 가드를 무조건 열지 않고
 # KIS_ALNUM_STOCK_ORDER_ENABLED 플래그 뒤에 둔다 — 아래 is_orderable_stock_code()가
 # 텔레그램 주문 경로의 판정 진입점이며, 이 상수는 그 함수의 "플래그 꺼짐(기본값)"
-# 분기에서, 그리고 order_assist.check_orderable_code()에서 쓰인다. 후자는 플래그와
-# 무관하게 이 상수를 직접 참조한다(아래 ⚠️ 블록 3번째 복제본 항목 참조).
+# 분기에서, 그리고 order_assist.check_orderable_code()에서 쓰인다. 후자는 플래그를 보지
+# 않는 is_orderable_stock_code_strict()를 거친다(아래 ⚠️ 블록 3번째 복제본 항목 참조).
+#
+# 이 상수와 mcp-trading/order.js의 ORDERABLE_STOCK_CODE_RE가 같은 판정을 내는지는
+# mcp-trading/tests/fixtures/orderable_code_policy.json 공유 판정표가 고정한다(#138).
 _ORDERABLE_STOCK_CODE_RE = re.compile(r"\A[0-9]{6,7}\Z")
 
 # 플래그가 켜졌을 때(KIS_ALNUM_STOCK_ORDER_ENABLED=true) 허용하는 범위. _STOCK_CODE_RE
@@ -109,6 +113,37 @@ def _alnum_stock_order_enabled() -> bool:
     return os.environ.get("KIS_ALNUM_STOCK_ORDER_ENABLED", "") == "true"
 
 
+def describe_orderable_code_policy() -> str:
+    """지금 이 프로세스가 주문을 받는 코드 형태를 사용자 문장으로 돌려줍니다.
+
+    거절 안내 문구를 호출부에 리터럴로 두면 정책의 4번째 복제본이 되고, 그 복제본만
+    플래그를 보지 않아 조용히 어긋난다 — 실제로 telegram_commands.py의 안내는 플래그를
+    보는 가드 아래에서 플래그 꺼짐 규칙을 무조건 서술하고 있었다. 코드 상한이 없는
+    _STOCK_CODE_EXTRACT_RE 덕분에 8자 코드가 거기까지 도달하므로, 플래그를 켠 채
+    0001A0은 주문되는 프로세스에서 "숫자 6~7자리만 주문할 수 있다"는 안내가 나갔다.
+
+    문장을 판정 정규식 바로 옆에 둬 정책과 설명이 갈라질 자리를 없앤다. 같은 분기를
+    mcp-trading/order.js의 buildCashOrderBody()도 메시지 단위로 갖고 있다.
+    """
+    if _alnum_stock_order_enabled():
+        return "영숫자 6~7자 또는 9자 코드만 주문할 수 있습니다."
+    return "숫자 6~7자리 코드만 주문할 수 있습니다."
+
+
+def is_orderable_stock_code_strict(code: str) -> bool:
+    """플래그와 무관하게 #73 기본 정책(숫자 6~7자)으로만 판정합니다.
+
+    ``_ORDERABLE_STOCK_CODE_RE``를 모듈 밖으로 새어 나가게 두면 "이 상수를 직접 쓰는
+    곳이 몇 군데인가"를 grep으로만 알 수 있고, 정책이 바뀔 때 호출부가 각자
+    ``fullmatch`` 호출을 복제한다. 진입점을 함수로 고정해 상수는 이 모듈 안에 둔다.
+
+    ``is_orderable_stock_code()``와 달리 KIS_ALNUM_STOCK_ORDER_ENABLED를 보지 않는다 —
+    자동 제안 경로(order_assist.check_orderable_code)가 쓰는 하드 한도이며, 이
+    비대칭은 의도된 것이다(아래 is_orderable_stock_code() docstring 참조).
+    """
+    return bool(_ORDERABLE_STOCK_CODE_RE.fullmatch(code))
+
+
 def is_orderable_stock_code(code: str) -> bool:
     """code(이미 upper() 정규화된 값)가 현재 정책상 주문 가능한 형태인지 판정합니다.
 
@@ -116,14 +151,15 @@ def is_orderable_stock_code(code: str) -> bool:
     buildCashOrderBody() 가드를 미리 복제해, 조기 거절로 시세·잔고 조회와 60초 대기
     슬롯 낭비를 막는다(#73).
 
-    ⚠️  결합 유지 필수: 이 함수와 mcp-trading/order.js:77-84(+ 플래그 분기)는 쌍을
-        이루므로 한쪽만 바꾸면 그 계층에서 조용히 계속 막힌다. 플래그를 켤 때는 두
-        계층에 같은 KIS_ALNUM_STOCK_ORDER_ENABLED 값을 넣어야 한다 — mcp-trading은
-        backend가 띄우는 자식 프로세스라 config._MCP_ENV_ALLOWED_PREFIXES의 KIS_
-        접두사 통과 목록을 통해 같은 값을 그대로 물려받는다.
+    ⚠️  결합 유지 필수: 이 함수와 mcp-trading/order.js buildCashOrderBody()의 두 가드
+        (+ 플래그 분기)는 쌍을 이루므로 한쪽만 바꾸면 그 계층에서 조용히 계속 막힌다.
+        플래그를 켤 때는 두 계층에 같은 KIS_ALNUM_STOCK_ORDER_ENABLED 값을 넣어야
+        한다 — mcp-trading은 backend가 띄우는 자식 프로세스라
+        config._MCP_ENV_ALLOWED_PREFIXES의 KIS_ 접두사 통과 목록을 통해 같은 값을
+        그대로 물려받는다.
 
         3번째 복제본이 하나 더 있다: order_assist.check_orderable_code()가
-        _ORDERABLE_STOCK_CODE_RE를 직접 참조한다(자동 제안 경로의 하드 한도 판정).
+        is_orderable_stock_code_strict()를 쓴다(자동 제안 경로의 하드 한도 판정).
         이건 의도된 비대칭이다 — 플래그를 켜도 자동 제안은 숫자 6~7자만 낸다.
         사람이 명시적으로 입력한 코드와 달리 봇이 스스로 고른 종목은 KIS 수용
         여부가 확정될 때까지(#265 실측) 기존 범위에 묶어 둔다.
@@ -132,7 +168,7 @@ def is_orderable_stock_code(code: str) -> bool:
     """
     if _alnum_stock_order_enabled():
         return bool(_ORDERABLE_STOCK_CODE_ALNUM_RE.fullmatch(code))
-    return bool(_ORDERABLE_STOCK_CODE_RE.fullmatch(code))
+    return is_orderable_stock_code_strict(code)
 
 
 # ──────────────────────────────────────────────────────────────────────────

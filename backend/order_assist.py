@@ -68,10 +68,10 @@ from .services import short_error
 # 쓰지 않으므로 마크다운 표기가 남으면 화면에 그대로 별표로 보인다 (#297).
 from .presentation import sanitize_markdown
 from .stock_code import (
-    _ORDERABLE_STOCK_CODE_RE,
     _is_unresolved_echo,
     _STOCK_CODE_EXTRACT_RE,
     extract_stock_name,
+    is_orderable_stock_code_strict,
 )
 from .timeutil import KST
 from .trading_orders import ORDER_EXPIRES_AFTER, OrderSide, OrderType, PendingOrder, is_korean_market_open
@@ -225,6 +225,14 @@ class OrderAssistResult:
 # 제안 프롬프트 / 파싱
 # ---------------------------------------------------------------------------
 
+# 프롬프트가 "<6자리 종목코드>"를 요구하고 check_orderable_code()가 숫자 6~7자만
+# 받는 것은 의도된 비대칭이다(#138). 사람이 명시적으로 입력한 코드는
+# stock_code.is_orderable_stock_code()가 KIS_ALNUM_STOCK_ORDER_ENABLED를 따라
+# 영숫자·9자까지 열어 주지만, 봇이 스스로 고른 종목은 KIS가 영숫자 PDNO를 실제로
+# 수용하는지 확정될 때까지(docs/issue-138-alnum-stock-code.md §7 실측) 기존 범위에
+# 묶어 둔다. tests/test_order_assist.py의
+# test_suggestion_path_stays_numeric_only_even_when_alnum_flag_is_on이 이 비대칭을
+# 고정하므로, 없앨 때는 그 테스트를 함께 지워야 한다.
 PROPOSAL_PROMPT_TEMPLATE = """당신은 Fin-Us 주문 제안자입니다. 아래 종목 하나에 대해 지금 낼 만한 주문을 한 건만 제안하세요.
 
 종목: {stock}
@@ -494,12 +502,17 @@ def parse_snapshot(
 def check_orderable_code(stock_code: str, blacklist: frozenset[str]) -> LimitViolation | None:
     """"이 코드로 주문을 낼 수 있는가"의 두 갈래를 한자리에서 판정한다.
 
-    주문 가능 코드 형태(``_ORDERABLE_STOCK_CODE_RE``, mcp-trading/order.js 정책의
-    백엔드 복제본)와 블랙리스트를 붙여 둔 이유는, 둘을 떨어뜨리면 한쪽만 통과하는
-    경로가 생기기 때문이다. 새 코드 제약이 생기면 여기에 함께 넣는다.
+    주문 가능 코드 형태(``stock_code.is_orderable_stock_code_strict()``,
+    mcp-trading/order.js 정책의 백엔드 복제본)와 블랙리스트를 붙여 둔 이유는, 둘을
+    떨어뜨리면 한쪽만 통과하는 경로가 생기기 때문이다. 새 코드 제약이 생기면 여기에
+    함께 넣는다.
+
+    ``strict``인 것은 의도된 비대칭이다 — KIS_ALNUM_STOCK_ORDER_ENABLED를 켜도 자동
+    제안 경로는 숫자 6~7자만 낸다(#138). 자세한 근거는 위 PROPOSAL_PROMPT_TEMPLATE
+    주석과 stock_code.is_orderable_stock_code() docstring 참조.
     """
     code = (stock_code or "").strip().upper()
-    if not _ORDERABLE_STOCK_CODE_RE.fullmatch(code):
+    if not is_orderable_stock_code_strict(code):
         return LimitViolation(
             "unorderable_code",
             f"{code or '(코드 없음)'} — 주문을 지원하지 않는 종목코드입니다.",

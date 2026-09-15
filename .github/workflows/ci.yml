@@ -38,6 +38,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # 백엔드 스위트는 파이썬만 쓰지 않는다. backend/tests/test_stock_code.py의
+      # test_order_js_guard_agrees_with_shared_policy_table이 node로
+      # mcp-trading/order.js의 buildCashOrderBody()를 실제 호출해 공유 판정표와
+      # 대조한다 — "JS 쪽만 바꾼 변경도 백엔드 스위트에서 red가 된다"는 보장이
+      # 이 한 테스트에 달려 있다(docs/issue-138-alnum-stock-code.md 6.2).
+      # 러너 이미지에 node가 있다는 사실에 기대면 이미지가 바뀌는 날 그 보장이
+      # 조용히 사라지므로 mcp-trading-test 잡과 같은 버전을 여기서도 못 박는다.
+      # npm 설치는 하지 않는다 — order.js는 의존성 없이 import되므로 캐시도 붙이지 않는다.
+      - name: Node 24 설치 (order.js 교차 확인 테스트용)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
       - name: uv 설치 (자체 캐시 활성화)
         uses: astral-sh/setup-uv@v3
         with:
