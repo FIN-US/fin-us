@@ -4,10 +4,11 @@ import re
 import secrets
 import time
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from enum import Enum
 from datetime import datetime
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 from urllib.parse import quote as _url_quote
 
 from fastapi import HTTPException
@@ -548,6 +549,22 @@ def _create_poller_state_store() -> TelegramPollerStore:
     return RedisTelegramPollerStore(create_redis_client())
 
 
+# 핸들러가 "이 update는 다시 실행하면 안 되는 지점을 지났다"를 폴러에 알리는 통로 (#259 3단계).
+#
+# 폴러는 handle_update가 돌아온 뒤에 offset을 영속화한다. /confirm 체결 성공은 그 사이에 결과
+# 전송이 들어앉아 있어, 거기서 프로세스가 죽으면 같은 update가 재배달·재실행되고 claim이 비어
+# "확정할 대기 주문이 없습니다"로 체결을 오표시했다(#269). 확정 시점을 아는 것은 핸들러이고
+# 영속화를 쥔 것은 폴러라, 핸들러가 그 시점에 폴러를 부르게 한다.
+#
+# 인자가 아니라 ContextVar로 넘긴다. handle_update는 폴러의 덕 타이핑된 주입 지점이라(테스트
+# 대역 수십 개가 handle_update(update) 하나만 구현한다) 시그니처를 넓히면 구현 전부가 함께
+# 바뀐다. 핸들러 속성에 심으면 update마다 공유 객체를 고쳐 쓰게 된다. ContextVar는 폴러가
+# handle_update를 await하는 동안에만 값이 보이고, 폴러 밖에서 부른 handle_update에서는 None이다.
+_update_settled_hook: ContextVar[Callable[[], Awaitable[None]] | None] = ContextVar(
+    "telegram_update_settled_hook", default=None
+)
+
+
 def _default_watchlist_repo() -> SqliteWatchlistRepo:
     return SqliteWatchlistRepo(lambda: Session(engine))
 
@@ -746,6 +763,19 @@ class TelegramCommandHandler:
         return await send_text_settled(
             self.notifier, text, reply_markup=reply_markup, sleep=self._sleep
         )
+
+    async def _mark_update_settled(self) -> None:
+        """지금 처리 중인 update를 폴러가 곧바로 확정하게 한다 (#259 3단계).
+
+        폴러는 이 호출 안에서 offset을 영속화한다. 돌아온 뒤에 프로세스가 죽어도 그 update는
+        재배달되지 않으므로, **이 뒤에서 잃은 메시지를 되살릴 근거가 따로 있는 자리에서만**
+        부른다 — 지금은 체결이 원장에 미통지로 기록된 직후 하나다(_handle_confirm 참조).
+
+        폴러 밖에서 불렸으면(handle_update를 직접 부르는 테스트 등) 아무 일도 하지 않는다.
+        """
+        hook = _update_settled_hook.get()
+        if hook is not None:
+            await hook()
 
     async def _sleep(self, seconds: float) -> None:
         """테스트가 전역 asyncio.sleep 대신 이 인스턴스만 대체할 수 있게 하는 간접층.
@@ -1560,14 +1590,29 @@ class TelegramCommandHandler:
             )
             return
 
+        # 여기서 update를 확정한다 (#259 3단계). 이 아래에서 죽어도 체결은 원장에 미통지로
+        # 남아 outbox가 배달하므로 update를 다시 실행할 이유가 없다 — 재실행은 claim이 비어
+        # "확정할 대기 주문이 없습니다"로 체결을 오표시할 뿐이다. 그래서 전송보다 먼저 폴러가
+        # offset을 영속화하게 한다.
+        #
+        # 대가: 영속화 대기가 전송 뒤에서 앞으로 옮겨 왔다. redis가 멈추면 "주문 완료"가
+        # 최대 STATE_STORE_TIMEOUT_SECONDS(3초)만큼 늦게 나간다(PR #376 리뷰). 상한이 있고
+        # 저장 실패는 삼켜지므로 통지 자체를 막지는 않는다.
+        #
+        # 기록 뒤여야 한다. 위 기록 실패 경로는 원장이 없어 먼저 확정하면 그 경로에서 죽을 때
+        # 무응답이 되므로 확정하지 않는다. 나머지 settled 경로(/buy 프롬프트·/cancel·403·
+        # 불명확)도 같은 이유로 여기에 넣지 않았다 — 되살릴 원장이 없는 메시지에서 먼저
+        # 영속화하면 오표시 한 줄을 무응답과 바꾸는 거래가 된다.
+        await self._mark_update_settled()
+
         try:
             sent = await self.notifier.send_text(f"주문 완료: {result.message}")
         except Exception as exc:
-            # 이 경로가 예외를 올리면 폴러가 update를 재실행하고, claim이 비어 체결된 주문이
-            # "확정할 대기 주문이 없습니다"로 오표시된다 (#247). 실제 notifier는 실패를
-            # False로 접어 오지만 계약을 여기서 닫는다 — _handle_one_update의 독스트링이
-            # "확정 뒤의 전송은 예외를 던지지 않는다"에 기대고 있고, _send_text_settled를
-            # 걷어내면서 그 보장을 대신 서 주던 자리도 함께 사라졌다.
+            # 예외를 여기서 받는 이유는 재실행 방지가 아니다 — 위에서 이미 확정했으므로 예외가
+            # 올라가도 폴러는 COMMITTED로 받아 재실행하지 않는다(#259 3단계). 받는 이유는
+            # 실패의 흔적이다: 올려 보내면 폴러의 일반 로그 한 줄로 끝나 trade_id와
+            # delivery_metrics 집계가 남지 않는다. 실제 notifier는 실패를 False로 접어 오므로
+            # 아래 sent is False 분기와 같은 기록을 남긴다.
             #
             # CancelledError는 BaseException이라 여기 걸리지 않는다. 폴러의 graceful
             # shutdown이 막히지 않고, 그 경우 행은 미통지로 남아 재시작 뒤 배달된다.
@@ -2226,11 +2271,16 @@ class _UpdateOutcome(Enum):
 
     offset을 전진시켜도 되는지(DONE/SKIPPED)와 스킵 통지가 필요한지(SKIPPED)를 한 값으로
     구분한다. 평문 str이면 오타가 조용히 통과하므로 Enum으로 강제한다 (PR #242 리뷰).
+
+    COMMITTED는 handle_update가 처리 도중에 이미 offset을 확정·영속화했다는 뜻이다
+    (_update_settled_hook, #259 3단계). 전진시켜도 되는 것은 DONE과 같지만, 배치 루프가 같은
+    쓰기를 반복하지 않도록 구분한다.
     """
 
     DONE = "done"
     RETRY = "retry"
     SKIPPED = "skipped"
+    COMMITTED = "committed"
 
 
 def _update_chat_id(update: dict[str, Any]) -> str:
@@ -2363,32 +2413,13 @@ class TelegramCommandPoller:
                     break
                 if outcome is _UpdateOutcome.SKIPPED:
                     skipped.append(update)
+                if outcome is _UpdateOutcome.COMMITTED:
+                    # 핸들러가 처리 도중에 이미 확정했다 (#259 3단계). 같은 쓰기를 반복하지 않는다.
+                    continue
                 if not isinstance(update_id, int):
                     continue
 
-                self._failures.pop(update_id, None)
-                self.offset = update_id + 1
-                self._forget_passed_updates(self.offset)
-                # 배치 끝이 아니라 update마다 쓴다. 배치 단위로 미루면 중간에 죽었을 때
-                # 이미 실행한 update의 기록이 통째로 사라져 영속화의 의미가 없다 (#248).
-                #
-                # 남는 창은 handle_update의 실행 시간이다. #253이 _send_text_settled로
-                # "부수효과 확정 뒤의 전송"을 그 자리에서 재시도하게 만들면서 이 시간이
-                # 밀리초에서 십수 초로 늘어났었다. 그 구간에 SIGTERM이 오면 체결은 됐는데
-                # persist 전이라, 재시작 후 재배달·재실행에서 claim이 None을 돌려주고
-                # 사용자는 "확정할 대기 주문이 없습니다"를 받는다 — #253이 없애려던 그
-                # 오표시다.
-                #
-                # #259 2단계가 이 창을 **줄였다**. 체결 통지가 outbox로 나가면서 /confirm
-                # 성공 경로의 전송은 재시도 없는 한 번이 됐고, 창은 최대 20초에서 send_text
-                # 한 번(httpx 타임아웃 10초)으로 내려왔다. 그리고 성격이 바뀌었다: 그 창에서
-                # 죽어도 체결은 이미 원장에 미통지로 남아 있어 다음 주기가 통지를 배달한다.
-                # 남는 피해는 재실행이 내보내는 "확정할 대기 주문이 없습니다" 한 줄이다.
-                #
-                # 창 자체는 아직 열려 있다. #269가 그 사실을 회귀 테스트로 고정했고
-                # (test_confirmed_order_is_reexecuted_when_restart_lands_in_the_settled_send),
-                # 닫는 작업은 #293(= #259 3단계)이다.
-                await self._persist_state()
+                await self._commit_update(update_id)
 
             if skipped:
                 # 배치 통지는 한 건으로 합친다. poison N건에 N번 발송하면 채팅당 초당 ~1건
@@ -2429,11 +2460,14 @@ class TelegramCommandPoller:
         update: dict[str, Any],
         update_id: Any,
     ) -> _UpdateOutcome:
-        """update 처리 결과를 반환한다: 완료 / 재시도 대기 / 예산 소진 후 스킵 (#241).
+        """update 처리 결과를 반환한다: 완료 / 재시도 대기 / 예산 소진 후 스킵 / 처리 도중 확정
+        (#241, #259 3단계).
 
         재시도는 handle_update가 멱등하다는 전제 위에 있고, 그 전제는 핸들러가 지킨다:
         부수효과가 확정된 뒤의 전송은 예외를 던지지 않으므로 여기까지 오지 않는다. 즉
-        재실행되는 것은 부수효과 이전 구간뿐이다 (#247). 그 전송이 실패했을 때 무엇으로
+        재실행되는 것은 부수효과 이전 구간뿐이다 (#247). /confirm 체결 성공은 이 전제에 기대지
+        않는다 — 전송 전에 _update_settled_hook으로 확정하므로, 그 뒤의 예외는 아래 committed
+        분기가 COMMITTED로 받아 재시도하지 않는다. 그 전송이 실패했을 때 무엇으로
         되살리는지는 경로마다 다르다 — /confirm 체결 성공은 원장에 남은 미통지 행과
         scheduler.trade_notification_task가 받고(#259 2단계), 나머지 settled 경로는
         _send_text_settled의 인플레이스 재시도가 전부다.
@@ -2451,12 +2485,31 @@ class TelegramCommandPoller:
         예산에도 잡히지 않으므로 같은 채팅의 rate limit을 추가로 소모한다. 예산을 손볼
         때 함께 보라 (PR #263 리뷰, #275).
         """
+        committed = False
+
+        async def commit() -> None:
+            nonlocal committed
+            # update_id가 없으면 확정할 offset이 없다. 한 update 안에서 두 번 불려도 한 번만 쓴다.
+            if committed or not isinstance(update_id, int):
+                return
+            committed = True
+            await self._commit_update(update_id)
+
+        hook_token = _update_settled_hook.set(commit)
         try:
             await self.handler.handle_update(update)
-            return _UpdateOutcome.DONE
+            return _UpdateOutcome.COMMITTED if committed else _UpdateOutcome.DONE
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            if committed:
+                # offset이 이미 이 update를 지나갔다 (#259 3단계). 여기서 RETRY를 돌려주면
+                # 재배달되지 않을 update에 예산이 생기고 배치만 끊긴다. 확정은 "다시 실행하면
+                # 안 된다"는 핸들러의 선언이므로 뒤의 예외도 재시도로 되살리지 않는다.
+                logger.error(
+                    "Telegram update %s failed after it was settled: %s", update_id, exc
+                )
+                return _UpdateOutcome.COMMITTED
             if not isinstance(update_id, int):
                 # update_id가 없으면 예산도 offset도 추적할 수 없다. 붙잡아 둘 방법이
                 # 없으므로 로그만 남기고 넘어간다.
@@ -2509,6 +2562,32 @@ class TelegramCommandPoller:
                 exc,
             )
             return _UpdateOutcome.SKIPPED
+        finally:
+            _update_settled_hook.reset(hook_token)
+
+    async def _commit_update(self, update_id: int) -> None:
+        """update를 통과시킨다: 예산을 지우고 offset을 그 뒤로 옮겨 영속화한다 (#248, #350).
+
+        보통은 배치 루프가 handle_update를 마친 뒤에 부른다. 결과 전송보다 먼저 확정해야 하는
+        update는 핸들러가 처리 도중에 부른다(_update_settled_hook, #259 3단계).
+        """
+        self._failures.pop(update_id, None)
+        self.offset = update_id + 1
+        self._forget_passed_updates(self.offset)
+        # 배치 끝이 아니라 update마다 쓴다. 배치 단위로 미루면 중간에 죽었을 때 이미 실행한
+        # update의 기록이 통째로 사라져 영속화의 의미가 없다 (#248).
+        #
+        # 남는 창은 이 쓰기 전까지, 즉 handle_update의 실행 시간이다. 그 사이 죽으면 update가
+        # 재배달·재실행된다. /confirm 체결 성공에서는 그 재실행이 claim에서 비어 "확정할 대기
+        # 주문이 없습니다"로 체결을 오표시했다(#253 → #269). #259 2단계가 창을 최대 20초에서
+        # send_text 한 번으로 줄였고, 3단계가 그 경로만 전송 전에 여기를 부르게 해 닫았다 —
+        # test_confirmed_order_is_not_reexecuted_when_restart_lands_in_the_fill_send.
+        #
+        # 먼저 쓰는 대가(전송 전에 죽으면 메시지가 사라진다)는 원장이 받는다. 그 체결은 미통지로
+        # 남아 scheduler.trade_notification_task가 배달한다. 나머지 settled 경로(/buy 프롬프트·
+        # /cancel·/confirm 403·불명확)에는 받아줄 원장이 없어 창을 그대로 둔다 — 거기서 먼저
+        # 쓰면 재실행이 내보내는 오표시 한 줄 대신 메시지 자체가 사라진다.
+        await self._persist_state()
 
     def _retry_delay(self) -> float:
         """미해결 update 중 가장 적게 시도한 것을 기준으로 백오프 간격을 고른다 (#241).
