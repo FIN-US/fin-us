@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from typing import NamedTuple, cast
 from zoneinfo import ZoneInfo
 
+import httpx
 import pytest
 from fastapi import HTTPException
 
@@ -2336,9 +2337,7 @@ async def test_alerts_command_ignores_other_chats():
 
 
 @pytest.mark.asyncio
-async def test_polling_failure_log_has_no_bot_token(
-    monkeypatch, caplog, failing_telegram_client
-):
+async def test_polling_failure_log_has_no_bot_token(monkeypatch, caplog, mock_httpx):
     """폴러의 getUpdates 실패 로그에 봇 토큰이 남지 않아야 한다 (PR #253 2차 리뷰, #257).
 
     401(토큰 폐기)·409(인스턴스 중복 또는 웹훅 병행)·429·5xx에서 폴링 루프가 5초마다
@@ -2354,10 +2353,8 @@ async def test_polling_failure_log_has_no_bot_token(
     notifier.bot_token = token
     poller = _make_poller(notifier, handler=TelegramCommandHandler(notifier=notifier))
 
-    monkeypatch.setattr(
-        "backend.telegram_notifier.httpx.AsyncClient",
-        failing_telegram_client(409, {"ok": False, "description": "Conflict"}),
-    )
+    # 진짜 409 응답이다. raise_for_status의 예외에 실제로 나간 요청의 URL(토큰)이 실린다.
+    mock_httpx(httpx.Response(409, json={"ok": False, "description": "Conflict"}))
 
     async def stop_after_first_failure(delay):
         raise pytest.fail.Exception("stop after first failed polling iteration")
@@ -5156,39 +5153,27 @@ def test_get_updates_bounds_the_batch_size():
 
 
 @pytest.mark.asyncio
-async def test_get_updates_sends_the_batch_limit(monkeypatch):
+async def test_get_updates_sends_the_batch_limit(mock_httpx):
     """limit을 payload에 실제로 실어야 배치가 유계가 된다 (PR #253 3차 리뷰).
 
     앞의 상수 검사는 _get_updates를 부르지 않아, payload에서 limit을 빼도 초록이었다 —
     Telegram 기본값 100으로 되돌아가는 회귀에 아무 신호가 없었다.
     """
-    captured = {}
-
-    class FakeClient:
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *exc):
-            return False
-
-        async def post(self, url, json):
-            captured["payload"] = json
-            return SimpleNamespace(
-                raise_for_status=lambda: None,
-                json=lambda: {"ok": True, "result": []},
-            )
-
-    # HTTP 호출은 telegram_notifier.fetch_telegram_api로 옮겨갔다 (#257). 패치 지점도
-    # 따라 옮긴다 — 여기서 검사하는 것은 폴러가 싣는 payload이지 호출 위치가 아니다.
-    monkeypatch.setattr(
-        "backend.telegram_notifier.httpx.AsyncClient", lambda **kwargs: FakeClient()
-    )
+    # HTTP 호출은 telegram_notifier.fetch_telegram_api로 옮겨갔다 (#257). 대역은 전역
+    # httpx의 transport에 걸리므로 호출 위치와 무관하다 — 여기서 검사하는 것은 폴러가
+    # 싣는 payload다.
+    recorded = mock_httpx()
     notifier = FakeNotifier()
     notifier.bot_token = "token"
     poller = _make_poller(notifier, handler=object())
 
     assert await poller._get_updates() == []
-    assert captured["payload"]["limit"] == telegram_commands.GET_UPDATES_LIMIT
+    (_, payload), = recorded.calls
+    assert payload["limit"] == telegram_commands.GET_UPDATES_LIMIT
+    # 롱폴링 대기(payload의 timeout)보다 클라이언트 타임아웃이 길어야 update가 없는 정상
+    # 응답을 타임아웃 오류로 읽지 않는다. 클라이언트 생성 인자는 요청 객체에 남지 않으므로
+    # 따로 고정한다 (#360).
+    assert recorded.client_kwargs["timeout"] > payload["timeout"]
 
 
 # TelegramSendError(RuntimeError)를 삼키는 except 이름들. 이 중 하나라도 먼저 걸리면

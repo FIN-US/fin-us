@@ -254,185 +254,96 @@ def test_telegram_error_log_redacts_bot_token(caplog):
 
 
 @pytest.mark.asyncio
-async def test_send_text_posts_reply_markup(monkeypatch):
-    captured = {}
-
-    class FakeResponse:
-        def raise_for_status(self):
-            return None
-
-    class FakeAsyncClient:
-        def __init__(self, *, timeout):
-            self.timeout = timeout
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, traceback):
-            return None
-
-        async def post(self, url, *, json):
-            captured["url"] = url
-            captured["json"] = json
-            return FakeResponse()
-
+async def test_send_text_posts_reply_markup(mock_httpx):
     reply_markup = {
         "inline_keyboard": [
             [{"text": "확정", "callback_data": "order:confirm"}],
         ]
     }
-    monkeypatch.setattr("backend.telegram_notifier.httpx.AsyncClient", FakeAsyncClient)
+    recorded = mock_httpx()
     notifier = TelegramNotifier("token", "123")
 
     result = await notifier.send_text("주문 확인", reply_markup=reply_markup)
 
     assert result is True
-    assert captured["url"] == "https://api.telegram.org/bottoken/sendMessage"
-    assert captured["json"] == {
-        "chat_id": "123",
-        "text": "주문 확인",
-        "disable_web_page_preview": True,
-        "reply_markup": reply_markup,
-    }
+    assert recorded.calls == [
+        (
+            "https://api.telegram.org/bottoken/sendMessage",
+            {
+                "chat_id": "123",
+                "text": "주문 확인",
+                "disable_web_page_preview": True,
+                "reply_markup": reply_markup,
+            },
+        )
+    ]
+    # 클라이언트 생성 인자는 요청 객체에 남지 않는다. 구 대역의 필수 timeout 인자가
+    # 우연히 지키던 계약을 여기서 명시적으로 고정한다 (#360). 텔레그램 호출은 전부
+    # _request_telegram_api 한 곳에서 클라이언트를 만든다.
+    assert recorded.client_kwargs.get("timeout") == 10.0
 
 
 @pytest.mark.asyncio
-async def test_answer_callback_query_posts_payload(monkeypatch):
-    captured = {}
-
-    class FakeResponse:
-        def raise_for_status(self):
-            return None
-
-    class FakeAsyncClient:
-        def __init__(self, *, timeout):
-            self.timeout = timeout
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, traceback):
-            return None
-
-        async def post(self, url, *, json):
-            captured["url"] = url
-            captured["json"] = json
-            return FakeResponse()
-
-    monkeypatch.setattr("backend.telegram_notifier.httpx.AsyncClient", FakeAsyncClient)
+async def test_answer_callback_query_posts_payload(mock_httpx):
+    recorded = mock_httpx()
     notifier = TelegramNotifier("token", "123")
 
     result = await notifier.answer_callback_query("callback-1", text="처리했습니다.")
 
     assert result is True
-    assert captured["url"] == "https://api.telegram.org/bottoken/answerCallbackQuery"
-    assert captured["json"] == {
-        "callback_query_id": "callback-1",
-        "text": "처리했습니다.",
-    }
+    assert recorded.calls == [
+        (
+            "https://api.telegram.org/bottoken/answerCallbackQuery",
+            {"callback_query_id": "callback-1", "text": "처리했습니다."},
+        )
+    ]
 
 
 @pytest.mark.asyncio
-async def test_send_chat_action_posts_typing_payload(monkeypatch):
-    captured = {}
-
-    class FakeResponse:
-        def raise_for_status(self):
-            return None
-
-    class FakeAsyncClient:
-        def __init__(self, *, timeout):
-            self.timeout = timeout
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, traceback):
-            return None
-
-        async def post(self, url, *, json):
-            captured["url"] = url
-            captured["json"] = json
-            return FakeResponse()
-
-    monkeypatch.setattr("backend.telegram_notifier.httpx.AsyncClient", FakeAsyncClient)
+async def test_send_chat_action_posts_typing_payload(mock_httpx):
+    recorded = mock_httpx()
     notifier = TelegramNotifier("token", "123")
 
     result = await notifier.send_chat_action()
 
     assert result is True
-    assert captured["url"] == "https://api.telegram.org/bottoken/sendChatAction"
-    assert captured["json"] == {"chat_id": "123", "action": "typing"}
+    assert recorded.calls == [
+        (
+            "https://api.telegram.org/bottoken/sendChatAction",
+            {"chat_id": "123", "action": "typing"},
+        )
+    ]
 
 
 @pytest.mark.asyncio
-async def test_set_bot_commands_posts_command_menu_payload(monkeypatch):
-    captured = {}
-
-    class FakeResponse:
-        def raise_for_status(self):
-            return None
-
-    class FakeAsyncClient:
-        def __init__(self, *, timeout):
-            self.timeout = timeout
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, traceback):
-            return None
-
-        async def post(self, url, *, json):
-            captured["url"] = url
-            captured["json"] = json
-            return FakeResponse()
-
+async def test_set_bot_commands_posts_command_menu_payload(mock_httpx):
     commands = [
         {"command": "balance", "description": "잔고 조회"},
         {"command": "alerts", "description": "알림 모드 변경"},
     ]
-    monkeypatch.setattr("backend.telegram_notifier.httpx.AsyncClient", FakeAsyncClient)
+    recorded = mock_httpx()
     notifier = TelegramNotifier("token", "123")
 
     result = await notifier.set_bot_commands(commands)
 
     assert result is True
-    assert captured["url"] == "https://api.telegram.org/bottoken/setMyCommands"
-    assert captured["json"] == {"commands": commands}
+    assert recorded.calls == [
+        ("https://api.telegram.org/bottoken/setMyCommands", {"commands": commands})
+    ]
 
 
 @pytest.mark.asyncio
-async def test_load_bot_username_fetches_and_caches_get_me(monkeypatch):
-    calls = []
-
-    class FakeResponse:
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return {"ok": True, "result": {"username": "Finus_Bot"}}
-
-    class FakeAsyncClient:
-        def __init__(self, *, timeout):
-            self.timeout = timeout
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, traceback):
-            return None
-
-        async def post(self, url, **kwargs):
-            calls.append((url, kwargs))
-            return FakeResponse()
-
-    monkeypatch.setattr("backend.telegram_notifier.httpx.AsyncClient", FakeAsyncClient)
+async def test_load_bot_username_fetches_and_caches_get_me(mock_httpx):
+    recorded = mock_httpx(
+        httpx.Response(200, json={"ok": True, "result": {"username": "Finus_Bot"}})
+    )
     notifier = TelegramNotifier("token", "123")
 
     assert await notifier.load_bot_username() == "finus_bot"
     assert await notifier.load_bot_username() == "finus_bot"
-    assert calls == [("https://api.telegram.org/bottoken/getMe", {})]
+    # 본문 없이 한 번만 부른다. 구 대역은 이걸 post의 kwargs가 {}인지로 봤는데, 그 단언이
+    # 호출 시그니처를 읽는 탓에 post에 인자가 하나 붙으면 깨졌다 (#360 뮤테이션 실측).
+    assert recorded.calls == [("https://api.telegram.org/bottoken/getMe", None)]
 
 
 def _api_error(status_code, body, *, method="sendMessage"):
@@ -447,113 +358,66 @@ def _api_error(status_code, body, *, method="sendMessage"):
 # ── #260: 진행 메시지 전송(message_id 확보) · 편집 ──────────────────────────
 
 
-def _fake_client_factory(calls, response, *rest):
-    """응답을 순서대로 돌려준다. 마지막 응답은 이후 호출에서 계속 재사용된다.
-
-    응답이 하나면 예전과 똑같이 매 호출 같은 응답이다. 여럿 주면 분할 전송(#313)의
-    "n번째 조각에서 실패" 같은 순서 있는 시나리오를 세울 수 있다.
-    """
-    responses = [response, *rest]
-
-    class FakeAsyncClient:
-        def __init__(self, *, timeout):
-            self.timeout = timeout
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, traceback):
-            return None
-
-        async def post(self, url, *, json):
-            calls.append((url, json))
-            return responses[min(len(calls) - 1, len(responses) - 1)]
-
-    return FakeAsyncClient
-
-
-class _FakeResponse:
-    def __init__(self, body=None, error=None):
-        self._body = body
-        self._error = error
-
-    def raise_for_status(self):
-        if self._error is not None:
-            raise self._error
-
-    def json(self):
-        if self._body is None:
-            raise ValueError("no body")
-        return self._body
-
-
 @pytest.mark.asyncio
-async def test_send_text_returning_id_extracts_message_id(monkeypatch):
-    calls = []
-    response = _FakeResponse({"ok": True, "result": {"message_id": 4242}})
-    monkeypatch.setattr(
-        "backend.telegram_notifier.httpx.AsyncClient",
-        _fake_client_factory(calls, response),
+async def test_send_text_returning_id_extracts_message_id(mock_httpx):
+    recorded = mock_httpx(
+        httpx.Response(200, json={"ok": True, "result": {"message_id": 4242}})
     )
     notifier = TelegramNotifier("token", "123")
 
     message_id = await notifier.send_text_returning_id("⏳ 분석 중입니다...")
 
     assert message_id == 4242
-    assert calls[0][0] == "https://api.telegram.org/bottoken/sendMessage"
-    assert calls[0][1]["text"] == "⏳ 분석 중입니다..."
+    url, payload = recorded.calls[0]
+    assert url == "https://api.telegram.org/bottoken/sendMessage"
+    assert payload["text"] == "⏳ 분석 중입니다..."
 
 
 @pytest.mark.asyncio
-async def test_send_text_returning_id_returns_none_on_unusable_body(monkeypatch):
+async def test_send_text_returning_id_returns_none_on_unusable_body(mock_httpx):
     """본문을 읽을 수 없으면 전송은 성공했어도 '편집 불가'로 떨어뜨린다."""
-    monkeypatch.setattr(
-        "backend.telegram_notifier.httpx.AsyncClient",
-        _fake_client_factory([], _FakeResponse(body=None)),
-    )
+    recorded = mock_httpx(httpx.Response(200, text="not json"))
     notifier = TelegramNotifier("token", "123")
 
     assert await notifier.send_text_returning_id("⏳") is None
+    # 실패 경로는 결과만 보면 요청 전에 난 예외(예: 클라이언트 생성 인자 오류)도 관문의
+    # except Exception에 접혀 같은 None이 된다. 요청이 실제로 나갔는지까지 봐야 이 응답
+    # 때문에 None인 것이다 (PR #374 리뷰). 아래 실패 경로 테스트들도 같은 이유다.
+    assert len(recorded.requests) == 1
 
 
 @pytest.mark.asyncio
-async def test_send_text_returning_id_rejects_a_body_that_says_not_ok(monkeypatch):
+async def test_send_text_returning_id_rejects_a_body_that_says_not_ok(mock_httpx):
     """2xx + ok:false 본문의 message_id는 쓰지 않는다 (PR #263 리뷰 — 뮤테이션 생존).
 
     ok:false면 result가 무엇이든 그 메시지는 만들어지지 않았다. 그 id로 삭제·편집을
     시도하면 남의 메시지를 건드리거나 조용히 실패한다.
     """
-    monkeypatch.setattr(
-        "backend.telegram_notifier.httpx.AsyncClient",
-        _fake_client_factory([], _FakeResponse({"ok": False, "result": {"message_id": 4242}})),
+    recorded = mock_httpx(
+        httpx.Response(200, json={"ok": False, "result": {"message_id": 4242}})
     )
     notifier = TelegramNotifier("token", "123")
 
     assert await notifier.send_text_returning_id("⏳") is None
+    assert len(recorded.requests) == 1
 
 
 @pytest.mark.asyncio
-async def test_send_text_returning_id_returns_none_on_send_failure(monkeypatch):
-    monkeypatch.setattr(
-        "backend.telegram_notifier.httpx.AsyncClient",
-        _fake_client_factory([], _FakeResponse(error=httpx.HTTPError("boom"))),
-    )
+async def test_send_text_returning_id_returns_none_on_send_failure(mock_httpx):
+    recorded = mock_httpx(httpx.Response(500))
     notifier = TelegramNotifier("token", "123")
 
     assert await notifier.send_text_returning_id("⏳") is None
+    assert len(recorded.requests) == 1
 
 
 @pytest.mark.asyncio
-async def test_edit_message_text_posts_edit_payload(monkeypatch):
-    calls = []
-    monkeypatch.setattr(
-        "backend.telegram_notifier.httpx.AsyncClient",
-        _fake_client_factory(calls, _FakeResponse({"ok": True})),
-    )
+async def test_edit_message_text_posts_edit_payload(mock_httpx):
+    recorded = mock_httpx()
     notifier = TelegramNotifier("token", "123")
 
     assert await notifier.edit_message_text(4242, "최종 답변") is True
-    assert calls == [
+    assert recorded.calls == [
         (
             "https://api.telegram.org/bottoken/editMessageText",
             {
@@ -567,54 +431,44 @@ async def test_edit_message_text_posts_edit_payload(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_edit_message_text_clamps_to_the_telegram_limit(monkeypatch):
+async def test_edit_message_text_clamps_to_the_telegram_limit(mock_httpx):
     """편집은 메시지 하나를 고치는 조작이라 나눌 수 없다 — 대신 잘림이 보이게 자른다 (#313).
 
     현재 호출부는 짧은 종료 표시 하나뿐이라 절단이 발동하지 않지만, 넘겨 보내면
     텔레그램이 400으로 거부하고 진행 메시지가 '분석 중'인 채로 남는다.
     """
-    calls = []
-    monkeypatch.setattr(
-        "backend.telegram_notifier.httpx.AsyncClient",
-        _fake_client_factory(calls, _FakeResponse({"ok": True})),
-    )
+    recorded = mock_httpx()
     notifier = TelegramNotifier("token", "123")
 
     assert await notifier.edit_message_text(4242, "가" * (TELEGRAM_MESSAGE_LIMIT + 500)) is True
-    assert len(calls[0][1]["text"]) == TELEGRAM_MESSAGE_LIMIT
-    assert calls[0][1]["text"].endswith(TELEGRAM_TRUNCATION_SUFFIX)
+    text = recorded.calls[0][1]["text"]
+    assert len(text) == TELEGRAM_MESSAGE_LIMIT
+    assert text.endswith(TELEGRAM_TRUNCATION_SUFFIX)
 
 
 @pytest.mark.asyncio
-async def test_send_text_returning_id_clamps_to_the_telegram_limit(monkeypatch):
+async def test_send_text_returning_id_clamps_to_the_telegram_limit(mock_httpx):
     """식별자 하나로 다시 손댈 메시지 하나가 계약이라 나누지 않는다. 잘림은 보인다 (#313)."""
-    calls = []
-    monkeypatch.setattr(
-        "backend.telegram_notifier.httpx.AsyncClient",
-        _fake_client_factory(calls, _FakeResponse({"ok": True, "result": {"message_id": 7}})),
-    )
+    recorded = mock_httpx(httpx.Response(200, json={"ok": True, "result": {"message_id": 7}}))
     notifier = TelegramNotifier("token", "123")
 
     assert await notifier.send_text_returning_id("다" * (TELEGRAM_MESSAGE_LIMIT + 500)) == 7
-    assert len(calls) == 1
-    assert len(calls[0][1]["text"]) == TELEGRAM_MESSAGE_LIMIT
-    assert calls[0][1]["text"].endswith(TELEGRAM_TRUNCATION_SUFFIX)
+    assert len(recorded.calls) == 1
+    text = recorded.calls[0][1]["text"]
+    assert len(text) == TELEGRAM_MESSAGE_LIMIT
+    assert text.endswith(TELEGRAM_TRUNCATION_SUFFIX)
 
 
 @pytest.mark.asyncio
-async def test_send_text_splits_instead_of_truncating(monkeypatch):
+async def test_send_text_splits_instead_of_truncating(mock_httpx):
     """sendMessage는 자르지 않고 나눈다 — 잘려 사라지던 뒷부분이 다음 통으로 간다 (#313)."""
-    calls = []
-    monkeypatch.setattr(
-        "backend.telegram_notifier.httpx.AsyncClient",
-        _fake_client_factory(calls, _FakeResponse({"ok": True, "result": {"message_id": 1}})),
-    )
+    recorded = mock_httpx(httpx.Response(200, json={"ok": True, "result": {"message_id": 1}}))
     notifier = TelegramNotifier("token", "123")
 
     body = "나" * (TELEGRAM_MESSAGE_LIMIT + 500)
     assert await notifier.send_text(body) is True
 
-    texts = [call[1]["text"] for call in calls]
+    texts = [payload["text"] for _, payload in recorded.calls]
     assert len(texts) > 1
     assert all(len(text) <= TELEGRAM_MESSAGE_LIMIT for text in texts)
     assert TELEGRAM_TRUNCATION_SUFFIX not in "".join(texts)
@@ -623,45 +477,36 @@ async def test_send_text_splits_instead_of_truncating(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_send_text_keeps_the_keyboard_on_the_last_part_only(monkeypatch):
+async def test_send_text_keeps_the_keyboard_on_the_last_part_only(mock_httpx):
     """앞 조각에 버튼을 달면 본문이 끝나기 전에 답을 고르라고 재촉하는 꼴이 된다 (#313)."""
-    calls = []
-    monkeypatch.setattr(
-        "backend.telegram_notifier.httpx.AsyncClient",
-        _fake_client_factory(calls, _FakeResponse({"ok": True, "result": {"message_id": 1}})),
-    )
+    recorded = mock_httpx(httpx.Response(200, json={"ok": True, "result": {"message_id": 1}}))
     notifier = TelegramNotifier("token", "123")
     markup = {"inline_keyboard": [[{"text": "상세", "callback_data": "x"}]]}
 
     assert await notifier.send_text("라" * (TELEGRAM_MESSAGE_LIMIT + 500), reply_markup=markup) is True
 
-    markups = [call[1].get("reply_markup") for call in calls]
+    markups = [payload.get("reply_markup") for _, payload in recorded.calls]
     assert len(markups) > 1
     assert markups[-1] == markup
     assert all(value is None for value in markups[:-1])
 
 
 @pytest.mark.asyncio
-async def test_send_text_stops_at_the_failed_part(monkeypatch):
+async def test_send_text_stops_at_the_failed_part(mock_httpx):
     """도중에 실패하면 남은 조각을 보내지 않는다. 앞이 빠진 채 뒤만 도착하는 것보다 낫다 (#313)."""
-    calls = []
-    monkeypatch.setattr(
-        "backend.telegram_notifier.httpx.AsyncClient",
-        _fake_client_factory(
-            calls,
-            _FakeResponse({"ok": True, "result": {"message_id": 1}}),
-            _FakeResponse(error=httpx.HTTPError("boom")),
-        ),
+    recorded = mock_httpx(
+        httpx.Response(200, json={"ok": True, "result": {"message_id": 1}}),
+        httpx.Response(500),
     )
     notifier = TelegramNotifier("token", "123")
 
     assert await notifier.send_text("마" * (TELEGRAM_MESSAGE_LIMIT * 2 + 10)) is False
     # 첫 조각은 나갔고, 둘째에서 막힌 뒤 셋째는 시도하지 않는다.
-    assert len(calls) == 2
+    assert len(recorded.requests) == 2
 
 
 @pytest.mark.asyncio
-async def test_send_text_returns_false_when_splitting_itself_raises(monkeypatch):
+async def test_send_text_returns_false_when_splitting_itself_raises(mock_httpx):
     """조립 단계의 예외도 False로 접는다 (PR #328 리뷰).
 
     예전의 text[:LIMIT]은 던질 수 없어 "전송 실패는 False"라는 계약이 저절로 지켜졌다.
@@ -672,27 +517,19 @@ async def test_send_text_returns_false_when_splitting_itself_raises(monkeypatch)
         def __str__(self):
             raise ValueError("cannot render")
 
-    calls = []
-    monkeypatch.setattr(
-        "backend.telegram_notifier.httpx.AsyncClient",
-        _fake_client_factory(calls, _FakeResponse({"ok": True, "result": {"message_id": 1}})),
-    )
+    recorded = mock_httpx()
     notifier = TelegramNotifier("token", "123")
 
     # cast: 타입상 불가능한 입력을 일부러 넣는 테스트다. 계약을 지키는 것은 타입 검사가
     # 아니라 런타임이어야 한다 — 전송 계층은 서명을 신뢰할 수 없는 자리에 있다.
     assert await notifier.send_text(cast(str, Unprintable())) is False
-    assert calls == []
+    assert recorded.requests == []
 
 
 @pytest.mark.asyncio
-async def test_a_long_analysis_alert_is_split_not_truncated(monkeypatch):
+async def test_a_long_analysis_alert_is_split_not_truncated(mock_httpx):
     """알림도 같은 분할 경로를 지난다 — format_analysis_alert는 더 이상 자르지 않는다 (#313)."""
-    calls = []
-    monkeypatch.setattr(
-        "backend.telegram_notifier.httpx.AsyncClient",
-        _fake_client_factory(calls, _FakeResponse({"ok": True, "result": {"message_id": 1}})),
-    )
+    recorded = mock_httpx(httpx.Response(200, json={"ok": True, "result": {"message_id": 1}}))
     notifier = TelegramNotifier("token", "123")
     reason = "바" * (TELEGRAM_MESSAGE_LIMIT + 500)
 
@@ -707,22 +544,22 @@ async def test_a_long_analysis_alert_is_split_not_truncated(monkeypatch):
     )
 
     assert sent is True
-    texts = [call[1]["text"] for call in calls]
+    texts = [payload["text"] for _, payload in recorded.calls]
     assert len(texts) > 1
     assert all(len(text) <= TELEGRAM_MESSAGE_LIMIT for text in texts)
     assert reason in "".join(text.split(chr(10), 1)[1] for text in texts)
 
 
 @pytest.mark.asyncio
-async def test_edit_message_text_returns_false_on_failure(monkeypatch):
+async def test_edit_message_text_returns_false_on_failure(mock_httpx):
     """편집 실패는 예외가 아니라 False — 호출부가 새 메시지로 폴백한다."""
-    monkeypatch.setattr(
-        "backend.telegram_notifier.httpx.AsyncClient",
-        _fake_client_factory([], _FakeResponse(error=httpx.HTTPError("message is too old"))),
+    recorded = mock_httpx(
+        httpx.Response(400, json={"ok": False, "description": "Bad Request: message is too old"})
     )
     notifier = TelegramNotifier("token", "123")
 
     assert await notifier.edit_message_text(4242, "최종 답변") is False
+    assert len(recorded.requests) == 1
 
 
 @pytest.mark.asyncio
@@ -734,16 +571,12 @@ async def test_progress_helpers_are_inert_when_notifier_disabled():
 
 
 @pytest.mark.asyncio
-async def test_delete_message_posts_delete_payload(monkeypatch):
-    calls = []
-    monkeypatch.setattr(
-        "backend.telegram_notifier.httpx.AsyncClient",
-        _fake_client_factory(calls, _FakeResponse({"ok": True})),
-    )
+async def test_delete_message_posts_delete_payload(mock_httpx):
+    recorded = mock_httpx()
     notifier = TelegramNotifier("token", "123")
 
     assert await notifier.delete_message(4242) is True
-    assert calls == [
+    assert recorded.calls == [
         (
             "https://api.telegram.org/bottoken/deleteMessage",
             {"chat_id": "123", "message_id": 4242},
@@ -752,15 +585,17 @@ async def test_delete_message_posts_delete_payload(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_delete_message_returns_false_on_failure(monkeypatch):
+async def test_delete_message_returns_false_on_failure(mock_httpx):
     """삭제 거부는 예외가 아니라 False — 호출부가 종료 표시 편집으로 폴백한다."""
-    monkeypatch.setattr(
-        "backend.telegram_notifier.httpx.AsyncClient",
-        _fake_client_factory([], _FakeResponse(error=httpx.HTTPError("message can't be deleted"))),
+    recorded = mock_httpx(
+        httpx.Response(
+            400, json={"ok": False, "description": "Bad Request: message can't be deleted"}
+        )
     )
     notifier = TelegramNotifier("token", "123")
 
     assert await notifier.delete_message(4242) is False
+    assert len(recorded.requests) == 1
 
 
 @pytest.mark.asyncio
@@ -861,9 +696,7 @@ async def test_send_text_logs_retry_after_on_429(monkeypatch, caplog):
 
 
 @pytest.mark.asyncio
-async def test_call_telegram_api_raises_error_without_token(
-    monkeypatch, failing_telegram_client
-):
+async def test_call_telegram_api_raises_error_without_token(mock_httpx):
     """상태 오류를 URL 없는 예외로 바꿔 던진다 — allowlist를 없앨 수 있는 근거다 (#257).
 
     httpx의 HTTPStatusError는 메시지에 요청 URL을 담고, 텔레그램 URL의 경로가 곧 봇
@@ -871,16 +704,17 @@ async def test_call_telegram_api_raises_error_without_token(
     하고, 그 목록은 두 번 뚫렸다 (PR #253 1·2차 리뷰).
     """
     token = "8666951614:SECRET"
-    monkeypatch.setattr(
-        "backend.telegram_notifier.httpx.AsyncClient",
-        failing_telegram_client(
+    # 진짜 429 응답이다. raise_for_status가 실제로 나간 요청의 URL — 따라서 토큰 — 을 담은
+    # HTTPStatusError를 만든다. URL을 테스트가 지어내지 않아야 누출 경로를 그대로 탄다.
+    mock_httpx(
+        httpx.Response(
             429,
-            {
+            json={
                 "ok": False,
                 "description": "Too Many Requests: retry after 42",
                 "parameters": {"retry_after": 42},
             },
-        ),
+        )
     )
 
     with pytest.raises(TelegramApiError) as excinfo:
@@ -900,35 +734,14 @@ async def test_call_telegram_api_raises_error_without_token(
 
 
 @pytest.mark.asyncio
-async def test_send_text_succeeds_when_200_body_is_not_json(monkeypatch):
+async def test_send_text_succeeds_when_200_body_is_not_json(mock_httpx):
     """본문을 쓰지 않는 호출은 200의 본문이 JSON이 아니어도 성공해야 한다 (#257 자가리뷰).
 
     무조건 response.json()을 부르면 본문을 읽지도 않는 sendMessage가 파싱 실패로 실패한다 —
     리팩터링 전에는 없던 동작이고, send_text가 False를 돌려주면 _send_text_settled가
     최대 4회 재시도한다. call_telegram_api/fetch_telegram_api 분리가 그 비대칭을 막는다.
     """
-
-    class FakeResponse:
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            raise ValueError("Expecting value: line 1 column 1 (char 0)")
-
-    class FakeAsyncClient:
-        def __init__(self, *, timeout):
-            self.timeout = timeout
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, traceback):
-            return None
-
-        async def post(self, url, **kwargs):
-            return FakeResponse()
-
-    monkeypatch.setattr("backend.telegram_notifier.httpx.AsyncClient", FakeAsyncClient)
+    recorded = mock_httpx(httpx.Response(200, text="not json"))
     notifier = TelegramNotifier("token", "123")
 
     assert await notifier.send_text("안녕") is True
@@ -937,38 +750,20 @@ async def test_send_text_succeeds_when_200_body_is_not_json(monkeypatch):
     # "update 없음"으로 읽고 로그도 백오프도 없이 다음 폴링으로 넘어간다.
     with pytest.raises(TelegramApiError):
         await fetch_telegram_api("token", "getUpdates", payload={})
+    # 요청 전에 난 예외도 같은 TelegramApiError로 접힌다 — 두 번째 요청이 실제로 나갔는지
+    # 까지 봐야 파싱 실패 때문에 던진 것이다 (PR #374 리뷰).
+    assert len(recorded.requests) == 2
 
 
 @pytest.mark.asyncio
-async def test_call_telegram_api_returns_none_so_body_readers_cannot_use_it(monkeypatch):
+async def test_call_telegram_api_returns_none_so_body_readers_cannot_use_it(mock_httpx):
     """본문이 필요한 호출부가 call_telegram_api를 고르면 조용히가 아니라 즉시 깨져야 한다.
 
     플래그 하나짜리 API였다면 빠뜨린 호출부가 빈 dict를 받아 getUpdates는 "update 없음",
     getMe는 username ""으로 조용히 퇴화한다. 반환형을 나눠 그 실수를 불가능하게 만든
     것이 이 분리의 목적이다 (#257 자가리뷰).
     """
-
-    class FakeResponse:
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return {"ok": True, "result": [{"update_id": 1}]}
-
-    class FakeAsyncClient:
-        def __init__(self, *, timeout):
-            self.timeout = timeout
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, traceback):
-            return None
-
-        async def post(self, url, **kwargs):
-            return FakeResponse()
-
-    monkeypatch.setattr("backend.telegram_notifier.httpx.AsyncClient", FakeAsyncClient)
+    mock_httpx(httpx.Response(200, json={"ok": True, "result": [{"update_id": 1}]}))
 
     assert await call_telegram_api("token", "getUpdates", payload={}) is None
     assert await fetch_telegram_api("token", "getUpdates", payload={}) == {
@@ -978,7 +773,7 @@ async def test_call_telegram_api_returns_none_so_body_readers_cannot_use_it(monk
 
 
 @pytest.mark.asyncio
-async def test_call_telegram_api_redacts_token_from_transport_error_message(monkeypatch):
+async def test_call_telegram_api_redacts_token_from_transport_error_message(mock_httpx):
     """상태 오류가 아닌 실패도 토큰을 흘리지 않아야 한다 (#257).
 
     httpx의 전송 계층 예외는 대개 URL을 담지 않지만 전부는 아니다 — UnsupportedProtocol,
@@ -987,22 +782,13 @@ async def test_call_telegram_api_redacts_token_from_transport_error_message(monk
     """
     token = "8666951614:SECRET"
 
-    class ExplodingAsyncClient:
-        def __init__(self, *, timeout):
-            self.timeout = timeout
+    def unsupported_protocol(request: httpx.Request) -> httpx.Response:
+        # URL은 지어내지 않고 실제로 나간 요청에서 읽는다.
+        raise httpx.UnsupportedProtocol(
+            f"Request URL has an unsupported protocol: {request.url}"
+        )
 
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, traceback):
-            return None
-
-        async def post(self, url, **kwargs):
-            raise httpx.UnsupportedProtocol(f"Request URL has an unsupported protocol: {url}")
-
-    monkeypatch.setattr(
-        "backend.telegram_notifier.httpx.AsyncClient", ExplodingAsyncClient
-    )
+    mock_httpx(unsupported_protocol)
 
     with pytest.raises(TelegramApiError) as excinfo:
         await call_telegram_api(token, "getUpdates", payload={})
@@ -1014,9 +800,7 @@ async def test_call_telegram_api_redacts_token_from_transport_error_message(monk
 
 
 @pytest.mark.asyncio
-async def test_send_text_failure_log_redacts_bot_token(
-    monkeypatch, caplog, failing_telegram_client
-):
+async def test_send_text_failure_log_redacts_bot_token(caplog, mock_httpx):
     """전송 실패 로그에 봇 토큰이 평문으로 남지 않아야 한다 (PR #253 1차 리뷰, #257).
 
     _post_message가 실제로 URL을 만들고 raise_for_status가 도는 경로를 그대로 태운다.
@@ -1024,10 +808,7 @@ async def test_send_text_failure_log_redacts_bot_token(
     없어야 통과한다 — 즉 목록을 지워도 이 테스트가 남는다.
     """
     token = "SECRET-BOT-TOKEN-123"
-    monkeypatch.setattr(
-        "backend.telegram_notifier.httpx.AsyncClient",
-        failing_telegram_client(429, {"ok": False, "parameters": {"retry_after": 42}}),
-    )
+    mock_httpx(httpx.Response(429, json={"ok": False, "parameters": {"retry_after": 42}}))
     notifier = TelegramNotifier(token, "123")
 
     with caplog.at_level(logging.ERROR):

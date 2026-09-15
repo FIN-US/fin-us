@@ -1,9 +1,37 @@
+import json
+from collections.abc import Callable
+from typing import Any
+
 import httpx
 import pytest
 
 from backend import services, stock_code, telegram_commands
 from backend.delivery_alarm import delivery_metrics, trade_outbox_stall
 from backend.trading_orders import TradeRecorder
+
+# mock_httpx가 받는 응답 지정: 그대로 돌려줄 응답, 또는 요청을 받아 응답을 만들거나 던지는 함수.
+_ResponseSpec = httpx.Response | Callable[[httpx.Request], httpx.Response]
+
+
+class RecordedHttpx:
+    """``MockTransport``가 받아 둔 요청들 — 테스트의 단언은 여기서 읽는다 (#360)."""
+
+    def __init__(self) -> None:
+        self.requests: list[httpx.Request] = []
+        # 마지막으로 만들어진 클라이언트의 생성 인자. timeout처럼 요청 객체에는 남지
+        # 않지만 계약인 값을 여기서 본다.
+        self.client_kwargs: dict[str, Any] = {}
+
+    @property
+    def calls(self) -> list[tuple[str, Any]]:
+        """요청마다 ``(URL, JSON 본문)``. 본문 없이 보낸 요청은 ``None``이다.
+
+        본문은 프로덕션이 실제로 직렬화해 보낸 바이트에서 읽는다.
+        """
+        return [
+            (str(request.url), json.loads(request.content) if request.content else None)
+            for request in self.requests
+        ]
 
 
 @pytest.fixture(autouse=True)
@@ -22,45 +50,68 @@ def _reset_delivery_alarm_state():
 
 
 @pytest.fixture
-def failing_telegram_client():
-    """텔레그램 호출을 상태 오류로 실패시키는 가짜 httpx 클라이언트 팩토리 (#257).
+def mock_httpx(monkeypatch):
+    """``httpx.AsyncClient``가 ``MockTransport``를 타게 만든다 (#360).
 
-    호출부가 만든 URL을 그대로 받아 httpx 응답을 세우고 raise_for_status를 태운다.
-    URL을 테스트가 지어내지 않는 것이 핵심이다 — 토큰이 실제로 URL에 실려 나가고
-    예외 메시지에 들어앉는 경로를 그대로 통과시켜야 리댁션을 검증한 것이 된다.
+    손으로 흉내 낸 ``async def post(self, url, *, json)`` 대역은 프로덕션의 **호출
+    시그니처를 복제**한다. 인자가 하나 붙으면 대역이 ``TypeError``를 던지는데, 텔레그램
+    관문의 넓은 ``except Exception``이 그걸 전송 실패로 접는다 — 성공 경로 테스트는
+    엉뚱한 단언에서 깨지고, 실패 경로 테스트는 틀린 이유로 초록인 채 남는다. finus_nat이
+    #357에서 겪은 사고와 같은 양상이다. ``MockTransport``는 조립이 끝난
+    ``httpx.Request``를 받으므로 호출 시그니처와 무관하다.
 
-    전송(telegram_notifier)과 폴링(telegram_commands) 양쪽이 같은 팩토리를 쓴다.
+    뼈대는 finus_nat/tests/conftest.py의 ``mock_backend``와 같지만 응답 지정은 다시 썼다.
+    backend 쪽은 분할 전송(#313)처럼 한 테스트가 요청을 여러 번 태우고 "n번째에서 실패"를
+    세워야 해서, 고정 응답 하나가 아니라 응답 순서를 받는다.
+
+    ``responses``를 요청 순서대로 돌려준다. 마지막 응답은 이후 요청에서 계속 재사용되고,
+    비우면 ``{"ok": True}`` 200이다. 반환값은 :class:`RecordedHttpx`.
+
+    응답 자리에 ``httpx.Request``를 받는 함수를 넣을 수도 있다. 전송 계층 예외처럼 응답이
+    아니라 예외가 필요한 경우다 — 함수가 던지면 ``client.post``에서 그대로 올라온다. 예외
+    메시지에 URL을 싣고 싶으면 테스트가 지어내지 말고 받은 ``request.url``을 쓴다.
+
+    패치 대상은 **전역 httpx 모듈**이다(``backend.telegram_notifier.httpx``도
+    ``backend.order_assist.httpx``도 같은 객체). 테스트 도중 만들어지는 다른 클라이언트도
+    같은 transport를 탄다.
+
+    **시그니처가 아니라 계약으로 지켜야 하는 것**: 구 대역의 ``def __init__(self, *, timeout)``은
+    프로덕션이 ``timeout=``을 잃으면 우연히 빨개졌다. 인자를 그대로 흘리는 이 대역에는 그
+    우연이 없으므로, 클라이언트 생성 인자를 ``client_kwargs``로 관측해 테스트가 명시적으로
+    단언한다 (PR #359 리뷰와 같은 이유).
     """
+    # 진짜 클라이언트는 패치 전에 한 번만 잡는다 — _install 안에서 읽으면 두 번째 설치의
+    # "진짜"가 첫 번째 래퍼가 된다 (PR #359 리뷰).
+    real_client = httpx.AsyncClient
 
-    def _factory(status_code, body):
-        class FakeResponse:
-            def __init__(self, url):
-                self._inner = httpx.Response(
-                    status_code, json=body, request=httpx.Request("POST", url)
-                )
+    def _install(*responses: _ResponseSpec) -> RecordedHttpx:
+        recorded = RecordedHttpx()
+        templates = list(responses) or [httpx.Response(200, json={"ok": True})]
 
-            def raise_for_status(self):
-                self._inner.raise_for_status()
+        def _dispatch(request: httpx.Request) -> httpx.Response:
+            recorded.requests.append(request)
+            template = templates[min(len(recorded.requests) - 1, len(templates) - 1)]
+            if callable(template):
+                return template(request)
+            # 응답은 요청마다 새로 만든다 — 한 httpx.Response 객체를 여러 요청이 나눠 쓰지
+            # 않게 한다.
+            return httpx.Response(
+                template.status_code, headers=template.headers, content=template.content
+            )
 
-            def json(self):
-                return body
+        transport = httpx.MockTransport(_dispatch)
 
-        class FakeAsyncClient:
-            def __init__(self, *, timeout):
-                self.timeout = timeout
+        def _client(*args, **kwargs):
+            # 프로덕션이 넘기는 인자는 그대로 진짜 AsyncClient에 흘린다 — 그래서 인자가
+            # 하나 더 붙어도 이 대역은 손댈 필요가 없다. transport만 우리 것으로 바꾼다.
+            recorded.client_kwargs = dict(kwargs)
+            kwargs["transport"] = transport
+            return real_client(*args, **kwargs)
 
-            async def __aenter__(self):
-                return self
+        monkeypatch.setattr(httpx, "AsyncClient", _client)
+        return recorded
 
-            async def __aexit__(self, exc_type, exc, traceback):
-                return None
-
-            async def post(self, url, **kwargs):
-                return FakeResponse(url)
-
-        return FakeAsyncClient
-
-    return _factory
+    return _install
 
 
 @pytest.fixture(autouse=True)

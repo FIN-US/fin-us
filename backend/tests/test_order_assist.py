@@ -1622,33 +1622,17 @@ async def test_request_proposal_refuses_anything_but_a_string_value(monkeypatch,
 
 
 @pytest.mark.asyncio
-async def test_post_json_raises_on_http_error(monkeypatch):
+async def test_post_json_raises_on_http_error(mock_httpx):
     """4xx/5xx 본문을 정상 응답으로 읽지 않는다."""
-
-    class _Response:
-        status_code = 500
-        text = "internal error"
-
-        def json(self):
-            return {"value": "이건 답변이 아니다"}
-
-    class _Client:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *args):
-            return False
-
-        async def post(self, url, headers=None, json=None):
-            return _Response()
-
-    monkeypatch.setattr(httpx, "AsyncClient", _Client)
+    recorded = mock_httpx(httpx.Response(500, json={"value": "이건 답변이 아니다"}))
 
     with pytest.raises(RuntimeError, match="500"):
         await order_assist._post_json("/v1/propose-order", {}, 5.0)
+
+    assert recorded.calls == [(f"{order_assist.NAT_BASE_URL}/v1/propose-order", {})]
+    # 클라이언트 생성 인자는 요청 객체에 남지 않는다. 호출부가 넘긴 타임아웃이 실제
+    # 클라이언트에 실리는지 따로 고정한다 (#360).
+    assert recorded.client_kwargs.get("timeout") == httpx.Timeout(5.0)
 
 
 @pytest.mark.asyncio
