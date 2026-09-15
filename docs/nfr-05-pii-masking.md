@@ -443,7 +443,8 @@ LLM이 판단할 수 있어 유지되지만, **절대 금액 기반 판단**("�
 - 리뷰어가 우려한 손실(잔고 컨텍스트 상실)은 실제로는 NAT **서브에이전트가 자체
   조회한** 잔고에서 발생하는데, 그 경로는 `user_msg`와 무관하게 NAT 프로세스 내부에서
   OpenAI로 나간다(`finus_nat/configs/agents/trading_agent.yml`의
-  `functions.trading_agent_react.tool_names`에 있는 `kis-trading-mcp-tool` → 같은
+  `functions.trading_agent_react.tool_names`에 있는 `kis-trading-mcp-tool`(#380 이후
+  조회 전용 `kis-trading-mcp-tool-readonly`) → 같은
   함수의 `llm_name`인 `trading_openai_llm`). 즉 backend의 마스킹을 끄든 켜든 그
   경로는 달라지지 않는다 — 여기서 마스킹을 빼도 얻는 것이 없다.
 - 반면 NAT 분기만 마스킹에서 제외하면 "`llm_chat()`을 거치는 모든 provider가 동일하게
@@ -532,6 +533,17 @@ backend → NAT ("내 잔고 어때?" — 마스킹해도 걸릴 게 없다)
 근거로 판단할 수 없다. "방식" 절에 적힌 (a) 방식의 알려진 한계와 같은 종류의 비용이며,
 왕복이 무손실이라 **사용자가 보는 최종 값은 원값 그대로**다. 품질 저하가 실제로 관측되면
 api_type 면제 목록을 별도 이슈로 검토한다.
+
+**조회 범위 확장 (#380).** 채팅 trading·monitoring 에이전트가 조회 전용 래퍼로 옮겨 오면서
+래퍼의 국내주식 허용 목록이 넓어졌다 — 순위·수급·재무·예탁원 일정 등 upstream 판정표의 조회
+TR 85개와 `find_stock_code`(`finus_api._READONLY_DOMESTIC_STOCK_API_EXACT`). 이 중 계좌번호
+(`CANO`)를 입력으로 받는 조회(`intgr_margin`·`order_resv_ccnl`·`period_rights`·
+`pension_inquire_balance`·`pension_inquire_daily_ccld`·`pension_inquire_deposit`·
+`pension_inquire_present_balance`)와 HTS ID를 받는 조회(`intstock_grouplist`·
+`intstock_stocklist_by_group`·`psearch_title`·`psearch_result`)가 새로 열렸다. 이 계층에서
+따로 할 일은 없다 — 모두 원장 키 `finus_account_balance`로 돌아와 위 도구 단위 규칙대로
+마스킹된다. `test_kis_readonly_allowlist.py`가 새로 연 계좌 조회의 결과가 마스킹되는 것을
+래퍼 수준에서 고정한다.
 
 ### 두 계층의 자리표시자가 섞이는 문제
 
@@ -752,7 +764,8 @@ backend는 단일 uvicorn 프로세스로 뜨므로(`backend/Dockerfile`의 CMD�
 `finus_save_diary` 하나뿐이라, **인자 방향에는 역치환이 없었다.**
 
 `finus_account_balance`는 Kis Trading MCP pass-through이고 주문 권한이 있다
-(`configs/common.yml`). 에이전트가 마스킹된 잔고 Observation에서 읽은 수량을 그대로
+(`configs/common.yml` — 이 절을 쓸 때 기준. #380 이후로는 어떤 설정에도 등록되지 않고, 채팅
+에이전트는 조회 전용 래퍼만 쓴다). 에이전트가 마스킹된 잔고 Observation에서 읽은 수량을 그대로
 `params`에 실으면 이런 호출이 나간다.
 
 ```
@@ -862,7 +875,8 @@ pass-through 주문에는 rationale이 없어 "rationale이 비어 있으면 REJ
 (KIS로 나가는 모든 호출이 지나는 자리)에서 보내기 직전에 판정한다.
 
 - **대상 api_type** — 읽기 전용 allowlist(`inquire_*`·`search_*`, 정확 값 `find_api_detail`·
-  `pension_inquire_psbl_order`, #66)에 없는 api_type **전부**다. 주문 TR 이름 목록으로 고르면
+  `pension_inquire_psbl_order`, #66. #380부터 국내주식은 `_READONLY_DOMESTIC_STOCK_API_EXACT`도)에
+  없는 api_type **전부**다. 주문 TR 이름 목록으로 고르면
   목록에 없는 쓰기성 TR이 조용히 우회한다. `pension_inquire_psbl_order`(퇴직연금 주문가능조회,
   TR `TTTC0503R`)는 `inquire_`로 시작하지 않는 조회 TR인데 `pdno`·`ord_unpr`를 입력으로 받아,
   목록에 넣지 않으면 조회가 괴리 가드에 막힌다(PR #379 리뷰). upstream `examples_llm` 333개 TR 중
@@ -907,13 +921,23 @@ pass-through 주문에는 rationale이 없어 "rationale이 비어 있으면 REJ
 보조(`/advise`·룰 트리거)와 같은 지정가 괴리 한도가 새로 걸린다. backend `/buy`에는 괴리 한도가
 없다. 채팅에서 국내주식 **가격 정정은 할 수 없다** — 취소 후 새 주문으로 안내한다(취소는 그대로
 된다). 퇴직연금 주문가능조회는 조회 전용 래퍼(news·recommend·strategy 에이전트)에서도 새로 쓸 수
-있다.
+있다. (#380 이후 채팅 경로에서는 주문 자체가 나가지 않는다 — 아래 "남는 것" 참고.)
 
 **남는 것.**
 
-- pass-through 주문은 괴리 외의 backend 하드 한도(1회·일 한도, 종목 비중, 현금 비중,
-  블랙리스트)를 여전히 거치지 않는다. 이 계층의 문제가 아니라 주문 경로 정책의 문제라 이 절에서
-  닫지 않았다.
+- ~~pass-through 주문은 괴리 외의 backend 하드 한도(1회·일 한도, 종목 비중, 현금 비중,
+  블랙리스트)를 여전히 거치지 않는다.~~ — **해소됨 (#380, 대안 A-1).** 채팅 pass-through 주문
+  경로 자체를 닫았다. trading·monitoring 에이전트도 조회 전용 래퍼만 쓰고, 전체 권한 래퍼
+  (`_type: finus_account_balance`)는 어떤 설정에도 등록하지 않는다. 채팅에서 주문을 요청하면
+  에이전트는 주문을 내지 않고 텔레그램 `/buy`·`/sell`·`/advise`를 안내한다 — 한도·검증·확정
+  버튼·일 사용량 집계(`TradeHistory`)가 있는 backend 경로다. 어떤 설정도 주문 가능한 도구를
+  등록·참조하지 않는다는 것은 `test_agent_configs.py::test_no_config_can_reach_an_order_capable_tool`이
+  configs/ 전수 스캔으로 지킨다.
+- 이 절의 괴리 가드와 위 종류 검사(#338)는 **방어 심층으로 남긴다.** 둘 다 KIS로 나가는 모든
+  호출이 지나는 `_call_kis_mcp_and_record`·`_prepare_kis_trading_mcp_call`에 있어 조회 전용
+  래퍼도 거친다. 다만 조회 전용 래퍼는 허용 목록 밖 api_type을 그 전에 거부하므로, 지금 설정에서
+  괴리 가드가 실제로 판정하는 호출은 없다 — 전체 권한 래퍼가 다시 붙는 날(예: A-2) 바로 작동하도록
+  코드와 테스트(전체 권한 래퍼를 직접 생성해 쓰는 `test_order_price_guard.py`)를 유지한다.
 - Kis Trading MCP의 `inquire_price` 응답 모양은 이 저장소가 통제하지 못한다. 파서는 `stck_prpr`
   키를 어느 깊이에서든 찾는다. 모양이 달라져 읽지 못하면 결과는 거부(관측 가능한 실패)이지
   우회가 아니다.

@@ -558,25 +558,31 @@ def _normalize_branch(raw: str, branches: list[SupervisorBranch]) -> str | None:
     return None
 
 
-@register_function(config_type=FinusSupervisorAgentConfig, framework_wrappers=[LLMFrameworkEnum.LANGCHAIN])
-async def finus_supervisor_agent(config: FinusSupervisorAgentConfig, builder: Builder):
-    llm = await builder.get_llm(config.llm_name, wrapper_type=LLMFrameworkEnum.LANGCHAIN)
-    branch_functions = {b.name: await builder.get_function(b.function_name) for b in config.branches}
-
-    branch_list = "\n".join(f"- {b.name}: {b.description}" for b in config.branches)
-    branch_names = ", ".join(b.name for b in config.branches)
-
-    system_prompt = (
+def _supervisor_system_prompt(branches: list[SupervisorBranch]) -> str:
+    """supervisor 라우팅 system prompt. 규칙은 한 줄에 하나다 — 줄이 붙으면 뒤 규칙이 앞 문장의
+    꼬리로 읽힌다(PR #388 리뷰: 첫 규칙 끝의 개행이 빠져 trading 라우팅 규칙이 붙어 있었다)."""
+    branch_list = "\n".join(f"- {b.name}: {b.description}" for b in branches)
+    branch_names = ", ".join(b.name for b in branches)
+    return (
         "당신은 Fin-Us supervisor입니다. 당신의 유일한 역할은 현재 사용자 턴에 가장 적합한 브랜치 하나를 고르는 것입니다.\n\n"
         "규칙:\n"
-        "- 최신 메시지가 짧거나 섹터/종목명을 생략했다면, 최근 대화와 같은 주제를 이어가는 것으로 추론하세요 "
-        "- 가격, 거래량, 시가총액 순위, 계좌 잔고, 주문, 보유 종목 요청은 trading_agent로 라우팅하세요.\n"
+        "- 최신 메시지가 짧거나 섹터/종목명을 생략했다면, 최근 대화와 같은 주제를 이어가는 것으로 추론하세요.\n"
+        "- 가격, 거래량, 시가총액 순위, 계좌 잔고, 보유 종목 요청과 주문 요청(주문은 내지 않고 텔레그램 명령을 "
+        "안내한다)은 trading_agent로 라우팅하세요.\n"
         "- 열린 탐색이나 새로운 스크리닝 요청에는 recommend_agent를 사용하세요. 다만 사용자가 직전 턴의 "
         "섹터/종목 비교를 계속하고 있다면, 그 진행 중인 작업에 맞는 브랜치를 우선하세요.\n"
         "- 허용된 목록의 브랜치 이름 하나만 정확히 출력하세요. 설명과 문장부호는 출력하지 마세요.\n\n"
         f"브랜치:\n{branch_list}\n\n"
         f"허용된 이름: {branch_names}"
     )
+
+
+@register_function(config_type=FinusSupervisorAgentConfig, framework_wrappers=[LLMFrameworkEnum.LANGCHAIN])
+async def finus_supervisor_agent(config: FinusSupervisorAgentConfig, builder: Builder):
+    llm = await builder.get_llm(config.llm_name, wrapper_type=LLMFrameworkEnum.LANGCHAIN)
+    branch_functions = {b.name: await builder.get_function(b.function_name) for b in config.branches}
+
+    system_prompt = _supervisor_system_prompt(config.branches)
 
     async def _choose_branch(chat_request: ChatRequest) -> str:
         latest = latest_user_plain_text(chat_request.messages)

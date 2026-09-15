@@ -13,8 +13,11 @@ functions:
   trading_agent_react:
     _type: react_agent
     llm_name: trading_openai_llm
+    # 조회 전용 래퍼만 쓴다 (#380). 전체 권한 도구(주문 가능)는 backend 하드 한도·확정
+    # 버튼을 전부 우회하므로 어떤 에이전트에도 붙이지 않는다 — 주문은 텔레그램
+    # /buy·/sell·/advise(확정 버튼 경로)로 안내한다. 안내 문구는 react_kis_chat.md에 있다.
     tool_names:
-      - kis-trading-mcp-tool
+      - kis-trading-mcp-tool-readonly
       - mcp-news-get-market-news
       - mcp-dart-get-disclosure-signal
       - add_user_memory
@@ -24,25 +27,30 @@ functions:
     parse_agent_response_max_retries: 5
     raise_on_parsing_failure: false
     max_tool_calls: 10
-    system_prompt: file://../prompts/react_kis_full.md
+    system_prompt: file://../prompts/react_kis_chat.md
     additional_instructions: |
-      주식·채권·선물옵션·해외·ETF 등의 질문에서는 `kis-trading-mcp-tool`을 호출합니다.
-      지분공시·5% 룰·임원/주요주주 변동은 `mcp-dart-get-disclosure-signal`(stock_name)로 조회하되, 공시 signal만으로 주문·매매를 실행하지 마세요.
+      주식·채권·선물옵션·해외·ETF 등의 조회 질문에서는 `kis-trading-mcp-tool-readonly`를 호출합니다.
+      지분공시·5% 룰·임원/주요주주 변동은 `mcp-dart-get-disclosure-signal`(stock_name)로 조회합니다. 공시 signal은 참고 정보이며 매매 판단을 대신하지 않습니다.
       사용자에게 “어떤 방식으로 할까요?”, “원하시면”, “확인해 드릴까요?”처럼 되묻지 마세요. 추측으로 답하지 마세요.
 
       도구 결과(Observation JSON)를 받기 전에는 Final Answer를 출력하지 마세요.
       조회 질문에서 첫 응답은 반드시 ReAct 형식:
       Thought: (한 줄)
-      Action: kis-trading-mcp-tool
+      Action: kis-trading-mcp-tool-readonly
       Action Input: {{"tool_name":"domestic_stock","api_type":"...","params": {{...}}}}
       (국내 주식만 다루면 ``tool_name`` 생략 가능 — YAML 기본값 domestic_stock)
 
       MCP는 도구별로 나뉩니다: domestic_stock, overseas_stock, domestic_bond, domestic_futureoption,
-      overseas_futureoption, elw, etfetn, auth. 해외 주식이면 ``tool_name`` 을 ``overseas_stock`` 등으로 지정합니다.
+      overseas_futureoption, elw, etfetn. 해외 주식이면 ``tool_name`` 을 ``overseas_stock`` 등으로 지정합니다.
       새 api_type은 먼저 ``find_api_detail`` 로 필수 파라미터를 확인한 뒤 호출합니다.
       모의투자는 MCP 규칙대로 ``params`` 에 ``"env_dv":"demo"`` 를 넣습니다.
+      국내 주식은 inquire_*/search_* 외에 순위(volume_rank·market_cap·fluctuation·volume_power 등),
+      수급(investor_trade_by_stock_daily·program_trade_by_stock 등), 재무(finance_*), 휴장일(chk_holiday),
+      시황·공시 제목(news_title) 같은 조회 TR도 쓸 수 있습니다. 종목명만 알면 api_type find_stock_code
+      (params: stock_name)로 종목코드를 먼저 찾습니다.
+      주문 요청은 system prompt의 "주문 요청" 규칙대로 텔레그램 명령을 안내합니다.
 
-      kis-trading-mcp-tool 예시(국내):
+      kis-trading-mcp-tool-readonly 예시(국내):
       - ``{{"api_type":"find_api_detail","params":{{"api_type":"inquire_balance"}}}}``
       - ``{{"api_type":"inquire_balance","params":{{"env_dv":"real","inqr_dvsn":"01"}}}}``  # 잔고/포트폴리오 기본값
       - ``{{"api_type":"inquire_price","params":{{"fid_cond_mrkt_div_code":"J","fid_input_iscd":"005930","env_dv":"real"}}}}``
@@ -58,4 +66,4 @@ functions:
   trading_branch_agent:
     _type: fe_branch
     inner_function_name: trading_agent_react
-    tool_description: "Trading: Kis Trading MCP; mcp-news headlines; mcp-dart disclosure (reference only, no auto-trade)."
+    tool_description: "Trading: Kis Trading MCP (read-only); mcp-news headlines; mcp-dart disclosure. Places no orders — guides to Telegram /buy·/sell·/advise."
