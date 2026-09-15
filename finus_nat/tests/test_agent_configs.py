@@ -305,11 +305,17 @@ def test_agent_references_expected_kis_tool(config_path: Path, agent_fn: str, ex
     "find_api_detail",
     "pension_inquire_psbl_order",  # 접두사 밖 조회 TR — 괴리 가드(#365) 오인 방지 (PR #379 리뷰)
 ], ids=lambda x: x)
-def test_readonly_api_type_allows_read_only(api_type: str):
-    """#66: 조회 계열 api_type은 _is_readonly_api_type이 True를 반환해야 한다."""
+@pytest.mark.parametrize("tool_name", ["domestic_stock", "overseas_stock"])
+def test_readonly_api_type_allows_read_only(api_type: str, tool_name: str):
+    """#66: 조회 계열 api_type은 _is_readonly_api_type이 True를 반환해야 한다.
+
+    #66의 접두사·정확 값은 상품과 무관하다 — 국내주식 전용 목록(#380)이 생긴 뒤에도
+    다른 상품에서 그대로 허용되는지 함께 본다. 국내주식 전용 목록의 판정은
+    ``test_kis_readonly_allowlist.py``가 고정한다.
+    """
     from nat_finus_nat.finus_api import _is_readonly_api_type
-    assert _is_readonly_api_type(api_type) is True, (
-        f"{api_type!r}는 조회 전용 허용 목록에 포함되어야 합니다."
+    assert _is_readonly_api_type(api_type, tool_name=tool_name) is True, (
+        f"{tool_name}/{api_type!r}는 조회 전용 허용 목록에 포함되어야 합니다."
     )
 
 
@@ -327,9 +333,12 @@ def test_readonly_api_type_blocks_non_allowlisted(api_type: str):
 
     ``unknown_operation``, ``overseas_stock_order`` 케이스가 fail-closed 핵심이다.
     allowlist 판정을 무조건 True로 교체하면 이 테스트들이 red가 된다.
+
+    허용 범위가 가장 넓은 국내주식(#380 전용 목록 포함)으로 판정한다 — 거기서 막히면 다른
+    상품에서도 막힌다.
     """
     from nat_finus_nat.finus_api import _is_readonly_api_type
-    assert _is_readonly_api_type(api_type) is False, (
+    assert _is_readonly_api_type(api_type, tool_name="domestic_stock") is False, (
         f"{api_type!r}는 조회 전용 허용 목록에서 차단되어야 합니다."
     )
 

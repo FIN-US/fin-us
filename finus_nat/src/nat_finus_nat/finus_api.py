@@ -1111,7 +1111,9 @@ _KIS_BALANCE_LEDGER_NAME: str = "finus_account_balance"
 # 허용 목록(allowlist) 방식 — fail-closed: 목록에 없는 api_type은 기본 차단.
 #
 # 설계 근거:
-#   KIS TR 이름 규칙: 조회 계열은 예외 없이 ``inquire_`` 또는 ``search_`` 로 시작한다.
+#   KIS TR 이름 규칙: ``inquire_`` 또는 ``search_`` 로 시작하는 TR은 조회다. 거꾸로는
+#   성립하지 않는다 — 접두사 밖의 조회 TR이 많아 국내주식은 아래 정확 값 목록으로 따로
+#   넓혔다(#380).
 #   스키마 조회(find_api_detail)도 읽기 전용이다 — 에이전트가 이 도구로 TR 스키마를
 #   발견하더라도, 실제 호출 시 api_type이 이 허용 목록을 통과해야 하므로 이중 차단이 된다.
 #   결과적으로 원격 MCP 서버가 새 TR을 추가해도 허용 목록에 명시하기 전까지는 차단된다.
@@ -1129,8 +1131,8 @@ _KIS_BALANCE_LEDGER_NAME: str = "finus_account_balance"
 #     막는다(PR #379 리뷰). upstream examples_llm 333개 TR을 훑어, tr_id가 조회(…R)이면서
 #     단가 인자가 있고 위 접두사에 걸리지 않는 TR은 이것 하나뿐임을 확인했다.
 #
-# 운영자 추가 방법: 새 조회 TR이 위 접두사 패턴을 벗어나면
-# _READONLY_API_ALLOWLIST_EXACT에 추가하거나 접두사를 확장하세요.
+# 운영자 추가 방법: 국내주식 조회 TR은 판정표를 다시 만들어 아래
+# _READONLY_DOMESTIC_STOCK_API_EXACT에 옮긴다. 다른 상품은 같은 방식의 판정표를 먼저 만든다.
 # 이 목록은 조회 전용 래퍼(#66)와 지정가 괴리 가드(#365)가 **함께** 쓴다 — 두 판정이
 # "무엇이 조회인가"를 따로 들고 있으면 한쪽만 고쳐져 어긋난다.
 _READONLY_API_ALLOWLIST_PREFIXES: tuple[str, ...] = ("inquire_", "search_")
@@ -1139,25 +1141,103 @@ _READONLY_API_ALLOWLIST_EXACT: frozenset[str] = frozenset({
     "pension_inquire_psbl_order",
 })
 
+# 국내주식(tool_name ``domestic_stock``)에서만 허용하는 정확 값 (#380).
+#
+# 위 접두사 규칙("조회 TR은 ``inquire_``·``search_``로 시작한다")은 upstream 국내주식 TR에서
+# 절반쯤만 맞는다. 순위(``volume_rank``·``market_cap``), 수급(``program_trade_by_stock``),
+# 재무(``finance_*``) 같은 조회 TR이 접두사 밖에 있다. 채팅 ``trading_agent``·
+# ``monitoring_agent``가 이 래퍼로 옮겨 오면서(#380) 이 조회를 잃지 않도록 넓혔다.
+#
+# **판정 근거는 이름이 아니라 upstream 소스다.** 판정표
+# ``finus_nat/tests/fixtures/kis_domestic_stock_tr_verdicts.json``(생성기
+# ``finus_nat/scripts/kis_tr_verdicts.py``)에서 REST GET이고 tr_id가 전부 조회형(계좌 계열은
+# ``…R``, 시세·정보 계열은 ``F…``/``H…``)인 ``read`` 행 가운데 위 접두사·정확 값에 걸리지 않는
+# 것만 옮겼다. 주문 5종(``order_cash``·``order_credit``·``order_resv``·``order_resv_rvsecncl``·
+# ``order_rvsecncl``)과 웹소켓 실시간 구독 25종은 넣지 않는다. 판정표와 이 목록이 양방향으로
+# 같은지는 ``test_kis_readonly_allowlist.py``가 고정한다 — 판정표에 없는 값을 여기 넣거나
+# ``read`` 행을 빠뜨리면 빨개진다.
+#
+# **국내주식에만 거는 이유.** 이 판정은 국내주식 TR만 했다. 해외·채권·선물옵션·ELW·ETF/ETN은
+# 같은 이름의 api_type이 다른 뜻일 수 있어(해외주식 ``order_resv``는 정정취소구분 ``00``을 신규
+# 주문에 쓴다 — order_price_guard 참고) 이름만으로 넓히지 않는다. 필요해지면 같은 방식으로
+# 판정표를 만들어 넓힌다.
+#
+# ``find_stock_code``는 TR이 아니라 Kis Trading MCP의 특수 api_type이다(``tools/base.py``의
+# ``_handle_find_stock_code`` — 종목 마스터 DB 조회, KIS 호출 없음). ``find_api_detail``과 같은
+# 부류지만 이번 판정 범위(국내주식)에 맞춰 여기에 둔다.
+#
+# 계좌번호(``CANO``)나 HTS ID(``USER_ID``)를 입력으로 받는 조회 — 이 계좌·이 사용자의
+# 데이터를 돌려준다 — 가 섞여 있다: ``intgr_margin``·``order_resv_ccnl``·``period_rights``·
+# ``pension_inquire_*`` 4종(계좌), ``intstock_*`` 2종·``psearch_*`` 2종(HTS ID). 도구 결과는
+# 이 래퍼의 원장 키 ``finus_account_balance``로 전부 마스킹된다(``pii_guard.MASKED_TOOLS``,
+# api_type과 무관한 도구 단위 fail-closed).
+_READONLY_DOMESTIC_STOCK_TOOL = "domestic_stock"
+_READONLY_DOMESTIC_STOCK_API_EXACT: frozenset[str] = frozenset({
+    # Kis Trading MCP 특수 api_type — 종목명→종목코드 (마스터 DB 조회)
+    "find_stock_code",
+    # [국내주식] 기본시세
+    "after_hour_balance", "exp_closing_price", "frgnmem_trade_trend", "quote_balance",
+    # [국내주식] 순위분석
+    "bulk_trans_num", "credit_balance", "disparity", "dividend_rate", "exp_trans_updown",
+    "finance_ratio", "fluctuation", "hts_top_view", "market_cap", "market_value",
+    "near_new_highlow", "overtime_fluctuation", "overtime_volume", "prefer_disparate_ratio",
+    "profit_asset_index", "short_sale", "top_interest_stock", "traded_by_company",
+    "volume_power", "volume_rank",
+    # [국내주식] 시세분석
+    "capture_uplowprice", "comp_program_trade_daily", "comp_program_trade_today",
+    "daily_credit_balance", "daily_loan_trans", "daily_short_sale", "exp_price_trend",
+    "foreign_institution_total", "frgnmem_pchs_trend", "frgnmem_trade_estimate",
+    "intstock_grouplist", "intstock_multprice", "intstock_stocklist_by_group",
+    "investor_program_trade_today", "investor_trade_by_stock_daily", "investor_trend_estimate",
+    "mktfunds", "overtime_exp_trans_fluct", "pbar_tratio", "program_trade_by_stock",
+    "program_trade_by_stock_daily", "psearch_result", "psearch_title", "tradprt_byamt",
+    # [국내주식] 업종/기타
+    "chk_holiday", "comp_interest", "exp_index_trend", "exp_total_index", "market_time",
+    "news_title",
+    # [국내주식] 종목정보
+    "credit_by_company", "estimate_perform", "finance_balance_sheet", "finance_financial_ratio",
+    "finance_growth_ratio", "finance_income_statement", "finance_other_major_ratios",
+    "finance_profit_ratio", "finance_stability_ratio", "invest_opbysec", "invest_opinion",
+    "ksdinfo_bonus_issue", "ksdinfo_cap_dcrs", "ksdinfo_dividend", "ksdinfo_forfeit",
+    "ksdinfo_list_info", "ksdinfo_mand_deposit", "ksdinfo_merger_split", "ksdinfo_paidin_capin",
+    "ksdinfo_pub_offer", "ksdinfo_purreq", "ksdinfo_rev_split", "ksdinfo_sharehld_meet",
+    "lendable_by_company",
+    # [국내주식] 주문/계좌 — 조회(tr_id …R). 계좌번호를 입력으로 받는다(위 주석).
+    "intgr_margin", "order_resv_ccnl", "pension_inquire_balance", "pension_inquire_daily_ccld",
+    "pension_inquire_deposit", "pension_inquire_present_balance", "period_rights",
+})
+
 # _READONLY_TOOL_ALLOWLIST는 _KIS_TRADING_TOOL_NAMES와 함께 위에서 정의되어 있다.
 # (FinusAccountBalanceConfig 클래스 정의 직전 — 단일 출처 유지를 위해 이동)
 
 
-def _is_readonly_api_type(api_type: str) -> bool:
+def _is_readonly_api_type(api_type: str, *, tool_name: str) -> bool:
     """Return True when *api_type* is a permitted read-only KIS Trading API (allowlist, fail-closed).
 
-    Allowed:
+    Allowed for every asset class (*tool_name*):
     - ``inquire_*`` prefix — balance, price, chart, investor, and all other inquiry TRs
     - ``search_*`` prefix — stock code and other search TRs
     - ``find_api_detail`` — TR schema lookup (safe: discovering schemas does not execute orders)
+    - ``pension_inquire_psbl_order`` — see ``_READONLY_API_ALLOWLIST_EXACT``
+
+    Allowed only for ``tool_name="domestic_stock"`` (#380):
+    - ``_READONLY_DOMESTIC_STOCK_API_EXACT`` — read TRs outside the prefixes, taken from the
+      upstream verdict table (ranking, flows, financials, …) plus ``find_stock_code``
 
     Any api_type not in the above list returns False, including all order-execution types
     (``order_cash``, ``order_sell``, ``modify_order``, ``cancel_order``, novel future types, …).
+
+    *tool_name* is keyword-only and required: the domestic list must never be applied to a
+    call whose asset class the caller did not look at.
     """
     lower = (api_type or "").strip().lower()
+    if any(lower.startswith(p) for p in _READONLY_API_ALLOWLIST_PREFIXES):
+        return True
+    if lower in _READONLY_API_ALLOWLIST_EXACT:
+        return True
     return (
-        any(lower.startswith(p) for p in _READONLY_API_ALLOWLIST_PREFIXES)
-        or lower in _READONLY_API_ALLOWLIST_EXACT
+        (tool_name or "").strip().lower() == _READONLY_DOMESTIC_STOCK_TOOL
+        and lower in _READONLY_DOMESTIC_STOCK_API_EXACT
     )
 
 
@@ -1199,7 +1279,7 @@ async def _order_price_gap_rejection(
     아니고 결과가 LLM 컨텍스트로 가지도 않는다.
     """
     api_type = str(arguments.get("api_type", "")).strip()
-    if _is_readonly_api_type(api_type):
+    if _is_readonly_api_type(api_type, tool_name=tool_name):
         return None
     raw_params = arguments.get("params")
     params: dict[str, Any] = raw_params if isinstance(raw_params, dict) else {}
@@ -1287,7 +1367,7 @@ class FinusAccountBalanceReadonlyConfig(FinusAccountBalanceConfig, name="finus_a
     """finus_account_balance 조회 전용 래퍼 — allowlist 방식 api_type 차단 (#66).
 
     비-trading 에이전트(news/recommend/strategy/diary)가 잔고·시세 조회 능력은 유지하되
-    허용 목록(inquire_*, search_*, find_api_detail)에 없는 api_type은 fail-closed로 차단한다.
+    허용 목록(:func:`_is_readonly_api_type`)에 없는 api_type은 fail-closed로 차단한다.
     """
 
     # readonly 래퍼는 auth를 런타임에 차단하므로, 설정 시점에도 받지 않는다.
@@ -1303,7 +1383,11 @@ async def finus_account_balance_readonly(config: FinusAccountBalanceReadonlyConf
         허용 tool_name: domestic_stock, overseas_stock, domestic_bond, domestic_futureoption,
         overseas_futureoption, elw, etfetn (auth 제외 — 인증 상태 변경 가능).
         허용 api_type(pass-through): inquire_*(잔고·시세·체결 등), search_*, find_api_detail.
-        차단(fail-closed): 목록 밖의 tool_name 또는 api_type(order_* 계열 포함).
+        domestic_stock은 추가로 순위(volume_rank·market_cap·fluctuation 등)·수급(program_trade_*·
+        investor_*)·재무(finance_*)·예탁원 일정(ksdinfo_*)·휴장일(chk_holiday)·시황 제목(news_title)·
+        예약주문조회(order_resv_ccnl) 등 확인된 조회 TR과 find_stock_code(종목명→코드)를 허용한다.
+        차단(fail-closed): 목록 밖의 tool_name 또는 api_type(order_cash 등 주문 TR 전부).
+        주문은 이 도구로 낼 수 없다 — 사용자에게 텔레그램 /buy·/sell·/advise 명령을 안내한다.
         """
         prepared = _prepare_kis_trading_mcp_call(inp, config)
         if isinstance(prepared, str):
@@ -1323,17 +1407,22 @@ async def finus_account_balance_readonly(config: FinusAccountBalanceReadonlyConf
             )
             return _record_and_mask(_KIS_BALANCE_LEDGER_NAME, result)
         api_type = str(arguments.get("api_type", ""))
-        if not _is_readonly_api_type(api_type):
+        if not _is_readonly_api_type(api_type, tool_name=tool_name):
             logger.warning(
-                "readonly gate blocked api_type=%r (allowlist prefixes: %s, exact: %s)",
-                api_type, _READONLY_API_ALLOWLIST_PREFIXES, sorted(_READONLY_API_ALLOWLIST_EXACT),
+                "readonly gate blocked tool_name=%r api_type=%r (allowlist prefixes: %s, exact: %s, "
+                "domestic_stock exact: %d entries)",
+                tool_name, api_type, _READONLY_API_ALLOWLIST_PREFIXES,
+                sorted(_READONLY_API_ALLOWLIST_EXACT), len(_READONLY_DOMESTIC_STOCK_API_EXACT),
             )
             result = _err_json(
                 "kis_api_type_not_allowed_readonly",
+                tool_name=tool_name,
                 api_type=api_type,
                 hint=(
-                    "이 도구는 조회 전용입니다. inquire_*/search_*/find_api_detail 만 사용하세요. "
-                    "주문 실행은 이 에이전트의 권한이 아니므로 재시도하지 말고 사용자에게 안내하세요."
+                    "이 도구는 조회 전용입니다. 모든 상품에서 inquire_*/search_*/find_api_detail 을, "
+                    "국내주식(domestic_stock)에서는 순위·수급·재무 등 확인된 조회 TR과 "
+                    "find_stock_code 를 쓸 수 있습니다. 주문(order_*)은 이 도구로 낼 수 없으므로 "
+                    "재시도하지 말고 사용자에게 텔레그램 주문 명령(/buy·/sell·/advise)을 안내하세요."
                 ),
             )
             return _record_and_mask(_KIS_BALANCE_LEDGER_NAME, result)
