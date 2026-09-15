@@ -426,9 +426,13 @@ _last_quote_error: str | None = None
 _paper_fallback_streak = 0
 
 # 실현손익 연속조회 잘림 연속 횟수(#369, PR #378 리뷰). 예산(_RLZ_PL_TIME_BUDGET_MS)을 넘는
-# 계좌는 매 주기 잘리므로 _quote_failure_streak와 같은 규칙(첫 회와 이후 6회마다)으로 억제한다.
-# 잘리지 않은 응답을 받으면 0으로 되돌린다.
+# 계좌는 매 주기 잘리므로 _quote_failure_streak와 같은 규칙(첫 회, 사유가 바뀐 회, 이후 6회마다)으로
+# 억제한다. 잘리지 않은 응답을 받으면 0으로 되돌린다.
 _rlz_truncation_streak = 0
+# 직전 잘림 경고의 사유(truncation_notice 결과). _last_quote_error와 같은 역할이다. 잘리지 않은
+# 응답에서 되돌리지 않는다 — 그 뒤 첫 잘림은 연속 1회라 사유와 무관하게 warning이 나가므로
+# 되돌려도 관측 가능한 차이가 없다.
+_last_rlz_truncation_notice: str | None = None
 
 # 모의투자 대체 응답을 받은 뒤 도구 호출 자체를 건너뛸 주기 수. 위 억제는 로그만 줄일 뿐
 # 호출은 줄이지 못한다 — 모의투자 분기(index.js의 getBalanceRlzPl 첫 분기)는 TR 대신
@@ -884,7 +888,7 @@ def _sync_portfolio_prices_from_rlz_pl(report_text: str, session: Session) -> in
          응답으로는 쓰지 않는다"를 잔고 동기화와 갈라 둘 이유가 없습니다.
       3) 마커 부재(빈 계좌 문구도 없음) — 응답을 읽지 못한 것이므로 error.
     """
-    global _paper_fallback_streak, _rlz_truncation_streak
+    global _paper_fallback_streak, _rlz_truncation_streak, _last_rlz_truncation_notice
 
     # 순서가 중요합니다. 모의투자 대체 응답에는 "[보유 종목]" 마커가 없으므로, 이
     # 검사를 뒤로 미루면 마커 부재 가드가 먼저 걸려 정상 상황에 error가 남습니다.
@@ -917,12 +921,19 @@ def _sync_portfolio_prices_from_rlz_pl(report_text: str, session: Session) -> in
         # 사유(시간 예산·페이지 상한·오류)를 JS 안내 줄 그대로 싣는다. #369에서 예산을 낮춘 뒤
         # 이 경고가 "예산 초과"를 드러내는 곳이다(PR #378 리뷰).
         #
-        # 연속 횟수로 억제한다(첫 회와 이후 6회마다). 연속조회가 예산을 넘는 계좌는 매 주기
-        # 잘리는데, 예산을 낮추기 전 그 계좌가 빠지던 504 실패 경로는 _quote_failure_streak로
-        # 억제돼 있었다 — 억제 없이 두면 이 PR이 10분마다 쌓이는 warning을 새로 만든다.
+        # 억제 규칙은 _quote_failure_streak와 같다 — 첫 회, 사유(안내 줄)가 바뀐 회, 이후 6회마다만
+        # warning이다. 연속조회가 예산을 넘는 계좌는 매 주기 잘리는데, 예산을 낮추기 전 그 계좌가
+        # 빠지던 504 실패 경로는 그 규칙으로 억제돼 있었다 — 억제 없이 두면 이 PR이 10분마다
+        # 쌓이는 warning을 새로 만든다. 사유 변경을 곧바로 올리는 이유: 시간 예산에서 오류로
+        # 바뀌면 운영 대응이 달라지는데, 횟수로만 억제하면 6회째(최대 50분 뒤)까지 debug로만
+        # 남는다(PR #378 리뷰).
         _rlz_truncation_streak += 1
         notice = truncation_notice(report_text)
-        if _rlz_truncation_streak == 1 or _rlz_truncation_streak % 6 == 0:
+        if (
+            _rlz_truncation_streak == 1
+            or notice != _last_rlz_truncation_notice
+            or _rlz_truncation_streak % 6 == 0
+        ):
             logger.warning(
                 "실현손익 연속조회가 잘려 이번 주기 시세 갱신을 건너뜁니다(%d회 연속) — %s "
                 "기존 시세와 갱신 시각을 유지합니다.",
@@ -933,6 +944,7 @@ def _sync_portfolio_prices_from_rlz_pl(report_text: str, session: Session) -> in
             logger.debug(
                 "실현손익 연속조회 잘림이 %d회 연속됩니다 — %s", _rlz_truncation_streak, notice
             )
+        _last_rlz_truncation_notice = notice
         return None
 
     _rlz_truncation_streak = 0

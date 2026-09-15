@@ -1351,6 +1351,7 @@ def reset_balance_failure_streak(monkeypatch):
     monkeypatch.setattr("backend.scheduler._paper_fallback_streak", 0)
     monkeypatch.setattr("backend.scheduler._paper_fallback_skip_remaining", 0)
     monkeypatch.setattr("backend.scheduler._rlz_truncation_streak", 0)
+    monkeypatch.setattr("backend.scheduler._last_rlz_truncation_notice", None)
 
 
 def _make_balance_failure_mocks(monkeypatch, mock_run_mcp_tool_fn):
@@ -3662,6 +3663,46 @@ def test_sync_portfolio_prices_suppresses_repeated_truncation_warning(portfolio_
     with caplog.at_level(logging.DEBUG, logger="backend.scheduler"):
         assert _sync_portfolio_prices_from_rlz_pl(truncated_text, portfolio_session) is None
     assert len(_truncation_warnings()) == 1
+
+
+def test_sync_portfolio_prices_warns_immediately_when_truncation_reason_changes(
+    portfolio_session, caplog
+):
+    """잘림 사유가 바뀌면 억제 중이어도 곧바로 warning을 낸다 (PR #378 리뷰).
+
+    억제 규칙은 _quote_failure_streak와 같다 — 첫 회, 원인이 바뀐 회, 6회마다. 횟수로만
+    억제하면 사유가 시간 예산에서 오류로 바뀌어도 6회째(최대 50분 뒤)까지 debug로만 남는데,
+    두 사유는 운영 대응이 다르다. 사유가 그대로면 기존처럼 억제된다.
+
+    이 테스트가 잡는 mutation: 사유 비교를 걷어 내는 회귀(4회차 오류 사유가 debug로 빠진다),
+    직전 사유를 저장하지 않는 회귀(같은 사유의 2·3·5회차도 warning이 된다).
+    """
+    import logging
+
+    from ..scheduler import _sync_portfolio_prices_from_rlz_pl
+
+    fixture_text = _rlz_pl_text("truncated")
+    fixture_reason = "페이지 상한(20회)에 도달하여"
+    budget_text = fixture_text.replace(fixture_reason, "조회 시간 예산을 초과하여")
+    error_text = fixture_text.replace(fixture_reason, "연속조회 중 오류가 발생하여")
+    assert budget_text != fixture_text and error_text != fixture_text
+
+    with caplog.at_level(logging.DEBUG, logger="backend.scheduler"):
+        # 1~3회: 시간 예산. 1회만 warning, 2·3회는 같은 사유라 억제된다.
+        for _ in range(3):
+            assert _sync_portfolio_prices_from_rlz_pl(budget_text, portfolio_session) is None
+        # 4회: 사유가 오류로 바뀐다 → 6회를 기다리지 않고 warning.
+        assert _sync_portfolio_prices_from_rlz_pl(error_text, portfolio_session) is None
+        # 5회: 오류 사유 그대로 → 다시 억제된다.
+        assert _sync_portfolio_prices_from_rlz_pl(error_text, portfolio_session) is None
+
+    warnings = [
+        r.getMessage() for r in caplog.records
+        if r.levelno == logging.WARNING and "실현손익 연속조회가 잘려" in r.getMessage()
+    ]
+    assert len(warnings) == 2, warnings
+    assert "1회 연속" in warnings[0] and "조회 시간 예산을 초과하여" in warnings[0]
+    assert "4회 연속" in warnings[1] and "연속조회 중 오류가 발생하여" in warnings[1]
 
 
 def test_sync_portfolio_prices_does_not_repeat_empty_warning_for_priceless(
