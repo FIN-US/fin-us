@@ -5390,11 +5390,11 @@ async def test_poller_keeps_polling_when_state_store_hangs(monkeypatch, caplog):
 
 
 # ---------------------------------------------------------------------------
-# 체결 확정 ~ 상태 영속화 사이의 창 (#269)
+# 체결 확정 ~ 상태 영속화 사이의 창 (#269 — #259 3단계에서 닫힘)
 # ---------------------------------------------------------------------------
 
 
-class _SettledSendBlocker(FakeNotifier):
+class _FillSendBlocker(FakeNotifier):
     """체결 결과("주문 완료") 전송에서 영원히 블록한다 (#269).
 
     응답하지 않는 Telegram의 모형이다. #259 2단계 이후 이 경로의 실제 상한은 send_text
@@ -5404,39 +5404,37 @@ class _SettledSendBlocker(FakeNotifier):
 
     def __init__(self):
         super().__init__()
-        self.settled_send_started = asyncio.Event()
+        self.fill_send_started = asyncio.Event()
 
     async def send_text(self, text, *, reply_markup=None):
         self.messages.append(text)
         self.reply_markups.append(reply_markup)
         if text.startswith("주문 완료"):
-            self.settled_send_started.set()
+            self.fill_send_started.set()
             await asyncio.Event().wait()
         return True
 
 
 @pytest.mark.asyncio
-async def test_confirmed_order_is_reexecuted_when_restart_lands_in_the_settled_send(monkeypatch):
-    """체결 성공 후 결과 전송 도중 취소되면 재시작 뒤 같은 update가 재실행된다 (#269).
+async def test_confirmed_order_is_not_reexecuted_when_restart_lands_in_the_fill_send(monkeypatch):
+    """체결 성공 후 결과 전송 도중 취소돼도 재시작 뒤 같은 update가 재실행되지 않는다 (#269).
 
-    창의 정체: place_order 성공(telegram_commands.py의 _handle_confirm)과 _persist_state()
-    (run()의 배치 루프) 사이에 결과 전송이 들어앉는다. 그 사이 SIGTERM이 오면 offset이
-    전진하지 못한 채 죽고, Telegram이 같은 update를 재배달하며, 재실행을 막을 상태가
-    아무것도 없다. claim(GETDEL)은 이미 주문을 소비했으므로 재실행은 "확정할 대기 주문이
-    없습니다"로 끝난다 — 체결된 주문을 미체결로 오표시한다.
+    창의 정체: place_order 성공(telegram_commands.py의 _handle_confirm)과 offset 영속화
+    사이에 결과 전송이 들어앉아 있었다. 그 사이 SIGTERM이 오면 offset이 전진하지 못한 채
+    죽고, Telegram이 같은 update를 재배달하며, claim(GETDEL)이 이미 주문을 소비했으므로
+    재실행은 "확정할 대기 주문이 없습니다"로 끝났다 — 체결된 주문을 미체결로 오표시했다.
 
-    이 창은 #241 revert(#259 1단계)와 무관하다. 원인이 _handled_ahead의 유무가 아니라
-    handle_update 한 번의 실행 시간이기 때문이다.
+    #259 2단계가 창을 최대 20초에서 send_text 한 번으로 좁혔고, 3단계가 닫았다. 핸들러가
+    체결을 원장에 기록한 직후 _mark_update_settled로 폴러를 불러, 결과 전송 **전에** offset이
+    영속화된다. 그래서 전송에서 붙잡힌 채 죽어도 저장된 offset은 이미 41을 지나 있고, 재시작한
+    폴러는 41을 받지 않는다(polls == [42]) — 재실행도 오표시 메시지도 없다.
 
-    #259 2단계가 창을 좁혔지 닫지는 않았다. 전송이 _send_text_settled의 재시도 루프
-    (최대 20초)에서 단발 send_text(httpx 타임아웃 10초)로 바뀌었을 뿐, 그 사이에 죽으면
-    재배달과 재실행은 그대로다. 닫는 작업은 #293(= #259 3단계)이고, 그 이슈가 닫히면
-    아래 마지막 두 단언이 뒤집혀야 한다.
+    먼저 영속화하는 대가는 "전송 전에 죽으면 메시지가 사라진다"인데, 그것을 원장이 받는다는
+    것이 이 설계의 전제다: 체결 이력이 **미통지로 남는다**(recorder.notified가 비어 있다) —
+    통지는 outbox가 다음 주기에 배달한다. 이 단언이 깨지면 창을 닫은 대가로 체결 통지가 조용히
+    사라진다는 뜻이므로 3단계의 전제부터 다시 봐야 한다.
 
-    심각도를 함께 고정한다: 중복 체결은 일어나지 않는다(gateway.orders가 1건). GETDEL claim이
-    두 번째 실행에 주문을 주지 않고 체결 이력도 recorder에 그대로 남는다. 그리고 그 이력이
-    **미통지로 남는다**(recorder.notified가 비어 있다) — 오표시 문구가 나가더라도 체결
-    통지 자체는 outbox가 다음 주기에 배달한다. 이 단언이 깨지면 그때는 성격이 다른 문제다.
+    중복 체결이 없다는 것(gateway.orders가 1건)도 함께 고정한다.
     """
     now = datetime(2026, 5, 20, 10, 0, tzinfo=KST)
     gateway = FakeOrderGateway()
@@ -5493,21 +5491,21 @@ async def test_confirmed_order_is_reexecuted_when_restart_lands_in_the_settled_s
         return polls
 
     # 1) 체결까지 가고 결과 전송에서 붙잡힌 채 SIGTERM을 맞는다.
-    blocked_notifier = _SettledSendBlocker()
+    blocked_notifier = _FillSendBlocker()
     first = make_poller(blocked_notifier)
     install_telegram(first)
 
     task = asyncio.create_task(first.run())
-    await asyncio.wait_for(blocked_notifier.settled_send_started.wait(), timeout=5.0)
+    await asyncio.wait_for(blocked_notifier.fill_send_started.wait(), timeout=5.0)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
 
     assert len(gateway.orders) == 1  # 돈은 실제로 움직였다
-    # 창의 존재 자체. persist에 도달하지 못해 offset이 전진하지 않았다.
-    assert poller_state.state == TelegramPollerState()
+    # 창이 닫혔다. 전송에서 붙잡히기 전에 offset이 41을 지나 영속화됐다.
+    assert poller_state.state == TelegramPollerState(offset=42)
 
-    # 2) 재시작. 41은 여전히 미확정이라 Telegram이 그대로 재배달한다.
+    # 2) 재시작. 저장된 offset이 41을 지나 있어 Telegram은 41을 재배달하지 않는다.
     second_notifier = FakeNotifier()
     second = make_poller(second_notifier)
     polls = install_telegram(second)
@@ -5515,15 +5513,86 @@ async def test_confirmed_order_is_reexecuted_when_restart_lands_in_the_settled_s
     with pytest.raises(asyncio.CancelledError):
         await second.run()
 
-    # 중복 체결은 없다 — claim(GETDEL)이 두 번째 실행에 주문을 주지 않는다.
     assert len(gateway.orders) == 1
     assert len(recorder.results) == 1
-    # 체결은 미통지로 남았다. 이 창에서 죽어도 통지가 사라지지는 않는다 (#259 2단계).
+    # 체결은 미통지로 남았다. 먼저 영속화하고 죽어도 통지는 outbox가 배달한다 — 3단계의 전제.
     assert recorder.notified == []
-    # 그 대가가 오표시다. 창을 닫으면 아래 두 줄이 뒤집힌다: 복원된 offset이 41을 지나가
-    # 재배달 자체가 없어지고(polls == [42]) 사용자에게 나가는 메시지도 없어진다.
-    assert polls == [None]
-    assert second_notifier.messages == ["확정할 대기 주문이 없습니다."]
+    # 복원된 offset이 41을 지나 재배달 자체가 없고, 사용자에게 나가는 오표시도 없다.
+    # (창이 열려 있던 때는 polls == [None], 메시지는 "확정할 대기 주문이 없습니다."였다.)
+    assert polls == [42]
+    assert second_notifier.messages == []
+
+
+class _RecordingPollerStore(InMemoryTelegramPollerStore):
+    """저장된 offset을 순서대로 남긴다 — 무엇이 몇 번 쓰였는지 단언하기 위한 대역."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.saved_offsets: list[int | None] = []
+
+    async def save(self, state: TelegramPollerState) -> None:
+        self.saved_offsets.append(state.offset)
+        await super().save(state)
+
+
+@pytest.mark.asyncio
+async def test_settled_update_is_not_retried_when_the_handler_fails_after_settling(monkeypatch):
+    """핸들러가 확정을 알린 뒤 예외를 던져도 그 update는 재시도되지 않는다 (#259 3단계).
+
+    확정은 "이 update를 다시 실행하면 안 된다"는 핸들러의 선언이고, offset은 그 자리에서 이미
+    update를 지나 영속화됐다. 뒤의 예외를 RETRY로 돌리면 재배달되지 않을 update에 예산이 생기고
+    배치가 끊겨 재시도 대기에 들어간다 — 되살릴 것도 없이 뒤의 명령만 늦춘다.
+
+    확정된 update는 배치 루프가 같은 offset을 한 번 더 쓰지 않는다는 것(saved_offsets)도
+    함께 고정한다.
+    """
+    notifier = FakeNotifier()
+    store = _RecordingPollerStore()
+    handled = []
+    offsets_seen_by_handler = []
+
+    class SettleThenFailHandler:
+        async def handle_update(self, update):
+            handled.append(update["update_id"])
+            if update["update_id"] == 41:
+                hook = telegram_commands._update_settled_hook.get()
+                assert hook is not None
+                await hook()
+                # 확정이 돌아온 시점에 이미 저장돼 있다 — 이 뒤에 죽어도 재배달되지 않는다.
+                offsets_seen_by_handler.append(store.state.offset)
+                raise RuntimeError("확정 뒤의 예외")
+
+    poller = _make_poller(notifier, handler=SettleThenFailHandler(), state_store=store)
+    polls = 0
+
+    async def fake_get_updates():
+        nonlocal polls
+        polls += 1
+        if polls > 1:
+            raise asyncio.CancelledError
+        return [
+            {"update_id": 41, "message": {"chat": {"id": 123}, "text": "/confirm"}},
+            {"update_id": 42, "message": {"chat": {"id": 123}, "text": "/help"}},
+        ]
+
+    async def unexpected_backoff(delay):
+        raise pytest.fail.Exception(f"폴러가 재시도 대기에 들어갔다 (delay={delay})")
+
+    monkeypatch.setattr(poller, "_get_updates", fake_get_updates)
+    monkeypatch.setattr(poller, "_sleep", unexpected_backoff)
+
+    with pytest.raises(asyncio.CancelledError):
+        await poller.run()
+
+    assert offsets_seen_by_handler == [42]
+    # 배치가 끊기지 않고 42까지 처리됐고, 41에 예산이 남지 않았다.
+    assert handled == [41, 42]
+    assert poller.offset == 43
+    assert poller._failures == {}
+    # 41은 핸들러 안에서 한 번, 42는 배치 루프에서 한 번 — 41을 두 번 쓰지 않는다.
+    assert store.saved_offsets == [42, 43]
+    # 폴러가 handle_update를 부르는 동안에만 보인다.
+    assert telegram_commands._update_settled_hook.get() is None
 
 
 # ---------------------------------------------------------------------------
