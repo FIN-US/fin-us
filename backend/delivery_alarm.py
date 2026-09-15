@@ -57,6 +57,8 @@ DeliveryFailureKind = Literal[
     # - 주문: /buy 프롬프트·/cancel·/confirm 403·불명확, 자동 제안 승인 프롬프트
     # - 답변: 자연어·/earnings
     # - 실패 통지: 자연어·/earnings·/advise (#259 4단계)
+    # - 안내: 콜백 답이 유일한 통지인 분기에서 답이 실패했을 때의 대체 전송 — 만료·지원하지
+    #   않는 버튼, 주문 저장소 오류 (#382)
     # 되살릴 근거가 없는 메시지들이라(send_text_settled 독스트링) 알람은 걸지 않고 횟수만 센다.
     "settled_send",
     # /confirm 체결 성공의 첫 전송 실패. 통지는 outbox가 받으므로 이것만으로는 사용자
