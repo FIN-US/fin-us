@@ -336,7 +336,7 @@ def _report_api_auth(values: dict[str, str], *, generated: bool, output_fn: Outp
     if generated:
         masked = mask_value(API_KEY_ENV, values[API_KEY_ENV])
         output_fn(f"  켜짐 — 새 설치라 {API_KEY_ENV}에 난수 키를 만들어 넣었습니다({masked}).")
-        output_fn("  대시보드(8080)는 그대로 동작합니다. curl 등으로 /api/를 직접 부를 때는 X-API-Key 헤더에 이 값을 실으세요.")
+        output_fn(f"  대시보드(8080)는 그대로 동작합니다. curl 등으로 /api/를 직접 부를 때는 X-API-Key 헤더에 .env의 {API_KEY_ENV} 값을 실으세요.")
         output_fn(f"  Unity 에디터 플레이 모드는 키를 싣지 못하므로, 에디터로 테스트하는 동안에는 .env의 {API_KEY_ENV}를 비우세요.")
     elif is_placeholder(values.get(API_KEY_ENV)):
         output_fn(f"  꺼짐 — {API_KEY_ENV}가 비어 있어 /api/ 전체가 무인증입니다. 켜려면 값을 채우세요(.env.example 참고).")

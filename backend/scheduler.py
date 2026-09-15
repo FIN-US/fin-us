@@ -1575,9 +1575,9 @@ async def _monitor_market_task(
                 # 브로드캐스트하지 않는다. 동기화가 수행된 경우 updated_at을 매번 갱신하는
                 # 특성상 내용이 직전과 동일해도 신호가 나간다 — 즉 정상 주기마다 1건이다.
                 # payload에는 보유 종목 개수만 싣고 종목명·수량 등 실제 보유 내역은 담지
-                # 않는다. WebSocket 인증은 FINUS_API_KEY를 설정한 배포에서만 걸리고
-                # (#266 2단계), 미설정이 기본이라 이 채널은 여전히 무인증으로 열려 있을
-                # 수 있다. 신호만 보내고 클라이언트가 /api/v1/db/portfolio를 재조회하게
+                # 않는다. WebSocket 인증은 FINUS_API_KEY를 채운 배포에서만 걸리고(#266),
+                # 키를 비운 배포에서는 이 채널이 무인증으로 열려 있다(새 설치만 setup_env가
+                # 키를 채운다). 신호만 보내고 클라이언트가 /api/v1/db/portfolio를 재조회하게
                 # 두면 채널이 열려 있어도 계좌 보유 현황이 그 채널로 나가지 않는다.
                 if sync_result is not None:
                     try:
@@ -1870,8 +1870,9 @@ async def _monitor_signal(
         #
         # #266: 이 채널이 인증을 받는지는 배포 설정에 달렸다. Origin 허용목록 검사
         # (main.py is_allowed_ws_origin)가 브라우저발 Cross-Site WebSocket Hijacking을
-        # 막고, 비브라우저 클라이언트는 FINUS_API_KEY를 설정한 배포에서만 막힌다
-        # (#266 2단계). 그 키는 미설정이 기본이므로 여기서는 무인증을 전제로 둔다 —
+        # 막고, 비브라우저 클라이언트는 FINUS_API_KEY를 채운 배포에서만 막힌다(#266).
+        # 키를 비운 배포가 남아 있으므로(새 설치만 setup_env가 키를 채운다) 여기서는
+        # 무인증을 전제로 둔다 —
         # 분석 전문을 싣지 않으면 채널이 뚫려도 유출될 내용 자체가 없다.
         #
         # stock·source는 남긴다. 어떤 종목의 리포트를 다시 읽어야 하는지 알려 주는 값이고,

@@ -279,6 +279,10 @@ def test_new_install_starts_with_api_auth_on(tmp_path):
     assert "켜짐" in joined
     # 키 전체를 터미널에 찍지 않는다(다른 비밀값의 mask_value와 같은 규칙).
     assert key not in joined
+    # 키를 가려 출력하므로, 헤더에 실을 값은 화면이 아니라 .env에 있다고 가리켜야 한다.
+    # 치환되지 않은 자리표시자가 그대로 나가는 회귀(f 접두사 누락)도 여기서 걸린다.
+    assert "X-API-Key 헤더에 .env의 FINUS_API_KEY 값을" in joined
+    assert "{API_KEY_ENV}" not in joined
 
 
 def test_generated_api_key_differs_per_install(tmp_path):
