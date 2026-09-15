@@ -19,7 +19,7 @@ frontend/
 ├── Build/           # WebGL 빌드 산출물 — 아래 3개 경로만 선별 추적
 │                    #   index.html / Build/** / TemplateData/**
 ├── build-stamp.txt  # 위 번들이 어느 Assets/에서 나왔는지 적어 둔 트리 해시 (CI가 대조)
-├── nginx.conf       # docker-compose의 frontend 서비스가 Build/를 서빙할 때 쓰는 nginx 설정
+├── nginx.conf.template  # frontend 서비스의 nginx 설정 — envsubst로 API 키를 주입하는 템플릿
 └── frontend.slnx    # Visual Studio 솔루션
 ```
 
@@ -137,16 +137,16 @@ docker compose up frontend
 | 이미지 | `nginx:alpine` |
 | 포트 | 호스트 `8080` → 컨테이너 `80` |
 | 문서 루트 | `./frontend/Build` → `/usr/share/nginx/html` (읽기 전용 `:ro`) |
-| nginx 설정 | `./frontend/nginx.conf` → `/etc/nginx/conf.d/default.conf` (읽기 전용) |
-| `.wasm` MIME | `application/wasm` (`nginx.conf`에서 명시) |
+| nginx 설정 | `./frontend/nginx.conf.template` → `/etc/nginx/templates/default.conf.template` (읽기 전용) — 기동 시 envsubst가 `/etc/nginx/conf.d/default.conf`를 만듭니다 |
+| `.wasm` MIME | `application/wasm` (`nginx.conf.template`에서 명시) |
 | API 프록시 | `/api/`·`/health` → `http://backend:8000` (이슈 #245) |
 | 레이트리밋 | `/api/` 2r/s, `/api/v1/analyze` 6r/m + 동시 2건, 초과 시 429 (이슈 #266 1단계) |
-| API 인증 | `FINUS_API_KEY`를 채운 배포에서만 (이슈 #266 2단계) — **켜면 이 번들은 401로 멈춥니다**, 아래 참고 |
+| API 인증 | `FINUS_API_KEY`를 채운 배포에서만 (이슈 #266 2·3단계) — nginx가 키를 쿠키로 내려 주므로 **번들 재빌드 없이 동작합니다**, 아래 참고 |
 | backend 의존 | `depends_on` 없음 — backend가 아직 없어도 nginx는 뜨고 정적 화면이 먼저 보입니다 |
 
 ### `/api` 리버스 프록시 (#245)
 
-`nginx.conf`가 `/api/`와 `/health`를 같은 compose 네트워크의 `backend:8000`으로
+`nginx.conf.template`이 `/api/`와 `/health`를 같은 compose 네트워크의 `backend:8000`으로
 프록시합니다. 브라우저 입장에서는 대시보드와 API가 **같은 오리진(8080)**이므로 CORS가
 개입하지 않고, 어떤 주소로 열든(로컬·Tailscale·리버스 프록시 뒤) 그대로 동작합니다.
 
@@ -237,7 +237,7 @@ backend를 기다리지 않아도 됩니다. backend가 없는 동안에는 `/ap
 
 `error_page`는 상태 코드로만 갈라낼 수 있어서 `limit_conn_status`를 **내부적으로만** 430으로
 둡니다. IANA 미할당 코드이고 `error_page`가 가로채므로 클라이언트에게는 나가지 않습니다
-(실측 확인). 문구를 바꾸려면 `nginx.conf`의 `@too_many_requests`·`@analysis_in_flight`
+(실측 확인). 문구를 바꾸려면 `nginx.conf.template`의 `@too_many_requests`·`@analysis_in_flight`
 블록만 고치면 됩니다.
 
 **스케줄러의 자동 분석은 이 제한에 걸리지 않습니다.** `backend/scheduler.py`가
@@ -250,39 +250,72 @@ backend를 기다리지 않아도 됩니다. backend가 없는 동안에는 `/ap
 `backend/tests/test_compose_ports.py`가 고정합니다 — CI의 `nginx -t`는 문법만 보므로
 `limit_req` 한 줄이 사라져도 통과합니다.
 
-### API 인증 (#266 2단계) — 이 번들은 아직 키를 싣지 못합니다
+### API 인증 (#266 2·3단계) — nginx가 키를 쿠키로 내려 줍니다
 
 위 레이트리밋은 **비용의 뚜껑**이지 접근 제어가 아닙니다. 접근 제어는 backend의 정적 API 키가
-맡습니다(`backend/main.py`). `.env`의 `FINUS_API_KEY`를 채우면 `/api/` 아래 모든 요청이
-`X-API-Key` 헤더를, `/api/v1/ws` 핸드셰이크가 `?api_key=...` 쿼리 파라미터를 요구합니다.
-비워 두면(기본값) 인증이 꺼지고 backend 기동 로그에 경고가 남습니다.
+맡습니다(`backend/main.py`). `.env`의 `FINUS_API_KEY`를 채우면 `/api/` 아래 모든 요청과
+`/api/v1/ws` 핸드셰이크가 이 키를 요구합니다. 비워 두면(기본값) 인증이 꺼지고 backend 기동
+로그에 경고가 남습니다.
 
-**WebSocket 키는 URL에 실려 nginx 액세스 로그에 평문으로 남습니다.** 이 설정의
-`access_log off`는 `/nginx-health` 한 곳뿐이라 `/api/`는 기본 로그를 탑니다. 기록은
-nginx가 backend보다 먼저 하므로 backend 쪽에서 무엇을 먼저 거절하든 줄지 않습니다 —
-완화하려면 이 파일에서 쿼리스트링을 뺀 `log_format`을 쓰는 수밖에 없고, 그건 별도
-이슈입니다. REST 쪽(헤더)은 로그에 남지 않습니다.
+키가 서버에 닿는 경로는 둘입니다.
+
+| 클라이언트 | 전달 경로 | 누가 붙이나 |
+| --- | --- | --- |
+| 브라우저(이 번들) | `finus_api_key` 쿠키 | **브라우저** — 아래 nginx가 문서 응답에 실어 보냅니다 |
+| 비브라우저(`curl`·`wscat`·NAT) | `X-API-Key` 헤더 | 호출자가 직접 |
+
+그래서 **이 번들은 고치지 않아도 인증을 통과합니다.** `ApiClient`는 여전히 아무 자격증명도
+붙이지 않지만, 쿠키는 브라우저가 same-origin 요청에 자동으로 붙이고 그건 WebSocket
+핸드셰이크에도 적용됩니다. 위의 재빌드 규칙이 적용되지 않는 작업이라는 뜻입니다 — #266이
+(a) "빌드 타임에 굽기"를 접은 이유가 이것이고, 덤으로 키가 저장소에 커밋되는 일도 없습니다.
+
+이 파일이 `nginx.conf`가 아니라 `nginx.conf.template`인 것이 그 대가입니다. compose가
+`/etc/nginx/templates/`에 마운트하고, `nginx:alpine`의 기동 스크립트가 envsubst로
+`${FINUS_API_KEY}`를 치환해 `/etc/nginx/conf.d/default.conf`를 만듭니다. 그래서:
+
+- **키를 바꾸면 이 컨테이너도 다시 만들어야** 합니다(`docker compose up -d backend frontend`).
+  치환은 기동 시점에 한 번뿐이라, backend만 재시작하면 대시보드가 낡은 키를 계속 보냅니다.
+- 키에 `$`·`"`를 넣으면 치환 결과가 nginx 문법에 섞입니다. `"`는 **컨테이너가 뜨지 않는**
+  것으로 끝나지만, `$`는 실재하는 nginx 변수 이름이 뒤따르면(`abc$host`) 조용히 그 값으로
+  바뀌어 다른 키가 나갑니다. `;`·`,`·공백은 nginx는 통과시키지만 쿠키 값에 쓸 수 없어
+  브라우저가 값을 끊어 보냅니다. backend가 기동 로그에 미리 경고합니다.
+- 쿠키는 `/`와 `/index.html` 응답에만 실립니다. 정적 자산까지 실으면 번들 하나를 받는 동안
+  같은 `Set-Cookie`가 요청 수십 개에 따라붙고, 앞단에 캐시를 두는 순간 키를 품은 응답이
+  저장됩니다.
+- 그 두 응답에는 `Cache-Control: no-cache`가 붙습니다. **이게 없으면 방식 자체가 성립하지
+  않습니다** — 쿠키는 세션 쿠키(브라우저를 닫으면 사라짐)인데 문서가 브라우저 캐시에서
+  나오면 새 쿠키를 받을 기회가 없어, 다음 방문에 401이 됩니다. 키를 바꿨을 때도 같습니다.
+  재검증 응답(304)에도 `Set-Cookie`가 실리므로(실측) 본문을 다시 받지는 않습니다.
+  번들 자산에는 걸지 않습니다 — 53MB짜리 `.wasm`은 캐시가 동작해야 하는 쪽입니다.
+
+쿠키 속성은 `Path=/; SameSite=Strict; HttpOnly`이고(HTTPS로 열면 `Secure`가 붙습니다),
+**`SameSite=Strict`는 장식이 아닙니다.** 쿠키 인증은 브라우저가 자격증명을 알아서 붙이므로
+CSRF가 따라오는데, Strict가 cross-site 요청에서 쿠키를 떼기 때문에 임의 페이지의
+`fetch(..., { mode: "no-cors" })`가 인증 없는 요청이 되어 401에서 끝납니다 — CORS로는 막지
+못했던 그 경로입니다. 이 값을 내리는 것은 인증 방식을 바꾸는 일입니다.
+
+단 "site"는 **스킴 + 등록가능도메인**이고 포트는 보지 않습니다. 같은 호스트의 다른 포트에
+페이지가 뜨면 그건 same-site라 쿠키가 그대로 실립니다. 지금은 전 인터페이스에 게시되는
+서비스가 이 `frontend`(8080) 하나뿐이고 나머지는 루프백 전용이라(#246·#285) 그런 페이지가
+없지만, 새 서비스를 전 인터페이스에 게시할 때 함께 볼 일입니다.
+
+**WebSocket 키가 URL에 실리던 문제(#355)는 사라졌습니다.** 2단계는 `?api_key=...` 쿼리
+파라미터를 썼고 그게 nginx 액세스 로그에 평문으로 남았는데, 쿠키가 핸드셰이크에도 붙게 되면서
+그 경로를 걷어냈습니다. 남은 헤더 경로는 기본 `log_format`(combined)에 들어가지 않습니다.
 
 `/openapi.json`·`/docs`는 `/api/` 접두사 밖이라 인증을 켜도 열려 있습니다. 8080에서는
 `location /`의 `try_files ... =404`가 막지만, **8000에 직접 닿으면 전체 스키마가 그대로
 나옵니다.** 스키마는 저장소 소스 그 자체이고 8000은 루프백 전용이라(#246) 함께 닫지
 않았습니다 — 인증이 지키는 것은 "무엇이 있는지"가 아니라 "무엇을 호출할 수 있는지"입니다.
 
-> ⚠️ **지금 이 값을 채우면 대시보드가 401로 멈춥니다.** 추적 중인 번들(`Build/`)의
-> `ApiClient`는 헤더를 붙이지 않기 때문입니다. 1단계의 429 본문은 `{"detail": ...}` JSON이라
-> 번들을 다시 굽지 않고도 배너에 읽혔지만, 여기서는 **보내는 쪽**을 고쳐야 하므로 같은 수를
-> 쓸 수 없습니다. 즉 이 항목은 위의 재빌드 규칙이 그대로 적용되는 작업입니다 —
-> `Assets/Scripts/ApiClient.cs`가 헤더를 붙이도록 고치고, WebGL 재빌드와 `Build/` 커밋이
-> 따라옵니다.
+> ⚠️ **페이지를 열 수 있는 사람은 API도 부를 수 있습니다.** 정적 키가 브라우저에 도달하는
+> 순간 성립하는 성질이고, 키를 어떤 방식으로 들여보내도 같습니다(#266의 2026-09-04 코멘트).
+> 없애려면 로그인(세션 토큰)이나 네트워크 레벨 인증이 필요하고, 이 배포에서 브라우저 경계를
+> 맡는 것은 Tailscale입니다. 즉 이 키가 실제로 막는 것은 **대시보드를 열 수 없는 비브라우저
+> 호출자**입니다.
 
-그래서 현재 키를 채우는 것이 의미 있는 구성은 **대시보드를 쓰지 않는 배포**(텔레그램·NAT
-중심 운용)입니다. 컴포즈 내부에서 backend를 부르는 NAT의 매매일지 도구는 이미 이 헤더를
-싣습니다(`finus_nat/src/nat_finus_nat/finus_api.py`).
-
-키를 번들에 어떻게 들여보낼지는 아직 정해지지 않았습니다. 브라우저에 도달하는 정적 키는
-페이지를 열 수 있는 사람 누구에게나 읽힌다는 성질이 있어서, 빌드 타임에 굽는 방식과 nginx가
-런타임에 내려 주는 방식(설정 템플릿·`SameSite=Strict` 쿠키 등) 중 무엇을 택할지가 함께
-결정돼야 합니다. #266에 남아 있는 항목입니다.
+이 배선은 `backend/tests/test_nginx_api_key_cookie.py`가 고정합니다 — CI의 `nginx -t`는
+문법만 보므로 `SameSite=Strict` 한 줄이 사라져도 통과합니다.
 
 현재 번들은 비압축입니다(`Build/`에 `.br`·`.gz` 산출물 없음).
 

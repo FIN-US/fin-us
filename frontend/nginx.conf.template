@@ -1,5 +1,16 @@
 # Unity WebGL 번들(frontend/Build) 정적 서빙 + backend API 리버스 프록시 설정.
-# docker-compose.yml의 frontend 서비스가 /etc/nginx/conf.d/default.conf로 마운트한다.
+#
+# ⚠️ 이 파일은 **템플릿**이다(#266 3단계). docker-compose.yml의 frontend 서비스가
+# /etc/nginx/templates/default.conf.template로 마운트하고, nginx:alpine의 기동
+# 스크립트(/docker-entrypoint.d/20-envsubst-on-templates.sh)가 envsubst로 `${...}`를
+# 치환해 /etc/nginx/conf.d/default.conf를 만든다. 예전처럼 conf.d에 직접 마운트하면
+# `${FINUS_API_KEY}`가 치환되지 않은 채 남고, nginx는 그것을 정의되지 않은 변수로 보고
+# **기동 자체에 실패한다** — 정적 화면까지 함께 죽는다.
+#
+# 치환 대상은 compose의 `NGINX_ENVSUBST_FILTER: ^FINUS_`로 FINUS_* 하나로 좁혀 뒀다.
+# 그 필터의 기본값은 "환경에 정의된 모든 변수"라, 컨테이너 환경에 nginx 변수와 같은
+# 이름이 생기는 날 이 파일의 `$host`·`$uri`가 조용히 치환된다.
+#
 # 이 파일은 nginx 기본 nginx.conf의 http 블록 안에서 include되므로, 아래 map·server는
 # 모두 http 컨텍스트에 놓인다.
 
@@ -40,12 +51,90 @@ limit_req_zone $binary_remote_addr zone=finus_analyze:1m rate=6r/m;
 # 제한해 "진행 중인 고비용 작업"의 상한을 직접 못 박는다.
 limit_conn_zone $binary_remote_addr zone=finus_analyze_conn:1m;
 
+# --- 번들에 API 키를 실어 보내기 (#266 3단계) ---
+#
+# 2단계가 backend에 정적 키 인증을 걸었지만 추적 중인 Unity WebGL 번들은 그 키를 보내지
+# 못했다 — `ApiClient`가 헤더를 붙이지 않고, 붙이려면 WebGL 재빌드와 `Build/` 커밋이
+# 따라온다. 그래서 인증 기본값이 "꺼짐"이었고, 켜면 대시보드가 401로 멈췄다.
+#
+# 그 전달을 여기서 한다. envsubst가 채운 키를 **문서 응답의 쿠키로** 내려 주면 브라우저가
+# 이후의 same-origin 요청에 자동으로 붙인다 — `/api/` XHR과 `/api/v1/ws` 핸드셰이크
+# 양쪽이다. 번들을 다시 굽지 않고 키를 들여보내는 유일한 경로다(#266의 (a)안은 키를
+# 저장소에 커밋하고, (c)안은 재빌드와 첫 요청의 닭-달걀 문제를 새로 만든다).
+#
+# `SameSite=Strict`는 장식이 아니라 이 방식의 안전장치다. 쿠키 인증은 브라우저가 알아서
+# 자격증명을 붙이므로 CSRF가 따라오는데(이 API에는 `POST /api/v1/db/diary` 같은 쓰기
+# 경로가 있다), Strict가 cross-site 요청에서 쿠키를 떼기 때문에 임의 페이지의
+# `fetch(..., { mode: "no-cors" })`는 인증 없는 요청이 되어 401에서 끝난다. 위
+# 레이트리밋 주석이 "CORS는 방어가 되지 않는다"고 적어 둔 그 경로가 부수적으로 함께
+# 닫힌다. 이 속성을 Lax·None으로 내리는 것은 인증 방식을 바꾸는 일이다.
+#
+# 단 "site"는 **스킴 + 등록가능도메인**이고 포트는 보지 않는다(PR #363 리뷰). 같은
+# 호스트의 다른 포트에 페이지가 뜨면 그건 same-site라 쿠키가 그대로 실린다. 지금 전
+# 인터페이스에 게시되는 서비스는 frontend(8080) 하나뿐이고 나머지는 루프백 전용이라
+# (#246·#285) 실제로 그런 페이지가 없지만, 새 서비스를 전 인터페이스에 게시할 때는
+# "임의 페이지"의 범위가 그만큼 넓어진다는 뜻이다.
+#
+# `HttpOnly`도 준다. 번들은 이 값을 자바스크립트로 읽을 필요가 없다 — 브라우저가 붙이는
+# 것이 이 방식의 전부다. WebSocket 핸드셰이크에도 그대로 붙는다(HttpOnly는 스크립트의
+# 읽기만 막고 네트워크 계층의 전송은 막지 않는다).
+#
+# ⚠️ 그렇다고 키가 비밀이 되는 것은 아니다. **페이지를 열 수 있는 사람은 API도 부를 수
+# 있다** — 그 페이지의 자바스크립트가 내는 요청에 브라우저가 쿠키를 붙여 주고, 개발자
+# 도구의 쿠키 목록에는 값 자체가 보인다. 이 성질은 (a)·(b)·(c) 세 안 모두에 똑같이
+# 있는 것이고(#266 2026-09-04 코멘트), 없애려면 로그인이나 네트워크 레벨 인증이
+# 필요하다. 이 배포에서 브라우저 경계를 맡는 것은 Tailscale이다.
+#
+# ⚠️ 키에 못 쓰는 문자가 있다. 깨지는 이유가 둘로 갈린다.
+#   - `$`·`"` — 치환 결과가 nginx **설정 문법**에 섞인다. `"`는 기동 실패로 끝나지만,
+#     `$`는 하필 실재하는 변수 이름이 뒤따르면(`abc$host`) 조용히 그 값으로 치환돼
+#     backend가 아는 키와 다른 쿠키가 나간다.
+#   - `;`·`,`·`\`·공백 — nginx는 통과시키지만 **쿠키 값**에 쓸 수 없는 문자다
+#     (RFC 6265 cookie-octet). 브라우저가 값을 거기서 끊어 보내 401이 된다.
+# 어느 쪽이든 증상은 frontend에만 나타나므로, 같은 `.env`를 먼저 읽는 backend가 기동
+# 로그로 미리 경고한다(backend/main.py의 unsafe_key_characters).
+
+# `Secure`는 스킴을 보고 붙인다. 이 배포의 주 경로는 Tailscale 위의 평문 HTTP
+# (`http://100.x.y.z:8080`)라 무조건 붙이면 브라우저가 쿠키를 저장하지 않고 대시보드가
+# 401로 멈춘다 — 켠 것처럼 보이는데 안 켜진 상태다. 앞단에서 TLS를 끊는 프록시를 두면
+# nginx가 보는 $scheme은 그래도 http이므로, 그 구성에서는 X-Forwarded-Proto를 신뢰하는
+# 쪽으로 함께 고칠 것(위 X-Forwarded-For 주석과 같은 자리).
+map $scheme $finus_cookie_secure {
+    https   '; Secure';
+    default '';
+}
+
+# 키가 비어 있으면(= 인증 미설정, 기본값) 쿠키 문자열도 빈 문자열이 되고, nginx는 값이
+# 빈 add_header를 아예 내보내지 않는다. 그래서 인증을 끈 배포에는 Set-Cookie가 붙지
+# 않는다 — `finus_api_key=`라는 빈 쿠키를 심어 두면 나중에 인증을 켠 날 브라우저가 그
+# 빈 값을 먼저 보내고, 키를 채웠는데 401인 상태가 된다.
+#
+# 쿠키 이름은 backend/main.py의 API_KEY_COOKIE와 같아야 한다. 실행 경계를 넘는 계약이라
+# 한쪽만 바꾸면 인증을 켠 날에야 드러나므로, backend/tests/test_nginx_api_key_cookie.py가
+# 이 파일을 텍스트로 읽어 대조한다.
+map $finus_injected_key $finus_api_key_cookie {
+    ''      '';
+    default "finus_api_key=$finus_injected_key; Path=/; SameSite=Strict; HttpOnly$finus_cookie_secure";
+}
+
 server {
     listen 80;
     server_name _;
 
     root /usr/share/nginx/html;
     index index.html;
+
+    # envsubst가 채우는 자리. 위 map이 이 값을 읽어 Set-Cookie 문자열을 만든다.
+    # map은 참조 시점(헤더 필터)에 평가되므로, rewrite 단계의 이 set이 항상 먼저다.
+    #
+    # ⚠️ 변수 이름이 `finus_api_key`가 **아닌** 것은 의도다. nginx는 변수 이름을 소문자로
+    # 접어 다루므로 `$finus_api_key`와 `${FINUS_API_KEY}`가 같은 변수다. 이름을 그렇게
+    # 맞춰 두면 이 줄이 "자기 값을 자기에게 대입"이 되어, 치환이 일어나지 않은 배포에서
+    # nginx가 **정상 기동한 뒤** 요청마다 `using uninitialized "finus_api_key" variable`
+    # 경고만 남기고 쿠키를 조용히 빼먹는다(실측 확인). 이름을 갈라 둔 지금은 같은 상황이
+    # 기동 실패로 즉시 드러난다 — `[emerg] unknown "finus_api_key" variable`(nginx가
+    # 이름을 소문자로 접어 그렇게 보고한다). 막는 것처럼 보이는 상태를 만들지 않는다.
+    set $finus_injected_key "${FINUS_API_KEY}";
 
     # nginx가 스스로 내는 리다이렉트(예: /api → /api/ 자동 슬래시 보정)를 상대 경로로
     # 낸다. 기본값 on이면 Location을 절대 URL로 만들면서 server_name(_)과 리스닝 포트
@@ -241,6 +330,49 @@ server {
     # 여기서는 location + default_type 방식을 쓴다.
     location ~ \.wasm$ {
         default_type application/wasm;
+    }
+
+    # --- 문서 응답: 여기서만 API 키 쿠키를 내려 준다 (#266 3단계) ---
+    #
+    # 정적 자산까지 실으면 번들 하나를 받는 동안 같은 Set-Cookie가 요청 수십 개에
+    # 따라붙고, 앞단에 캐시를 두는 순간 그 응답들이 키를 품은 채 저장된다. 쿠키가
+    # 필요한 것은 페이지를 처음 받는 순간 한 번뿐이다.
+    #
+    # `/`와 `/index.html`을 모두 적는다. 아래 `location /`의 try_files가 문서를 그대로
+    # 내보내므로 한쪽만 적으면 그 주소로 들어온 사람에게는 쿠키가 가지 않고, 그건
+    # 대시보드가 401로 멈추는 것으로만 드러난다. location 사이에는 상속이 없어 보안 헤더
+    # 3종도 각각 다시 적어야 한다(위 /nginx-health·@too_many_requests와 같은 이유).
+    # 이 중복은 backend/tests/test_nginx_api_key_cookie.py가 대조한다.
+    #
+    # ⚠️ `Cache-Control: no-cache`가 이 방식을 성립시킨다(PR #363 리뷰). 쿠키는
+    # Max-Age·Expires가 없는 **세션 쿠키**라 브라우저를 닫으면 사라지는데, 문서에 캐시
+    # 지시가 없으면 브라우저가 Last-Modified 기준 휴리스틱으로 캐싱해(대략 age의 10%)
+    # 다음 방문의 네비게이션이 네트워크를 타지 않는다. 그러면 쿠키는 없고 문서는 캐시에서
+    # 나와 **새 쿠키를 받을 기회가 없다** — 대시보드가 401로 멈추고, 서버 로그에는 아무
+    # 흔적이 없다. 키 회전도 같은 이유로 깨진다(컨테이너를 다시 만들어도 캐시된 문서를 쓰는
+    # 브라우저는 낡은 쿠키를 계속 보낸다).
+    #
+    # no-store가 아니라 no-cache인 것은 재검증 응답(304)에도 Set-Cookie가 실리기 때문이다
+    # — 실측했다(nginx:alpine, If-None-Match·If-Modified-Since 양쪽 304에 쿠키·보안 헤더가
+    # 그대로 나왔다). 즉 본문을 다시 보내지 않으면서 키는 매번 최신이다.
+    #
+    # 정적 자산에는 일부러 걸지 않는다. 번들은 53MB짜리 .wasm을 포함하고, 그건 캐시가
+    # 동작해야 하는 쪽이다.
+    location = / {
+        add_header Cache-Control "no-cache" always;
+        add_header Set-Cookie $finus_api_key_cookie always;
+        add_header X-Frame-Options SAMEORIGIN always;
+        add_header X-Content-Type-Options nosniff always;
+        add_header Referrer-Policy strict-origin-when-cross-origin always;
+        try_files /index.html =404;
+    }
+
+    location = /index.html {
+        add_header Cache-Control "no-cache" always;
+        add_header Set-Cookie $finus_api_key_cookie always;
+        add_header X-Frame-Options SAMEORIGIN always;
+        add_header X-Content-Type-Options nosniff always;
+        add_header Referrer-Policy strict-origin-when-cross-origin always;
     }
 
     location / {

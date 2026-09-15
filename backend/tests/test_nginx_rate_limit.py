@@ -1,8 +1,8 @@
-"""`frontend/nginx.conf`의 레이트리밋이 조용히 무의미해지지 않게 고정한다(#266 1단계).
+"""`frontend/nginx.conf.template`의 레이트리밋이 조용히 무의미해지지 않게 고정한다(#266 1단계).
 
-`/api/v1/analyze`는 무인증이면서 호출 한 번이 LLM 또는 NAT 멀티 에이전트를 태워 직접
-과금으로 이어진다. 제한은 프록시 지점인 nginx에 걸려 있는데, nginx 설정은 컨테이너가
-뜰 때만 파싱되므로 **문법이 맞는 한 보호가 사라져도 아무것도 빨간불이 되지 않는다.**
+`/api/v1/analyze`는 호출 한 번이 LLM 또는 NAT 멀티 에이전트를 태워 직접 과금으로
+이어진다. 제한은 프록시 지점인 nginx에 걸려 있는데, nginx 설정은 컨테이너가 뜰 때만
+파싱되므로 **문법이 맞는 한 보호가 사라져도 아무것도 빨간불이 되지 않는다.**
 CI의 `nginx -t`(.github/workflows/ci.yml)는 문법만 본다 — `limit_req` 한 줄을 지워도
 통과한다. 그 간극을 여기서 메운다.
 
@@ -16,22 +16,23 @@ CI의 `nginx -t`(.github/workflows/ci.yml)는 문법만 본다 — `limit_req` �
 동시 실행 초과 쪽은 반대로 **헤더가 없는 것**을 고정한다 — 서버가 알 수 없는 값이라 지어내면
 안 된다(PR #349 리뷰).
 
-검사 범위는 `frontend/nginx.conf` 한 파일이다. compose가 이 파일을
-`/etc/nginx/conf.d/default.conf`로 마운트하므로 실제로 뜨는 것과 같은 내용이지만,
-베이스 이미지의 `nginx.conf`(http 블록의 기본값)는 보지 않는다.
+설정 파일을 읽는 파서는 `nginx_conf.py`에 있다(같은 파일을 훑는 검사가
+`test_nginx_api_key_cookie.py`에도 있어 한 벌만 둔다). 파서 자체의 검증은
+`test_nginx_conf_parse.py`다.
 """
-
-from pathlib import Path
 
 import pytest
 
+from backend.tests import nginx_conf
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-_NGINX_CONF_PATH = _REPO_ROOT / "frontend" / "nginx.conf"
 
 # 정적 서빙 경로 — backend를 거치지 않으므로 제한 대상이 아니다. `/nginx-health`는
 # frontend healthcheck용이라(#252 리뷰) 제한에 걸리면 감시가 스스로를 죽인다.
-_UNLIMITED_LOCATIONS = frozenset({"/", "~ \\.wasm$", "= /nginx-health"})
+# `= /`·`= /index.html`은 문서를 내보내며 API 키 쿠키를 싣는 자리다(#266 3단계) — 여기에
+# 제한이 걸리면 새로 고침 몇 번으로 대시보드가 아예 열리지 않는다.
+_UNLIMITED_LOCATIONS = frozenset(
+    {"/", "= /", "= /index.html", "~ \\.wasm$", "= /nginx-health"}
+)
 
 # (제한 지시어 접두사, 내부 상태 코드, 응답을 만드는 named location).
 #
@@ -47,138 +48,19 @@ _REJECTION_ROUTES = frozenset(
 )
 
 
-def _strip_comments(text):
-    """`#` 주석을 지운다 — 단 따옴표 안의 `#`은 건드리지 않는다.
-
-    아래 블록 분해가 `{`/`}`를 세는데, 주석에 중괄호가 들어 있으면(이 설정에는 실제로
-    `fetch(..., { mode: "no-cors" })` 예시가 있다) 짝이 어긋나 엉뚱한 곳에서 블록이
-    끝난다. 그래서 세기 전에 주석부터 걷어낸다.
-    """
-
-    out = []
-    quote = None
-    index = 0
-    while index < len(text):
-        char = text[index]
-        if quote is not None:
-            out.append(char)
-            if char == quote:
-                quote = None
-            index += 1
-        elif char in "\"'":
-            quote = char
-            out.append(char)
-            index += 1
-        elif char == "#":
-            while index < len(text) and text[index] != "\n":
-                index += 1
-        else:
-            out.append(char)
-            index += 1
-    return "".join(out)
-
-
-def _blocks(text):
-    """*text*의 최상위 `헤더 { 본문 }`을 `(헤더, 본문)` 목록으로 돌려준다.
-
-    중괄호는 따옴표 밖에 있을 때만 센다. 429 응답의
-    `return 429 '{"detail":"..."}';`가 문자열 안에 중괄호를 담고 있어, 순진하게 세면
-    location 블록이 그 자리에서 닫힌 것으로 보인다.
-    """
-
-    blocks = []
-    quote = None
-    depth = 0
-    start = 0  # 현재 헤더가 시작되는 위치
-    body_start = None
-    for index, char in enumerate(text):
-        if quote is not None:
-            if char == quote:
-                quote = None
-            continue
-        if char in "\"'":
-            quote = char
-        elif char == "{":
-            depth += 1
-            if depth == 1:
-                body_start = index + 1
-                header = text[start:index].strip()
-        elif char == "}":
-            depth -= 1
-            if depth == 0:
-                blocks.append((header, text[body_start:index]))
-                start = index + 1
-        elif char == ";" and depth == 0:
-            start = index + 1
-    assert depth == 0 and quote is None, "nginx.conf의 중괄호나 따옴표 짝이 맞지 않는다."
-    return blocks
-
-
-def _directives(body):
-    """블록 본문에서 **자신의** 지시어만 뽑는다(중첩 블록 안쪽은 제외).
-
-    location 사이에는 상속이 없으므로, 중첩 블록의 내용을 함께 세면 바깥 블록이 갖지도
-    않은 제한을 가진 것으로 읽힌다.
-    """
-
-    own = []
-    quote = None
-    depth = 0
-    current = []
-    for char in body:
-        if quote is not None:
-            current.append(char)
-            if char == quote:
-                quote = None
-            continue
-        if char in "\"'":
-            quote = char
-            current.append(char)
-        elif char == "{":
-            depth += 1
-            current = []
-        elif char == "}":
-            depth -= 1
-            current = []
-        elif char == ";" and depth == 0:
-            own.append(" ".join("".join(current).split()))
-            current = []
-        elif depth == 0:
-            current.append(char)
-    return own
-
-
 @pytest.fixture(scope="module")
 def conf():
-    return _strip_comments(_NGINX_CONF_PATH.read_text(encoding="utf-8"))
+    return nginx_conf.read_conf()
 
 
 @pytest.fixture(scope="module")
 def server_body(conf):
-    servers = [body for header, body in _blocks(conf) if header == "server"]
-    assert len(servers) == 1, f"server 블록이 하나가 아니다({len(servers)}개)."
-    return servers[0]
-
-
-def _collect_locations(body, found):
-    """*body* 아래의 location을 **중첩까지** 모은다.
-
-    nginx는 location 안에 location을 허용한다. 최상위만 훑으면 중첩 블록에 넣은
-    `proxy_pass`가 아래 "프록시 경로는 전부 제한 대상" 검사에서 조용히 빠진다.
-    """
-
-    for header, nested in _blocks(body):
-        if header.startswith("location "):
-            spec = header[len("location ") :].strip()
-            assert spec not in found, f"location 스펙이 중복된다({spec})."
-            found[spec] = _directives(nested)
-        _collect_locations(nested, found)
-    return found
+    return nginx_conf.read_server_body(conf)
 
 
 @pytest.fixture(scope="module")
 def locations(server_body):
-    return _collect_locations(server_body, {})
+    return nginx_conf.read_locations(server_body)
 
 
 @pytest.fixture(scope="module")
@@ -186,7 +68,7 @@ def zone_rates(conf):
     """`limit_req_zone` 이름 → 분당 허용 건수."""
 
     rates = {}
-    for directive in _directives(conf):
+    for directive in nginx_conf.directives(conf):
         if not directive.startswith("limit_req_zone "):
             continue
         fields = dict(
@@ -200,29 +82,6 @@ def zone_rates(conf):
     return rates
 
 
-def test_strip_comments_keeps_a_hash_inside_a_quoted_string():
-    """따옴표 안의 `#`을 주석으로 오해하면 그 뒤가 통째로 사라진다."""
-
-    assert _strip_comments('return 200 "a#b"; # 꼬리') == 'return 200 "a#b"; '
-
-
-def test_blocks_ignores_braces_inside_a_quoted_string():
-    """429 본문의 `{"detail":...}`가 블록을 조기에 닫지 않아야 한다."""
-
-    parsed = _blocks('location @x { return 429 \'{"detail":"d"}\'; } server { listen 80; }')
-
-    assert [header for header, _ in parsed] == ["location @x", "server"]
-    assert 'return 429 \'{"detail":"d"}\'' in _directives(parsed[0][1])
-
-
-def test_directives_excludes_the_bodies_of_nested_blocks():
-    """중첩 블록 안의 지시어를 바깥 것으로 세면 없는 보호가 있는 것으로 읽힌다."""
-
-    body = " listen 80; location /a { limit_req zone=z; } server_tokens off; "
-
-    assert _directives(body) == ["listen 80", "server_tokens off"]
-
-
 def _limited_zones(directives):
     """*directives*의 `limit_req`가 참조하는 zone 이름들."""
 
@@ -233,21 +92,6 @@ def _limited_zones(directives):
         for field in directive.split()
         if field.startswith("zone=")
     }
-
-
-def test_collect_locations_reaches_a_nested_location():
-    """중첩 location을 놓치면 "프록시 경로를 전부 훑는다"가 거짓이 된다(PR #349 리뷰).
-
-    nginx는 location 안의 location을 허용하므로, 최상위만 보는 구현에서는 중첩 블록에
-    넣은 `proxy_pass`가 제한 없이 통과한다.
-    """
-
-    body = "location /outer { proxy_pass http://a; location /outer/inner { proxy_pass http://b; } }"
-
-    found = _collect_locations(body, {})
-
-    assert set(found) == {"/outer", "/outer/inner"}
-    assert found["/outer"] == ["proxy_pass http://a"]
 
 
 def test_analyze_has_its_own_stricter_zone(locations, zone_rates):
@@ -327,7 +171,9 @@ def test_no_limit_sits_at_server_level(server_body):
     """
 
     limits = [
-        d for d in _directives(server_body) if d.startswith(("limit_req ", "limit_conn "))
+        d
+        for d in nginx_conf.directives(server_body)
+        if d.startswith(("limit_req ", "limit_conn "))
     ]
     assert limits == [], f"server 레벨에 제한이 걸려 있다: {limits}."
 
@@ -344,7 +190,7 @@ def test_each_rejection_kind_is_wired_to_its_own_handler(
     돌아간다(PR #349 리뷰). 블록 본문만 보는 검사로는 잡히지 않아 여기서 배선을 본다.
     """
 
-    directives = _directives(server_body)
+    directives = nginx_conf.directives(server_body)
 
     assert f"{kind}_status {status}" in directives, (
         f"{kind} 거절의 상태 코드가 {status}가 아니다. 종류별로 코드가 갈려 있어야 "
@@ -433,7 +279,7 @@ def test_the_rejection_handlers_restate_the_security_headers(
 
     inherited = {
         d
-        for d in _directives(server_body)
+        for d in nginx_conf.directives(server_body)
         if d.startswith("add_header X-") or d.startswith("add_header Referrer-Policy")
     }
 

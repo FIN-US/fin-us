@@ -20,6 +20,14 @@ backend 계층 바깥에 있었다.
 3. **돌아올 때 역치환**: 같은 `finus_reasoning_trace_agent`가 최종 응답 본문에
    :func:`unmask_response`를 적용한다.
 
+## 인자 방향 (#338)
+
+위 셋은 도구 **결과**만 다룬다. 그런데 에이전트는 마스킹된 잔고를 보고 그 수량으로
+주문을 내려 하고, 그때 자리표시자가 KIS `params`에 실린다. 목적지가 외부 LLM이 아니라
+KIS MCP이므로 여기서도 되돌리는 것이 맞다 — 다만 무조건 되돌리면 종류가 어긋난 값까지
+숫자가 되어 조용한 오주문이 가능해지므로, :func:`restore_params_for_kis`가 종류 검사를
+함께 건다. 근거는 그 함수의 docstring과 `docs/nfr-05-pii-masking.md`.
+
 ## ContextVar 방향성
 
 `DATA_TOOL_LEDGER`와 같은 제약을 받는다 — `ContextVar.set()`은 LangGraph의
@@ -47,9 +55,12 @@ NAT 응답을 받은 **뒤에** 자기 매핑으로 역치환한다. 즉 NAT이 
 """
 from __future__ import annotations
 
+import json
 import logging
 import re
+from collections.abc import Mapping
 from contextvars import ContextVar
+from typing import Any, NamedTuple
 
 from .pii_mask import _FALLBACK_LABEL, mask_pii
 
@@ -167,10 +178,10 @@ def restore_for_internal(text: str) -> str:
     (사용자 원문 유래)까지 여기서 중립 문구로 갈아엎으면, 원값 대신 "(이전 금액 1)"이
     DB에 박힌다. 손상의 종류만 바뀌고 소실은 그대로다.
 
-    **그래서 이 함수만으로는 저장이 안전하지 않다.** 손대지 않고 통과시킨 것은 원값이
-    어디에도 없는 토큰이고, 저장은 backend 왕복의 바깥이라 나중에 복원될 기회가 없다.
-    호출자는 결과를 :func:`unrestorable_placeholders`에 한 번 더 태워, 남은 것이 있으면
-    저장 자체를 거부해야 한다(#339). 그 함수의 docstring에 두 종류의 잔여 토큰을 적었다.
+    **그래서 이 함수만으로는 저장이 안전하지 않다.** 통과시킨 것 중 이 요청이 발급한
+    scope의 토큰은 원값이 어디에도 없다. 호출자는 결과를
+    :func:`unrestorable_placeholders`에 한 번 더 태워, 남은 것이 있으면 저장 자체를
+    거부해야 한다(#339). 그 함수의 docstring에 판정 경계를 적었다.
     """
     # 이웃한 ``unmask_response``는 ``box is None``으로 갈리는데 여기는 빈 dict까지 함께
     # 걷어낸다. **동작 차이는 없다** — 빈 박스로 아래 sub()를 돌려도 되돌릴 항목이 없어
@@ -186,27 +197,60 @@ def unrestorable_placeholders(text: str) -> list[str]:
     """*text*에 남은 **되돌릴 수 없는** 자리표시자를 등장 순서대로 돌려준다 (#339).
 
     :func:`restore_for_internal`을 **거친 뒤의** 값에 쓴다. 그 함수는 이 요청의 박스에
-    있는 것만 되돌리므로, 남아 있는 것은 두 종류뿐이고 **둘 다 원값이 어디에도 없다**:
+    있는 것만 되돌리므로, 남아 있는 것은 두 종류다:
 
-    - **낯선 scope** — backend ``llm_chat``이 NAT을 부르기 전에 사용자 발화를 자기
-      매핑으로 마스킹한 것이다(#230). 응답 본문이라면 backend가 돌려받아 역치환하지만,
-      저장은 그 왕복의 **바깥**이다 — ``POST /api/v1/db/diary``는 저장만 하고
-      ``unmask_pii``를 타지 않는다(``backend/main.py::create_db_diary``). 요청이 끝나면
-      backend의 매핑은 지역 변수와 함께 사라진다.
     - **이 요청 scope인데 박스에 없음** — LLM이 번호를 지어냈거나(``<AMOUNT_9f2a1c_9>``)
-      박스를 물려받지 못한 실행 경로에서 매핑이 유실된 경우다.
+      박스를 물려받지 못한 실행 경로에서 매핑이 유실된 경우다. 원값이 **어디에도 없다.**
+      → 돌려준다(저장 거부).
+    - **낯선 scope** — backend ``llm_chat``이 NAT을 부르기 전에 사용자 발화를 자기
+      매핑으로 마스킹한 것이거나(#230) 이전 턴의 것이다. → **돌려주지 않는다.**
 
-    둘을 갈라 한쪽만 막을 이유가 없다. 저장 관점에서 차이는 "누가 만들었는가"뿐이고,
-    결과는 같다 — 원값이 없는 토큰이 ``Diary.content``에 **영구히** 박힌다. 사용자가
-    나중에 일지를 열면 자기가 쓴 금액 대신 내부 토큰을 본다.
+    ## 왜 낯선 scope를 더 이상 거부하지 않는가 (#354)
+
+    #339 시점에는 둘을 갈라 한쪽만 막을 이유가 없었다. ``POST /api/v1/db/diary``가 저장만
+    하고 ``unmask_pii``를 타지 않았으므로, 낯선 scope도 결과가 같았다 — 원값이 없는
+    토큰이 ``Diary.content``에 영구히 박힌다. 그래서 여기서 전부 거부했고, 그 대가로
+    **사용자가 발화에 적은 금액을 일지에 남기는 것 자체가 불가능**했다(재입력해도 새
+    scope로 다시 마스킹된다).
+
+    #354가 그 전제를 바꿨다. backend는 이제 ``llm_chat``의 매핑을 provider 호출 동안
+    scope 키로 등록해 두고(``backend/pii_registry.py``), ``create_db_diary``가 저장
+    직전에 그 등록소로 되돌린다. 낯선 scope 중 **지금 응답을 기다리는 그 요청의 것**은
+    backend가 원값으로 되돌릴 수 있다 — 여기서 거부하면 그 복구를 우리가 막는다.
+
+    되돌리지 못하는 낯선 scope(이전 턴 등)가 남는 것은 그대로다. 그것은 backend가 같은
+    자리에서 거부한다(``create_db_diary``의 422). 판정을 값이 있는 쪽에 맡기는 것이고,
+    두 거부는 막는 대상이 갈려 이중 방어로 남는다 — 여기서는 NAT 도구 결과에서 유실·조작된
+    토큰을, backend에서는 그 밖의 모든 경로를 막는다.
+
+    ## 박스가 없는 것과 비어 있는 것은 다르게 판정한다
+
+    - **박스가 ``None``** — 최상위 에이전트가 심지 못했거나 ContextVar를 물려받지 못한
+      실행 경로다(``mask_tool_result``가 같은 상황을 ERROR로 남긴다). 이때
+      ``mask_tool_result``는 **마스킹은 그대로 하고 매핑만 버렸으므로**, 이 요청이 만든
+      자리표시자가 원값 없이 본문에 들어와 있을 수 있는데 어느 scope가 우리 것인지 알
+      길이 없다. 전부 되돌릴 수 없는 것으로 본다(fail-closed).
+    - **박스가 비어 있음(``{}``)** — 심기는 했고 마스킹 대상 도구를 한 번도 부르지
+      않았다. 이 요청이 발급한 자리표시자가 **없다**는 뜻이므로, 본문에 있는 것은 전부
+      낯선 scope다. 아무것도 돌려주지 않고 backend가 판정하게 둔다.
 
     호출자(``finus_save_diary``)는 이 목록이 비어 있지 않으면 **저장하지 않는다.**
-    조용한 원본 소실보다 시끄러운 실패가 낫다는 판정이다(#339 방향 3). 근거와
-    택하지 않은 두 방향은 ``docs/nfr-05-pii-masking.md``에 적었다.
+    조용한 원본 소실보다 시끄러운 실패가 낫다는 판정이다(#339 방향 3). 근거는
+    ``docs/nfr-05-pii-masking.md``에 적었다.
     """
     if not text:
         return []
-    return [m.group(0) for m in _SCOPED_PLACEHOLDER_RE.finditer(text)]
+    box = PII_MAPPING.get()
+    if box is None:
+        return [m.group(0) for m in _SCOPED_PLACEHOLDER_RE.finditer(text)]
+    # 자리표시자는 <KIND_scope_n> 이므로 뒤에서 두 번째 조각이 scope다 (unmask_response와
+    # 같은 규칙 — 둘이 갈리면 "응답에서는 중립 문구가 되는데 저장은 통과하는" 자리가 생긴다).
+    own_scopes = {ph.rsplit("_", 2)[-2] for ph in box}
+    return [
+        m.group(0)
+        for m in _SCOPED_PLACEHOLDER_RE.finditer(text)
+        if m.group(2) in own_scopes
+    ]
 
 
 def placeholder_kind(placeholder: str) -> str:
@@ -221,6 +265,205 @@ def placeholder_kind(placeholder: str) -> str:
     """
     match = _SCOPED_PLACEHOLDER_RE.fullmatch(placeholder)
     return match.group(1) if match else ""
+
+
+# ---------------------------------------------------------------------------
+# 도구 **인자** 방향 — KIS 주문 파라미터 역치환 (#338)
+# ---------------------------------------------------------------------------
+
+# 자리표시자가 올 수 있는 KIS 파라미터의 **마지막 밑줄 마디** → 그 자리에 허용되는
+# 자리표시자 종류. 필드 이름 전체가 아니라 마지막 마디로 판정한다.
+#
+# **왜 필드 이름 목록이 아니라 접미 마디인가 (fail-closed)**
+#
+# 이슈(#338)가 지적한 위험은 "수량 필드 목록을 하드코딩하면 KIS가 필드를 늘릴 때
+# 조용히 새는 쪽으로 무너진다"였다. KIS TR 필드는 마디 규약이 일정해서
+# (``ORD_QTY``·``CNCL_QTY``, ``ORD_UNPR``·``STCK_PRPR``, ``TOT_EVLU_AMT``) 새 필드도
+# 같은 마디를 쓴다 — 목록이 아니라 규약을 보면 새 필드가 자동으로 덮인다.
+#
+# 규약을 벗어난 새 필드가 나오면 아래 판정은 "모른다"가 되고, 모르는 필드에 실린
+# 자리표시자는 **복원하지 않고 거부한다**. 즉 드리프트의 결과는 유출이나 오주문이
+# 아니라 이 계층이 내는 시끄러운 실패다 — 이슈가 걱정한 방향의 반대다.
+#
+# 갱신 책임: KIS가 새 마디를 쓰는 수량·금액 필드를 도입하면 여기에 추가한다. 추가를
+# 잊으면 그 필드를 쓰는 주문이 거부되며(관측 가능), 잘못된 값이 나가지는 않는다.
+_PARAM_KIND_BY_SUFFIX: dict[str, str] = {
+    "QTY": "QTY",      # ORD_QTY, CNCL_QTY, RVSE_QTY, SLL_QTY …
+    "UNPR": "AMOUNT",  # ORD_UNPR (주문 단가)
+    "PRPR": "AMOUNT",  # STCK_PRPR (현재가)
+    "PRC": "AMOUNT",   # *_PRC (가격)
+    "AMT": "AMOUNT",   # TOT_EVLU_AMT, ORD_AMT …
+}
+
+# 복원된 원값이 KIS 파라미터로 나갈 수 있는 모양. 접미사·콤마를 벗긴 뒤 이것에
+# 맞아야 한다. 맞지 않으면 거부한다 — 아래 _as_kis_number 참고.
+_KIS_NUMBER_RE = re.compile(r"\d+(?:\.\d+)?")
+
+
+class ParamRejection(NamedTuple):
+    """:func:`restore_params_for_kis`가 복원을 거부한 파라미터 하나.
+
+    *placeholder*는 **로그 전용**이다. 호출자가 만드는 오류 JSON은 Observation으로
+    LLM 컨텍스트에 재유입되므로, 거기에 내부 토큰을 실으면 에이전트가 그것을 답변에
+    옮겨 적을 여지를 준다 — ``finus_save_diary``의 거부 가드가 같은 이유로 같은
+    구분을 한다.
+    """
+
+    field: str
+    reason: str
+    placeholder: str
+
+
+def _expected_kind(field: str) -> str | None:
+    """*field*(KIS 파라미터 이름)에 허용되는 자리표시자 종류. 모르면 ``None``."""
+    return _PARAM_KIND_BY_SUFFIX.get(field.strip().upper().rsplit("_", 1)[-1])
+
+
+def _as_kis_number(value: str) -> str | None:
+    """원값을 KIS가 받는 숫자 문자열로 정규화한다. 못 하면 ``None``.
+
+    자리표시자의 원값은 사람이 읽는 표기 그대로다 — ``mask_pii``의 인식기가 매치한
+    구간을 통째로 매핑에 넣기 때문이다. 종류별로 남는 군더더기가 다르다:
+
+    - ``AMOUNT`` — ``_AMOUNT_WON_RE``·``_AMOUNT_UNIT_RE``는 ``원``을 매치에 **포함**한다
+      (``"12,345,000원"``). ``_LABELED_AMOUNT_RE``는 라벨을 빼고 숫자만 담지만 콤마는
+      남는다(``"1,234,567"``).
+    - ``QTY`` — ``_QTY_RE``는 ``(?=주)`` lookahead라 ``주``는 매치 밖이지만, 잔고
+      리포트가 ``toLocaleString("ko-KR")``을 쓰므로 콤마가 들어온다(``"1,234"``).
+
+    그대로 KIS ``params``에 넣으면 전부 거부된다. 그래서 접미사와 콤마를 벗겨 순수
+    숫자로 만든다.
+
+    **벗겨서 숫자가 되지 않으면 복원하지 않는다.** 한글 수사 표기(``"3천만원"`` —
+    ``_AMOUNT_UNIT_RE``가 만드는 매핑이고, ``finus_list_diaries``가 돌려주는 일지
+    본문에 실제로 들어 있다)를 숫자로 해석하려면 수사 파서가 필요한데, 그 파서가
+    한 자리라도 틀리면 **자릿수가 어긋난 주문**이 조용히 나간다. 이 이슈가 피하려던
+    바로 그 맞바꿈이라, 해석하지 않고 거부한다.
+    """
+    core = value.strip().removesuffix("원").strip().replace(",", "")
+    if not core or not _KIS_NUMBER_RE.fullmatch(core):
+        return None
+    return core
+
+
+def _restore_one_param(
+    field: str, value: str, box: dict[str, str],
+) -> tuple[str, ParamRejection | None]:
+    """파라미터 값 하나를 복원한다. 거부하면 *value*를 그대로 돌려주고 사유를 함께 낸다."""
+    matches = list(_SCOPED_PLACEHOLDER_RE.finditer(value))
+    if not matches:
+        return value, None
+
+    stripped = value.strip()
+    if len(matches) > 1 or matches[0].group(0) != stripped:
+        # "10<QTY_..._1>"·"<QTY_..._1>주"처럼 자리표시자가 값의 **일부**인 형태. 어디까지가
+        # 값이고 어디부터가 군더더기인지 이쪽이 판정할 근거가 없다.
+        return value, ParamRejection(field, "placeholder_is_not_the_whole_value", stripped)
+
+    placeholder = stripped
+    kind = matches[0].group(1)
+    expected = _expected_kind(field)
+    if expected is None:
+        # 위 _PARAM_KIND_BY_SUFFIX 주석의 fail-closed 지점. ``CANO``·``ACNT_PRDT_CD``
+        # 같은 계좌 필드도 여기로 떨어진다 — mcp-trading이 ``KIS_ACCOUNT_NO`` env로
+        # 채우는 값이라(``mcp-trading/balance.js``의 ``buildBalanceParams()``) LLM 인자로
+        # 올 이유가 없고, 원값의 하이픈 유무가 원문 표기를 따라가므로 ``CANO``/
+        # ``ACNT_PRDT_CD`` 분리와 어긋날 수 있다.
+        return value, ParamRejection(field, "field_does_not_accept_placeholders", placeholder)
+    if kind != expected:
+        # 이 이슈의 본체다. 역치환만 붙이면 ``ORD_QTY``에 실린 ``AMOUNT`` 자리표시자가
+        # 금액으로 복원돼 **의미가 어긋난 주문이 조용히** 나간다. 종류 검사가 그
+        # 맞바꿈을 되돌린다 — 여전히 시끄럽게 실패한다.
+        return value, ParamRejection(field, f"expected_{expected}_placeholder_got_{kind}", placeholder)
+
+    original = box.get(placeholder)
+    if original is None:
+        # 낯선 scope(backend가 사용자 발화를 마스킹한 것)이거나 LLM이 지어낸 번호다.
+        # 어느 쪽이든 원값이 **이 프로세스에** 없으므로 여기서 복원할 수 없다.
+        #
+        # 저장 경로와 판정이 갈리는 자리다. ``unrestorable_placeholders``는 #354 이후
+        # 낯선 scope를 돌려주지 않는다 — backend가 ``pii_registry``에 매핑을 들고 있다가
+        # ``create_db_diary``에서 되돌리므로, 거기서 막으면 그 복구를 NAT이 막는 꼴이기
+        # 때문이다. **주문 경로에는 그 복구 지점이 없다.** 목적지가 backend가 아니라 KIS
+        # MCP라 backend 왕복 자체를 타지 않으므로, 여기서 통과시키면 자리표시자가 그대로
+        # KIS까지 간다. 그래서 이쪽은 두 종류를 함께 거부한다.
+        return value, ParamRejection(field, "no_mapping_in_this_request", placeholder)
+
+    number = _as_kis_number(original)
+    if number is None:
+        return value, ParamRejection(field, "restored_value_is_not_a_number", placeholder)
+    return number, None
+
+
+def restore_params_for_kis(
+    params: Mapping[str, Any], *, tool_name: str, api_type: str,
+) -> tuple[dict[str, Any], list[ParamRejection]]:
+    """KIS ``params``의 자리표시자를 숫자 원값으로 되돌린다 (#338, 후보 1).
+
+    마스킹은 도구 **결과**에만 걸려 있었고 인자 방향에는 역치환이 없었다. 그래서
+    에이전트는 자기가 방금 본 잔고 수량으로 주문을 낼 수 없었다 — "보유 전량 매도"가
+    깨지는 자리다. 목적지가 외부 LLM이 아니라 KIS MCP이므로 되돌리는 것이 맞다.
+
+    다만 **역치환만** 붙이면 이 이슈가 우려한 맞바꿈이 생긴다: 지금은 자리표시자가
+    실리면 MCP가 거부해 주문이 안 나가는데(시끄러운 실패), 무조건 되돌리면 종류가
+    어긋난 값도 숫자가 되어 **조용한 오주문**이 가능해진다. 그래서 되돌리기 전에
+    검사를 건다 — 넷 다 fail-closed다:
+
+    - 값 전체가 자리표시자 하나여야 한다.
+    - 필드의 접미 마디가 요구하는 종류와 자리표시자의 종류가 같아야 한다.
+    - 원값이 이 요청의 박스에 있어야 한다.
+    - 원값이 숫자로 정규화돼야 한다.
+
+    넷 중 하나라도 어긋나면 그 필드는 **복원하지 않고** 사유를 함께 돌려준다.
+    호출자는 사유가 하나라도 있으면 호출 자체를 중단해야 한다 — 일부만 복원해
+    보내면 반쯤 맞는 주문이 나간다.
+
+    **막는 것은 종류 *간* 맞바꿈뿐이다.** 같은 종류 안에서 값이 뒤바뀌는 것
+    (평가금액 자리표시자를 ``ORD_UNPR``에 싣는 등)은 둘 다 ``AMOUNT``라 그대로
+    복원돼 나간다. 자리표시자는 숫자의 타당성 신호를 지우므로 — 평문이었다면
+    "주가가 1,234만원"에서 LLM이 느꼈을 이상함이 사라진다 — 이 계층이 만든 위험이
+    맞지만, 값이 의미상 맞는지는 종류가 아니라 종목·문맥을 봐야 하는 별도 판정이다
+    (#365). 이 함수의 계약은 거기까지가 아니다.
+
+    자리표시자가 없는 값은 손대지 않는다. 정상 경로(에이전트가 종목코드·구분값을
+    직접 적는 경우)는 이 함수를 그대로 통과한다.
+
+    *tool_name*·*api_type*은 거부 로그에만 쓴다. 한 요청에서 KIS 호출이 여러 번 나가면
+    필드 이름과 사유만으로는 어느 호출이 막혔는지 짚을 수 없다 — 호출자가 이미 아는
+    값이므로 받아서 함께 남긴다 (PR #364 리뷰).
+    """
+    restored: dict[str, Any] = {}
+    rejections: list[ParamRejection] = []
+    box = PII_MAPPING.get() or {}
+
+    for field, value in params.items():
+        if isinstance(value, str):
+            new_value, rejection = _restore_one_param(field, value, box)
+            if rejection is not None:
+                rejections.append(rejection)
+            # 거부된 필드도 원값을 그대로 실어 둔다 — 호출자가 호출을 중단하므로 MCP까지
+            # 가지 않고, 로그에 원래 인자가 남는 편이 진단에 낫다.
+            restored[field] = new_value
+            continue
+
+        # 문자열이 아닌 값(중첩 dict·리스트) 안에 자리표시자가 숨어 있는 경우. KIS
+        # params는 평평한 스칼라 dict라 정상 경로에서는 나오지 않지만, 나온다면
+        # 위 규칙들을 적용할 필드 이름이 없다 — 복원하지 않고 거부한다.
+        found = _SCOPED_PLACEHOLDER_RE.search(json.dumps(value, ensure_ascii=False, default=str))
+        if found is not None:
+            rejections.append(
+                ParamRejection(field, "placeholder_inside_a_non_string_value", found.group(0))
+            )
+        restored[field] = value
+
+    if rejections:
+        logger.warning(
+            "KIS params 자리표시자 복원을 거부했습니다 — tool=%s api_type=%s %s",
+            tool_name,
+            api_type,
+            [(r.field, r.reason, r.placeholder) for r in rejections],
+        )
+    return restored, rejections
 
 
 def unmask_response(text: str) -> str:

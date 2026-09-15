@@ -1,7 +1,12 @@
 import asyncio
 import json
+import logging
+import traceback
 from pathlib import Path
 from types import SimpleNamespace
+
+import anyio
+import httpx
 
 from nat_finus_nat import finus_api
 
@@ -76,33 +81,8 @@ def test_save_diary_input_converter_accepts_multiline_content():
     assert inp.content == "line1\nline2"
 
 
-def test_save_trading_diary_posts_to_backend(monkeypatch):
-    captured = {}
-
-    class FakeResponse:
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return {"status": "success", "data": {"id": 1, "title": "T", "content": "C"}}
-
-    class FakeClient:
-        def __init__(self, timeout):
-            captured["timeout"] = timeout
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, tb):
-            return False
-
-        async def post(self, url, json, headers=None):
-            captured["url"] = url
-            captured["json"] = json
-            captured["headers"] = headers
-            return FakeResponse()
-
-    monkeypatch.setattr(finus_api.httpx, "AsyncClient", FakeClient)
+def test_save_trading_diary_posts_to_backend(monkeypatch, mock_backend):
+    backend = mock_backend({"status": "success", "data": {"id": 1, "title": "T", "content": "C"}})
     # delenv가 아니라 빈 값이다 — dotenv 로딩이 지운 키를 되살릴 수 있고, 빈 값은
     # _finus_backend_headers가 "키 없음"으로 보는 값이라 판정 결과가 같다(PR #352 리뷰).
     monkeypatch.setenv("FINUS_API_KEY", "")
@@ -119,15 +99,19 @@ def test_save_trading_diary_posts_to_backend(monkeypatch):
 
     result = asyncio.run(run_tool())
 
-    assert captured["url"] == "http://test-backend:8000/api/v1/db/diary"
-    assert captured["json"] == {"title": "매매일지 2026-05-24", "content": "본문"}
+    assert backend.method == "POST"
+    assert backend.url == "http://test-backend:8000/api/v1/db/diary"
+    assert backend.json_body == {"title": "매매일지 2026-05-24", "content": "본문"}
     # 키가 없는 배포에서는 헤더 자체를 붙이지 않는다. 빈 값을 보내면 backend가 그것을
     # "틀린 키"로 보므로(main.matches_api_key), 인증이 꺼진 배포에서까지 401이 된다.
-    assert captured["headers"] == {}
+    assert backend.header("X-API-Key") is None
+    # 타임아웃은 요청 객체에 남지 않지만 계약이다. 빠지면 httpx 기본값 5초가 적용돼
+    # 느린 backend에서 저장이 조용히 실패한다 (PR #359 리뷰).
+    assert backend.client_kwargs.get("timeout") == config.timeout_sec
     assert '"id": 1' in result
 
 
-def test_save_trading_diary_sends_the_api_key_header(monkeypatch):
+def test_save_trading_diary_sends_the_api_key_header(monkeypatch, mock_backend):
     """backend가 인증을 켠 배포에서는 `X-API-Key`를 실어 보냅니다 (#266 2단계).
 
     NAT는 컴포즈 내부에서 backend를 부르는 비브라우저 클라이언트다. 이 헤더가 빠지면
@@ -138,30 +122,7 @@ def test_save_trading_diary_sends_the_api_key_header(monkeypatch):
     날에야 드러난다. 이 테스트가 잡는 mutation: headers 인자를 다시 빼거나 이름을
     바꾸는 회귀.
     """
-    captured = {}
-
-    class FakeResponse:
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return {"status": "success", "data": {"id": 7}}
-
-    class FakeClient:
-        def __init__(self, timeout):
-            pass
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, tb):
-            return False
-
-        async def post(self, url, json, headers=None):
-            captured["headers"] = headers
-            return FakeResponse()
-
-    monkeypatch.setattr(finus_api.httpx, "AsyncClient", FakeClient)
+    backend = mock_backend({"status": "success", "data": {"id": 7}})
     monkeypatch.setenv("FINUS_API_KEY", "s3cr3t-key")
 
     config = finus_api.FinusSaveDiaryConfig(backend_url="http://test-backend:8000")
@@ -174,35 +135,12 @@ def test_save_trading_diary_sends_the_api_key_header(monkeypatch):
 
     asyncio.run(run_tool())
 
-    assert captured["headers"] == {"X-API-Key": "s3cr3t-key"}
+    assert backend.header("X-API-Key") == "s3cr3t-key"
 
 
-def test_list_trading_diaries_sends_the_api_key_header(monkeypatch):
+def test_list_trading_diaries_sends_the_api_key_header(monkeypatch, mock_backend):
     """조회 쪽도 같은 헤더를 붙입니다 — 한쪽만 붙이면 그쪽만 401이 된다."""
-    captured = {}
-
-    class FakeResponse:
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return {"status": "success", "data": []}
-
-    class FakeClient:
-        def __init__(self, timeout):
-            pass
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, tb):
-            return False
-
-        async def get(self, url, headers=None):
-            captured["headers"] = headers
-            return FakeResponse()
-
-    monkeypatch.setattr(finus_api.httpx, "AsyncClient", FakeClient)
+    backend = mock_backend({"status": "success", "data": []})
     monkeypatch.setenv("FINUS_API_KEY", "s3cr3t-key")
 
     config = finus_api.FinusListDiariesConfig(backend_url="http://test-backend:8000")
@@ -213,7 +151,11 @@ def test_list_trading_diaries_sends_the_api_key_header(monkeypatch):
 
     asyncio.run(run_tool())
 
-    assert captured["headers"] == {"X-API-Key": "s3cr3t-key"}
+    assert backend.method == "GET"
+    assert backend.header("X-API-Key") == "s3cr3t-key"
+    # 저장 쪽과 마찬가지로 조회 쪽 타임아웃도 여기서 고정한다 — 프로덕션은 두 곳에서
+    # 따로 넘기므로 한쪽만 잃는 회귀가 가능하다.
+    assert backend.client_kwargs.get("timeout") == config.timeout_sec
 
 
 def test_mcp_call_tool_passes_environment_to_child_process(monkeypatch, tmp_path):
@@ -346,3 +288,212 @@ def test_mcp_dart_earnings_stock_routes_to_earnings_report_tool(monkeypatch, tmp
         "arguments": {"stock_name": "삼성전자", "period": "2025Q1"},
         "timeout_sec": 7,
     }
+
+
+# ---------------------------------------------------------------------------
+# #358 — 코딩 실수가 API 실패로 위장되지 않는다
+# ---------------------------------------------------------------------------
+#
+# ``finus_api``의 넓은 ``except Exception``은 ``TypeError``·``AttributeError`` 같은
+# 코딩 실수까지 잡아 ``mcp_call_failed``·``diary_api_request_failed``로 바꿨다. PR #356의
+# 원인이 정확히 이 경로였다 — 테스트 대역의 시그니처 불일치가 던진 ``TypeError``가
+# "저장이 안 됐다"는 오류 JSON으로 위장돼 진단이 비쌌다. 운영에서는 같은 위장이 스택
+# 없이 남아 원인 추적을 막는다.
+#
+# 방침 B(잡되 ``logger.exception``으로 스택 보존) + 오류 코드 구분을 세 지점
+# (MCP 호출·일지 저장·일지 조회)에 같이 적용했고, 아래 테스트가 그 셋을 함께 고정한다.
+# 한 곳만 고치면 나머지 두 곳에 같은 위장이 남으므로 지점마다 테스트를 둔다.
+#
+# 잡는 것 자체는 유지한다 — 도구 경계에서 예외가 탈출하면 ReAct 루프가 끊기고, 그것이
+# 오해를 부르는 Observation보다 운영상 더 큰 실패다.
+
+_BUG_MESSAGE = "post() got an unexpected keyword argument 'headers'"
+
+
+def _install_client(monkeypatch, handler):
+    """``httpx.AsyncClient``가 *handler*를 쓰는 ``MockTransport``를 타게 한다.
+
+    ``conftest``의 ``mock_backend``는 정상 응답을 돌려주는 대역이라 예외를 던질 수 없다.
+    여기서 던지는 예외는 프로덕션의 ``await client.post(...)`` 안에서 난 것과 같은
+    자리에서 올라온다 — 예외를 손으로 조립해 ``except`` 블록에 밀어 넣는 것보다 실제
+    경로에 가깝다.
+    """
+    real_client = finus_api.httpx.AsyncClient
+    transport = httpx.MockTransport(handler)
+
+    def _client(*args, **kwargs):
+        kwargs["transport"] = transport
+        return real_client(*args, **kwargs)
+
+    monkeypatch.setattr(finus_api.httpx, "AsyncClient", _client)
+
+
+def _raise_coding_bug(_request):
+    raise TypeError(_BUG_MESSAGE)
+
+
+def _assert_disguise_is_gone(observation: str, caplog, *, api_error: str) -> dict:
+    """코딩 실수가 (1) API 실패 코드로 위장되지 않고 (2) 스택으로 드러나는지 본다."""
+    payload = json.loads(observation)
+    assert payload["error"] == finus_api._TOOL_INTERNAL_ERROR, (
+        f"코딩 실수가 {payload['error']!r}로 위장됐다"
+    )
+    assert payload["error"] != api_error
+    assert payload["exception"] == "TypeError"
+    # 에이전트가 같은 호출을 반복하지 않도록 무엇이 일어났는지 알려 준다.
+    assert "hint" in payload
+    # 방침 B의 본체 — 로그에 스택이 남는다. 스택이 없으면 운영에서 원인 추적이 막힌다.
+    with_stack = [r for r in caplog.records if r.exc_info is not None]
+    assert with_stack, "logger.exception이 호출되지 않아 스택이 남지 않았다"
+    # 그룹으로 도착한 경우 ``exc_info[0]``은 ``ExceptionGroup``이고 ``TypeError``는 그
+    # 잎에 있다. 어느 모양이든 **원인이 스택에 드러나는 것**이 #358의 검증 기준이므로,
+    # 최상위 타입이 아니라 렌더링된 스택을 본다.
+    assert any(
+        "TypeError" in "".join(traceback.format_exception(*r.exc_info)) for r in with_stack
+    )
+    return payload
+
+
+def test_mcp_call_type_error_is_not_disguised_as_api_failure(caplog):
+    """MCP 호출 경로(#358의 첫 지점) — 코딩 실수가 ``mcp_call_failed``가 되지 않는다."""
+
+    async def inner():
+        raise TypeError(_BUG_MESSAGE)
+
+    with caplog.at_level(logging.ERROR, logger=finus_api.logger.name):
+        observation = asyncio.run(
+            finus_api._run_mcp_timed(inner, tool_name="domestic_stock", timeout_sec=5)
+        )
+
+    payload = _assert_disguise_is_gone(observation, caplog, api_error="mcp_call_failed")
+    assert payload["tool"] == "domestic_stock"
+
+
+def _raise_inside_nested_task_groups(exc: BaseException):
+    """실 운영의 **두 겹** task group 구조를 그대로 만든다 (PR #364 리뷰).
+
+    ``sse_client``/``stdio_client``가 task group을 하나 열고
+    (``mcp/client/sse.py``·``mcp/client/stdio/__init__.py``), 그 안에서
+    ``ClientSession.__aenter__``가 하나 더 연다(``mcp/shared/session.py``). 손으로 만든
+    한 겹짜리 ``BaseExceptionGroup``으로 테스트하면 **이 겹수에서만** 통하지 않는
+    회귀를 통째로 놓친다 — 실제로 놓쳤다.
+    """
+
+    async def inner():
+        async with anyio.create_task_group():
+            async with anyio.create_task_group():
+                raise exc
+
+    return inner
+
+
+def test_mcp_call_type_error_inside_nested_task_groups_is_not_disguised(caplog):
+    """실 경로의 겹수(2겹)에서 코딩 실수가 분류된다 — 한 겹만 풀면 여기서 되돌아간다."""
+    with caplog.at_level(logging.ERROR, logger=finus_api.logger.name):
+        observation = asyncio.run(
+            finus_api._run_mcp_timed(
+                _raise_inside_nested_task_groups(TypeError(_BUG_MESSAGE)),
+                tool_name="domestic_stock",
+                timeout_sec=5,
+            )
+        )
+
+    payload = _assert_disguise_is_gone(observation, caplog, api_error="mcp_call_failed")
+    # 잎까지 내려가지 않으면 detail이 "unhandled errors in a TaskGroup (1 sub-exception)"이 된다.
+    assert payload["detail"] == _BUG_MESSAGE
+
+
+def test_mcp_call_type_error_is_found_even_when_it_is_not_the_first_sibling(caplog):
+    """형제 중 첫 번째가 아니어도 찾는다 — ``exceptions[0]``만 보면 놓치는 자리다.
+
+    겹수가 아니라 **형제 순서**를 고정하는 테스트라 그룹을 손으로 조립한다. task group
+    으로는 자식 예외의 수집 순서를 결정적으로 만들 수 없다.
+    """
+
+    async def inner():
+        raise BaseExceptionGroup(
+            "mcp",
+            [BaseExceptionGroup("session", [ConnectionError("refused"), TypeError(_BUG_MESSAGE)])],
+        )
+
+    with caplog.at_level(logging.ERROR, logger=finus_api.logger.name):
+        observation = asyncio.run(
+            finus_api._run_mcp_timed(inner, tool_name="domestic_stock", timeout_sec=5)
+        )
+
+    assert json.loads(observation)["error"] == finus_api._TOOL_INTERNAL_ERROR
+
+
+def test_mcp_call_real_api_failure_keeps_its_error_code_and_a_useful_detail(caplog):
+    """반대 방향 — 진짜 외부 실패가 내부 오류로 위장되면 그것도 같은 종류의 결함이다.
+
+    같은 두 겹 구조로 낸다. 종전에는 그룹을 한 겹만 풀어 ``detail``이 "unhandled errors
+    in a TaskGroup (1 sub-exception)"이었다 — 진짜 실패에서도 원인이 안 보이는 자리다.
+    """
+    with caplog.at_level(logging.ERROR, logger=finus_api.logger.name):
+        observation = asyncio.run(
+            finus_api._run_mcp_timed(
+                _raise_inside_nested_task_groups(httpx.ConnectError("connection refused")),
+                tool_name="domestic_stock",
+                timeout_sec=5,
+            )
+        )
+
+    payload = json.loads(observation)
+    assert payload["error"] == "mcp_call_failed"
+    assert payload["detail"] == "connection refused"
+    # 진짜 실패에도 스택은 남긴다 — 방침 B는 "잡되 조용히 삼키지 않는다"이다.
+    assert any(r.exc_info is not None for r in caplog.records)
+
+
+def test_save_diary_type_error_is_not_disguised_as_api_failure(monkeypatch, caplog):
+    """일지 저장 경로(#358의 둘째 지점) — PR #356이 실제로 겪은 그 위장이다."""
+    _install_client(monkeypatch, _raise_coding_bug)
+    config = finus_api.FinusSaveDiaryConfig(backend_url="http://test-backend:8000")
+
+    async def run_tool():
+        async with finus_api.finus_save_diary(config, None) as info:
+            return await info.single_fn(
+                finus_api.FinusSaveDiaryInput(title="매매일지", content="본문")
+            )
+
+    with caplog.at_level(logging.ERROR, logger=finus_api.logger.name):
+        observation = asyncio.run(run_tool())
+
+    _assert_disguise_is_gone(observation, caplog, api_error="diary_api_request_failed")
+
+
+def test_list_diaries_type_error_is_not_disguised_as_api_failure(monkeypatch, caplog):
+    """일지 조회 경로(#358의 셋째 지점) — 한 곳만 고치면 나머지에 같은 위장이 남는다."""
+    _install_client(monkeypatch, _raise_coding_bug)
+    config = finus_api.FinusListDiariesConfig(backend_url="http://test-backend:8000")
+
+    async def run_tool():
+        async with finus_api.finus_list_diaries(config, None) as info:
+            return await info.single_fn(finus_api.FinusListDiariesInput())
+
+    with caplog.at_level(logging.ERROR, logger=finus_api.logger.name):
+        observation = asyncio.run(run_tool())
+
+    _assert_disguise_is_gone(observation, caplog, api_error="diary_api_request_failed")
+
+
+def test_diary_real_request_failure_keeps_its_error_code(monkeypatch, caplog):
+    """진짜 네트워크 실패는 종전대로 ``diary_api_request_failed``로 남는다."""
+
+    def _refuse(request):
+        raise httpx.ConnectError("connection refused", request=request)
+
+    _install_client(monkeypatch, _refuse)
+    config = finus_api.FinusSaveDiaryConfig(backend_url="http://test-backend:8000")
+
+    async def run_tool():
+        async with finus_api.finus_save_diary(config, None) as info:
+            return await info.single_fn(
+                finus_api.FinusSaveDiaryInput(title="매매일지", content="본문")
+            )
+
+    with caplog.at_level(logging.ERROR, logger=finus_api.logger.name):
+        observation = asyncio.run(run_tool())
+
+    assert json.loads(observation)["error"] == "diary_api_request_failed"

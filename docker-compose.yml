@@ -2,17 +2,38 @@ services:
   # Unity WebGL 빌드(frontend/Build)를 정적 서빙하고, /api·/health는 같은 네트워크의
   # backend:8000으로 프록시한다(#245). file://로는 로더가 동작하지 않아 HTTP 서빙이
   # 필수다(frontend/README.md 참고).
-  # depends_on은 일부러 두지 않는다 — nginx.conf가 proxy_pass에 변수를 써서 backend
+  # depends_on은 일부러 두지 않는다 — nginx 설정이 proxy_pass에 변수를 써서 backend
   # 이름을 요청 시점에 해석하므로, backend가 아직 없어도 nginx는 뜨고 정적 화면이 먼저
   # 보인다. backend를 기다리게 만들면 그 이점이 사라진다.
   frontend:
     image: nginx:alpine
     ports:
       - "8080:80"
+    environment:
+      # nginx.conf.template의 ${FINUS_API_KEY} 자리를 채운다(#266 3단계). nginx가 문서
+      # 응답에 이 키를 SameSite=Strict 쿠키로 실어 보내면, 브라우저가 이후 /api/ 요청과
+      # /api/v1/ws 핸드셰이크에 자동으로 붙인다 — 번들을 다시 굽지 않고 키를 들여보내는
+      # 경로다. compose가 프로젝트 루트의 .env를 보간에 쓰므로 backend와 같은 값이 된다.
+      #
+      # ⚠️ `:-`를 지우지 말 것. 값이 없으면 변수가 아예 정의되지 않고, 그러면 envsubst가
+      # `${FINUS_API_KEY}`를 문자 그대로 남긴다 — nginx는 그것을 정의되지 않은 변수로
+      # 보고 기동에 실패하므로, 인증을 쓰지 않는 배포에서 정적 화면까지 함께 죽는다.
+      #
+      # env_file을 붙이지 않는 것도 의도다. .env 전체를 nginx 컨테이너에 넣으면 이
+      # 설정이 쓰지도 않는 KIS·OpenAI 키까지 함께 퍼진다.
+      FINUS_API_KEY: ${FINUS_API_KEY:-}
+      # 치환 대상을 FINUS_* 하나로 좁힌다. 기본값은 "환경에 정의된 모든 변수"라,
+      # 컨테이너 환경에 nginx 변수와 같은 이름이 생기는 날 설정의 `$host`·`$uri`가
+      # 조용히 치환된다.
+      NGINX_ENVSUBST_FILTER: ^FINUS_
     volumes:
       # 번들은 호스트의 Unity 빌드 산출물이 원본이므로 컨테이너에서는 읽기 전용으로만 쓴다.
       - ./frontend/Build:/usr/share/nginx/html:ro
-      - ./frontend/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      # conf.d가 아니라 templates다(#266 3단계). 기동 스크립트
+      # (/docker-entrypoint.d/20-envsubst-on-templates.sh)가 envsubst로 치환해
+      # /etc/nginx/conf.d/default.conf를 만든다. 키를 바꾸면 이 컨테이너를 다시 만들어야
+      # 반영된다(치환은 기동 시점에 한 번뿐이다) — `docker compose up -d frontend`.
+      - ./frontend/nginx.conf.template:/etc/nginx/templates/default.conf.template:ro
     networks:
       - fin-us-network
 
@@ -25,8 +46,8 @@ services:
       # 걸린다), /api/v1/analyze 한 번이 LLM 과금으로 이어진다. 번들이 상대
       # 경로로 재빌드돼(#262) 원격 시연의 8000 직접 호출 의존이 사라졌으므로 127.0.0.1에만
       # 바인딩한다(#246). 전 인터페이스에 열어 두면 nginx에 건 레이트리밋(#266 1단계,
-      # frontend/nginx.conf)을 8000 직접 호출로 그대로 우회할 수 있다 — 막는 게 아니라
-      # 막는 것처럼 보이는 상태가 된다.
+      # frontend/nginx.conf.template)을 8000 직접 호출로 그대로 우회할 수 있다 — 막는 게
+      # 아니라 막는 것처럼 보이는 상태가 된다.
       # 게시를 없애지 않는 것은 호스트에서 /docs를 열거나 수동으로 API를 부르는 흐름과,
       # Unity 에디터 플레이 모드(ApiClient.DefaultBaseUrl이 http://localhost:8000으로
       # 폴백한다) 때문이다. 브라우저는 8080 프록시로, nginx는 backend:8000 별칭으로
@@ -69,8 +90,8 @@ services:
     ports:
       # 무인증 `/v1/chat/completions`를 그대로 받는 LLM 호출 경로라 127.0.0.1에만
       # 바인딩한다(#285). 전 인터페이스에 열어 두면 `/api/v1/analyze`의 레이트리밋
-      # (#266 1단계, frontend/nginx.conf)을 8001 직접 호출로 우회할 수 있다. 컴포즈
-      # 내부에서는 backend가 `NAT_BASE_URL: http://finus-nat:8000` 네트워크 별칭으로
+      # (#266 1단계, frontend/nginx.conf.template)을 8001 직접 호출로 우회할 수 있다.
+      # 컴포즈 내부에서는 backend가 `NAT_BASE_URL: http://finus-nat:8000` 네트워크 별칭으로
       # 부르므로 영향이 없다.
       # 게시를 남겨 두는 것은 수동 디버깅과, 호스트에서 백엔드만 띄울 때 쓰는
       # `.env.example`의 `NAT_BASE_URL=http://127.0.0.1:8001`을 위해서다.
