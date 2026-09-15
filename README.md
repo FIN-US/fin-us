@@ -117,7 +117,7 @@ Fin-Us는 단일 모델이 모든 일을 처리하지 않고, 역할이 분리�
 
 에이전트의 페르소나, 도구 구성, 라우팅 지침은 NAT 레이어에서 정의합니다. `finus_nat/configs/agents/` 폴더 내의 YAML 파일을 수정하여 각 에이전트의 성격과 작업 지침을 관리할 수 있습니다.
 
-에이전트별 역할·지침은 각 YAML의 `additional_instructions`에 둡니다. 반면 모든 에이전트가 공유하는 ReAct 출력 골격(`Thought:` / `Action:` / `Action Input:` 형식 규칙)은 `finus_nat/configs/prompts/*.md` 5개로 분리되어 있고, YAML의 `system_prompt`가 `file://../prompts/<파일>.md`로 이를 참조합니다. `react_kis_full.md`는 trading·monitoring 두 에이전트가 공유하므로 고치면 양쪽에 함께 반영됩니다.
+에이전트별 역할·지침은 각 YAML의 `additional_instructions`에 둡니다. 반면 모든 에이전트가 공유하는 ReAct 출력 골격(`Thought:` / `Action:` / `Action Input:` 형식 규칙)은 `finus_nat/configs/prompts/*.md` 5개로 분리되어 있고, YAML의 `system_prompt`가 `file://../prompts/<파일>.md`로 이를 참조합니다. `react_kis_chat.md`는 trading·monitoring 두 에이전트가 공유하므로 고치면 양쪽에 함께 반영됩니다. 이 파일의 "주문 요청" 절은 텔레그램 주문 명령 문법을 안내하므로, 명령 문법(`backend/telegram_commands.py`)을 바꾸면 함께 고쳐야 합니다 — `backend/tests/test_nat_order_guidance.py`가 둘을 대조합니다.
 
 ```yaml
 # 예시: finus_nat/configs/agents/news_agent.yml
@@ -389,6 +389,8 @@ Backend 스케줄러는 매 거래일 오전 8시 30분에 Telegram 모닝 브�
 | `/confirm` | 대기 중인 주문 실행 | - |
 | `/cancel` | 대기 중인 주문 취소 (증권사 제출 주문은 취소 불가) | - |
 
+> 종목명이 공백 뒤 숫자로 끝나는 종목(`KODEX 200`·`TIGER 200` 등)은 시장가 형식(`/buy KODEX 200 10`)에서 끝 숫자가 수량으로 읽힙니다. 이런 종목은 6자리 종목코드로 입력하세요(`/buy 069500 10`). 지정가까지 쓰면(`/buy KODEX 200 10 30000`) 올바르게 읽힙니다([#387](https://github.com/FIN-US/fin-us/issues/387)).
+
 `/advise`는 종목명만 받아 **주문 내용까지 제안**합니다. 사용자가 정한 주문을 확인만 받는 `/buy`·`/sell`과 다른 점입니다. 결과물은 같은 60초 대기 주문이며, 확정 버튼 없이는 아무것도 체결되지 않습니다.
 
 순서는 ① 종목코드 확정 → ② 재제안 냉각 확인 → ③ 제안 에이전트 호출 → ④ 계좌·시세 조회 → ⑤ **하드 한도를 코드가 판정** → ⑥ 통과분만 검증 에이전트로 → ⑦ 승인이면 대기 주문 생성입니다.
@@ -450,6 +452,8 @@ python3 mcp-trading/scripts/update_stock_master.py
 ```
 
 슬래시 명령이 아닌 일반 텍스트는 NAT 채팅으로 전달됩니다. Telegram 채팅은 `telegram:{chat_id}` conversation id를 사용하므로 스케줄러 분석 리포트와 대화 이력이 섞이지 않습니다.
+
+NAT 채팅은 **조회만 합니다**. 채팅으로 매수·매도를 요청하면 주문을 내지 않고, 위 `/buy`·`/sell`·`/advise` 명령을 안내합니다 — 주문은 한도 검사·확정 버튼이 있는 명령 경로로만 나갑니다(#380). 채팅 에이전트가 쓰는 KIS 조회 전용 도구는 국내주식의 순위·수급·재무 같은 조회 TR까지 허용하고, 주문 TR은 막습니다(판정표 `finus_nat/tests/fixtures/kis_domestic_stock_tr_verdicts.json`).
 
 <a id="troubleshooting" name="troubleshooting"></a>
 

@@ -42,7 +42,7 @@ functions:
     branches:
       - name: trading_agent
         function_name: trading_branch_agent
-        description: "Kis Trading MCP: 계좌·잔고·보유·주문·체결, 현재가·호가·시가총액·거래량·순위 등 정형 시장/계좌 데이터 조회."
+        description: "Kis Trading MCP(조회 전용): 계좌·잔고·보유·체결, 현재가·호가·시가총액·거래량·순위 등 정형 시장/계좌 데이터 조회. 주문 요청은 주문을 내지 않고 텔레그램 /buy·/sell·/advise 명령으로 안내."
       - name: monitoring_agent
         function_name: monitoring_branch_agent
         description: "보유·관심 포트폴리오 상태 점검, 리스크/하락/알림/건전성 모니터링."
