@@ -391,8 +391,8 @@ async def test_approval_prompt_message_id_is_recorded_on_the_pending_order():
     텍스트 /confirm은 그 id보다 뒤에 보낸 것일 때만 주문을 실행한다. 이 경로가 id를 남기지
     않으면 자동 제안 주문은 텍스트 /confirm으로 영영 확정되지 않는다(버튼만 된다).
 
-    이 테스트가 잡는 mutation: 스케줄러가 send_text_settled(id 없음)로 되돌아가거나
-    record_prompt_message_id 호출을 빠뜨림.
+    이 테스트가 잡는 mutation: 스케줄러가 send_order_prompt 대신 send_text_settled(id 없음)로
+    되돌아감, send_order_prompt가 id 기록을 빠뜨림.
     """
     from ..scheduler import run_rule_triggered_proposal
 

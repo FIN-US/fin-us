@@ -58,12 +58,10 @@ from .telegram_notifier import (
     SETTLED_SEND_RETRY_BACKOFF_SECONDS,
     SETTLED_SEND_TIMEOUT_SECONDS,
     TELEGRAM_ALERT_MODES,
-    SendReceipt,
     TelegramCommandNotifier,
     TelegramPollerNotifier,
     fetch_telegram_api,
     send_text_settled,
-    send_text_settled_receipt,
     telegram_notifier,
 )
 from .timeutil import KST
@@ -79,7 +77,7 @@ from .trading_orders import (
     TradeRecorder,
     is_korean_market_open,
     order_reply_markup,
-    record_prompt_message_id,
+    send_order_prompt,
 )
 from .stock_code import (
     _STOCK_CODE_EXTRACT_RE,
@@ -742,7 +740,7 @@ class TelegramCommandHandler:
         if self._matches_command(command, bot_username, "/confirm"):
             await self._handle_confirm(
                 str(chat.get("id", "")).strip(),
-                text=_TextConfirm(
+                text_confirm=_TextConfirm(
                     update_id=_telegram_int(update.get("update_id")),
                     message_id=_telegram_int(message.get("message_id")),
                 ),
@@ -819,24 +817,15 @@ class TelegramCommandHandler:
         )
 
     async def _send_order_prompt(self, order: PendingOrder, text: str) -> bool:
-        """저장된 대기 주문의 확정 프롬프트를 보내고 그 message_id를 주문에 남긴다 (#386).
+        """/buy·/sell·자연어 주문과 /advise의 확정 프롬프트 전송 (#386).
 
-        /buy·/sell·자연어 주문과 /advise가 쓴다. 스케줄러의 자동 제안은 같은 두 단계
-        (send_text_settled_receipt → record_prompt_message_id)를 직접 밟는다.
-
-        반환값은 전송 성공 여부다. 실패하면 호출부가 대기 주문을 지운다(#247). id를 남기지 못한
-        것은 실패로 치지 않는다. 프롬프트는 나갔고 버튼으로 확정할 수 있으며, 텍스트 /confirm만
-        fail-closed로 막힌다.
+        전송과 message_id 기록은 trading_orders.send_order_prompt 하나가 하고, 스케줄러의 자동
+        제안도 같은 함수를 부른다. 여기서는 테스트가 대체할 수 있는 _sleep을 넘겨 주는 것 말고
+        하는 일이 없다 — _send_text_settled와 같은 모양이다.
         """
-        receipt: SendReceipt = await send_text_settled_receipt(
-            self.notifier,
-            text,
-            reply_markup=self._order_reply_markup(order),
-            sleep=self._sleep,
+        return await send_order_prompt(
+            self.notifier, self.pending_orders, order, text, sleep=self._sleep
         )
-        if receipt.sent:
-            await record_prompt_message_id(self.pending_orders, order, receipt.message_id)
-        return receipt.sent
 
     async def _mark_update_settled(self) -> None:
         """지금 처리 중인 update를 폴러가 곧바로 확정하게 한다 (#259 3단계).
@@ -1600,10 +1589,10 @@ class TelegramCommandHandler:
         # 대기 주문이 삭제된 뒤다 — 재실행은 "취소할 대기 주문이 없습니다"로 끝난다 (#247).
         await self._send_text_settled("대기 주문을 취소했습니다.")
 
-    async def _handle_confirm(self, chat_id: str, *, text: _TextConfirm | None = None) -> None:
+    async def _handle_confirm(self, chat_id: str, *, text_confirm: _TextConfirm | None = None) -> None:
         """대기 주문을 claim해 실행한다.
 
-        ``text``는 텍스트 /confirm에서만 넘어온다. 막으려는 규칙은 "메시지를 보낸 뒤 생긴 주문은
+        ``text_confirm``은 텍스트 /confirm에서만 넘어온다. 막으려는 규칙은 "메시지를 보낸 뒤 생긴 주문은
         그 메시지로 확정할 수 없다"이다. claim(GETDEL)은 **같은** 주문을 두 번 주지 않을 뿐,
         /confirm이 그사이 생긴 **다른** 대기 주문(자동 제안·새 /buy)을 받는 것은 막지 않는다.
         그러면 사용자가 본 적도 없는 주문이 확정 없이 실행된다. 이 규칙은 두 창에서 깨졌다.
@@ -1634,19 +1623,22 @@ class TelegramCommandHandler:
         않고 update만으로 판정하는 별도 층이다. 표지는 owner(프로세스)를 담아 프로세스 안의
         재시도(전송 실패 뒤 폴러 재시도)는 그대로 통과시킨다.
 
-        버튼 콜백은 ``text``를 넘기지 않아 두 판정 모두 걸리지 않는다. 버튼에는 주문마다 다른
+        버튼 콜백은 ``text_confirm``을 넘기지 않아 두 판정 모두 걸리지 않는다. 버튼에는 주문마다 다른
         토큰이 실려 있어 _handle_order_callback이 다른 주문의 확정을 이미 거절한다.
 
-        남는 경우: message_id의 순서는 서버가 메시지를 받은 순서이지 사용자 화면에 프롬프트가 뜬
-        순서가 아니다. 프롬프트가 서버를 떠난 직후부터 사용자 기기에 표시되기까지(네트워크 지연,
-        수 초 이하) 서버에 도착한 /confirm은 통과한다. 그 /confirm이 겨냥한 원래 주문은 60초
-        만료를 넘겨 이미 치워진 뒤다. 창이 적체·다운타임(분 단위)에서 전송 지연으로 줄어 수용했다.
+        남는 경우: message_id의 순서는 서버가 /confirm을 **받은** 순서이지 사용자가 누른 순서가
+        아니다. 텔레그램 클라이언트는 연결이 끊긴 동안 보낸 메시지를 로컬 큐에 두었다가 재연결 때
+        올린다. 그래서 A의 프롬프트를 보고 누른 /confirm이 큐에 묶인 사이 A가 60초 만료로
+        치워지고 자동 제안 B의 프롬프트가 먼저 id를 받으면, 뒤늦게 올라간 /confirm은 id가 더 커서
+        대조를 통과하고 B가 확정 없이 실행된다. 창의 상한은 사용자 쪽 전송 지연(오프라인 큐 포함,
+        상한 없음)이다. 폴러 적체·다운타임 창보다는 좁지만 닫히지 않았고, 닫는 방법(자동 제안은
+        버튼으로만 확정, 또는 프롬프트에 단 답장만 받기)은 #390에서 정한다(PR #389 리뷰).
         """
         # order_gateway 부재 체크를 claim 전에 수행해 주문이 소비되지 않게 한다.
         if self.order_gateway is None:
             await self._send_text_or_raise("주문 실행 설정이 준비되지 않았습니다.")
             return
-        update_id = text.update_id if text is not None else None
+        update_id = text_confirm.update_id if text_confirm is not None else None
         if update_id is not None:
             try:
                 first_run = await self.pending_orders.mark_confirm_update(
@@ -1669,11 +1661,11 @@ class TelegramCommandHandler:
             await self._drop_expired_pending_order(chat_id, self.now_factory())
             # 원자적 읽기+삭제. 멀티워커 경합이나 프로세스 안의 재시도에서 정확히 하나의 호출만
             # order를 받고 나머지는 None을 받는다. 재시작 뒤 재배달은 위 표지가 먼저 걸러낸다(#383).
-            if text is None:
+            if text_confirm is None:
                 order = await self.pending_orders.claim(chat_id)
             else:
                 # 텍스트 /confirm은 그 주문의 프롬프트를 본 뒤에 보낸 것일 때만 꺼낸다 (#386).
-                confirm_message_id = text.message_id
+                confirm_message_id = text_confirm.message_id
                 outcome = await self.pending_orders.claim_if(
                     chat_id, lambda pending: pending.prompted_before(confirm_message_id)
                 )
@@ -1687,11 +1679,11 @@ class TelegramCommandHandler:
             logger.warning(
                 "텍스트 /confirm(message_id=%s)이 대기 주문의 프롬프트(message_id=%s)보다 앞서거나 "
                 "순서를 알 수 없어 실행하지 않는다 (#386)",
-                text.message_id if text is not None else None,
+                text_confirm.message_id if text_confirm is not None else None,
                 refused.prompt_message_id,
             )
             unknown = (
-                refused.prompt_message_id is None or text is None or text.message_id is None
+                refused.prompt_message_id is None or text_confirm is None or text_confirm.message_id is None
             )
             await self._send_text_or_raise(
                 CONFIRM_PROMPT_UNKNOWN_TEXT if unknown else CONFIRM_BEFORE_PROMPT_TEXT
