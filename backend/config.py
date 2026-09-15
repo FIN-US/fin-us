@@ -310,17 +310,19 @@ def is_placeholder_secret(value: str | None) -> bool:
     return not normalized or normalized.startswith("your_") or normalized.endswith("_here")
 
 
-# API 정적 키(#266 2단계). 값이 있으면 `/api/` 아래 모든 HTTP 요청과 `/api/v1/ws`
-# 핸드셰이크가 이 키를 요구한다(backend/main.py). 방식은 #266의 방향 결정 코멘트를
-# 그대로 따른다 — REST는 헤더, WS는 쿼리 파라미터(브라우저 WS API가 커스텀 헤더를 못
-# 붙인다), 키는 .env로 관리.
+# API 정적 키(#266 2·3단계). 값이 있으면 `/api/` 아래 모든 HTTP 요청과 `/api/v1/ws`
+# 핸드셰이크가 이 키를 요구한다(backend/main.py). 비브라우저는 `X-API-Key` 헤더로 싣고,
+# 브라우저는 nginx가 문서 응답에 실어 준 쿠키를 자동으로 붙인다(3단계). 키는 .env로 관리.
 #
-# **기본값이 빈 문자열 = 인증 꺼짐이다.** 이 저장소가 보안 설정에서 보통 고르는
-# fail-closed와 반대 방향이라 이유를 남긴다. 지금 추적 중인 Unity WebGL 번들
-# (frontend/Build)은 키를 실어 보내지 못한다 — ApiClient가 헤더를 붙이지 않고, 붙이게
-# 하려면 WebGL 재빌드와 Build/ 커밋이 따라온다(frontend/README.md). 기본값을 "켜짐"으로
-# 두면 `docker compose up`이 그대로 401 화면이 되고, 되돌리는 스위치가 코드가 아니라
-# .env에만 있어 원인을 찾기 어렵다. 그래서 켜는 것을 운영자의 명시적 행위로 둔다.
+# **이 모듈의 기본값은 빈 문자열 = 인증 꺼짐이고, 새 설치는 켜진 채 시작한다.** 둘이
+# 모순이 아닌 것은 정적 키에 비어 있지 않은 기본값이라는 것이 없어서다 — 여기나
+# .env.example에 적힌 값은 아무나 아는 키다. 그래서 값을 만드는 일은 `.env`를 처음 만드는
+# backend/scripts/setup_env.py가 맡는다(난수 키 생성). 이미 `.env`가 있는 배포는 비어
+# 있으면 꺼진 채 남고, 그건 의도다 — 운영자가 모르는 사이에 인증이 켜지면 헤더 없이
+# 부르던 호출이 이유 모를 401이 된다.
+#
+# 2단계 때 "꺼짐"을 고른 근거는 달랐다 — 추적 중인 WebGL 번들이 키를 싣지 못해 켜면
+# 대시보드가 401이었다. 3단계(nginx 쿠키 주입)로 그 근거는 사라졌고, 남은 것이 위 이유다.
 #
 # 꺼져 있다는 사실 자체는 조용하지 않다 — main.py의 lifespan이 기동 로그에 경고를
 # 남긴다. "설정이 조용히 기능 하나를 끄는" 상태를 배격하는 것은 위 _int_env_in_range와

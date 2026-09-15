@@ -14,8 +14,8 @@ nginx가 문서 응답에 실어 준 `finus_api_key` 쿠키를 자동으로 붙�
 nginx 액세스 로그에 평문으로 남는 원인이었다(#355). 그 경로가 되살아나지 않는 것도
 여기서 고정한다.
 
-인증은 `FINUS_API_KEY`가 설정된 배포에서만 걸린다(미설정이 기본값 — 근거는
-`backend/config.py`의 해당 주석). 그래서 여기서는 **켠 상태**와 **끈 상태** 양쪽을
+인증은 `FINUS_API_KEY`가 설정된 배포에서만 걸린다(비우면 꺼지고, 값은 새 설치에서만
+setup_env가 채운다 — 근거는 `backend/config.py`의 해당 주석). 그래서 여기서는 **켠 상태**와 **끈 상태** 양쪽을
 모두 본다. 끈 상태를 보지 않으면 "언제나 401"이라는 회귀가 통과해 버린다.
 
 `TestClient`를 `with` 없이 쓴다. `with`는 `main.py`의 lifespan을 실행해 `init_db()`·
@@ -280,9 +280,9 @@ def test_a_stale_header_does_not_mask_a_valid_cookie(auth_on, stub_news):
 def test_api_stays_open_when_auth_is_off(stub_news):
     """키를 설정하지 않은 배포에서는 헤더 없이도 그대로 열려 있습니다.
 
-    기본값이 "꺼짐"인 것은 의도다(config.FINUS_API_KEY 주석). 이 테스트가 잡는
+    키를 비운 배포가 열려 있는 것은 의도다(config.FINUS_API_KEY 주석). 이 테스트가 잡는
     mutation: 미들웨어가 `api_auth_enabled()`를 보지 않고 언제나 키를 요구하게 되는
-    회귀 — 그러면 `docker compose up`이 그대로 401 화면이 된다.
+    회귀 — 그러면 키를 비워 둔 기존 배포가 `docker compose up`부터 401 화면이 된다.
     """
     response = TestClient(app).get("/api/v1/news", params={"stock": "삼성전자"})
     assert response.status_code == 200
