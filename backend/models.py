@@ -23,10 +23,27 @@ class Portfolio(SQLModel, table=True):
     stock_name: str = Field(description="종목명")
     quantity: int = Field(default=0, description="보유 수량")
     avg_price: float = Field(default=0.0, description="평균 매입가")
-    # 이 값을 채우는 프로덕션 경로는 아직 없다 — get_balance(inquire-balance,
-    # TTTC8434R) output1에 현재가 필드가 있는지가 실계좌 실측 전까지 미확인이다(#196).
-    # 경로가 생긴 뒤에도 잔고 동기화는 이 필드를 덮지 않는다(위 upsert 참고).
+    # 이 값을 채우도록 배선된 프로덕션 경로는 get_balance_rlz_pl(inquire-balance-rlz-pl,
+    # TTTC8494R)의 텍스트 리포트를 파싱하는 scheduler._sync_portfolio_prices_from_rlz_pl
+    # 하나뿐이다(#196). 잔고 동기화(_sync_portfolio_from_balance)는 이 필드를 읽지도
+    # 쓰지도 않는다 — get_balance(TTTC8434R) output1에 현재가 필드가 있는지가
+    # 미확인이라 그쪽에서 채울 근거가 없고, 덮으면 시세 경로가 방금 쓴 값이 10분마다
+    # null로 지워진다(위 upsert 참고).
+    #
+    # **다만 이 경로가 실제로 값을 낸다는 것도 아직 확인되지 않았다**(두 TR 모두 실계좌
+    # 응답 미관측). 근거와 퇴화 시 동작은 schema_docs.md의 Portfolio 항목 한 곳에 둔다.
     current_price: Optional[float] = Field(default=None, description="현재가")
+    # current_price를 마지막으로 갱신한 시각(UTC). updated_at과 **다른 축**이다:
+    # updated_at은 "잔고를 마지막으로 확인한 시각"이라 시세 갱신 여부와 무관하게 매
+    # 주기 갱신되므로, 그 값으로 시세 나이를 재면 항상 방금 갱신된 것처럼 보인다.
+    #
+    # null이면 "시세 나이를 모른다"이지 "시세가 없다"가 아니다. 구버전 행을 백필하지
+    # 않는 이유는 database.py의 _PENDING_COLUMN_MIGRATIONS 주석 한 곳에 둔다.
+    # scheduler.is_price_fresh가 이 null을 "모름"으로 판정해 price_known=False로 내린다.
+    price_updated_at: Optional[datetime] = Field(
+        default=None,
+        description="current_price를 마지막으로 갱신한 시각 (UTC). null이면 시세 나이 미상 — 신선도 판정에서 '모름'.",
+    )
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="최근 업데이트 시간")
 
 class TradeHistory(SQLModel, table=True):

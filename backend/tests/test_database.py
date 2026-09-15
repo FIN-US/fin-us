@@ -1,4 +1,4 @@
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 from fastapi.testclient import TestClient
@@ -7,6 +7,18 @@ from sqlmodel.pool import StaticPool
 
 from ..main import app, get_session
 from ..models import Diary, AgentReport, Portfolio, CatalystEvent
+from ..scheduler import PRICE_FRESHNESS_TTL
+
+# 이슈 #196: current_price는 값과 **나이**가 함께 있어야 "안다"가 된다. 아래 테스트들이
+# 검증하려는 것은 신선도 게이트가 아니라 매핑·집계이므로, 나이는 확실히 신선한 고정
+# 시각으로 못 박아 게이트를 통과시킨다. 시각을 고정하는 이유는 price_updated_at이
+# 응답에 ISO 문자열로 실려 완전 일치 단언의 일부가 되기 때문이다.
+# 고정 리터럴을 쓰지 않는 이유: TTL은 "지금"으로부터의 나이라, 달력 상수는 파일을
+# 쓴 날에만 신선하고 그 뒤로는 조용히 낡아 이 테스트들이 게이트 회귀가 아니라 날짜
+# 때문에 깨진다. 대신 import 시각으로 한 번만 고정해, 응답에 실릴 ISO 문자열은
+# 결정적이면서 값은 항상 신선하게 만든다. 마이크로초는 버려 문자열을 안정시킨다.
+_FRESH_AT = datetime.now(timezone.utc).replace(microsecond=0)
+_FRESH_ISO = _FRESH_AT.isoformat()
 
 # 테스트용 인메모리 SQLite 엔진 설정
 @pytest.fixture(name="session")
@@ -64,6 +76,7 @@ def test_get_visualization_portfolio_maps_holdings(
             quantity=10,
             avg_price=70000,
             current_price=77000,
+            price_updated_at=_FRESH_AT,
         )
     )
     session.add(
@@ -73,6 +86,7 @@ def test_get_visualization_portfolio_maps_holdings(
             quantity=5,
             avg_price=200000,
             current_price=190000,
+            price_updated_at=_FRESH_AT,
         )
     )
     session.commit()
@@ -95,6 +109,8 @@ def test_get_visualization_portfolio_maps_holdings(
                 "quantity": 10,
                 "price_known": True,
                 "return_rate_known": True,
+                "price_updated_at": _FRESH_ISO,
+                "price_updated_at_known": True,
             },
             {
                 "name": "SK하이닉스",
@@ -104,6 +120,8 @@ def test_get_visualization_portfolio_maps_holdings(
                 "quantity": 5,
                 "price_known": True,
                 "return_rate_known": True,
+                "price_updated_at": _FRESH_ISO,
+                "price_updated_at_known": True,
             },
         ],
     }
@@ -129,6 +147,7 @@ def test_get_visualization_portfolio_handles_missing_prices(
             quantity=2,
             avg_price=0,
             current_price=1000,
+            price_updated_at=_FRESH_AT,
         )
     )
     session.commit()
@@ -160,6 +179,9 @@ def test_get_visualization_portfolio_handles_missing_prices(
                 "quantity": 3,
                 "price_known": False,
                 "return_rate_known": False,
+                # current_price 자체가 없으므로 갱신 시각도 없다 (#196).
+                "price_updated_at": "",
+                "price_updated_at_known": False,
             },
             {
                 "name": "평단가없음",
@@ -172,6 +194,8 @@ def test_get_visualization_portfolio_handles_missing_prices(
                 "quantity": 2,
                 "price_known": True,
                 "return_rate_known": False,
+                "price_updated_at": _FRESH_ISO,
+                "price_updated_at_known": True,
             },
         ],
     }
@@ -227,6 +251,7 @@ def test_get_visualization_portfolio_price_known_independent_of_return_rate(
             quantity=10,
             avg_price=0,
             current_price=50000,
+            price_updated_at=_FRESH_AT,
         )
     )
     session.add(
@@ -236,6 +261,7 @@ def test_get_visualization_portfolio_price_known_independent_of_return_rate(
             quantity=1,
             avg_price=70000,
             current_price=77000,
+            price_updated_at=_FRESH_AT,
         )
     )
     session.commit()
@@ -260,6 +286,123 @@ def test_get_visualization_portfolio_price_known_independent_of_return_rate(
     normal = holdings_by_name["정상"]
     assert normal["price_known"] is True
     assert normal["return_rate_known"] is True
+
+
+def test_get_visualization_portfolio_price_known_honours_freshness_ttl(
+    client: TestClient,
+    session: Session,
+):
+    """price_known은 current_price의 존재가 아니라 **나이**로 결정된다 (#196).
+
+    세 행을 한 응답 안에 함께 놓는 것이 이 테스트의 핵심이다. 경계 양쪽을 따로 두면
+    "항상 False"나 "항상 True"로 되돌리는 회귀가 한쪽 테스트만 깨뜨려 눈에 덜 띈다.
+
+      - 낡음:  now - TTL - 1초  → False (경계 밖)
+      - 신선:  now - TTL + 1초  → True  (경계 안)
+      - 미상:  price_updated_at IS NULL, current_price는 있음 → False
+
+    세 번째 행이 이 이슈의 본론이다. 이 컬럼이 없던 시절에 저장된 행은 값은 있어도
+    언제 채운 값인지 알 수 없다 — 그것을 신선으로 통과시키면 낡은 시세가 현재가로
+    나가고, 게이트를 붙인 의미가 사라진다.
+
+    이 테스트가 잡는 mutation:
+    - PRICE_FRESHNESS_TTL을 넓히거나 좁히면 아래 상수 단언이 깨진다.
+    - is_price_fresh의 비교 방향을 뒤집으면(>= / <) 두 경계 행의 판정이 서로 바뀐다.
+    - 미래 쪽 하한(-TTL)을 지우면 한참 앞선 스탬프가 영원히 신선으로 통과한다.
+    - NULL 분기를 True로 되돌리거나 지우면 "미상" 행이 신선으로 통과한다.
+    - main이 price_known을 다시 `current_price is not None`으로 되돌리면 세 행이
+      모두 True가 된다.
+    """
+    from ..scheduler import is_price_fresh
+
+    # 상수 자체를 고정한다. 아래 경계 단언은 PRICE_FRESHNESS_TTL을 기호로 쓰므로
+    # 상수를 넓혀도 함께 움직여 통과해 버린다 — 값과 그 근거(주기의 3배)를 여기서
+    # 못 박아야 "조용히 넓히기"가 빨간 줄로 드러난다.
+    assert PRICE_FRESHNESS_TTL == timedelta(minutes=30)
+    assert PRICE_FRESHNESS_TTL == 3 * timedelta(minutes=10), (
+        "시세 갱신 주기(market_monitoring, 10분)의 3배라는 근거가 깨졌습니다. "
+        "주기를 바꿨다면 scheduler.PRICE_FRESHNESS_TTL의 주석부터 갱신하세요."
+    )
+
+    # 경계 판정 자체는 now를 명시해 결정적으로 확인한다(요청 처리 지연에 흔들리지 않게).
+    fixed_now = datetime(2026, 9, 3, 6, 0, 0, tzinfo=timezone.utc)
+    assert is_price_fresh(fixed_now - PRICE_FRESHNESS_TTL - timedelta(seconds=1), now=fixed_now) is False
+    assert is_price_fresh(fixed_now - PRICE_FRESHNESS_TTL + timedelta(seconds=1), now=fixed_now) is True
+    assert is_price_fresh(fixed_now - PRICE_FRESHNESS_TTL, now=fixed_now) is True, (
+        "정확히 TTL만큼 지난 값은 아직 경계 안이다(<=)"
+    )
+    assert is_price_fresh(None, now=fixed_now) is False
+
+    # 미래 스탬프도 대칭으로 TTL을 건다. 하한이 없으면 시계가 크게 틀어졌거나 잘못된
+    # 값이 한 번 쓰인 행은 **영원히** 신선해져 다시는 "모름"으로 내려가지 않는다.
+    # 이 테스트가 잡는 mutation: 하한(-PRICE_FRESHNESS_TTL <= age)을 지우는 회귀.
+    assert is_price_fresh(fixed_now + timedelta(seconds=1), now=fixed_now) is True, (
+        "시계 오차 수준으로 앞선 값은 '방금 갱신됨'으로 읽는다"
+    )
+    assert is_price_fresh(fixed_now + PRICE_FRESHNESS_TTL, now=fixed_now) is True
+    assert is_price_fresh(
+        fixed_now + PRICE_FRESHNESS_TTL + timedelta(seconds=1), now=fixed_now
+    ) is False, (
+        "TTL을 넘어 앞선 스탬프는 시계 오차가 아니라 잘못된 값이다 — 영원히 신선하면 안 된다"
+    )
+
+    now = datetime.now(timezone.utc)
+    session.add(
+        Portfolio(
+            stock_code="005930",
+            stock_name="낡음",
+            quantity=1,
+            avg_price=70000,
+            current_price=77000,
+            price_updated_at=now - PRICE_FRESHNESS_TTL - timedelta(seconds=1),
+        )
+    )
+    session.add(
+        Portfolio(
+            stock_code="000660",
+            stock_name="신선",
+            quantity=1,
+            avg_price=190000,
+            current_price=200000,
+            price_updated_at=now - PRICE_FRESHNESS_TTL + timedelta(seconds=1),
+        )
+    )
+    session.add(
+        Portfolio(
+            stock_code="035420",
+            stock_name="나이미상",
+            quantity=1,
+            avg_price=180000,
+            current_price=200000,
+            price_updated_at=None,
+        )
+    )
+    session.commit()
+
+    data = client.get("/api/v1/portfolio").json()["data"]
+    holdings = {h["name"]: h for h in data["holdings"]}
+
+    assert holdings["낡음"]["price_known"] is False
+    assert holdings["낡음"]["current_price"] is None, (
+        "신선하지 않은 값을 current_price로 내리면 소비자가 그것을 현재가로 읽는다"
+    )
+    assert holdings["낡음"]["price_updated_at_known"] is True, (
+        "나이는 알고 있다 — 다만 그 나이가 TTL을 넘겼을 뿐이다"
+    )
+
+    assert holdings["신선"]["price_known"] is True
+    assert holdings["신선"]["current_price"] == 200000.0
+
+    assert holdings["나이미상"]["price_known"] is False, (
+        "값은 있어도 나이를 모르면 신선하다고 단언할 수 없다"
+    )
+    assert holdings["나이미상"]["price_updated_at"] == ""
+    assert holdings["나이미상"]["price_updated_at_known"] is False
+
+    # 신선하지 않은 두 종목이 매입가 추정으로 들어가므로 총자산은 추정값이다.
+    assert data["total_asset_is_estimate"] is True
+    # 200,000(신선 현재가) + 70,000(낡음 매입가) + 180,000(나이미상 매입가)
+    assert data["total_asset"] == 450000.0
 
 
 def test_get_visualization_portfolio_empty_keeps_zero_total_return_rate(client: TestClient):

@@ -69,6 +69,23 @@ _PENDING_COLUMN_MIGRATIONS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
             "UPDATE tradehistory SET notified_at = trade_date WHERE notified_at IS NULL",
         ),
     ),
+    # #196: 시세 신선도. DEFAULT도 백필도 주지 않는다 — signal_score와 같은 이유이고,
+    # notified_at과는 정반대의 선택이다.
+    #
+    # 이 컬럼이 없던 시절의 행에도 current_price가 채워져 있을 수 있지만, 그 값이
+    # **언제** 채워졌는지는 알 방법이 없다. updated_at으로 백필하면 "잔고를 마지막으로
+    # 확인한 시각"이 "시세를 마지막으로 갱신한 시각"으로 둔갑해, 지어낸 신선도가
+    # 소급 생성된다 — 이 이슈가 없애려는 "모르는데 안다"가 바로 그것이다.
+    # null로 남기면 scheduler.is_price_fresh가 그 행을 "모름"(price_known=False)으로
+    # 판정하고, 다음 시세 갱신 주기에 진짜 값으로 채워진다.
+    #
+    # notified_at을 백필한 이유는 null이 무해하지 않았기 때문이다(없던 통지가 새로
+    # 나간다). 여기서는 null이 정확히 옳은 값이라 백필할 이유가 없다.
+    (
+        "portfolio",
+        "price_updated_at",
+        ("ALTER TABLE portfolio ADD COLUMN price_updated_at DATETIME",),
+    ),
 )
 
 
