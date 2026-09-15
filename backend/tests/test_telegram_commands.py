@@ -19,6 +19,7 @@ import backend.redis_state as redis_state_module
 import backend.telegram_commands as telegram_commands
 import backend.telegram_notifier as telegram_notifier_module
 from backend.config import DART_MCP_PARAMS, NEWS_MCP_PARAMS, TRADING_MCP_PARAMS
+from backend.delivery_alarm import delivery_metrics
 from backend.telegram_commands import (
     BUY_COMMAND_HELP,
     CATALYST_COMMAND_HELP,
@@ -5010,6 +5011,59 @@ async def test_settled_send_waits_at_least_the_flood_wait(monkeypatch):
 
     assert await handler._send_text_settled("확정된 결과") is True
     assert sleeps == [6.0]
+
+
+@pytest.mark.asyncio
+async def test_settled_send_counts_one_failure_per_message_not_per_attempt(monkeypatch):
+    """메트릭의 단위는 "사용자가 못 받은 메시지"다 (#259 5단계).
+
+    재시도마다 세면 같은 429 한 번이 4건으로 부풀고, 성공으로 끝난 재시도까지 실패로 남는다.
+    """
+    handler = TelegramCommandHandler(notifier=FakeNotifier(fail_sends=1))
+    _capture_settled_sleeps(monkeypatch, handler)
+    assert await handler._send_text_settled("확정된 결과") is True
+    assert delivery_metrics.count("settled_send") == 0
+
+    handler = TelegramCommandHandler(notifier=FakeNotifier(send_text_result=False))
+    _capture_settled_sleeps(monkeypatch, handler)
+    assert await handler._send_text_settled("확정된 결과") is False
+    assert delivery_metrics.count("settled_send") == 1
+
+
+@pytest.mark.asyncio
+async def test_confirm_counts_the_fill_notification_failures(monkeypatch):
+    """체결 통지의 첫 전송 실패와 마킹 실패를 따로 센다 (#259 5단계).
+
+    첫 전송 실패는 outbox가 받으므로 settled_send와 섞으면 "사용자가 못 받은 메시지"가
+    부풀고, 마킹 실패는 중복 배달의 예고라 전송 실패와 뜻이 다르다.
+    """
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        mcp_runner=_order_mcp_runner(),
+        order_gateway=FakeOrderGateway(),
+        trade_recorder=FakeTradeRecorder(),
+        now_factory=lambda: datetime(2026, 5, 20, 10, 0, tzinfo=KST),
+    )
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/buy 삼성전자 1 75000"}})
+    notifier.send_text_result = False
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/confirm"}})
+
+    marking_handler = TelegramCommandHandler(
+        notifier=FakeNotifier(),
+        mcp_runner=_order_mcp_runner(),
+        order_gateway=FakeOrderGateway(),
+        trade_recorder=FakeTradeRecorder(mark_error=RuntimeError("db locked")),
+        now_factory=lambda: datetime(2026, 5, 20, 10, 0, tzinfo=KST),
+    )
+    await marking_handler.handle_update(
+        {"message": {"chat": {"id": 123}, "text": "/buy 삼성전자 1 75000"}}
+    )
+    await marking_handler.handle_update({"message": {"chat": {"id": 123}, "text": "/confirm"}})
+
+    assert delivery_metrics.count("fill_notify") == 1
+    assert delivery_metrics.count("fill_mark") == 1
+    assert delivery_metrics.count("settled_send") == 0
 
 
 @pytest.mark.asyncio

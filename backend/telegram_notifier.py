@@ -13,6 +13,7 @@ from .config import (
     TELEGRAM_CHAT_ID,
     is_placeholder_secret,
 )
+from .delivery_alarm import delivery_metrics
 from .presentation import (
     DEFAULT_TELEGRAM_USER_LEVEL,
     TELEGRAM_MESSAGE_LIMIT,
@@ -846,6 +847,8 @@ async def send_text_settled(
                     sleep=sleep,
                 )
                 if not sent:
+                    # 최종 실패의 메트릭 (#259 5단계). 원인 줄은 _send_part_settled가 남겼다.
+                    delivery_metrics.record_failure("settled_send")
                     return False
                 delivered = position
         return True
@@ -858,6 +861,7 @@ async def send_text_settled(
             len(parts),
             SETTLED_SEND_TIMEOUT_SECONDS,
         )
+        delivery_metrics.record_failure("settled_send")
         return False
     except Exception as exc:
         # 조립이든 전송이든, 예외를 여기서 멈춘다. 이 경로가 존재하는 이유가 "부수효과가
@@ -874,6 +878,7 @@ async def send_text_settled(
             len(parts),
             exc,
         )
+        delivery_metrics.record_failure("settled_send")
         return False
 
 

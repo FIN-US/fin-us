@@ -6,6 +6,7 @@
 불변식이다 — 그게 깨지면 outbox가 없애려던 무응답이 중복 배달로 바뀔 뿐이다.
 """
 
+import logging
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
@@ -13,6 +14,7 @@ import pytest
 from sqlmodel import Session, SQLModel, create_engine
 
 from backend import scheduler as scheduler_module
+from backend.delivery_alarm import delivery_metrics
 from backend.models import TradeHistory
 from backend.presentation import split_for_telegram
 from backend.trading_orders import _extract_order_message
@@ -413,3 +415,155 @@ def test_fill_notification_is_always_a_single_telegram_part():
 
     assert len(message) <= 500
     assert len(split_for_telegram(f"주문 완료: {message}")) == 1
+
+
+# ---------------------------------------------------------------------------
+# 알람·메트릭 (#259 5단계)
+# ---------------------------------------------------------------------------
+
+
+class RedeliveryBlockedNotifier(FakeNotifier):
+    """재배달 문구만 실패시킨다 — 채팅 전체가 아니라 그 행만 막힌 head-of-line 정지다.
+
+    이 경우가 정지 알람이 텔레그램으로 닿을 수 있는 경우이고, 알람 문구가 행의 내용을
+    싣지 않아야 하는 이유다.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.blocked = True
+
+    async def send_text(self, text, *, reply_markup=None):
+        self.messages.append(text)
+        if "재전송" in text:
+            return not self.blocked
+        return True
+
+
+async def _run_task_at(repo, notifier, at):
+    await scheduler_module.trade_notification_task(
+        repo=repo,
+        notifier=notifier,
+        now_factory=lambda: NOW + at,
+        use_redis_lock=False,
+    )
+
+
+def _alarms(notifier):
+    return [message for message in notifier.messages if "재전송" not in message]
+
+
+@pytest.mark.asyncio
+async def test_task_alarms_once_when_the_head_keeps_failing(caplog):
+    """임계를 넘는 주기에 한 번 — 매 주기 울리면 이 단계 전의 error 줄과 다를 게 없다."""
+    repo = FakeRepo([_pending(7)])
+    notifier = RedeliveryBlockedNotifier()
+
+    with caplog.at_level(logging.WARNING):
+        for minutes in (0, 5, 9):
+            await _run_task_at(repo, notifier, timedelta(minutes=minutes))
+        assert _alarms(notifier) == []
+
+        await _run_task_at(repo, notifier, scheduler_module.TRADE_NOTIFY_STALL_ALARM_AFTER)
+        await _run_task_at(repo, notifier, timedelta(minutes=11))
+        await _run_task_at(repo, notifier, timedelta(minutes=30))
+
+    alarms = _alarms(notifier)
+    assert len(alarms) == 1
+    assert "체결 통지가 전달되지 않고 있습니다" in alarms[0]
+    assert "2026-05-20 14:50 KST" in alarms[0]
+    # 막힌 원인일 수 있는 행의 내용을 다시 싣지 않는다.
+    assert "삼성전자" not in alarms[0]
+    assert caplog.text.count("[delivery-alarm] kind=stalled trade_id=7") == 1
+    assert repo.marked == []
+
+
+@pytest.mark.asyncio
+async def test_task_reports_when_a_stalled_trade_finally_goes_out(caplog):
+    """정지가 풀리면 로그로 끝을 알린다. 사용자는 재배달된 통지를 받았으니 알람을 더 보내지 않는다."""
+    repo = FakeRepo([_pending(7)])
+    notifier = RedeliveryBlockedNotifier()
+    await _run_task_at(repo, notifier, timedelta(0))
+    await _run_task_at(repo, notifier, timedelta(minutes=10))
+
+    notifier.blocked = False
+    with caplog.at_level(logging.WARNING):
+        await _run_task_at(repo, notifier, timedelta(minutes=12))
+
+    assert repo.marked == [7]
+    assert len(_alarms(notifier)) == 1
+    assert "[delivery-alarm] kind=delivered trade_id=7 failing_for=720s" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_task_tells_the_user_when_a_stalled_trade_is_given_up():
+    """창을 벗어난 체결은 더 시도하지 않는다. 그 사실을 조용히 두면 24시간의 정지가 알림 없이 끝난다."""
+    repo = FakeRepo([_pending(7)])
+    notifier = RedeliveryBlockedNotifier()
+    await _run_task_at(repo, notifier, timedelta(0))
+    await _run_task_at(repo, notifier, timedelta(minutes=10))
+
+    # 체결(NOW - 10분) 후 24시간이 지나 목록에서 빠졌다.
+    repo.pending = []
+    await _run_task_at(repo, notifier, scheduler_module.TRADE_NOTIFY_MAX_AGE)
+
+    alarms = _alarms(notifier)
+    assert len(alarms) == 2
+    assert "끝내 전달하지 못했습니다" in alarms[1]
+    assert "24시간" in alarms[1]
+
+
+@pytest.mark.asyncio
+async def test_failure_behind_a_delivered_head_is_not_a_stall():
+    """앞 행이 나간 주기의 뒤쪽 실패는 정지가 아니다 — 대기열은 움직였다."""
+    repo = FakeRepo([_pending(7), _pending(8)])
+
+    class SecondFails(FakeNotifier):
+        """주기마다 두 번째 재배달만 실패시킨다. 알람은 늘 성공한다."""
+
+        def __init__(self):
+            super().__init__()
+            self.redeliveries_this_cycle = 0
+
+        async def send_text(self, text, *, reply_markup=None):
+            self.messages.append(text)
+            if "재전송" not in text:
+                return True
+            self.redeliveries_this_cycle += 1
+            return self.redeliveries_this_cycle == 1
+
+    notifier = SecondFails()
+    # 메시지는 비우지 않고 쌓는다 — 주기마다 비우면 중간에 울린 알람이 단언 전에 사라진다.
+    for minutes in range(0, 31):
+        notifier.redeliveries_this_cycle = 0
+        await _run_task_at(repo, notifier, timedelta(minutes=minutes))
+
+    assert _alarms(notifier) == []
+
+
+@pytest.mark.asyncio
+async def test_stall_alarm_is_sent_once_even_when_it_fails_to_send(caplog):
+    """알람 전송은 재시도하지 않는다. 막힌 채팅에 매 주기 알람을 더 보내면 그것이 새 정지의 원인이 된다.
+
+    임계를 두 번 넘길 만큼 돌린다. 알람 실패를 "추적을 처음부터 다시"로 처리하는 구현은
+    다음 주기에는 조용하다가 임계 시간 뒤에 다시 울리므로, 한 임계 안에서만 보면 잡히지 않는다.
+    """
+    repo = FakeRepo([_pending(7)])
+    notifier = FakeNotifier(results=[False] * 20)
+
+    with caplog.at_level(logging.ERROR):
+        for minutes in (0, 10, 11, 12, 21, 22, 31):
+            await _run_task_at(repo, notifier, timedelta(minutes=minutes))
+
+    alarms = _alarms(notifier)
+    assert len(alarms) == 1
+    assert "정지 알람을 텔레그램으로 보내지 못했습니다" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_task_counts_redelivery_and_marking_failures():
+    await _run_task(FakeRepo([_pending(7)]), FakeNotifier(results=[False]))
+    await _run_task(FakeRepo([_pending(8)], mark_error=RuntimeError("db locked")), FakeNotifier())
+
+    assert delivery_metrics.count("fill_redelivery") == 1
+    assert delivery_metrics.count("fill_mark") == 1

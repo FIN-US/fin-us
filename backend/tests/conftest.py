@@ -2,7 +2,23 @@ import httpx
 import pytest
 
 from backend import services, stock_code, telegram_commands
+from backend.delivery_alarm import delivery_metrics, trade_outbox_stall
 from backend.trading_orders import TradeRecorder
+
+
+@pytest.fixture(autouse=True)
+def _reset_delivery_alarm_state():
+    """전송 실패 메트릭과 정지 추적은 모듈 전역이다 (#259 5단계).
+
+    호출부가 인스턴스를 import 시점에 붙잡으므로 monkeypatch로 바꿔치기하면 한쪽만
+    바뀐다. 제자리에서 비운다. 앞 테스트가 맨 앞 행 실패를 남기면 뒤 테스트의 정지
+    판정이 이미 진행 중인 추적 위에서 시작한다.
+    """
+    delivery_metrics.reset()
+    trade_outbox_stall.reset()
+    yield
+    delivery_metrics.reset()
+    trade_outbox_stall.reset()
 
 
 @pytest.fixture

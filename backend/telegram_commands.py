@@ -23,6 +23,7 @@ from .config import (
 )
 from .catalyst_repo import SqliteCatalystEventRepo
 from .database import engine
+from .delivery_alarm import delivery_metrics
 from .redis_state import (
     InMemoryPendingOrderStore,
     PendingOrderStore,
@@ -1573,11 +1574,15 @@ class TelegramCommandHandler:
             logger.error(
                 "체결 통지 전송 중 예외 — outbox 재배달 대기 (trade_id=%s): %s", trade_id, exc
             )
+            delivery_metrics.record_failure("fill_notify", trade_id=trade_id)
             return
         if sent is False:
             # 여기서 끝내도 통지가 사라지지는 않는다. notified_at이 비어 있는 행이 곧
-            # 재배달 대기열이다. 전송 실패의 알람·메트릭은 #259 5단계의 몫이다.
+            # 재배달 대기열이다. 그래서 이 자리에는 알람을 걸지 않고 횟수만 센다 (#259
+            # 5단계). 알람은 재배달마저 계속 실패할 때 scheduler.trade_notification_task가
+            # 울린다 — 사용자가 실제로 아무것도 못 받고 있는 것은 그때다.
             logger.error("체결 통지 전송 실패 — outbox 재배달 대기 (trade_id=%s)", trade_id)
+            delivery_metrics.record_failure("fill_notify", trade_id=trade_id)
             return
 
         try:
@@ -1587,6 +1592,7 @@ class TelegramCommandHandler:
             # 중복이지만 무응답보다 낫고, 재배달 문구가 재전송임을 밝힌다. asyncio.timeout
             # 만료처럼 "보냈는지 모르는" 경우도 같은 결말이라 여기만의 문제가 아니다.
             logger.error("체결 통지 마킹 실패 — 중복 배달 가능 (trade_id=%s): %s", trade_id, exc)
+            delivery_metrics.record_failure("fill_mark", trade_id=trade_id)
 
     def _parse_order_argument(self, argument: str) -> tuple[str, int, int, OrderType] | None:
         parts = argument.split()
