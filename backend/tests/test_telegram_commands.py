@@ -5907,6 +5907,174 @@ async def test_settled_update_is_not_retried_when_the_handler_fails_after_settli
 
 
 # ---------------------------------------------------------------------------
+# 재시작 뒤 재실행된 /confirm이 보지 못한 대기 주문을 실행하는 창 (#383)
+# ---------------------------------------------------------------------------
+
+
+def _pending_order_for_replay(quantity: int, token: str, now: datetime) -> PendingOrder:
+    return PendingOrder(
+        chat_id="123",
+        stock_name="삼성전자",
+        stock_code="005930",
+        side="BUY",
+        quantity=quantity,
+        price=75000,
+        created_at=now,
+        order_type="LIMIT",
+        callback_token=token,
+    )
+
+
+class _FirstOrderUnclearGateway(FakeOrderGateway):
+    """첫 주문만 결과 불명확(타임아웃)으로 끝난다.
+
+    claim으로 대기 주문이 소비된 뒤 settled 전송으로 가는 경로다 — 그 전송 도중의 재시작이
+    #383의 창이다.
+    """
+
+    async def place_order(self, order):
+        if not self.orders:
+            self.orders.append(order)
+            raise RuntimeError("timeout")
+        return await super().place_order(order)
+
+
+def _replay_handler(notifier, gateway, pending_orders, now):
+    """프로세스 하나의 핸들러. 재시작은 같은 저장소(redis)를 쥔 새 핸들러로 모형화한다.
+
+    폴러는 프로세스마다 핸들러를 한 번 만든다(TelegramCommandPoller.run). 그래서 핸들러를 새로
+    만드는 것이 곧 재시작이고, 저장소를 공유하는 것이 redis가 재시작을 넘어 살아남는 것이다.
+    """
+    return TelegramCommandHandler(
+        notifier=notifier,
+        order_gateway=gateway,
+        trade_recorder=FakeTradeRecorder(),
+        pending_order_store=pending_orders,
+        now_factory=lambda: now,
+    )
+
+
+@pytest.mark.asyncio
+async def test_reexecuted_text_confirm_does_not_execute_a_pending_order_created_after_it():
+    """재시작 뒤 재배달된 텍스트 /confirm이 그사이 생긴 대기 주문을 실행하지 않는다 (#383).
+
+    창의 정체: /confirm이 주문 A를 claim하고 결과 불명확으로 settled 전송에 들어간 사이 같은
+    채팅에 대기 주문 B(자동 제안·새 /buy)가 생긴다. 그 전송 도중 재시작하면 offset이 영속화되기
+    전이라 같은 update가 재배달되고, claim(GETDEL)은 A 대신 B를 준다 — 사용자가 본 적 없는 B가
+    확정 없이 실행됐다(수정 전 체결 수량 [1, 2]).
+
+    B는 소비되지 않고 남아야 한다. 사용자는 B의 프롬프트를 보고 스스로 확정·취소할 수 있다.
+    """
+    now = datetime(2026, 5, 20, 10, 0, tzinfo=KST)
+    gateway = _FirstOrderUnclearGateway()
+    pending_orders = InMemoryPendingOrderStore()
+    await pending_orders.set("123", _pending_order_for_replay(1, "token-a", now))
+    update = {"update_id": 41, "message": {"chat": {"id": 123}, "text": "/confirm"}}
+
+    # 1) 원래 실행. A를 claim하고 결과 불명확 — 이 settled 전송 도중 죽었다고 본다.
+    first_notifier = FakeNotifier()
+    await _replay_handler(first_notifier, gateway, pending_orders, now).handle_update(update)
+    assert "상태 확인 필요" in first_notifier.messages[-1]
+
+    # 2) 창 안에서 같은 채팅에 대기 주문 B가 생긴다(자동 제안의 대역 — 같은 저장소의 set_if_absent).
+    assert await pending_orders.set_if_absent("123", _pending_order_for_replay(2, "token-b", now))
+
+    # 3) 재시작. offset이 41을 지나지 않았으므로 같은 update가 재배달된다.
+    second_notifier = FakeNotifier()
+    await _replay_handler(second_notifier, gateway, pending_orders, now).handle_update(update)
+
+    assert [order.quantity for order in gateway.orders] == [1]
+    kept = await pending_orders.get("123")
+    assert kept is not None and kept.callback_token == "token-b"
+    assert second_notifier.messages == [telegram_commands.CONFIRM_REPLAY_REFUSED_TEXT]
+
+
+@pytest.mark.asyncio
+async def test_in_process_retry_of_a_text_confirm_is_not_refused():
+    """같은 프로세스의 재시도는 재실행 표지에 걸리지 않는다 (#383).
+
+    403 복원 뒤 거절 사유 전송이 실패하면 폴러가 같은 update를 재시도하고, 복원된 주문으로 같은
+    403에 도달해 사유를 전하는 것이 원래 계약이다(PR #253 2차 리뷰). 표지가 owner를 보지 않고
+    "이미 본 update"만으로 거절하면 이 재시도가 사유 대신 재실행 안내로 끝난다.
+    """
+    now = datetime(2026, 5, 20, 10, 0, tzinfo=KST)
+    gateway = FakeOrderGateway(error=HTTPException(status_code=403, detail="실계좌 가드 미충족"))
+    pending_orders = InMemoryPendingOrderStore()
+    await pending_orders.set("123", _pending_order_for_replay(1, "token-a", now))
+    notifier = FakeNotifier(fail_sends=1)
+    handler = _replay_handler(notifier, gateway, pending_orders, now)
+    update = {"update_id": 41, "message": {"chat": {"id": 123}, "text": "/confirm"}}
+
+    with pytest.raises(telegram_commands.TelegramSendError):
+        await handler.handle_update(update)
+    await handler.handle_update(update)
+
+    assert len(gateway.orders) == 2
+    assert notifier.messages[-1].startswith("주문 실패")
+
+
+@pytest.mark.asyncio
+async def test_redelivered_confirm_button_does_not_execute_a_pending_order_created_after_it():
+    """버튼 콜백의 재배달은 토큰이 막는다 — 재실행 표지를 버튼에 걸지 않는 근거 (#383).
+
+    버튼에는 주문마다 다른 토큰이 실려 있어, A의 확정 버튼이 재배달돼도 B에는 만료 버튼으로
+    답한다. 이 방어가 사라지면 버튼 경로에는 표지가 없으므로 B가 실행된다.
+    """
+    now = datetime(2026, 5, 20, 10, 0, tzinfo=KST)
+    gateway = _FirstOrderUnclearGateway()
+    pending_orders = InMemoryPendingOrderStore()
+    await pending_orders.set("123", _pending_order_for_replay(1, "token-a", now))
+    update = {
+        "update_id": 41,
+        "callback_query": {
+            "id": "cb-a",
+            "data": "order:confirm:token-a",
+            "message": {"chat": {"id": 123}},
+        },
+    }
+
+    await _replay_handler(FakeNotifier(), gateway, pending_orders, now).handle_update(update)
+    assert await pending_orders.set_if_absent("123", _pending_order_for_replay(2, "token-b", now))
+
+    second_notifier = FakeNotifier()
+    await _replay_handler(second_notifier, gateway, pending_orders, now).handle_update(update)
+
+    assert [order.quantity for order in gateway.orders] == [1]
+    kept = await pending_orders.get("123")
+    assert kept is not None and kept.callback_token == "token-b"
+    assert second_notifier.callback_answers == [
+        ("cb-a", telegram_commands.ORDER_STALE_CALLBACK_TEXT)
+    ]
+
+
+class _ConfirmMarkerFailingStore(InMemoryPendingOrderStore):
+    async def mark_confirm_update(self, chat_id: str, update_id: int, owner: str) -> bool:
+        raise RuntimeError("redis unavailable")
+
+
+@pytest.mark.asyncio
+async def test_text_confirm_is_not_executed_when_the_replay_marker_cannot_be_written():
+    """재실행 여부를 판정하지 못하면 실행하지 않는다 (#383).
+
+    표지 오류를 삼키고 진행하면, 표지가 없는 채로 claim이 돌아 재시작 뒤 재배달을 판정할 근거가
+    남지 않는다. 대기 주문과 같은 fail-closed로 "주문 저장소 오류"를 돌려주고 주문은 그대로 둔다.
+    """
+    now = datetime(2026, 5, 20, 10, 0, tzinfo=KST)
+    gateway = FakeOrderGateway()
+    pending_orders = _ConfirmMarkerFailingStore()
+    await pending_orders.set("123", _pending_order_for_replay(1, "token-a", now))
+    notifier = FakeNotifier()
+
+    await _replay_handler(notifier, gateway, pending_orders, now).handle_update(
+        {"update_id": 41, "message": {"chat": {"id": 123}, "text": "/confirm"}}
+    )
+
+    assert gateway.orders == []
+    assert notifier.messages[-1].startswith("주문 저장소 오류")
+    assert await pending_orders.has("123")
+
+
+# ---------------------------------------------------------------------------
 # redis 소켓 타임아웃 (#268)
 # ---------------------------------------------------------------------------
 
