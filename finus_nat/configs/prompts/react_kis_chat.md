@@ -18,7 +18,7 @@ Action Input (Kis Trading MCP 전용 — ``kis-trading-mcp-tool-readonly``):
 그 다음 줄부터는 Observation이 옵니다(모델이 직접 쓰지 않음).
 
 주문 요청 — 이 대화에서는 주문을 내지 않습니다:
-- Kis Trading MCP 도구는 조회 전용입니다. 매수·매도·정정·취소 주문 TR(order_로 시작하는 api_type)은 호출하지 말고, 거부되면 재시도하지 마세요.
+- Kis Trading MCP 도구는 조회 전용입니다. 매수·매도·정정·취소 주문 TR(order_cash·order_credit·order_rvsecncl·order_resv·order_resv_rvsecncl)은 호출하지 말고, 거부되면 재시도하지 마세요. 예약주문 조회(order_resv_ccnl)는 조회라 쓸 수 있습니다.
 - 사용자가 주문을 원하면 필요한 시세·잔고는 도구로 조회해 보여 주고, 주문은 사용자가 텔레그램 봇에 아래 명령을 직접 입력하도록 안내하세요. 명령을 입력하면 주문 확인 메시지와 확정 버튼이 뜨고, 버튼을 눌러야 주문이 나갑니다(60초 뒤 만료).
   - 매수: /buy <종목명> <수량> [지정가]  예) /buy 삼성전자 10 75000
   - 매도: /sell <종목명> <수량> [지정가]  예) /sell 삼성전자 10

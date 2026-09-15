@@ -17,6 +17,7 @@
 """
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -34,6 +35,7 @@ from nat_finus_nat.finus_api import (
 from nat_finus_nat.pii_guard import MASKED_TOOLS, PII_MAPPING, install_mapping_box
 
 _VERDICTS_PATH = Path(__file__).parent / "fixtures" / "kis_domestic_stock_tr_verdicts.json"
+_CHAT_PROMPT_PATH = Path(__file__).resolve().parents[1] / "configs" / "prompts" / "react_kis_chat.md"
 _TABLE = json.loads(_VERDICTS_PATH.read_text(encoding="utf-8"))
 _ROWS: list[dict] = _TABLE["trs"]
 _BY_VERDICT: dict[str, list[str]] = {}
@@ -160,6 +162,37 @@ def test_domestic_only_entries_are_blocked_for_other_asset_classes(tool_name: st
     assert leaked == []
 
 
+def _forbidden_order_trs(text: str) -> set[str]:
+    """에이전트에게 "주문 TR(…)은 호출하지 말라"고 적은 괄호 안의 api_type 이름들."""
+    match = re.search(r"주문 TR\(([^)]*)\)", text)
+    assert match, "주문 TR 목록 문구를 찾지 못했습니다"
+    return set(re.findall(r"[A-Za-z_]+", match.group(1)))
+
+
+def _assert_order_names_agree_with_the_allowlist(text: str) -> None:
+    """에이전트에게 주는 문구가 허용 목록과 반대로 말하지 않는다 (PR #388 리뷰).
+
+    - "금지" 목록은 정확히 주문 5종이다. ``order_``로 시작하는 것을 통째로 금지하면 이 PR이 연
+      예약주문조회(``order_resv_ccnl``)까지 금지하게 된다.
+    - ``order_``로 시작하는 허용 값은 문구에 이름이 나온다 — 모델이 금지로 오해하지 않게.
+    - 문구에 나오는 ``order_…`` 이름은 전부 주문 5종이거나 허용 값이다(접두사 표현 ``order_로`` 등 없음).
+    """
+    allowed_order_names = {n for n in _READONLY_DOMESTIC_STOCK_API_EXACT if n.startswith("order_")}
+    mentioned = set(re.findall(r"order_\w+", text))
+
+    assert _forbidden_order_trs(text) == _EXPECTED_WRITE_TRS
+    assert allowed_order_names <= mentioned
+    assert mentioned <= _EXPECTED_WRITE_TRS | allowed_order_names, sorted(mentioned)
+
+
+def test_chat_prompt_names_the_order_trs_instead_of_banning_the_prefix():
+    """채팅 프롬프트(react_kis_chat.md)의 주문 금지 문구가 허용 목록과 맞는다 (PR #388 리뷰).
+
+    뮤테이션: 금지 문구를 리뷰 전의 "주문 TR(order_로 시작하는 api_type)"로 되돌리면 red.
+    """
+    _assert_order_names_agree_with_the_allowlist(_CHAT_PROMPT_PATH.read_text(encoding="utf-8"))
+
+
 def test_tool_name_and_api_type_are_normalised():
     """래퍼가 넘기는 값은 소문자지만, 판정 함수도 스스로 정규화한다(대소문자·공백)."""
     assert _is_readonly_api_type(" VOLUME_RANK ", tool_name=" Domestic_Stock ") is True
@@ -247,6 +280,9 @@ class TestReadonlyWrapper:
         assert payload["error"] == "kis_api_type_not_allowed_readonly"
         # 에이전트가 재시도하지 않고 사용자에게 주문 명령을 안내하게 한다.
         assert "/buy" in payload["hint"]
+        # 거부 hint도 허용 목록과 반대로 말하지 않는다 — "주문(order_*)"처럼 접두사로 금지하면
+        # 예약주문조회까지 금지로 읽힌다(PR #388 리뷰).
+        _assert_order_names_agree_with_the_allowlist(payload["hint"])
 
     async def test_domestic_only_tr_is_blocked_for_another_asset_class(
         self, remote, mapping_box, ledger

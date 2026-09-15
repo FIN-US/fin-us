@@ -1431,8 +1431,10 @@ async def finus_account_balance_readonly(config: FinusAccountBalanceReadonlyConf
                 hint=(
                     "이 도구는 조회 전용입니다. 모든 상품에서 inquire_*/search_*/find_api_detail 을, "
                     "국내주식(domestic_stock)에서는 순위·수급·재무 등 확인된 조회 TR과 "
-                    "find_stock_code 를 쓸 수 있습니다. 주문(order_*)은 이 도구로 낼 수 없으므로 "
-                    "재시도하지 말고 사용자에게 텔레그램 주문 명령(/buy·/sell·/advise)을 안내하세요."
+                    "find_stock_code 를 쓸 수 있습니다(예약주문 조회 order_resv_ccnl 포함). "
+                    "주문 TR(order_cash·order_credit·order_rvsecncl·order_resv·order_resv_rvsecncl)은 "
+                    "이 도구로 낼 수 없으므로 재시도하지 말고 사용자에게 텔레그램 주문 명령"
+                    "(/buy·/sell·/advise)을 안내하세요."
                 ),
             )
             return _record_and_mask(_KIS_BALANCE_LEDGER_NAME, result)
