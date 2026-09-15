@@ -5001,6 +5001,66 @@ async def test_earnings_send_failure_does_not_rerun_llm(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_earnings_failure_notice_send_failure_does_not_raise_for_retry(monkeypatch):
+    """/earnings 실패 통지의 전송이 끝내 실패해도 update 재시도로 올리지 않는다 (PR #377 리뷰).
+
+    예외를 올리면 폴러가 update를 다시 실행해 DART·뉴스 조회와 LLM 호출이 되풀이된다.
+    답변 전송(#247)과 같이 전송만 그 자리에서 재시도한다.
+    """
+    llm_calls = []
+
+    async def mcp_runner(server_params, tool_name, arguments):
+        return f"{tool_name} 결과"
+
+    async def failing_llm_runner(provider, prompt, *, conversation_id=None):
+        llm_calls.append(conversation_id)
+        raise RuntimeError("LLM 장애")
+
+    notifier = FakeNotifier(send_text_result=False)
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        mcp_runner=mcp_runner,
+        llm_runner=failing_llm_runner,
+    )
+    sleeps = _capture_settled_sleeps(monkeypatch, handler)
+
+    # TelegramSendError가 올라오면 여기서 테스트가 실패한다 — 그게 폴러의 재시도 신호다.
+    await handler.handle_update(
+        {"message": {"chat": {"id": 123}, "text": "/earnings 삼성전자"}}
+    )
+
+    notice = f"조회 실패: {telegram_commands._short_error(RuntimeError('LLM 장애'))}"
+    assert len(llm_calls) == 1
+    assert notifier.messages == [notice] * (len(sleeps) + 1)
+
+
+@pytest.mark.asyncio
+async def test_advise_failure_notice_send_failure_does_not_raise_for_retry(monkeypatch):
+    """/advise 실패 통지의 전송이 끝내 실패해도 update 재시도로 올리지 않는다 (PR #377 리뷰).
+
+    예외를 올리면 폴러가 update를 다시 실행해 진행 메시지가 새로 나가고 주문 보조가 다시
+    호출된다(예외가 제안 왕복 뒤에서 났다면 제안 에이전트까지). 진행 메시지가 한 번뿐인
+    것을 함께 고정한다.
+    """
+    assist_calls = []
+
+    async def failing_order_assist(trigger, **kwargs):
+        assist_calls.append(trigger.stock)
+        raise RuntimeError("냉각 저장 실패")
+
+    monkeypatch.setattr(telegram_commands, "run_order_assist", failing_order_assist)
+    notifier = FakeNotifier(send_text_result=False)
+    handler = TelegramCommandHandler(notifier=notifier)
+    sleeps = _capture_settled_sleeps(monkeypatch, handler)
+
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/advise 삼성전자"}})
+
+    notice = f"주문 보조 실패: {telegram_commands._short_error(RuntimeError('냉각 저장 실패'))}"
+    assert assist_calls == ["삼성전자"]
+    assert notifier.messages == [NAT_PROGRESS_MESSAGE] + [notice] * (len(sleeps) + 1)
+
+
+@pytest.mark.asyncio
 async def test_order_prepare_does_not_convert_send_failure_into_user_message():
     """전송 실패는 사용자 메시지로 변환하지 않고 폴러에 그대로 올린다 (#249).
 
