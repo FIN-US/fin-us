@@ -161,8 +161,10 @@ function startKisStub(kisPath, {
         return;
       }
       if (requestTimes.length === rateLimitOnPage) {
-        // 유량 제한은 HTTP 200 + rt_cd=1로 온다(런북 2절 `http` 필드 주석). 그래서 axios가
-        // 던지지 않고 kisApiGet의 rt_cd 분기가 잡는다 — logKisRequest는 그전에 이미 지났다.
+        // 유량 제한이 HTTP 200 + rt_cd=1로 오는 경우를 흉내 낸다(런북 2절 `http` 필드 주석은
+        // "그런 경우가 있다"까지만 적는다 — HTTP 500으로 오는 갈래는 httpErrorOnPage가 다룬다).
+        // 이 갈래에서는 axios가 던지지 않고 kisApiGet의 rt_cd 분기가 잡는다 — logKisRequest는
+        // 그전에 이미 지났다.
         res.writeHead(200, { "Content-Type": "application/json", tr_cont: "D" });
         res.end(JSON.stringify({ rt_cd: "1", msg_cd: "EGW00201", msg1: rateLimitMsg1 }));
         return;
