@@ -24,6 +24,7 @@ import backend.telegram_commands as telegram_commands
 import backend.telegram_notifier as telegram_notifier_module
 from backend.config import DART_MCP_PARAMS, NEWS_MCP_PARAMS, TRADING_MCP_PARAMS
 from backend.delivery_alarm import delivery_metrics
+from backend.pii_egress import render_unmasked
 from backend.telegram_commands import (
     BUY_COMMAND_HELP,
     CATALYST_COMMAND_HELP,
@@ -917,7 +918,8 @@ async def test_earnings_command_combines_dart_news_and_nat_analysis():
         (NEWS_MCP_PARAMS, "get_market_news", {"stock_name": "삼성전자"}),
     ]
     assert len(llm_calls) == 1
-    provider, prompt, conversation_id = llm_calls[0]
+    provider, prompt_segments, conversation_id = llm_calls[0]
+    prompt = render_unmasked(prompt_segments)
     assert provider == "nat"
     assert conversation_id == "telegram:123:earnings:%EC%82%BC%EC%84%B1%EC%A0%84%EC%9E%90"
     conversation_id.encode("ascii")

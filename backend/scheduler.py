@@ -71,6 +71,7 @@ from .services import (
     generate_morning_briefing,
 )
 from .models import Portfolio
+from .pii_egress import personal, public
 from .timeutil import KST
 from .watchlist_repo import SqliteWatchlistRepo, WatchlistReader
 from .presentation import (
@@ -112,6 +113,11 @@ class SignalSource:
     mcp_params: Any
     tool_name: str
     stock_arg_name: str = "stock_name"
+    # 이 소스의 원문이 뉴스·공시처럼 누구나 같은 값을 조회하는 공개 데이터인가 (#395).
+    # True면 채점·분석 프롬프트에서 원문 속 금액을 마스킹하지 않는다. 기본값이 False인 것이
+    # fail-safe의 자리다 — 계좌 데이터를 읽는 소스가 표시 없이 추가돼도 마스킹된다.
+    # 판정 기준은 backend/pii_egress.py 모듈 docstring.
+    public_data: bool = False
 
 
 SIGNAL_SOURCES = [
@@ -119,11 +125,13 @@ SIGNAL_SOURCES = [
         name="news",
         mcp_params=NEWS_MCP_PARAMS,
         tool_name="get_market_news",
+        public_data=True,
     ),
     SignalSource(
         name="disclosure",
         mcp_params=DART_MCP_PARAMS,
         tool_name="get_disclosure_signal",
+        public_data=True,
     ),
 ]
 
@@ -2006,9 +2014,13 @@ async def _monitor_signal(
         #    #298: 판정은 |score| >= 임계값이다. 점수·근거·불확실성은 판정과 같은
         #    호출에서 함께 받아 분석 리포트와 알림까지 실어 나른다. 채점하지 못했으면
         #    (fail-open) score가 None이며 그대로 null로 남는다.
+        # 외부 LLM으로 나가는 신호 원문의 공개/개인 표시는 소스 정의가 정한다(#395).
+        signal_segment = (
+            public(current_signal) if source.public_data else personal(current_signal)
+        )
         signal_score = await score_signal(
             stock,
-            current_signal,
+            signal_segment,
             last_signal,
             source=source.name,
             provider=FILTER_PROVIDER,
@@ -2037,7 +2049,7 @@ async def _monitor_signal(
             "nat",
             session,
             trigger_source=source.name,
-            trigger_signal=current_signal,
+            trigger_signal=signal_segment,
             signal_score=signal_score,
         )
         await _set_last_signal_state(state, source.name, stock, current_signal, current_digest)

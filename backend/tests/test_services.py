@@ -16,6 +16,7 @@ from fastapi import HTTPException
 from mcp import StdioServerParameters
 
 from backend import services
+from backend.pii_egress import render_unmasked
 from backend.services import SignalScore
 
 
@@ -99,8 +100,8 @@ async def test_check_signal_significance_uses_generic_source_prompt(monkeypatch)
 
     assert result is True
     assert prompts[0][0] == "ollama"
-    assert "signal 출처: sns" in prompts[0][1]
-    assert "뉴스 내용" not in prompts[0][1]
+    assert "signal 출처: sns" in render_unmasked(prompts[0][1])
+    assert "뉴스 내용" not in render_unmasked(prompts[0][1])
 
 
 @pytest.mark.asyncio
@@ -150,9 +151,9 @@ async def test_perform_stock_analysis_includes_trigger_signal(monkeypatch):
     assert prompts[0][0] == "nat"
     encoded_stock = quote("삼성전자", safe="")
     assert captured_cids == [f"sns:{encoded_stock}:{date.today().isoformat()}"]
-    assert "분석 트리거 데이터 출처: sns" in prompts[0][1]
-    assert "SNS mentions spiked after earnings guidance" in prompts[0][1]
-    assert '"source_signals"' in prompts[0][1]
+    assert "분석 트리거 데이터 출처: sns" in render_unmasked(prompts[0][1])
+    assert "SNS mentions spiked after earnings guidance" in render_unmasked(prompts[0][1])
+    assert '"source_signals"' in render_unmasked(prompts[0][1])
 
 
 @pytest.mark.asyncio
@@ -816,8 +817,8 @@ async def test_generate_morning_briefing_collects_market_watchlist_and_strategy(
     ]
     assert prompts[0][0] == "nat"
     assert prompts[0][2] == f"morning-briefing:{date.today().isoformat()}"
-    assert "Strategy Planner" in prompts[0][1]
-    assert "NAVER 뉴스" in prompts[0][1]
+    assert "Strategy Planner" in render_unmasked(prompts[0][1])
+    assert "NAVER 뉴스" in render_unmasked(prompts[0][1])
 
 
 def test_analysis_from_nat_text_backfills_source_signals():
@@ -1179,7 +1180,7 @@ def test_build_toolless_prompt_does_not_request_decision_or_confidence_score():
     요청해서는 안 된다. 이 두 단어가 프롬프트에 포함되면 모델이 매매 판단을
     지어낼 수 있다 — 프롬프트를 제거하면 이 테스트가 깨진다.
     """
-    prompt = services._build_toolless_prompt("삼성전자", "")
+    prompt = render_unmasked(services._build_toolless_prompt("삼성전자", []))
     # JSON 포맷으로 매매 판단을 요청하는 표현이 없어야 한다.
     # 설명 문구에 "BUY/SELL/HOLD"가 언급될 수 있으므로 JSON 키·값 형식으로만 확인한다.
     assert '"decision"' not in prompt
@@ -1195,7 +1196,7 @@ def test_build_nat_prompt_includes_decision_and_confidence_score():
     파싱하는 analysis_from_nat_text가 결과를 얻지 못한다 — nat 경로의
     동작이 불변이어야 한다는 수용 기준(#162)을 이 테스트가 고정한다.
     """
-    prompt = services._build_nat_prompt("삼성전자", "")
+    prompt = render_unmasked(services._build_nat_prompt("삼성전자", []))
     assert '"decision"' in prompt
     assert '"confidence_score"' in prompt
     assert '"source_signals"' in prompt
@@ -1211,7 +1212,7 @@ async def test_toolless_provider_does_not_generate_decision(monkeypatch):
     captured_prompts: list[str] = []
 
     async def fake_llm_chat(provider, prompt, *, conversation_id=None):
-        captured_prompts.append(prompt)
+        captured_prompts.append(render_unmasked(prompt))
         return "plain analysis"
 
     async def fake_run_mcp_tool(params, tool_name, arguments):
@@ -2339,7 +2340,7 @@ async def test_score_signal_prompt_states_the_scale_and_headline_count(monkeypat
         provider="ollama",
     )
 
-    prompt = prompts[0]
+    prompt = render_unmasked(prompts[0])
     # 단계별 기준이 프롬프트에 명시돼야 한다 — 축을 모델 상상에 맡기면 재현성이 없다.
     assert "+3:" in prompt and "-3:" in prompt and " 0:" in prompt
     assert "기사 3건" in prompt
@@ -2416,7 +2417,7 @@ async def test_score_signal_prompt_counts_only_whole_articles(monkeypatch):
 
     await services.score_signal("삼성전자", content, source="news")
 
-    assert "기사 2건" in prompts[0]
+    assert "기사 2건" in render_unmasked(prompts[0])
 
 
 @pytest.mark.asyncio

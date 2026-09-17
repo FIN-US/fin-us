@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from fastapi.testclient import TestClient
 from unittest.mock import MagicMock
 from ..main import app
+from ..pii_egress import personal
 from ..redis_state import RedisSchedulerState
 from ..services import SignalScore
 from .test_balance_parser import TRUNCATION_NOTES_BY_REASON
@@ -694,9 +695,10 @@ async def test_monitor_market_task_processes_multiple_signal_sources_independent
 
     assert mock_perform_analysis.call_count == 2
     assert [call.kwargs["trigger_source"] for call in mock_perform_analysis.call_args_list] == ["news", "sns"]
+    # 테스트용 소스는 public_data를 표시하지 않았으므로 원문이 개인 구간(마스킹 대상)으로 간다 (#395).
     assert [call.kwargs["trigger_signal"] for call in mock_perform_analysis.call_args_list] == [
-        "get_market_news: 삼성전자",
-        "get_stock_mentions: 삼성전자",
+        personal("get_market_news: 삼성전자"),
+        personal("get_stock_mentions: 삼성전자"),
     ]
     # PORTFOLIO_UPDATE(이슈 #229)에는 "source" 키가 없으므로 AGENT_ANALYSIS 브로드캐스트만
     # 걸러서 검사한다. 잔고 응답에 마커가 있고 잘리지 않아 Portfolio 동기화도 성공하지만
