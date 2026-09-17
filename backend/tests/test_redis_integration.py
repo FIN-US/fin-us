@@ -152,6 +152,9 @@ async def test_real_redis_pending_order_conditional_writes_compare_values_and_ke
         price=75000,
         created_at=datetime(2026, 5, 20, 10, 0, tzinfo=timezone(timedelta(hours=9))),
         callback_token="tok-a",
+        # 기본값이 아닌 출처를 싣는다. id를 남기는 다시 쓰기가 출처를 떨어뜨리면 아래 왕복
+        # 비교에서 auto_proposal로 돌아와 드러난다 (#390).
+        origin="user_command",
     )
 
     try:

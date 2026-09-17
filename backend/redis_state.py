@@ -771,8 +771,12 @@ class RedisPendingOrderStore:
         정수가 아닌 값도 None으로 접는다. 주문 전체를 버리지 않고 "id 모름"으로 두어, 텍스트
         /confirm만 막히고(fail-closed) 확정 버튼은 그대로 쓸 수 있게 한다. 문자열을 그대로 두면
         판정의 ``<`` 비교가 TypeError로 터지고, bool은 int의 하위 타입이라 True가 1로 통과한다.
+
+        ``origin``(#390)도 같은 방식이다. 필드가 없는 기존 저장값과 목록(ORDER_ORIGINS) 밖의
+        값은 ``auto_proposal``로 접는다 — 출처를 모르는 주문은 자동 제안으로 간주해 텍스트
+        /confirm을 막는다(fail-closed). 저장값은 코드보다 오래 사므로 읽는 쪽이 방어한다.
         """
-        from .trading_orders import PendingOrder
+        from .trading_orders import DEFAULT_ORDER_ORIGIN, ORDER_ORIGINS, PendingOrder
 
         data: dict[str, Any] = json.loads(raw if isinstance(raw, str) else raw.decode())
         data["created_at"] = datetime.fromisoformat(data["created_at"])
@@ -785,6 +789,17 @@ class RedisPendingOrderStore:
                 prompt_message_id,
             )
             data["prompt_message_id"] = None
+        origin = data.get("origin")
+        # isinstance를 먼저 본다. 리스트·dict 같은 값은 해시할 수 없어 집합 검사가 TypeError를
+        # 내고, 그러면 get()이 주문을 손상값으로 지워 확정 버튼까지 잃는다.
+        if not isinstance(origin, str) or origin not in ORDER_ORIGINS:
+            if origin is not None:
+                logger.warning(
+                    "pending_order의 origin이 알 수 없는 값이라 자동 제안으로 읽는다 "
+                    "(텍스트 /confirm 불가, #390): %r",
+                    origin,
+                )
+            data["origin"] = DEFAULT_ORDER_ORIGIN
         return PendingOrder(**data)
 
     async def get(self, chat_id: str) -> "PendingOrder | None":

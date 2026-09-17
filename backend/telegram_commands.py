@@ -139,6 +139,13 @@ CONFIRM_PROMPT_UNKNOWN_TEXT = (
     "이 대기 주문은 안내 메시지가 언제 표시됐는지 확인할 수 없어 /confirm으로 실행하지 "
     "않았습니다.\n주문 메시지를 확인하고 확정 버튼을 누르세요."
 )
+# 자동 제안 주문에 텍스트 /confirm이 닿았을 때의 안내 (#390). 사용자 명령 없이 생긴 주문은
+# 확정 버튼으로만 확정한다. 대기 주문은 그대로 남으므로 그 메시지의 버튼을 누르면 된다.
+# 출처를 모르는 저장값도 자동 제안으로 간주해 여기로 온다(fail-closed).
+CONFIRM_AUTO_PROPOSAL_BUTTON_ONLY_TEXT = (
+    "이 대기 주문은 자동 제안이라 /confirm으로 실행하지 않았습니다.\n"
+    "주문 내용을 확인하고 그 메시지의 확정 버튼을 누르세요. 취소하려면 /cancel을 보내세요."
+)
 ALERT_CALLBACK_PREFIX = "alerts:"
 LEVEL_CALLBACK_PREFIX = "level:"
 BALANCE_REFRESH_CALLBACK = "balance:refresh"
@@ -1543,6 +1550,9 @@ class TelegramCommandHandler:
             created_at=self.now_factory(),
             order_type=order_type,
             callback_token=secrets.token_urlsafe(8),
+            # 사용자가 방금 낸 명령이다 (/buy·/sell·자연어 주문). 텍스트 /confirm으로 확정할 수
+            # 있는 출처다 — 명령과 /confirm이 같은 기기에서 순서대로 전송되기 때문이다 (#390).
+            origin="user_command",
         )
         try:
             stored = await self.pending_orders.set_if_absent(chat_id, order)
@@ -1602,37 +1612,51 @@ class TelegramCommandHandler:
         - 늦게 처리된 처음 실행(#386): 폴러는 update를 순서대로 처리한다. 그래서 LLM 대기·재시도
           대기 뒤에 줄 선 /confirm이나 봇이 내려가 있던 동안 쌓인 /confirm은 늦게 처리된다.
           그사이 A가 60초 앱 만료를 넘기면 자동 제안이 A를 치우고 B를 넣는다.
+        - 사용자 쪽 전송 지연(#390): 텔레그램 클라이언트는 연결이 끊긴 동안 보낸 메시지를 로컬
+          큐에 두었다가 재연결 때 올린다. A를 보고 누른 /confirm이 큐에 묶인 사이 A가 만료되고
+          자동 제안 B의 프롬프트가 먼저 message_id를 받으면, 늦게 올라간 /confirm의 id가 더 크다.
 
-        판정은 **프롬프트 message_id 대조**다(#386). 대기 주문은 자기 확정 프롬프트의 message_id를
-        들고 있고(PendingOrder.prompt_message_id), 텍스트 /confirm은 자기 message_id가 그보다 클
-        때만 claim한다. 한 채팅의 message_id는 봇과 사용자 메시지를 합쳐 단조 증가하므로 "프롬프트가
-        나간 뒤에 보낸 /confirm"이 곧 이 대조다. 시계를 쓰지 않는다. message.date와 created_at을
-        비교하면 텔레그램·호스트 시계 오차가 오판 방향을 정하고, 폴러의 수신 시각과 비교하면
-        적체 중에는 수신이 항상 주문 생성보다 늦어 이 경우를 가려내지 못한다. 두 창 모두 이
-        대조로 닫힌다. 재실행된 /confirm의 id는 그사이 생긴 주문의 프롬프트 id보다 작다.
+        판정은 PendingOrder.confirmable_by_text 하나이고 조건이 둘이다.
+
+        1. **출처가 사용자 명령일 것** (#390). 사용자가 모르는 사이에 대기 주문이 생기는 출처는
+           자동 제안뿐이라 위 세 창이 모두 거기서 열린다. 자동 제안 주문은 텍스트로 확정하지
+           않고 확정 버튼으로만 확정한다 — 버튼은 주문마다 다른 토큰에 묶여 있어 애초에 다른
+           주문을 확정할 수 없다. 사용자가 낸 /buy·/sell·자연어 주문·/advise는 같은 기기에서
+           /confirm과 순서대로 전송되므로(오프라인 큐도 보낸 순서를 지킨다) 이 역전이 성립하지
+           않는다. 기각한 대안은 "프롬프트에 단 답장만 확정으로 인정"이다 — 사용자가 매번
+           답장을 써야 하고, 원인이 자동 제안 쪽에만 있는데 사용자 주문의 텍스트 확정까지
+           없앤다(#390 결정 코멘트).
+        2. **프롬프트 message_id 대조** (#386). 대기 주문은 자기 확정 프롬프트의 message_id를
+           들고 있고(PendingOrder.prompt_message_id), 텍스트 /confirm은 자기 message_id가 그보다
+           클 때만 claim한다. 한 채팅의 message_id는 봇과 사용자 메시지를 합쳐 단조 증가하므로
+           "프롬프트가 나간 뒤에 보낸 /confirm"이 곧 이 대조다. 시계를 쓰지 않는다. message.date와
+           created_at을 비교하면 텔레그램·호스트 시계 오차가 오판 방향을 정하고, 폴러의 수신
+           시각과 비교하면 적체 중에는 수신이 항상 주문 생성보다 늦어 그 경우를 가려내지 못한다.
+           이 대조는 사용자 주문 안에서도 순서를 지킨다 — 재실행된 /confirm의 id는 그사이 생긴
+           주문의 프롬프트 id보다 작고, /buy 처리 중에 미리 보낸 /confirm도 여기 걸린다.
 
         판정과 claim은 claim_if 한 번에 원자적으로 끝난다. 판정에 걸린 주문은 꺼내지 않으므로 B는
-        소비되지 않고 남는다. 사용자는 B의 프롬프트를 보고 스스로 확정·취소한다.
+        소비되지 않고 남는다. 사용자는 B의 프롬프트를 보고 버튼으로 확정·취소한다.
 
-        fail-closed: 프롬프트 id를 모르면(전송은 됐지만 id를 못 읽음, 기록 실패, 필드가 없는 기존
-        저장값, 저장부터 기록까지의 창) 또는 /confirm의 message_id를 모르면 실행하지 않는다. 저장부터
-        기록까지의 창은 폴러 밖에서 만든 주문(자동 제안)에만 열린다. 폴러 안의 /buy·/advise는 id를
-        기록한 뒤에야 다음 update로 넘어간다.
+        fail-closed: 출처를 모르면(필드가 없는 기존 저장값, 목록 밖의 값) 자동 제안으로 읽어 막는다.
+        프롬프트 id를 모르면(전송은 됐지만 id를 못 읽음, 기록 실패, 저장부터 기록까지의 창) 또는
+        /confirm의 message_id를 모르면 실행하지 않는다. 저장부터 기록까지의 창은 폴러 밖에서 만든
+        주문(자동 제안)에만 열리고, 그 주문은 이제 출처 판정에서 먼저 막힌다. 폴러 안의
+        /buy·/advise는 id를 기록한 뒤에야 다음 update로 넘어간다.
 
         #383의 update 표지는 그대로 둔다. 재실행은 이제 id 대조에도 걸리지만, 표지는 주문을 보지
         않고 update만으로 판정하는 별도 층이다. 표지는 owner(프로세스)를 담아 프로세스 안의
         재시도(전송 실패 뒤 폴러 재시도)는 그대로 통과시킨다.
 
-        버튼 콜백은 ``text_confirm``을 넘기지 않아 두 판정 모두 걸리지 않는다. 버튼에는 주문마다 다른
+        버튼 콜백은 ``text_confirm``을 넘기지 않아 세 판정 모두 걸리지 않는다. 버튼에는 주문마다 다른
         토큰이 실려 있어 _handle_order_callback이 다른 주문의 확정을 이미 거절한다.
 
-        남는 경우: message_id의 순서는 서버가 /confirm을 **받은** 순서이지 사용자가 누른 순서가
-        아니다. 텔레그램 클라이언트는 연결이 끊긴 동안 보낸 메시지를 로컬 큐에 두었다가 재연결 때
-        올린다. 그래서 A의 프롬프트를 보고 누른 /confirm이 큐에 묶인 사이 A가 60초 만료로
-        치워지고 자동 제안 B의 프롬프트가 먼저 id를 받으면, 뒤늦게 올라간 /confirm은 id가 더 커서
-        대조를 통과하고 B가 확정 없이 실행된다. 창의 상한은 사용자 쪽 전송 지연(오프라인 큐 포함,
-        상한 없음)이다. 폴러 적체·다운타임 창보다는 좁지만 닫히지 않았고, 닫는 방법(자동 제안은
-        버튼으로만 확정, 또는 프롬프트에 단 답장만 받기)은 #390에서 정한다(PR #389 리뷰).
+        남는 경우: 사용자 주문 쪽 근거는 "명령과 /confirm이 한 기기에서 순서대로 나간다"이다. 같은
+        계정을 두 기기에서 동시에 쓰면서 한 기기의 /confirm이 오프라인 큐에 묶인 사이 다른 기기에서
+        새 /buy를 내면, 늦게 올라간 /confirm이 그 /buy를 확정할 수 있다. 그 주문은 사용자가 방금
+        직접 낸 것이고 프롬프트도 그 기기에 떠 있어, 자동 제안처럼 "존재를 모르는 주문"이 나가는
+        경우와는 피해의 종류가 다르다. 이 창은 수용했다(#390). 사용법 변화도 남는다 — 자동 제안
+        주문은 텍스트 /confirm으로 확정할 수 없고 확정 버튼(또는 /cancel)을 쓴다.
         """
         # order_gateway 부재 체크를 claim 전에 수행해 주문이 소비되지 않게 한다.
         if self.order_gateway is None:
@@ -1664,10 +1688,11 @@ class TelegramCommandHandler:
             if text_confirm is None:
                 order = await self.pending_orders.claim(chat_id)
             else:
-                # 텍스트 /confirm은 그 주문의 프롬프트를 본 뒤에 보낸 것일 때만 꺼낸다 (#386).
+                # 텍스트 /confirm은 사용자가 낸 주문이고(#390) 그 주문의 프롬프트를 본 뒤에 보낸
+                # 것일 때만(#386) 꺼낸다. 두 조건은 confirmable_by_text 하나에 있다.
                 confirm_message_id = text_confirm.message_id
                 outcome = await self.pending_orders.claim_if(
-                    chat_id, lambda pending: pending.prompted_before(confirm_message_id)
+                    chat_id, lambda pending: pending.confirmable_by_text(confirm_message_id)
                 )
                 order = outcome.order if outcome.claimed else None
                 refused = None if outcome.claimed else outcome.order
@@ -1676,6 +1701,17 @@ class TelegramCommandHandler:
             return
         if refused is not None:
             # 주문은 저장소에 그대로 있다. 재시도해도 같은 판정에 도달하므로 재시도 가능한 전송이다.
+            if not refused.text_confirm_allowed():
+                # 자동 제안(또는 출처를 모르는 저장값)이다. 프롬프트 id를 알든 모르든 텍스트로는
+                # 확정되지 않으므로 id 대조 안내가 아니라 버튼 안내를 보낸다 (#390).
+                logger.warning(
+                    "텍스트 /confirm(message_id=%s)이 자동 제안 대기 주문(origin=%s)에 닿아 "
+                    "실행하지 않는다 — 확정 버튼으로만 확정한다 (#390)",
+                    text_confirm.message_id if text_confirm is not None else None,
+                    refused.origin,
+                )
+                await self._send_text_or_raise(CONFIRM_AUTO_PROPOSAL_BUTTON_ONLY_TEXT)
+                return
             logger.warning(
                 "텍스트 /confirm(message_id=%s)이 대기 주문의 프롬프트(message_id=%s)보다 앞서거나 "
                 "순서를 알 수 없어 실행하지 않는다 (#386)",

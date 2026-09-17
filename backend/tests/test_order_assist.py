@@ -11,7 +11,7 @@
 
 from datetime import datetime, timedelta
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -745,6 +745,8 @@ async def _run(
     stock="삼성전자",
     now_factory=None,
     session_factory=None,
+    source: order_assist.ProposalSource = "telegram",
+    rule_id=None,
 ):
     verify_calls = verify_calls if verify_calls is not None else []
     propose_calls = propose_calls if propose_calls is not None else []
@@ -758,7 +760,7 @@ async def _run(
         return verdict if verdict is not None else VerifierVerdict(True, "근거가 명확합니다.")
 
     result = await run_order_assist(
-        ProposalTrigger(source="telegram", stock=stock, chat_id="123"),
+        ProposalTrigger(source=source, stock=stock, chat_id="123", rule_id=rule_id),
         pending_orders=store if store is not None else InMemoryPendingOrderStore(),
         mcp_runner=mcp if mcp is not None else _mcp_runner(),
         now_factory=now_factory or (lambda: now),
@@ -787,6 +789,49 @@ async def test_approved_flow_stores_a_pending_order_for_the_existing_confirm_pat
     assert stored.callback_token  # 확정/취소 버튼이 붙을 토큰
     assert stored.created_at == MARKET_OPEN_NOW
     assert (stored.side, stored.quantity, stored.price) == ("BUY", 10, 74_500)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("source", "rule_id", "origin", "text_confirm_hint"),
+    [
+        ("telegram", None, "user_command", True),
+        ("scheduler_rule", "rule-1", "auto_proposal", False),
+    ],
+    ids=["advise", "rule_trigger"],
+)
+async def test_approved_order_origin_follows_the_trigger_source(
+    source, rule_id, origin, text_confirm_hint
+):
+    """대기 주문의 출처는 제안 계기에서 온다 — /advise는 사용자 명령, 룰 트리거는 자동 제안 (#390).
+
+    같은 run_order_assist가 두 계기를 함께 처리하므로 계기를 무시하면 둘이 한 출처로 뭉친다.
+    자동 제안의 승인 메시지는 /confirm을 권하지 않는다 — 권하면 안내가 곧 막다른 길이다.
+
+    이 테스트가 잡는 mutation: PendingOrder 생성에서 origin 인자 제거(/advise 주문이 자동 제안으로
+    떨어진다), 출처를 상수 user_command로 고정(룰 트리거 주문이 텍스트로 확정된다), 승인 메시지의
+    확정 안내 분기 제거.
+    """
+    store = InMemoryPendingOrderStore()
+
+    result, _ = await _run(store=store, source=source, rule_id=rule_id)
+
+    assert result.status == "approved"
+    stored = await store.get("123")
+    assert stored is not None
+    assert stored.origin == origin
+    assert ("/confirm을 입력해야" in result.message) is text_confirm_hint
+    assert "확정 버튼" in result.message
+
+
+def test_order_origin_for_an_unknown_source_is_auto_proposal():
+    """ProposalSource에 새 계기가 붙어도 텍스트 확정이 조용히 열리지 않는다 (#390).
+
+    이 테스트가 잡는 mutation: 조건을 "scheduler_rule이면 auto_proposal, 아니면 user_command"로 뒤집음.
+    """
+    assert order_assist.order_origin_for("telegram") == "user_command"
+    assert order_assist.order_origin_for("scheduler_rule") == "auto_proposal"
+    assert order_assist.order_origin_for(cast(Any, "webhook")) == "auto_proposal"
 
 
 @pytest.mark.asyncio

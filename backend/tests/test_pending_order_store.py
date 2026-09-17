@@ -28,7 +28,11 @@ from backend.redis_state import (
     RedisPendingOrderStore,
 )
 from backend.trading_orders import OrderExecutionResult, PendingOrder
-from backend.telegram_commands import CONFIRM_BEFORE_PROMPT_TEXT, TelegramCommandHandler
+from backend.telegram_commands import (
+    CONFIRM_AUTO_PROPOSAL_BUTTON_ONLY_TEXT,
+    CONFIRM_BEFORE_PROMPT_TEXT,
+    TelegramCommandHandler,
+)
 
 KST = ZoneInfo("Asia/Seoul")
 
@@ -43,6 +47,9 @@ _SAMPLE_ORDER = PendingOrder(
     order_type="LIMIT",
     callback_token="abc123",
     prompt_message_id=4242,
+    # 기본값(auto_proposal)이 아닌 값을 싣는다. 직렬화가 이 필드를 빠뜨리면 왕복 뒤 기본값으로
+    # 돌아와 test_redis_store_set_get_roundtrip이 잡는다 (#390).
+    origin="user_command",
 )
 
 
@@ -132,6 +139,8 @@ async def test_redis_store_set_get_roundtrip():
     assert recovered.callback_token == "abc123"
     # 확정 프롬프트 id(#386). 왕복에서 빠지면 텍스트 /confirm이 모든 주문을 "id 모름"으로 거절한다.
     assert recovered.prompt_message_id == 4242
+    # 출처(#390). 왕복에서 빠지면 사용자 주문이 자동 제안으로 읽혀 텍스트 /confirm이 막힌다.
+    assert recovered.origin == "user_command"
     # datetime 왕복: isoformat → fromisoformat 과정에서 timezone 보존
     assert recovered.created_at == _SAMPLE_ORDER.created_at
     assert recovered == _SAMPLE_ORDER
@@ -626,6 +635,7 @@ async def test_duplicate_confirm_calls_place_order_only_once():
         created_at=datetime(2026, 5, 20, 10, 0, 0, tzinfo=KST),
         callback_token="tok",
         prompt_message_id=100,
+        origin="user_command",
     )
     await store.set("123", order)
 
@@ -887,6 +897,106 @@ async def test_redis_store_reads_a_non_integer_prompt_id_as_unknown(stored):
 
     assert order is not None
     assert order.prompt_message_id is None
+
+
+# ---------------------------------------------------------------------------
+# 대기 주문의 출처 (#390)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("origin", ["user_command", "auto_proposal"])
+async def test_redis_store_roundtrips_the_order_origin(origin):
+    """출처는 저장소 왕복에서 그대로 살아남는다 (#390).
+
+    이 테스트가 잡는 mutation: 직렬화에서 origin을 빼거나, 역직렬화가 저장된 값을 무시하고
+    기본값으로 덮음(user_command가 auto_proposal로 돌아온다).
+    """
+    redis = FakeRedis()
+    store = RedisPendingOrderStore(redis)
+    order = replace(_SAMPLE_ORDER, origin=origin)
+
+    await store.set("123", order)
+
+    assert json.loads(redis.store[RedisKeys().pending_order("123")])["origin"] == origin
+    assert await store.get("123") == order
+
+
+@pytest.mark.asyncio
+async def test_redis_store_reads_a_legacy_value_without_origin_as_auto_proposal():
+    """출처 필드가 생기기 전의 저장값은 자동 제안으로 읽힌다 — 텍스트 /confirm 불가 (#390).
+
+    주문 자체는 버리지 않는다. 확정 버튼은 출처를 보지 않으므로 그대로 쓸 수 있다.
+
+    이 테스트가 잡는 mutation: PendingOrder.origin 기본값을 user_command로 바꿈.
+    """
+    redis = FakeRedis()
+    redis.store[RedisKeys().pending_order("123")] = _raw_order(prompt_message_id=100)
+    store = RedisPendingOrderStore(redis)
+
+    order = await store.get("123")
+
+    assert order is not None
+    assert order.origin == "auto_proposal"
+    assert order.text_confirm_allowed() is False
+    assert order.confirmable_by_text(10**9) is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "stored",
+    ["USER_COMMAND", "manual", "", 1, True, None, ["user_command"]],
+    ids=["upper", "unknown", "empty", "int", "bool", "null", "list"],
+)
+async def test_redis_store_reads_an_unknown_origin_as_auto_proposal(stored):
+    """목록 밖의 출처는 자동 제안으로 접는다. 주문은 버리지 않는다 (#390).
+
+    그대로 두면 문자열 비교가 우연히 통과하지는 않지만, 저장값의 타입이 PendingOrder.origin의
+    Literal과 어긋난 채 살아 남아 로그·표시·향후 판정이 그 값을 믿게 된다.
+
+    이 테스트가 잡는 mutation: _deserialize의 origin 정규화 제거.
+    """
+    redis = FakeRedis()
+    redis.store[RedisKeys().pending_order("123")] = _raw_order(
+        prompt_message_id=100, origin=stored
+    )
+    store = RedisPendingOrderStore(redis)
+
+    order = await store.get("123")
+
+    assert order is not None
+    assert order.origin == "auto_proposal"
+
+
+@pytest.mark.asyncio
+async def test_text_confirm_with_redis_store_does_not_execute_a_legacy_order_without_origin():
+    """출처를 모르는 기존 저장값에 닿은 텍스트 /confirm은 실행하지 않는다 (#390).
+
+    프롬프트 id는 알고 /confirm도 그 뒤에 보낸 것이라 #386 대조는 통과하는 값이다. 출처를 모르는
+    것만으로 막혀야 한다(fail-closed). 주문은 남고, 확정 버튼 안내가 나간다.
+
+    이 테스트가 잡는 mutation: 기본값을 user_command로 바꿈, claim_if 판정에서 출처 조건 제거.
+    """
+    redis = FakeRedis()
+    redis.store[RedisKeys().pending_order("123")] = _raw_order(prompt_message_id=100)
+    store = RedisPendingOrderStore(redis)
+    gateway = FakeOrderGateway()
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        pending_order_store=store,
+        order_gateway=gateway,
+        trade_recorder=FakeTradeLedger(),
+        now_factory=lambda: datetime(2026, 5, 20, 10, 0, 30, tzinfo=KST),
+    )
+
+    await handler.handle_update(
+        {"message": {"chat": {"id": 123}, "message_id": 101, "text": "/confirm"}}
+    )
+
+    assert gateway.orders == []
+    assert await store.has("123") is True
+    assert notifier.messages == [CONFIRM_AUTO_PROPOSAL_BUTTON_ONLY_TEXT]
 
 
 _BOTH_STORES = pytest.mark.parametrize(
