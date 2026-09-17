@@ -72,6 +72,7 @@ from .trading_orders import (
     McpTradingOrderGateway,
     OrderSide,
     OrderType,
+    PENDING_ORDER_NEXT_STEP_TEXT,
     PendingOrder,
     TradeLedger,
     TradeRecorder,
@@ -124,8 +125,12 @@ ORDER_STALE_CALLBACK_TEXT = "이전 주문 버튼입니다. 최신 주문 메시
 CONFIRM_REPLAY_REFUSED_TEXT = (
     "이 /confirm은 재시작 전에 이미 처리를 시작한 요청이라 다시 실행하지 않았습니다.\n"
     "직전 주문 결과는 증권사 앱에서 확인하고, 확정할 대기 주문이 남아 있으면 "
-    "주문 메시지의 확정 버튼을 누르거나 /confirm을 새로 보내세요."
+    # 이 안내는 대기 주문을 읽기 전에 나간다. 자동 제안일 수도 있으므로 버튼을 먼저 권한다(PR #391 리뷰).
+    "주문 메시지의 확정 버튼을 누르세요. 직접 낸 주문은 /confirm을 새로 보내도 됩니다."
 )
+# 새 주문이 기존 대기 주문에 막혔을 때의 안내 (PR #391 리뷰). 기존 주문의 출처를 모르므로 두 출처를
+# 다 덮는 문장을 쓴다(PENDING_ORDER_NEXT_STEP_TEXT).
+PENDING_ORDER_CONFLICT_TEXT = f"이미 대기 중인 주문이 있습니다. {PENDING_ORDER_NEXT_STEP_TEXT}"
 # 텍스트 /confirm이 지금 대기 주문의 확정 프롬프트보다 먼저 보낸 것일 때의 안내 (#386). 폴러
 # 적체·다운타임 뒤 늦게 처리된 /confirm이나 /buy 처리 중에 미리 보낸 /confirm이 여기 온다.
 # 대기 주문은 그대로 남으므로 내용을 보고 다시 확정하면 된다.
@@ -1464,9 +1469,7 @@ class TelegramCommandHandler:
             await self._send_text_or_raise(f"주문 저장소 오류: {_short_error(exc)}")
             return
         if has_pending:
-            await self._send_text_or_raise(
-                "이미 대기 중인 주문이 있습니다. /confirm 또는 /cancel로 먼저 처리하세요."
-            )
+            await self._send_text_or_raise(PENDING_ORDER_CONFLICT_TEXT)
             return
 
         await self.notifier.send_chat_action("typing")
@@ -1594,10 +1597,8 @@ class TelegramCommandHandler:
             await self._send_text_or_raise(f"주문 저장 실패: {_short_error(exc)}")
             return
         if not stored:
-            # MCP 호출 사이에 같은 chat에서 /buy가 먼저 체결된 경우
-            await self._send_text_or_raise(
-                "이미 대기 중인 주문이 있습니다. /confirm 또는 /cancel로 먼저 처리하세요."
-            )
+            # MCP 호출 사이에 같은 chat에서 /buy가 먼저 체결된 경우(또는 자동 제안이 슬롯을 잡은 경우)
+            await self._send_text_or_raise(PENDING_ORDER_CONFLICT_TEXT)
             return
         # 대기 주문이 저장된 뒤다 — 재실행은 has_pending에 걸려 "이미 대기 중인 주문이
         # 있습니다"로 끝나고, 사용자는 확인 버튼을 영영 받지 못한다 (#247).
