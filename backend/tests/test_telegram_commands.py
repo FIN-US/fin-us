@@ -1,6 +1,8 @@
 import ast
 import asyncio
+import json
 import logging
+import re
 import socket
 import textwrap
 import time
@@ -284,9 +286,39 @@ class FakeTradeRecorder:
         self.notified.append((trade_id, notified_at))
 
 
-def _order_mcp_runner_response(tool_name):
+def _stock_not_found(stock_name: str) -> HTTPException:
+    """resolve_stock_code가 마스터에 없는 이름으로 실패할 때 run_mcp_tool이 올리는 예외 (#387).
+
+    문구는 mcp-trading/stock-master.js의 미발견 오류 그대로다
+    (test_stock_not_found_marker_matches_the_stock_master_error가 원문과 대조한다).
+    """
+    return HTTPException(
+        status_code=500,
+        detail=(
+            f"'{stock_name}'의 종목 코드를 찾을 수 없습니다. "
+            "6·7·9자리 종목코드로 직접 입력하거나 mcp-trading/data/stocks.json을 갱신하세요."
+        ),
+    )
+
+
+def _resolve_from_master(arguments: dict, reply: str) -> str:
+    """resolve_stock_code 대역. 입력이 ``reply`` 종목의 이름이나 코드일 때만 해석한다 (#387).
+
+    예전 대역은 어떤 입력에도 같은 종목을 돌려줬다. 파서가 ``/buy 삼성전자 10 75000``의 두
+    해석(``삼성전자``·``삼성전자 10``)을 모두 확인하게 되면서, 그런 대역은 두 해석이 다 실재
+    종목인 것처럼 보여 모호함 안내로 끝난다. 실제 resolveStock처럼 이름·코드 완전 일치만 받는다.
+    """
+    stock_name = str(arguments.get("stock_name", "")).strip()
+    name, _, rest = reply.rpartition(" (")
+    code = rest.split(",", 1)[0]
+    if stock_name in (name, code):
+        return reply
+    raise _stock_not_found(stock_name)
+
+
+def _order_mcp_runner_response(tool_name, arguments=None):
     if tool_name == "resolve_stock_code":
-        return "삼성전자 (005930, KOSPI)"
+        return _resolve_from_master(arguments or {}, "삼성전자 (005930, KOSPI)")
     if tool_name == "get_stock_quote":
         return "현재가: 74,500원"
     if tool_name == "get_balance":
@@ -298,7 +330,7 @@ def _order_mcp_runner():
     """/buy → /confirm 경로가 기대하는 세 MCP 응답을 돌려준다."""
 
     async def mcp_runner(server_params, tool_name, arguments):
-        return _order_mcp_runner_response(tool_name)
+        return _order_mcp_runner_response(tool_name, arguments)
 
     return mcp_runner
 
@@ -1048,7 +1080,7 @@ async def test_buy_command_creates_pending_order_and_prompts_confirmation():
     async def mcp_runner(server_params, tool_name, arguments):
         calls.append((server_params, tool_name, arguments))
         if tool_name == "resolve_stock_code":
-            return "삼성전자 (005930, KOSPI)"
+            return _resolve_from_master(arguments, "삼성전자 (005930, KOSPI)")
         if tool_name == "get_stock_quote":
             return "현재가: 74,500원"
         if tool_name == "get_balance":
@@ -1068,6 +1100,8 @@ async def test_buy_command_creates_pending_order_and_prompts_confirmation():
 
     assert calls == [
         (TRADING_MCP_PARAMS, "resolve_stock_code", {"stock_name": "삼성전자"}),
+        # 끝 두 토큰이 정수라 시장가 해석("삼성전자 10")도 확인한다 — 종목이 아니라 지정가로 간다 (#387).
+        (TRADING_MCP_PARAMS, "resolve_stock_code", {"stock_name": "삼성전자 10"}),
         (TRADING_MCP_PARAMS, "get_stock_quote", {"stock_name": "삼성전자"}),
         (TRADING_MCP_PARAMS, "get_balance", {}),
     ]
@@ -1106,7 +1140,7 @@ async def test_buy_command_creates_pending_order_and_prompts_confirmation():
 async def test_buy_command_includes_current_price_line_when_quote_has_header():
     async def mcp_runner(server_params, tool_name, arguments):
         if tool_name == "resolve_stock_code":
-            return "삼성전자 (005930, KOSPI)"
+            return _resolve_from_master(arguments, "삼성전자 (005930, KOSPI)")
         if tool_name == "get_stock_quote":
             return "[삼성전자] 현재가 시세\n- 현재가: 354,000원\n- 전일 대비: +1,000 (0.28%)"
         if tool_name == "get_balance":
@@ -1137,7 +1171,7 @@ async def test_buy_command_without_price_creates_market_order_and_prompts_confir
     async def mcp_runner(server_params, tool_name, arguments):
         calls.append((server_params, tool_name, arguments))
         if tool_name == "resolve_stock_code":
-            return "삼성전자 (005930, KOSPI)"
+            return _resolve_from_master(arguments, "삼성전자 (005930, KOSPI)")
         if tool_name == "get_stock_quote":
             return "현재가: 74,500원"
         if tool_name == "get_balance":
@@ -1187,7 +1221,7 @@ async def test_market_order_proceeds_without_reference_price_when_quote_is_unrea
 
     async def mcp_runner(server_params, tool_name, arguments):
         if tool_name == "resolve_stock_code":
-            return "삼성전자 (005930, KOSPI)"
+            return _resolve_from_master(arguments, "삼성전자 (005930, KOSPI)")
         if tool_name == "get_stock_quote":
             # 라벨이 바뀌어 현재가를 읽지 못하는 상황
             return "시세 조회 중 에러 발생: upstream timeout"
@@ -1221,7 +1255,7 @@ async def test_limit_order_keeps_the_typed_price_even_when_it_differs_from_the_q
 
     async def mcp_runner(server_params, tool_name, arguments):
         if tool_name == "resolve_stock_code":
-            return "삼성전자 (005930, KOSPI)"
+            return _resolve_from_master(arguments, "삼성전자 (005930, KOSPI)")
         if tool_name == "get_stock_quote":
             return "현재가: 74,500원"
         if tool_name == "get_balance":
@@ -1251,7 +1285,7 @@ async def test_natural_language_market_buy_creates_pending_order_without_nat():
     async def mcp_runner(server_params, tool_name, arguments):
         calls.append((server_params, tool_name, arguments))
         if tool_name == "resolve_stock_code":
-            return "삼성전자 (005930, KOSPI)"
+            return _resolve_from_master(arguments, "삼성전자 (005930, KOSPI)")
         if tool_name == "get_stock_quote":
             return "현재가: 74,500원"
         if tool_name == "get_balance":
@@ -1315,7 +1349,7 @@ async def test_natural_language_limit_sell_creates_pending_order_without_nat():
     async def mcp_runner(server_params, tool_name, arguments):
         calls.append((server_params, tool_name, arguments))
         if tool_name == "resolve_stock_code":
-            return "NAVER (035420, KOSPI)"
+            return _resolve_from_master(arguments, "NAVER (035420, KOSPI)")
         if tool_name == "get_stock_quote":
             return "현재가: 200,500원"
         if tool_name == "get_balance":
@@ -1387,7 +1421,7 @@ async def test_buy_command_accepts_stock_name_with_spaces():
     async def mcp_runner(server_params, tool_name, arguments):
         calls.append((server_params, tool_name, arguments))
         if tool_name == "resolve_stock_code":
-            return "LG 화학 (051910, KOSPI)"
+            return _resolve_from_master(arguments, "LG 화학 (051910, KOSPI)")
         if tool_name == "get_stock_quote":
             return "현재가: 75,000원"
         if tool_name == "get_balance":
@@ -1438,8 +1472,10 @@ async def test_buy_command_rejects_unresolved_stock_code_before_quote_and_balanc
         {"message": {"chat": {"id": 123}, "text": "/buy 알수없는종목 1 75000"}}
     )
 
+    # 두 해석 모두 확인하지만 어느 것도 종목이 아니다. 안내는 예전처럼 지정가 해석의 사유다 (#387).
     assert calls == [
-        (TRADING_MCP_PARAMS, "resolve_stock_code", {"stock_name": "알수없는종목"})
+        (TRADING_MCP_PARAMS, "resolve_stock_code", {"stock_name": "알수없는종목"}),
+        (TRADING_MCP_PARAMS, "resolve_stock_code", {"stock_name": "알수없는종목 1"}),
     ]
     assert notifier.messages[-1] == "주문 준비 실패: 종목코드를 확인할 수 없습니다."
     assert _orders(handler) == {}
@@ -1637,7 +1673,7 @@ async def test_order_command_rejection_message_follows_alnum_flag(monkeypatch):
 
     async def mcp_runner(server_params, tool_name, arguments):
         if tool_name == "resolve_stock_code":
-            return "가상종목 (12345678, KOSPI)"
+            return _resolve_from_master(arguments, "가상종목 (12345678, KOSPI)")
         raise AssertionError(f"주문 불가 종목인데 호출됨: {tool_name}")
 
     notifier = FakeNotifier()
@@ -1664,7 +1700,7 @@ async def test_order_command_rejection_message_follows_alnum_flag(monkeypatch):
 async def test_cancel_removes_pending_order():
     async def mcp_runner(server_params, tool_name, arguments):
         if tool_name == "resolve_stock_code":
-            return "삼성전자 (005930, KOSPI)"
+            return _resolve_from_master(arguments, "삼성전자 (005930, KOSPI)")
         if tool_name == "get_stock_quote":
             return "현재가: 74,500원"
         if tool_name == "get_balance":
@@ -1691,7 +1727,7 @@ async def test_cancel_removes_pending_order():
 async def test_cancel_button_removes_pending_order():
     async def mcp_runner(server_params, tool_name, arguments):
         if tool_name == "resolve_stock_code":
-            return "삼성전자 (005930, KOSPI)"
+            return _resolve_from_master(arguments, "삼성전자 (005930, KOSPI)")
         if tool_name == "get_stock_quote":
             return "현재가: 74,500원"
         if tool_name == "get_balance":
@@ -1740,7 +1776,7 @@ async def test_buy_with_stock_code_resolves_name_and_shows_no_warning():
 
     async def mcp_runner(server_params, tool_name, arguments):
         if tool_name == "resolve_stock_code":
-            return "삼성전자 (005930, KOSPI)"
+            return _resolve_from_master(arguments, "삼성전자 (005930, KOSPI)")
         if tool_name == "get_stock_quote":
             return "현재가: 74,500원"
         if tool_name == "get_balance":
@@ -1836,7 +1872,7 @@ def test_format_order_prompt_warns_when_name_equals_code():
 async def test_confirm_executes_gateway_and_records_trade():
     async def mcp_runner(server_params, tool_name, arguments):
         if tool_name == "resolve_stock_code":
-            return "삼성전자 (005930, KOSPI)"
+            return _resolve_from_master(arguments, "삼성전자 (005930, KOSPI)")
         if tool_name == "get_stock_quote":
             return "현재가: 74,500원"
         if tool_name == "get_balance":
@@ -2029,7 +2065,7 @@ async def test_confirm_records_the_trade_before_sending_the_result():
 async def test_confirm_button_executes_gateway_and_records_trade():
     async def mcp_runner(server_params, tool_name, arguments):
         if tool_name == "resolve_stock_code":
-            return "삼성전자 (005930, KOSPI)"
+            return _resolve_from_master(arguments, "삼성전자 (005930, KOSPI)")
         if tool_name == "get_stock_quote":
             return "현재가: 74,500원"
         if tool_name == "get_balance":
@@ -2072,7 +2108,7 @@ async def test_confirm_button_executes_gateway_and_records_trade():
 async def test_tokenless_old_confirm_button_does_not_execute_current_pending_order():
     async def mcp_runner(server_params, tool_name, arguments):
         if tool_name == "resolve_stock_code":
-            return "삼성전자 (005930, KOSPI)"
+            return _resolve_from_master(arguments, "삼성전자 (005930, KOSPI)")
         if tool_name == "get_stock_quote":
             return "현재가: 74,500원"
         if tool_name == "get_balance":
@@ -2308,7 +2344,7 @@ def test_the_callback_answer_branch_guard_actually_detects_a_violation():
 async def test_confirm_gateway_success_recorder_failure_clears_pending_order():
     async def mcp_runner(server_params, tool_name, arguments):
         if tool_name == "resolve_stock_code":
-            return "삼성전자 (005930, KOSPI)"
+            return _resolve_from_master(arguments, "삼성전자 (005930, KOSPI)")
         if tool_name == "get_stock_quote":
             return "현재가: 74,500원"
         if tool_name == "get_balance":
@@ -2347,7 +2383,7 @@ async def test_confirm_gateway_success_recorder_failure_clears_pending_order():
 async def test_confirm_without_gateway_keeps_pending_order():
     async def mcp_runner(server_params, tool_name, arguments):
         if tool_name == "resolve_stock_code":
-            return "삼성전자 (005930, KOSPI)"
+            return _resolve_from_master(arguments, "삼성전자 (005930, KOSPI)")
         if tool_name == "get_stock_quote":
             return "현재가: 74,500원"
         if tool_name == "get_balance":
@@ -2374,7 +2410,7 @@ async def test_confirm_without_gateway_keeps_pending_order():
 async def test_confirm_gateway_ambiguous_failure_clears_pending_order_and_blocks_retry():
     async def mcp_runner(server_params, tool_name, arguments):
         if tool_name == "resolve_stock_code":
-            return "삼성전자 (005930, KOSPI)"
+            return _resolve_from_master(arguments, "삼성전자 (005930, KOSPI)")
         if tool_name == "get_stock_quote":
             return "현재가: 74,500원"
         if tool_name == "get_balance":
@@ -2409,7 +2445,7 @@ async def test_confirm_gateway_ambiguous_failure_clears_pending_order_and_blocks
 async def test_confirm_real_order_guard_failure_keeps_pending_order():
     async def mcp_runner(server_params, tool_name, arguments):
         if tool_name == "resolve_stock_code":
-            return "삼성전자 (005930, KOSPI)"
+            return _resolve_from_master(arguments, "삼성전자 (005930, KOSPI)")
         if tool_name == "get_stock_quote":
             return "현재가: 74,500원"
         if tool_name == "get_balance":
@@ -2482,7 +2518,7 @@ async def test_buy_command_rejects_invalid_args_with_usage():
 async def test_sell_command_rejects_duplicate_pending_order():
     async def mcp_runner(server_params, tool_name, arguments):
         if tool_name == "resolve_stock_code":
-            return "삼성전자 (005930, KOSPI)"
+            return _resolve_from_master(arguments, "삼성전자 (005930, KOSPI)")
         if tool_name == "get_stock_quote":
             return "현재가: 74,500원"
         if tool_name == "get_balance":
@@ -5490,7 +5526,7 @@ async def test_pending_order_is_stamped_at_store_time_not_command_time():
 
     async def slow_mcp_runner(server_params, tool_name, arguments):
         clock[0] = clock[0] + timedelta(seconds=25)  # 조회가 느리다
-        return _order_mcp_runner_response(tool_name)
+        return _order_mcp_runner_response(tool_name, arguments)
 
     notifier = FakeNotifier()
     handler = TelegramCommandHandler(
@@ -6596,6 +6632,295 @@ async def test_confirm_button_is_not_gated_by_the_order_origin():
     )
 
     assert [order.callback_token for order in gateway.orders] == ["token-auto"]
+
+
+# ---------------------------------------------------------------------------
+# 숫자로 끝나는 종목명의 해석 (#387)
+# ---------------------------------------------------------------------------
+
+_STOCK_MASTER_PATH = Path(__file__).resolve().parents[2] / "mcp-trading" / "data" / "stocks.json"
+_STOCK_MASTER_JS_PATH = Path(__file__).resolve().parents[2] / "mcp-trading" / "stock-master.js"
+_CODE_SHAPE_RE = re.compile(r"^[A-Z0-9]{6,7}$", re.IGNORECASE)
+
+
+def _master_resolver(stocks: list[dict]):
+    """resolve_stock_code 대역. mcp-trading/stock-master.js resolveStock의 규칙을 그대로 따른다.
+
+    코드 완전 일치 → 이름·별칭 완전 일치(코드 형태 입력은 대소문자 무시) → 여럿이면 모호 오류 →
+    코드 형태면 UNKNOWN 에코 → 아니면 미발견 오류. 응답·오류 문구도 원문 형식이다.
+    """
+
+    async def resolve(stock_name: str) -> str:
+        text = stock_name.strip()
+        upper = text.upper()
+        for stock in stocks:
+            if str(stock["code"]).upper() == upper:
+                return f"{stock['name']} ({stock['code']}, {stock['market']})"
+        code_shaped = _CODE_SHAPE_RE.match(text) is not None
+        matches = []
+        for stock in stocks:
+            aliases = stock.get("aliases") or []
+            if stock["name"] == text or text in aliases:
+                matches.append(stock)
+            elif code_shaped and (
+                str(stock["name"]).upper() == upper
+                or any(str(alias).upper() == upper for alias in aliases)
+            ):
+                matches.append(stock)
+        if len(matches) > 1:
+            raise HTTPException(
+                status_code=500,
+                detail=f"'{text}'의 종목 매칭이 모호합니다. 6·7·9자리 종목코드를 직접 입력하세요.",
+            )
+        if matches:
+            stock = matches[0]
+            return f"{stock['name']} ({stock['code']}, {stock['market']})"
+        if code_shaped:
+            return f"{upper} ({upper}, UNKNOWN)"
+        raise _stock_not_found(text)
+
+    return resolve
+
+
+def _real_master() -> list[dict]:
+    return json.loads(_STOCK_MASTER_PATH.read_text(encoding="utf-8"))
+
+
+def _master_order_handler(stocks: list[dict], *, resolve_errors: dict[str, Exception] | None = None):
+    """종목 마스터 대역을 쓰는 주문 핸들러와 MCP 호출 기록."""
+    resolve = _master_resolver(stocks)
+    calls: list[tuple[str, dict]] = []
+
+    async def mcp_runner(server_params, tool_name, arguments):
+        calls.append((tool_name, arguments))
+        if tool_name == "resolve_stock_code":
+            error = (resolve_errors or {}).get(arguments["stock_name"])
+            if error is not None:
+                raise error
+            return await resolve(arguments["stock_name"])
+        if tool_name == "get_stock_quote":
+            return "현재가: 40,000원"
+        if tool_name == "get_balance":
+            return "- 예수금: 1,000,000원"
+        raise AssertionError(f"unexpected tool: {tool_name}")
+
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        mcp_runner=mcp_runner,
+        order_gateway=FakeOrderGateway(),
+        trade_recorder=FakeTradeRecorder(),
+        now_factory=lambda: _ORDER_TIME,
+    )
+    return handler, notifier, calls
+
+
+def _order_message(text: str) -> dict:
+    return {"message": {"chat": {"id": 123}, "message_id": 10, "text": text}}
+
+
+def test_stock_not_found_marker_matches_the_stock_master_error():
+    """"종목 없음" 판정 문구가 resolveStock의 미발견 오류 원문에 그대로 있다 (#387).
+
+    어긋나면 숫자로 끝나는 종목명의 앞부분("KODEX")이 "종목 없음"이 아니라 "확인 실패"로 읽혀,
+    /buy KODEX 200 10이 다시 주문 준비 실패로 끝난다(잘못된 주문이 나가는 쪽으로는 틀리지 않는다).
+    """
+    source = _STOCK_MASTER_JS_PATH.read_text(encoding="utf-8")
+    assert telegram_commands.STOCK_NOT_FOUND_ERROR_MARKER in source
+
+
+def test_order_argument_readings_offer_both_readings_only_when_the_last_two_tokens_are_numbers():
+    """끝 두 토큰이 정수면 지정가·시장가 두 해석, 끝 하나만 정수면 시장가 하나다 (#387).
+
+    이 테스트가 잡는 mutation: 끝 두 토큰이 정수일 때 시장가 해석을 빼는 것(예전 파서).
+    """
+    handler = TelegramCommandHandler(notifier=FakeNotifier())
+    reading = telegram_commands.OrderReading
+
+    assert handler._order_argument_readings("KODEX 200 10") == [
+        reading("KODEX", 200, 10, "LIMIT"),
+        reading("KODEX 200", 10, 0, "MARKET"),
+    ]
+    assert handler._order_argument_readings("삼성전자 10") == [reading("삼성전자", 10, 0, "MARKET")]
+    assert handler._order_argument_readings("삼성전자 10,000") == [
+        reading("삼성전자", 10000, 0, "MARKET")
+    ]
+    assert handler._order_argument_readings("10 20") == [reading("10", 20, 0, "MARKET")]
+    assert handler._order_argument_readings("삼성전자") == []
+    assert handler._order_argument_readings("삼성전자 열주") == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("text", "name", "code", "side"),
+    [
+        ("/buy KODEX 200 10", "KODEX 200", "069500", "BUY"),
+        ("/sell TIGER 200 10", "TIGER 200", "102110", "SELL"),
+        # 앞부분(HANARO)이 코드 형태라 "종목 없음" 오류가 아니라 UNKNOWN 에코로 돌아오는 경우
+        ("/buy HANARO 200 10", "HANARO 200", "293180", "BUY"),
+    ],
+    ids=["kodex", "tiger_sell", "hanaro_unknown_echo_prefix"],
+)
+async def test_numeric_suffix_stock_name_is_read_as_a_market_order_of_that_stock(text, name, code, side):
+    """``/buy KODEX 200 10``은 KODEX 200 10주 시장가로 읽힌다 — 실제 종목 마스터로 확인한다 (#387).
+
+    예전에는 끝 두 숫자를 무조건 (수량, 지정가)로 읽어 "KODEX 200주 지정가 10원"이 됐고, "KODEX"가
+    종목이 아니라 주문 준비 실패로 끝났다. 확인 화면은 해석 결과(종목명·종목코드·수량·주문유형)를
+    그대로 보여 주고 지정가 줄이 없다.
+
+    이 테스트가 잡는 mutation: 시장가 해석 제거(예전 파서), "종목 없음" 오류를 확인 실패로 취급
+    (kodex·tiger가 주문 준비 실패로 끝난다), UNKNOWN 에코를 해석됨으로 취급(hanaro가 모호함 안내로 끝난다).
+    """
+    handler, notifier, calls = _master_order_handler(_real_master())
+
+    await handler.handle_update(_order_message(text))
+
+    order = _orders(handler)["123"]
+    assert (order.stock_name, order.stock_code, order.side) == (name, code, side)
+    assert (order.quantity, order.order_type) == (10, "MARKET")
+    prompt = notifier.messages[-1]
+    side_text = "매수" if side == "BUY" else "매도"
+    assert prompt.startswith(f"{name} {side_text} 주문 확인")
+    assert f"종목코드: {code}" in prompt
+    assert "수량: 10주" in prompt
+    assert "주문유형: 시장가" in prompt
+    assert "지정가:" not in prompt
+    # 시세는 고른 해석의 종목명으로 조회한다.
+    assert ("get_stock_quote", {"stock_name": name}) in calls
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("/buy KODEX 200 10 30000", ("KODEX 200", "069500", 10, 30000, "LIMIT")),
+        ("/buy 삼성전자 10 75000", ("삼성전자", "005930", 10, 75000, "LIMIT")),
+        ("/buy 069500 10", ("KODEX 200", "069500", 10, 40000, "MARKET")),
+        ("/buy 삼성전자 10", ("삼성전자", "005930", 10, 40000, "MARKET")),
+    ],
+    ids=["numeric_suffix_limit", "limit", "code_market", "market"],
+)
+async def test_regular_order_arguments_keep_their_meaning_with_the_real_master(text, expected):
+    """기존에 올바르게 읽히던 입력은 그대로다 (#387 회귀). 시장가의 가격은 참고단가(현재가)다."""
+    handler, _, _ = _master_order_handler(_real_master())
+
+    await handler.handle_update(_order_message(text))
+
+    order = _orders(handler)["123"]
+    assert (order.stock_name, order.stock_code, order.quantity, order.price, order.order_type) == expected
+
+
+def _master_with_kodex_alias() -> list[dict]:
+    """"KODEX"가 별칭으로 붙은 가상 종목을 더한 마스터 — 두 해석이 모두 실재 종목이 되는 경우."""
+    return [
+        *_real_master(),
+        {"code": "999990", "name": "가상 KODEX", "market": "KOSPI", "aliases": ["KODEX"]},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_order_argument_readable_as_two_real_stocks_is_not_guessed():
+    """두 해석이 모두 실재 종목이면 주문을 만들지 않고 두 해석을 종목코드 명령과 함께 보여 준다 (#387).
+
+    fail-closed다. 시세·잔고도 조회하지 않는다. 안내된 종목코드 명령은 이름 끝 숫자가 없어 다시
+    모호해지지 않는다.
+
+    이 테스트가 잡는 mutation: 해석된 것이 둘 이상일 때 첫 해석으로 진행.
+    """
+    handler, notifier, calls = _master_order_handler(_master_with_kodex_alias())
+
+    await handler.handle_update(_order_message("/buy KODEX 200 10"))
+
+    assert _orders(handler) == {}
+    assert [tool for tool, _ in calls] == ["resolve_stock_code", "resolve_stock_code"]
+    assert notifier.messages[-1] == "\n".join(
+        [
+            "주문 불가: 입력이 두 가지로 읽혀 주문을 만들지 않았습니다.",
+            "- 가상 KODEX(999990) 200주, 지정가 10원 → /buy 999990 200 10",
+            "- KODEX 200(069500) 10주, 시장가 → /buy 069500 10",
+            "원하는 주문을 종목코드로 다시 입력하세요.",
+        ]
+    )
+
+    # 안내한 종목코드 명령은 같은 마스터에서 모호하지 않다.
+    await handler.handle_update(_order_message("/buy 069500 10"))
+    order = _orders(handler)["123"]
+    assert (order.stock_code, order.quantity, order.order_type) == ("069500", 10, "MARKET")
+
+
+@pytest.mark.asyncio
+async def test_order_reading_that_cannot_be_checked_blocks_the_order():
+    """한 해석이 "종목 없음"이 아닌 이유로 확인되지 않으면 진행하지 않는다 (#387, fail-closed).
+
+    다른 해석이 해석되더라도, 확인하지 못한 쪽이 실재 종목일 수 있어 모호함이 없다는 것을 증명하지
+    못한다. 예외 사유를 "주문 준비 실패"로 알린다.
+
+    이 테스트가 잡는 mutation: 모든 resolve 예외를 "종목 없음"으로 취급.
+    """
+    handler, notifier, calls = _master_order_handler(
+        _real_master(),
+        resolve_errors={"KODEX": HTTPException(status_code=504, detail="데이터 공급원 응답 타임아웃")},
+    )
+
+    await handler.handle_update(_order_message("/buy KODEX 200 10"))
+
+    assert _orders(handler) == {}
+    assert notifier.messages[-1] == "주문 준비 실패: 데이터 공급원 응답 타임아웃"
+    assert "get_stock_quote" not in [tool for tool, _ in calls]
+
+
+@pytest.mark.asyncio
+async def test_order_arguments_that_resolve_nowhere_report_the_limit_reading_as_before():
+    """두 해석이 모두 종목이 아니면 예전처럼 지정가 해석의 사유를 알린다 (#387)."""
+    handler, notifier, _ = _master_order_handler(_real_master())
+
+    await handler.handle_update(_order_message("/buy 없는종목 10 75000"))
+
+    assert _orders(handler) == {}
+    assert notifier.messages[-1].startswith("주문 준비 실패: '없는종목'의 종목 코드를 찾을 수 없습니다.")
+
+
+@pytest.mark.asyncio
+async def test_natural_order_passes_its_reading_without_reassembling_the_text():
+    """자연어 주문은 ``주``·``원`` 표지로 뽑은 해석 그대로 같은 판정을 지난다 (#387).
+
+    ``KODEX 200 10주 매수``를 ``KODEX 200 10``으로 다시 이어 붙이면 위치 해석의 모호함이 새로
+    생긴다. "KODEX"가 별칭으로 실재하는 마스터에서 그 경로는 모호함 안내로 끝나지만, 표지로 이미
+    정해진 해석은 KODEX 200 10주 시장가로 진행해야 한다. 종목 확인도 그 이름 한 번뿐이다.
+
+    이 테스트가 잡는 mutation: _parse_natural_order_text가 문자열을 재조립해 /buy 파서로 넘김.
+    """
+    handler, notifier, calls = _master_order_handler(_master_with_kodex_alias())
+
+    await handler.handle_update(_order_message("KODEX 200 10주 매수"))
+
+    order = _orders(handler)["123"]
+    assert (order.stock_name, order.stock_code, order.quantity, order.order_type) == (
+        "KODEX 200",
+        "069500",
+        10,
+        "MARKET",
+    )
+    assert [args for tool, args in calls if tool == "resolve_stock_code"] == [
+        {"stock_name": "KODEX 200"}
+    ]
+    assert notifier.messages[-1].startswith("KODEX 200 매수 주문 확인")
+
+
+@pytest.mark.asyncio
+async def test_natural_limit_order_with_numeric_suffix_name():
+    """자연어 지정가 주문도 표지대로 읽힌다 — ``KODEX 200 10주 30,000원에 매수`` (#387)."""
+    handler, _, _ = _master_order_handler(_real_master())
+
+    await handler.handle_update(_order_message("KODEX 200 10주 30,000원에 매수"))
+
+    order = _orders(handler)["123"]
+    assert (order.stock_code, order.quantity, order.price, order.order_type) == (
+        "069500",
+        10,
+        30000,
+        "LIMIT",
+    )
 
 
 # ---------------------------------------------------------------------------

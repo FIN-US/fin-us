@@ -606,6 +606,28 @@ class _TextConfirm:
     message_id: int | None
 
 
+@dataclass(frozen=True)
+class OrderReading:
+    """주문 명령 인자를 읽는 한 가지 방법 (#387).
+
+    ``/buy KODEX 200 10``은 위치만으로는 두 가지로 읽힌다 — ``KODEX`` 200주 지정가 10원과
+    ``KODEX 200`` 10주 시장가. 파서는 가능한 해석을 전부 이것으로 내고, 어느 쪽인지는
+    _resolve_order_reading이 종목 마스터로 정한다. ``price``는 MARKET이면 0이다.
+    """
+
+    stock_name: str
+    quantity: int
+    price: int
+    order_type: OrderType
+
+
+# mcp-trading/stock-master.js resolveStock이 "마스터에 그런 이름이 없다"로 끝날 때 오류 문구의
+# 고정 부분 (#387). run_mcp_tool은 도구 오류와 연결 실패를 같은 HTTPException으로 올리므로
+# "종목 없음"을 가를 근거가 이 문구뿐이다. 문구가 바뀌어 여기서 못 알아보면 그 해석은 "확인
+# 실패"로 읽혀 주문을 진행하지 않는 쪽으로 틀린다. test_telegram_commands가 JS 원문과 대조한다.
+STOCK_NOT_FOUND_ERROR_MARKER = "의 종목 코드를 찾을 수 없습니다"
+
+
 def _telegram_int(value: Any) -> int | None:
     """update의 정수 식별자만 통과시킨다. bool은 int의 하위 타입이라 따로 막는다.
 
@@ -739,10 +761,14 @@ class TelegramCommandHandler:
             await self._handle_advise(argument, str(chat.get("id", "")).strip())
             return
         if self._matches_command(command, bot_username, "/buy"):
-            await self._handle_order_command("BUY", argument, str(chat.get("id", "")).strip())
+            await self._handle_order_command(
+                "BUY", self._order_argument_readings(argument), str(chat.get("id", "")).strip()
+            )
             return
         if self._matches_command(command, bot_username, "/sell"):
-            await self._handle_order_command("SELL", argument, str(chat.get("id", "")).strip())
+            await self._handle_order_command(
+                "SELL", self._order_argument_readings(argument), str(chat.get("id", "")).strip()
+            )
             return
         if self._matches_command(command, bot_username, "/confirm"):
             await self._handle_confirm(
@@ -769,10 +795,10 @@ class TelegramCommandHandler:
                 await self._send_text_or_raise(NATURAL_ORDER_HELP)
                 return
 
-            side, order_argument = natural_order
+            side, reading = natural_order
             await self._handle_order_command(
                 side,
-                order_argument,
+                [reading],
                 str(chat.get("id", "")).strip(),
             )
             return
@@ -1411,15 +1437,19 @@ class TelegramCommandHandler:
                 logger.error("제안 프롬프트 미전달 후 대기 주문 정리 실패: %s", exc)
 
     async def _handle_order_command(
-        self, side: OrderSide, argument: str, chat_id: str
+        self, side: OrderSide, readings: list[OrderReading], chat_id: str
     ) -> None:
+        """주문 확인 대기를 만든다. ``readings``는 인자를 읽을 수 있는 해석 전부다 (#387).
+
+        /buy·/sell은 _order_argument_readings가 위치로 가능한 해석을 모두 내고, 자연어 주문은
+        ``주``·``원`` 표지로 이미 확정한 해석 하나를 넘긴다. 어느 해석으로 주문을 만들지는
+        _resolve_order_reading이 종목 마스터로 정한다 — 두 경로가 같은 판정을 지난다.
+        """
         usage = BUY_COMMAND_HELP if side == "BUY" else SELL_COMMAND_HELP
-        parsed = self._parse_order_argument(argument)
-        if parsed is None:
+        if not readings:
             await self._send_text_or_raise(usage)
             return
 
-        stock_name, quantity, price, order_type = parsed
         now = self.now_factory()
         if not is_korean_market_open(now):
             await self._send_text_or_raise(
@@ -1441,11 +1471,15 @@ class TelegramCommandHandler:
 
         await self.notifier.send_chat_action("typing")
         try:
-            resolved = await self.mcp_runner(
-                TRADING_MCP_PARAMS,
-                "resolve_stock_code",
-                {"stock_name": stock_name},
-            )
+            chosen = await self._resolve_order_reading(side, readings)
+            if chosen is None:
+                # 두 해석이 모두 실재 종목이다. 안내는 이미 나갔다.
+                return
+            reading, resolved = chosen
+            stock_name = reading.stock_name
+            quantity = reading.quantity
+            price = reading.price
+            order_type = reading.order_type
             stock_code = self._extract_stock_code(str(resolved))
             # 사용자가 코드를 직접 입력해도 해석된 종목명을 쓴다. 원문(stock_name)을 그대로
             # 넣으면 name == code가 되어 정상 종목에도 미해석 경고가 뜬다(#139 리뷰).
@@ -1496,8 +1530,8 @@ class TelegramCommandHandler:
                 self.mcp_runner(TRADING_MCP_PARAMS, "get_balance", {}),
             )
         except TelegramSendError:
-            # 위 검증 실패 메시지(종목코드 미확인·미등록 종목·주문 불가 코드)의 전송이
-            # 실패한 경우다. 전송 실패는 "이 명령을 처리하다 생긴 오류"가 아니라 "사용자에게
+            # 위 검증 실패 메시지(두 해석 모호(#387)·종목코드 미확인·미등록 종목·주문 불가 코드)의
+            # 전송이 실패한 경우다. 전송 실패는 "이 명령을 처리하다 생긴 오류"가 아니라 "사용자에게
             # 말을 걸 수 없는 상태"라 사용자 메시지로 변환하는 것 자체가 무의미하다.
             #
             # 이 분기가 막는 것은 폴러가 실패를 못 보는 것이 아니다 — 변환한 메시지가
@@ -1862,30 +1896,140 @@ class TelegramCommandHandler:
             logger.error("체결 통지 마킹 실패 — 중복 배달 가능 (trade_id=%s): %s", trade_id, exc)
             delivery_metrics.record_failure("fill_mark", trade_id=trade_id)
 
-    def _parse_order_argument(self, argument: str) -> tuple[str, int, int, OrderType] | None:
+    def _order_argument_readings(self, argument: str) -> list[OrderReading]:
+        """/buy·/sell 인자를 위치로 읽을 수 있는 해석을 **전부** 돌려준다 (#387).
+
+        형식은 ``<종목명> <수량> [지정가]``이다. 끝 토큰이 양의 정수가 아니면 해석이 없다(빈 목록).
+
+        끝 두 토큰이 모두 양의 정수면 해석이 둘이다. 예전에는 무조건 지정가로 읽어, 종목명이
+        숫자로 끝나는 ``/buy KODEX 200 10``이 ``KODEX`` 200주 지정가 10원이 됐다.
+
+        1. 지정가: 앞부분이 종목명, 끝에서 둘째가 수량, 끝이 지정가.
+        2. 시장가: 끝에서 둘째까지가 종목명, 끝이 수량.
+
+        여기서는 고르지 않는다. 종목명이 실제로 해석되는지는 파서가 알 수 없으므로
+        _resolve_order_reading이 종목 마스터로 정한다. 순서는 예전 해석(지정가)이 먼저이고,
+        둘 다 해석되지 않을 때 실패 사유를 이 첫 해석으로 알린다(예전과 같은 안내).
+        """
         parts = argument.split()
         if len(parts) < 2:
-            return None
+            return []
 
         last_value = self._parse_positive_int(parts[-1])
         if last_value is None:
-            return None
+            return []
 
+        readings: list[OrderReading] = []
         previous_value = self._parse_positive_int(parts[-2]) if len(parts) >= 3 else None
-        if previous_value is None:
-            stock_name = " ".join(parts[:-1]).strip()
-            quantity = last_value
-            price = 0
-            order_type: OrderType = "MARKET"
-        else:
-            stock_name = " ".join(parts[:-2]).strip()
-            quantity = previous_value
-            price = last_value
-            order_type = "LIMIT"
+        if previous_value is not None:
+            readings.append(
+                OrderReading(
+                    stock_name=" ".join(parts[:-2]),
+                    quantity=previous_value,
+                    price=last_value,
+                    order_type="LIMIT",
+                )
+            )
+        readings.append(
+            OrderReading(
+                stock_name=" ".join(parts[:-1]),
+                quantity=last_value,
+                price=0,
+                order_type="MARKET",
+            )
+        )
+        return readings
 
-        if not stock_name:
+    async def _resolve_order_reading(
+        self, side: OrderSide, readings: list[OrderReading]
+    ) -> tuple[OrderReading, str] | None:
+        """해석 중 종목 마스터가 실제로 해석하는 것 하나와 그 resolve_stock_code 응답을 고른다 (#387).
+
+        해석마다 종목명을 resolve_stock_code로 확인한다(동시 호출). 판정은 fail-closed다.
+
+        1. 둘 이상이 실재 종목으로 해석되면 추측하지 않는다. 두 해석을 종목코드와 함께 보여 주고
+           종목코드로 다시 입력하라고 안내한 뒤 None — 주문을 만들지 않는다.
+        2. 어느 해석이 "종목 없음"이 아닌 이유(연결 실패·타임아웃·마스터 안의 이름 중복 등)로
+           확인되지 않으면 그 예외를 올린다. 모호함이 없다는 것을 증명하지 못했기 때문이다.
+           호출부는 이것을 "주문 준비 실패"로 알린다.
+        3. 하나만 해석되면(나머지는 "종목 없음"이 확실) 그 해석이다.
+        4. 아무것도 해석되지 않으면 첫 해석의 결과를 돌려준다 — 호출부가 예전과 같은 사유
+           (종목코드 미확인·미등록 종목)로 알린다. 첫 해석이 예외였으면 2에서 이미 올라갔거나
+           "종목 없음" 예외라 여기서 올린다.
+
+        "해석됨"은 응답에서 종목코드를 뽑을 수 있고 UNKNOWN 에코가 아닌 것이다. "종목 없음"은
+        코드를 못 뽑았거나, UNKNOWN 에코이거나, resolveStock의 미발견 오류(STOCK_NOT_FOUND_ERROR_MARKER)다.
+
+        해석이 하나뿐이면(끝 토큰 하나만 정수, 자연어 주문) 1·3이 성립할 수 없고 결과는 예전과 같다.
+        """
+        results = await asyncio.gather(
+            *(
+                self.mcp_runner(
+                    TRADING_MCP_PARAMS, "resolve_stock_code", {"stock_name": reading.stock_name}
+                )
+                for reading in readings
+            ),
+            return_exceptions=True,
+        )
+        for result in results:
+            # CancelledError 같은 BaseException은 판정 대상이 아니다. 삼키면 종료가 막힌다.
+            if isinstance(result, BaseException) and not isinstance(result, Exception):
+                raise result
+
+        found: list[tuple[OrderReading, str]] = []
+        for reading, result in zip(readings, results):
+            if isinstance(result, BaseException):
+                continue
+            raw = str(result)
+            if self._extract_stock_code(raw) is not None and not _is_unresolved_echo(raw):
+                found.append((reading, raw))
+
+        if len(found) >= 2:
+            logger.warning(
+                "주문 인자가 두 실재 종목으로 읽혀 주문을 만들지 않는다 (#387): %s",
+                [(reading.stock_name, raw) for reading, raw in found],
+            )
+            await self._send_text_or_raise(self._format_ambiguous_order_readings(side, found))
             return None
-        return stock_name, quantity, price, order_type
+
+        for result in results:
+            if isinstance(result, Exception) and not self._is_stock_not_found_error(result):
+                raise result
+
+        if found:
+            return found[0]
+
+        first = results[0]
+        if isinstance(first, Exception):
+            raise first
+        return readings[0], str(first)
+
+    def _is_stock_not_found_error(self, exc: Exception) -> bool:
+        """resolve_stock_code가 "마스터에 그런 종목이 없다"로 실패했는가 (#387)."""
+        return STOCK_NOT_FOUND_ERROR_MARKER in str(getattr(exc, "detail", exc))
+
+    def _format_ambiguous_order_readings(
+        self, side: OrderSide, found: list[tuple[OrderReading, str]]
+    ) -> str:
+        """두 해석이 모두 실재 종목일 때의 안내 (#387).
+
+        해석마다 종목명·종목코드·수량·가격을 보여 주고, 그 해석을 종목코드로 쓴 명령을 붙인다.
+        종목코드 명령은 이름 끝 숫자가 없어 다시 모호해지지 않는다.
+        """
+        command = "/buy" if side == "BUY" else "/sell"
+        lines = ["주문 불가: 입력이 두 가지로 읽혀 주문을 만들지 않았습니다."]
+        for reading, raw in found:
+            code = self._extract_stock_code(raw) or ""
+            name = self._extract_stock_name(raw) or reading.stock_name
+            if reading.order_type == "LIMIT":
+                detail = f"{reading.quantity:,}주, 지정가 {reading.price:,}원"
+                example = f"{command} {code} {reading.quantity} {reading.price}"
+            else:
+                detail = f"{reading.quantity:,}주, 시장가"
+                example = f"{command} {code} {reading.quantity}"
+            lines.append(f"- {name}({code}) {detail} → {example}")
+        lines.append("원하는 주문을 종목코드로 다시 입력하세요.")
+        return "\n".join(lines)
 
     def _looks_like_natural_order(self, text: str) -> bool:
         return (
@@ -1893,7 +2037,13 @@ class TelegramCommandHandler:
             and re.search(r"\d[\d,]*\s*주", text) is not None
         )
 
-    def _parse_natural_order_text(self, text: str) -> tuple[OrderSide, str] | None:
+    def _parse_natural_order_text(self, text: str) -> tuple[OrderSide, OrderReading] | None:
+        """자연어 주문에서 (방향, 해석)을 뽑는다.
+
+        수량은 ``주``, 지정가는 ``원`` 표지로 갈리므로 해석이 하나로 정해진다. 뽑은 값을 문자열로
+        다시 이어 붙여 /buy 파서에 넘기면 안 된다 — ``KODEX 200 10주 매수``가 ``KODEX 200 10``이
+        되어 위치 해석의 모호함을 새로 만든다(#387). 해석 그대로 넘긴다.
+        """
         buy_count = text.count("매수")
         sell_count = text.count("매도")
         if buy_count + sell_count != 1:
@@ -1928,9 +2078,12 @@ class TelegramCommandHandler:
         if not stock_name:
             return None
 
-        if price > 0:
-            return side, f"{stock_name} {quantity} {price}"
-        return side, f"{stock_name} {quantity}"
+        return side, OrderReading(
+            stock_name=stock_name,
+            quantity=quantity,
+            price=price,
+            order_type="LIMIT" if price > 0 else "MARKET",
+        )
 
     def _parse_positive_int(self, raw_value: str) -> int | None:
         try:

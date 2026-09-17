@@ -1183,6 +1183,10 @@ async def test_buy_command_second_call_rejected_after_race():
     """
     async def mcp_runner(server_params, tool_name, arguments):
         if tool_name == "resolve_stock_code":
+            # 실제 resolveStock처럼 완전 일치만 해석한다. 아무 이름이나 해석하면 "/buy 삼성전자 1
+            # 75000"의 시장가 해석("삼성전자 1")까지 종목이 되어 모호함 안내로 끝난다 (#387).
+            if arguments["stock_name"] != "삼성전자":
+                raise RuntimeError(f"'{arguments['stock_name']}'의 종목 코드를 찾을 수 없습니다.")
             return "삼성전자 (005930, KOSPI)"
         if tool_name == "get_stock_quote":
             return "현재가: 75,000원"
