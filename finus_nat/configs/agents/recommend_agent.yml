@@ -41,7 +41,25 @@ functions:
       도구가 JSON을 반환해도 사용자에게는 요약·표 형태의 한국어로 설명합니다.
 
 
-  recommend_branch_agent:
+  recommend_gated_branch_agent:
     _type: fe_branch
     inner_function_name: recommend_agent
     tool_description: "Recommendations: KIS MCP context, Fin-Us mcp-news headlines, and user memory when available."
+
+  # 라우터가 부르는 추천 브랜치 (#397). 저장된 투자 성향을 코드가 읽어, 성향이 있을 때만 아래
+  # 논조 지시를 현재 요청 앞에 붙인 뒤 위 fe_branch(도구 강제 게이트)로 넘긴다. 성향이 없거나
+  # 메모리가 꺼져 있으면 요청을 손대지 않고 그대로 넘긴다 — 미설정 사용자의 추천은 기존과 같다.
+  # 지시문에는 숫자를 넣지 않는다(설정 검증이 거부한다): 게이트는 요청에 등장한 수치를 근거로 친다.
+  recommend_branch_agent:
+    _type: finus_risk_profile_branch
+    inner_function_name: recommend_gated_branch_agent
+    preferences_function_name: user_preferences
+    tool_description: "Recommendations: KIS MCP context, Fin-Us mcp-news headlines, and the user's stored risk profile."
+    conservative_guidance: |
+      추천 논조: 안정형 사용자입니다. 후보를 제시할 때 변동성·하방 위험·손실 가능성을 기회 요인보다 먼저 짚으세요.
+      최근 급등락, 실적 불확실성, 부정적 뉴스처럼 흔들릴 수 있는 이유를 먼저 적고 그다음에 매력 요인을 적으세요.
+      변동성이 큰 종목만 조건에 맞는다면 그 사실을 분명히 경고하고, 상대적으로 안정적인 대안이 있으면 함께 제시하세요.
+    aggressive_guidance: |
+      추천 논조: 공격형 사용자입니다. 후보를 제시할 때 성장 모멘텀·상승 촉매·수급 개선 같은 기회 요인을 먼저 짚으세요.
+      변동성이 크다는 이유만으로 후보에서 빼지 말고, 위험 요인은 기회 요인 뒤에 간결하게 덧붙이세요.
+      위험 요인을 생략하지는 마세요.

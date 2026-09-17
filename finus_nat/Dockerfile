@@ -53,5 +53,6 @@ RUN python scripts/patch_vendor.py --venv /workspace/finus_nat/.venv \
 
 EXPOSE 8000
 
+# config 선택(FINUS_MEM0_ENABLED, #397)은 엔트리포인트가 FINUS_NAT_CONFIG_FILE로 내보낸다.
 ENTRYPOINT ["/usr/local/bin/finus-nat-entrypoint.sh"]
-CMD ["sh", "-lc", "uv run --project . nat start fastapi --config_file \"${FINUS_NAT_CONFIG_FILE:-configs/router_nomemory.yml}\" --host 0.0.0.0 --port 8000"]
+CMD ["sh", "-lc", "uv run --project . nat start fastapi --config_file \"${FINUS_NAT_CONFIG_FILE:-configs/router.yml}\" --host 0.0.0.0 --port 8000"]

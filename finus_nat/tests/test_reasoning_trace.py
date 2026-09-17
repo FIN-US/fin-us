@@ -645,7 +645,10 @@ def _compiled_vendor_graph(transcript_fn, capture_error: Exception | None = None
 
 @asynccontextmanager
 async def _memory_chain(tmp_path, inner_response_fn, capture_error: Exception | None = None):
-    """router.yml 체인: trace_agent → auto_memory_agent(vendor) → transcript_agent → 브랜치.
+    """#397 이전 router.yml 체인: trace_agent → auto_memory_agent(vendor) → transcript_agent → 브랜치.
+
+    지금 router.yml은 이 래퍼를 쓰지 않지만(대화 전문을 저장하므로), str 시그니처 래퍼가 최상위
+    아래에 끼어도 각주가 살아남는지는 여전히 지킬 가치가 있어 남긴다.
 
     가운데 vendor 흉내는 실제 `_response_fn(input_message: str) -> str` 시그니처와
     `graph.ainvoke(state)` 홉을 함께 재현한다 — NAT 타입 변환이 요청을 문자열로

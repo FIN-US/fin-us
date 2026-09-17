@@ -1,12 +1,11 @@
 base: agents/verifier_agent.yml
 # base 사슬: verifier_agent.yml -> diary_agent.yml -> ... -> common.yml (#299).
 # 검증자 config를 diary와 라우터 사이에 끼워, 라우터가 로드하는 설정에
-# 주문 보조용 엔드포인트 2개와 order_verifier가 함께 들어오게 한다.
+# backend 전용 엔드포인트(주문 보조 2개, 사용자 선호 1개)와 order_verifier가 함께 들어오게 한다.
 # supervisor의 브랜치 6개는 불변이다 — 검증자는 브랜치가 아니며 채팅으로 도달할 수 없다.
 
-# Mem0 메모리 없이 라우터 에이전트 설정 (이전과 같은 방식)
-# Mem0 self-hosted server가 docker에 올라가있지 않은 경우 사용합니다.
-# finus_nat/scripts/run.sh에서 기본으로 Mem0를 활성화하지 않고 빌드합니다. --memory 옵션을 추가하면 config/router.yml을 사용합니다.
+# Mem0 메모리 없이 라우터 에이전트 설정. 사용자 선호(투자 성향)를 저장하지도 읽지도 않습니다.
+# 기본은 메모리 모드(router.yml)이고, FINUS_MEM0_ENABLED=0 이나 run.sh --nomemory 로 이 파일을 씁니다(#397).
 llms:
   router_openai_llm:
     _type: openai

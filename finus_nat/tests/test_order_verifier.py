@@ -369,7 +369,10 @@ def test_order_assist_endpoints_are_registered(config_path: Path):
     config = _load(config_path)
     endpoints = {ep.path: ep for ep in config.general.front_end.endpoints}
 
-    assert endpoints.keys() == {"/v1/propose-order", "/v1/verify-order"}
+    # 사용자 선호 엔드포인트(#397)도 같은 리스트에 있다 — endpoints는 base 병합이 덮어쓰기라
+    # 정의 파일이 하나여야 한다. 그 엔드포인트가 주문 보조 둘을 지우지 않았는지가 여기서의 요점이다.
+    assert endpoints.keys() == {"/v1/propose-order", "/v1/verify-order", "/v1/user-preferences"}
+    assert endpoints["/v1/user-preferences"].function_name == "user_preferences"
     assert endpoints["/v1/propose-order"].function_name == "strategy_branch_agent"
     assert endpoints["/v1/verify-order"].function_name == "order_verifier"
     assert endpoints["/v1/propose-order"].method == "POST"

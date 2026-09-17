@@ -32,6 +32,7 @@ from .stock_code import (
 )
 from .pii_mask import mask_pii, unmask_pii
 from .pii_registry import active_mapping
+from .user_preferences import nat_user_id_for_conversation
 
 logger = logging.getLogger(__name__)
 _NAT_RESPONSE_LOG_PREVIEW_CHARS = 800
@@ -1023,6 +1024,11 @@ async def _llm_nat_chat(user_msg: str, *, conversation_id: str | None = None) ->
         "Content-Type": "application/json",
         "conversation-id": cid,
     }
+    # 텔레그램 채팅 스레드일 때만 사용자 식별자를 싣는다 — NAT 추천 브랜치가 이 값으로 저장된
+    # 투자 성향을 읽는다(#397). 다른 스레드(스케줄러·실적·API)는 헤더가 없어 성향 없이 동작한다.
+    user_id = nat_user_id_for_conversation(cid)
+    if user_id is not None:
+        headers["x-user-id"] = user_id
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as client:
             resp = await client.post(

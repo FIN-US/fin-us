@@ -157,16 +157,19 @@ async def test_unknown_level_argument_shows_usage_without_storing():
 
 
 @pytest.mark.asyncio
-async def test_start_asks_one_question_and_stores_nothing():
-    """버튼을 누르지 않고 지나간 사용자도 기본값(초보)으로 동작해야 한다."""
+async def test_start_asks_the_level_question_first_and_stores_nothing():
+    """버튼을 누르지 않고 지나간 사용자도 기본값(초보)으로 동작해야 한다.
+
+    /start는 투자 성향 문항도 이어서 보낸다(#397) — 그 문항은 test_telegram_risk.py가 본다.
+    """
     notifier = FakeNotifier()
     state = FakeState()
 
     await _send(_handler(notifier, state), "/start")
 
-    assert LEVEL_ONBOARDING_QUESTION in notifier.messages[-1]
+    assert LEVEL_ONBOARDING_QUESTION in notifier.messages[0]
     assert state.writes == []
-    assert len(notifier.reply_markups[-1]["inline_keyboard"][0]) == 2
+    assert len(notifier.reply_markups[0]["inline_keyboard"][0]) == 2
 
 
 @pytest.mark.asyncio

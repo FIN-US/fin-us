@@ -23,7 +23,7 @@ functions:
     trading_tool_name: ${FINUS_KIS_TRADING_TOOL_NAME:-domestic_stock}
 
   # router_nomemory.yml에서는 memory 도구를 no-op으로 둡니다.
-  # router.yml(memory 모드)은 같은 이름을 실제 Mem0 도구로 덮어씁니다.
+  # router.yml(memory 모드)은 같은 이름을 사용자 선호 메모리 도구로 덮어씁니다(#397).
   add_user_memory:
     _type: finus_memory_disabled
     description: "Memory disabled: acknowledge that durable memory is unavailable and continue with live context only."
@@ -31,6 +31,12 @@ functions:
   get_user_memory:
     _type: finus_memory_disabled
     description: "Memory disabled: report that no durable memory can be retrieved and continue with live context only."
+
+  # 사용자 선호(투자 성향) 저장소 (#397). backend의 /v1/user-preferences 엔드포인트와 추천 브랜치가
+  # 이 이름을 쓴다. 여기서는 꺼진 구현이고(항상 enabled=false, 아무것도 저장하지 않음),
+  # router.yml(메모리 모드)이 같은 이름을 mem0 로컬 메모리로 덮어쓴다.
+  user_preferences:
+    _type: finus_user_preferences_disabled
 
   # fin-us/mcp-news stdio: get_market_news
   mcp-news-get-market-news:
