@@ -40,4 +40,7 @@ COPY . .
 
 EXPOSE 8000
 
-CMD ["uv", "run", "--project", "./backend", "--locked", "--no-sync", "uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+# 개발용 --reload는 기본 CMD에 두지 않는다(#396). 리로드는 파일 저장 하나로 스케줄러와
+# 텔레그램 폴러까지 재시작시키므로, 필요할 때만 docker-compose.override.example.yml로 켠다.
+# 그 예시의 command는 이 줄 끝에 --reload만 붙인 것이어야 한다(test_compose_ports.py가 고정).
+CMD ["uv", "run", "--project", "./backend", "--locked", "--no-sync", "uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000"]

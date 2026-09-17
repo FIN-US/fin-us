@@ -107,8 +107,6 @@ services:
       - ./.env
     environment:
       FINUS_VENDOR_ROOT: /workspace
-      FINUS_ROOT: /workspace
-      FINUS_ENV_PATH: /workspace/.env
       FINUS_BACKEND_URL: http://backend:8000
     extra_hosts:
       - "host.docker.internal:host-gateway"

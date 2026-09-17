@@ -2783,6 +2783,8 @@ class TelegramCommandPoller:
         # 실행돼 "폐기가 미뤄짐"에 그쳤다. 리셋 계기는 배포가 아니라 Dockerfile의
         # uvicorn --reload + bind mount라 backend 파일 저장 하나면 되고, 예산(일반 65초·
         # 전송 실패 335초)보다 잦은 재시작이 이어지면 poison은 영원히 폐기되지 않았다.
+        # (#396에서 기본 CMD의 --reload는 뺐다. override 예시로 리로드를 켠 개발 구성과
+        # 잦은 수동 재시작에는 같은 논리가 그대로 걸린다.)
         #
         # 방향이 offset과 반대라는 점은 그대로다: offset은 "자신을 poison에 붙들어 매는
         # 상태"이고 이건 "poison을 포기하게 해주는 유일한 상태"다 (PR #251 리뷰). 그래서

@@ -3722,7 +3722,8 @@ async def test_poison_budget_survives_restarts_faster_than_the_window(monkeypatc
     #248은 예산을 일부러 영속화하지 않았고, #259 1단계가 배치를 poison에서 끊게 만들면서
     그 선택의 대가가 "폐기가 미뤄짐"에서 "그 채팅의 모든 명령이 정지"로 커졌다. 리셋 계기는
     배포가 아니라 backend/Dockerfile의 uvicorn --reload + bind mount라 파일 저장 하나면
-    되므로, 아래처럼 매 프로세스가 재시도 한 번 만에 죽는 상황이 현실적이다.
+    되므로, 아래처럼 매 프로세스가 재시도 한 번 만에 죽는 상황이 현실적이다. (#396에서 기본
+    CMD의 --reload는 뺐지만, override 예시로 리로드를 켠 개발 구성에서는 그대로다.)
 
     각 프로세스는 sleep 한 번(stop_after=1) 만에 죽으므로 혼자서는 60초 창을 절대 채우지
     못한다. 예산이 재시작을 넘지 못하면 41은 영원히 재시도되고 42는 영원히 실행되지 않는다.

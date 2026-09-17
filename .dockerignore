@@ -11,3 +11,13 @@
 **/npm-debug.log*
 **/__pycache__
 **/.pytest_cache
+
+# 빌드 컨텍스트가 루트(.)라 backend·finus-nat 빌드마다 아래도 데몬으로 전송된다(#396).
+# 이미지는 둘 다 쓰지 않는다. Unity 로컬 캐시는 frontend/.gitignore가 이미 버리는 것이고,
+# .claude/worktrees에는 에이전트 워크트리(저장소 사본)가 통째로 쌓인다.
+frontend/Library
+frontend/Temp
+frontend/Logs
+frontend/UserSettings
+frontend/obj
+.claude

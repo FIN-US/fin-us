@@ -337,6 +337,8 @@ class TelegramPollerState:
     **그동안 그 채팅의 모든 명령이 정지**로 커졌다. backend/Dockerfile의 uvicorn --reload +
     bind mount 때문에 파일 저장 하나가 리셋 계기라, 예산(65초·335초)보다 잦은 재시작이
     이어지면 poison이 영원히 폐기되지 않는다. 그래서 #350에서 담기로 정했다.
+    (#396에서 기본 CMD의 --reload는 뺐다. docker-compose.override.example.yml로 리로드를
+    켠 개발 구성과, 잦은 수동 재시작에는 같은 논리가 그대로 걸린다.)
 
     dict가 아니라 순서 있는 튜플인 이유는 frozen dataclass의 필드로 쓰기 때문이다. 원소가
     실제로는 최대 1개(폴러 _forget_passed_updates 독스트링 참조)여도 목록 형태를 쓰는 것은
