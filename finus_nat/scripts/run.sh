@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # finus_nat/scripts/run.sh 으로 실행하면 지속적으로 대화할 수 있습니다.
-# --memory 옵션을 사용하면 finus_nat/configs/router.yml을 사용합니다.
-# --nomemory 옵션을 사용하면 finus_nat/configs/router_nomemory.yml을 사용합니다. 기본적으로 finus_nat/configs/router_nomemory.yml을 사용합니다.
+# 기본은 finus_nat/configs/router.yml(사용자 선호 메모리, mem0 로컬 모드)입니다(#397).
+# FINUS_MEM0_ENABLED=0(false/no/off)이면 finus_nat/configs/router_nomemory.yml을 사용합니다.
+# --memory / --nomemory 옵션은 위 기본값과 FINUS_NAT_CONFIG_FILE보다 우선합니다.
 # --once 옵션을 사용하면 한번 실행하고 워크플로우를 종료합니다.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -41,10 +42,23 @@ if [[ -z "${OPENAI_API_BASE_URL:-}" && -n "${OPENAI_BASE_URL:-}" ]]; then
   export OPENAI_API_BASE_URL="${OPENAI_BASE_URL}"
 fi
 
-# Mem0 등 NAT 전용 비밀(MEM0_API_KEY, FINUS_MEM0_*, FINUS_KIS_TRADING_MCP_URL,
-# FINUS_BACKEND_URL)도 fin-us/.env 로 통합되었습니다. 별도 finus_nat/.env 는 더 이상 사용하지 않습니다.
+# NAT 전용 설정(FINUS_MEM0_*, FINUS_KIS_TRADING_MCP_URL, FINUS_BACKEND_URL)도 fin-us/.env 로
+# 통합되었습니다. 별도 finus_nat/.env 는 더 이상 사용하지 않습니다.
 
-_default_config="${FE_PKG}/configs/router_nomemory.yml"
+# 메모리 플래그 (#397). 모르는 값은 켜짐으로 넘기지 않고 멈춘다 — 오타(예: "flase")가 조용히
+# 켜짐이 되면 끄려던 사람의 의도와 반대로 사용자 선호가 저장된다.
+case "$(printf '%s' "${FINUS_MEM0_ENABLED:-1}" | tr '[:upper:]' '[:lower:]')" in
+  1|true|yes|on)
+    _default_config="${FE_PKG}/configs/router.yml"
+    ;;
+  0|false|no|off)
+    _default_config="${FE_PKG}/configs/router_nomemory.yml"
+    ;;
+  *)
+    echo "오류: FINUS_MEM0_ENABLED 값을 해석할 수 없습니다: '${FINUS_MEM0_ENABLED}' (1/0, true/false, yes/no, on/off)" >&2
+    exit 1
+    ;;
+esac
 _CONFIG_FILE="${FINUS_NAT_CONFIG_FILE:-${_default_config}}"
 _CHAT_PORT="${FINUS_CHAT_PORT:-8765}"
 _CHAT_URL="${FINUS_NAT_URL:-}"
@@ -79,13 +93,14 @@ while [[ $# -gt 0 ]]; do
 Usage: ./scripts/run.sh [--memory|--nomemory] [--once] [chat|-chat|-i|--interactive] [initial_message]
 
 Options:
-  --memory     Use Mem0-enabled router config (${FE_PKG}/configs/router.yml)
-  --nomemory   Use no-memory router config (${FE_PKG}/configs/router_nomemory.yml, default)
+  --memory     Use user-memory router config (${FE_PKG}/configs/router.yml, default)
+  --nomemory   Use no-memory router config (${FE_PKG}/configs/router_nomemory.yml)
   --once       Run single-turn mode (nat run --input ...) and exit
   -h, --help   Show this help message
 
 Env override:
-  FINUS_NAT_CONFIG_FILE=<path> is applied first, then CLI option can override it.
+  FINUS_MEM0_ENABLED=0 selects the no-memory config as the default.
+  FINUS_NAT_CONFIG_FILE=<path> overrides that default, then CLI option can override it.
 EOF
       exit 0
       ;;
@@ -104,6 +119,11 @@ done
 # /v1/ping 검증이 없어서, 벤더 패치(scripts/patch_vendor.py)가 안 붙으면 Mem0
 # 경로가 깨진다. 패치 정의는 Dockerfile과 공유하는 scripts/patch_vendor.py
 # 하나에만 둔다.
+#
+# #397 이후 기본 config(router.yml)는 vendor mem0_memory(HTTP 클라이언트)가 아니라
+# finus_mem0_local_memory(프로세스 안 로컬 모드)를 쓴다. 그래서 두 기본 config 모두 아래
+# 게이트가 3(미사용)을 돌려주고, 이 게이트는 vendor mem0_memory를 쓰는 사용자 지정 config
+# (FINUS_NAT_CONFIG_FILE)에서만 패치를 강제한다. 아래 "--nomemory(기본값)" 서술은 그 이전 기준이다.
 #
 # 이 게이트는 파싱이 끝나 최종값이 된 _CONFIG_FILE(이 실행이 실제로 무엇을
 # 쓰는지)로 판단한다. 예전에는 env(FINUS_MEM0_HOST/MEM0_API_KEY) 존재만 보고

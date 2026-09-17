@@ -89,14 +89,26 @@ from .stock_code import (
     is_orderable_stock_code,
 )
 from .order_assist import ProposalTrigger, parse_current_price, run_order_assist
+from .user_preferences import (
+    RISK_AGGRESSIVE,
+    RISK_CLEAR,
+    RISK_CONSERVATIVE,
+    RISK_PROFILE_LABELS,
+    UserMemoryDisabled,
+    normalize_risk_choice,
+    request_risk_profile,
+    telegram_user_id,
+)
 
 logger = logging.getLogger(__name__)
 
 ALERT_COMMAND_HELP = "사용법: /alerts urgent | all | off | status"
 LEVEL_COMMAND_HELP = "사용법: /level 초보 | 중급"
 LEVEL_ONBOARDING_QUESTION = "주식 투자 얼마나 익숙하세요?"
-# 온보딩은 이 한 문항이 전부다. 지식 퀴즈로 수준을 판정하지 않는다 — 봇이 사용자를 시험하는
-# 관계가 되는 순간 설명을 켜 두는 것이 창피한 일이 되고, 그러면 초보 모드가 쓰이지 않는다.
+# 온보딩은 자기 신고 문항 두 개(수준·투자 성향)가 전부다. 지식 퀴즈로 수준을 판정하지 않는다 —
+# 봇이 사용자를 시험하는 관계가 되는 순간 설명을 켜 두는 것이 창피한 일이 되고, 그러면 초보 모드가
+# 쓰이지 않는다. 두 문항은 메시지를 나눈다: 버튼 묶음이 메시지마다 하나라, 한 메시지에 합치면
+# 어느 줄이 어느 질문의 답인지 흐려진다.
 START_MESSAGE = "\n".join(
     [
         "안녕하세요. 이 봇은 시세·공시·매매를 텔레그램에서 다룹니다.",
@@ -104,6 +116,21 @@ START_MESSAGE = "\n".join(
         LEVEL_ONBOARDING_QUESTION,
         "초보를 고르면 낯선 용어에 한 줄 설명이 붙습니다. 나중에 /level 로 바꿀 수 있어요.",
     ]
+)
+RISK_COMMAND_HELP = "사용법: /risk 안정형 | 공격형 | 해제"
+RISK_ONBOARDING_QUESTION = "투자할 때 어느 쪽에 더 가까우세요?"
+# 성향은 종목 추천의 논조만 바꾼다(#397). 고르지 않아도 되는 문항이라는 점을 함께 적는다 —
+# 미설정이 기존 추천과 같은 동작이다.
+START_RISK_MESSAGE = "\n".join(
+    [
+        RISK_ONBOARDING_QUESTION,
+        "안정형은 종목 추천에서 변동성 위험을 먼저, 공격형은 기회 요인을 먼저 짚어 드립니다.",
+        "고르지 않으면 지금처럼 성향 구분 없이 추천합니다. 나중에 /risk 로 바꾸거나 해제할 수 있어요.",
+    ]
+)
+RISK_MEMORY_DISABLED_TEXT = (
+    "사용자 메모리가 꺼져 있어 투자 성향을 저장하거나 불러올 수 없습니다. "
+    "종목 추천은 성향 구분 없이 동작합니다."
 )
 BUY_COMMAND_HELP = "사용법: /buy <종목명> <수량> [지정가]"
 SELL_COMMAND_HELP = "사용법: /sell <종목명> <수량> [지정가]"
@@ -154,6 +181,7 @@ CONFIRM_AUTO_PROPOSAL_BUTTON_ONLY_TEXT = (
 )
 ALERT_CALLBACK_PREFIX = "alerts:"
 LEVEL_CALLBACK_PREFIX = "level:"
+RISK_CALLBACK_PREFIX = "risk:"
 BALANCE_REFRESH_CALLBACK = "balance:refresh"
 TRADE_CALLBACK_PREFIX = "trade:"
 LOOKUP_CALLBACK_PREFIX = "lookup:"
@@ -264,6 +292,7 @@ TELEGRAM_INTERACTIVE_HELP = "\n".join(
         "사용 가능한 명령:",
         "/alerts urgent|all|off|status - Telegram 알림 모드 변경",
         "/level 초보|중급 - 용어 설명 표시 수준 변경",
+        "/risk 안정형|공격형|해제 - 종목 추천 투자 성향 설정",
         "/balance - 예수금·총자산·보유 종목 조회",
         "/watch add <종목명>|remove <종목명>|list - 관심 종목 관리",
         "/catalysts <종목명> - 예정 촉매 이벤트 조회",
@@ -291,7 +320,8 @@ TELEGRAM_BOT_COMMANDS = [
     {"command": "earnings", "description": "DART 실적·뉴스 분석"},
     {"command": "alerts", "description": "Telegram 알림 모드 변경"},
     {"command": "level", "description": "용어 설명 표시 수준 변경 (초보/중급)"},
-    {"command": "start", "description": "봇 소개와 수준 설정"},
+    {"command": "risk", "description": "종목 추천 투자 성향 설정 (안정형/공격형)"},
+    {"command": "start", "description": "봇 소개와 수준·투자 성향 설정"},
     {"command": "visualize", "description": "Unity 포트폴리오 시각화 링크"},
     {"command": "trade", "description": "매수·매도 주문 입력 안내"},
     {"command": "lookup", "description": "현재가·수급 조회 입력 안내"},
@@ -660,6 +690,7 @@ class TelegramCommandHandler:
         catalyst_repo: Any | None = None,
         mcp_runner: Callable[[Any, str, dict[str, Any]], Any] = run_mcp_tool,
         llm_runner: Callable[..., Any] = llm_chat,
+        risk_profile_client: Callable[..., Awaitable[str | None]] = request_risk_profile,
         order_gateway: Any | None = None,
         trade_recorder: TradeLedger | None = None,
         now_factory: Callable[[], datetime] | None = None,
@@ -672,6 +703,8 @@ class TelegramCommandHandler:
         self.catalyst_repo = catalyst_repo if catalyst_repo is not None else _default_catalyst_repo()
         self.mcp_runner = mcp_runner
         self.llm_runner = llm_runner
+        # NAT 사용자 선호 메모리 클라이언트(#397). 테스트가 NAT 없이 /risk를 검증하도록 주입한다.
+        self.risk_profile_client = risk_profile_client
         self.order_gateway = order_gateway
         # None을 그대로 두지 않는다 (#259 2단계). 체결 통지 outbox가 이 원장 위에 서므로,
         # 원장이 없는 핸들러는 "체결됐는데 통지가 조용히 사라지는" 배포가 된다. 프로덕션은
@@ -720,6 +753,9 @@ class TelegramCommandHandler:
             return
         if self._matches_command(command, bot_username, "/level"):
             await self._handle_level(argument)
+            return
+        if self._matches_command(command, bot_username, "/risk"):
+            await self._handle_risk(argument)
             return
         if self._matches_command(command, bot_username, "/start"):
             await self._handle_start()
@@ -915,6 +951,9 @@ class TelegramCommandHandler:
 
         if data.startswith(LEVEL_CALLBACK_PREFIX):
             await self._handle_level_callback(callback_query_id, data)
+            return
+        if data.startswith(RISK_CALLBACK_PREFIX):
+            await self._handle_risk_callback(callback_query_id, data)
             return
         if data.startswith(ALERT_CALLBACK_PREFIX):
             await self._handle_alerts_callback(callback_query_id, data)
@@ -1162,15 +1201,86 @@ class TelegramCommandHandler:
             )
 
     async def _handle_start(self) -> None:
-        """봇 소개 + 수준 1문항. /start는 텔레그램이 첫 대화에서 자동으로 보내는 명령이다 (#297).
+        """봇 소개 + 수준 1문항 + 투자 성향 1문항. /start는 텔레그램이 첫 대화에서 자동으로 보내는
+        명령이다 (#297, #397).
 
-        여기서 수준을 저장하지 않는다 — 버튼을 누르지 않고 넘어간 사용자도 기본값(초보)으로
-        동작해야 한다. 저장은 버튼 콜백이나 /level에서만 일어난다.
+        여기서 아무것도 저장하지 않는다 — 버튼을 누르지 않고 넘어간 사용자도 기본값(초보, 성향
+        미설정)으로 동작해야 한다. 저장은 버튼 콜백이나 /level·/risk에서만 일어난다. 그래서 성향
+        문항은 NAT을 부르지 않는다: NAT이 내려가 있어도 /start 자체는 실패하지 않는다.
         """
         await self._send_text_or_raise(
             START_MESSAGE,
             reply_markup=self._level_reply_markup(),
         )
+        await self._send_text_or_raise(
+            START_RISK_MESSAGE,
+            reply_markup=self._risk_reply_markup(),
+        )
+
+    async def _handle_risk(self, argument: str) -> None:
+        """/risk 안정형|공격형|해제. 인자가 없으면 현재 설정을 버튼과 함께 보여준다 (#397).
+
+        /level과 같은 모양이다. 다른 점은 저장소가 redis가 아니라 NAT 사용자 선호 메모리라는 것
+        하나다(backend/user_preferences.py). 그래서 캐시를 두지 않는다 — 이 값을 매 메시지마다
+        읽는 쪽은 backend가 아니라 NAT이다.
+        """
+        parts = argument.split()
+        if not parts:
+            await self._run_risk_request(None)
+            return
+        choice = normalize_risk_choice(parts[0])
+        if choice is None:
+            await self._send_text_or_raise(RISK_COMMAND_HELP, reply_markup=self._risk_reply_markup())
+            return
+        await self._run_risk_request(choice)
+
+    async def _handle_risk_callback(self, callback_query_id: str, data: str) -> None:
+        choice = normalize_risk_choice(data.removeprefix(RISK_CALLBACK_PREFIX))
+        if choice is None:
+            await self._answer_callback_query(callback_query_id, text="지원하지 않는 버튼입니다.")
+            return
+        await self._answer_callback_query(callback_query_id)
+        await self._run_risk_request(choice)
+
+    async def _run_risk_request(self, choice: str | None) -> None:
+        """조회(None)·저장·해제를 NAT에 보내고 결과를 알린다.
+
+        NAT 실패는 사용자 메시지로 바꾸고 삼킨다. 재시도 가능한 예외로 올리면 update 재시도가 같은
+        쓰기를 반복한다 — 멱등이긴 하지만 사용자는 같은 안내를 여러 번 받는다. 저장에 실패했는데
+        성공 문구가 나가는 경우는 없다: 성공 문구는 NAT이 돌려준 **적용 뒤의 값**으로만 만든다.
+        """
+        user_id = telegram_user_id(self.notifier.chat_id)
+        try:
+            profile = await self.risk_profile_client(user_id, choice)
+        except UserMemoryDisabled:
+            await self._send_text_or_raise(RISK_MEMORY_DISABLED_TEXT)
+            return
+        except Exception as exc:  # noqa: BLE001 — NAT 연결·응답 오류 전부 같은 안내
+            logger.warning("투자 성향 요청 실패 (choice=%s): %s", choice, exc)
+            await self._send_text_or_raise(
+                f"투자 성향을 처리하지 못했습니다: {_short_error(exc)}",
+                reply_markup=self._risk_reply_markup(),
+            )
+            return
+        await self._send_text_or_raise(
+            self._risk_result_message(choice, profile),
+            reply_markup=self._risk_reply_markup(),
+        )
+
+    def _risk_result_message(self, choice: str | None, profile: str | None) -> str:
+        if profile is None:
+            if choice == RISK_CLEAR:
+                return "투자 성향을 해제했습니다. 종목 추천을 성향 구분 없이 합니다."
+            return f"현재 투자 성향: 설정 안 함 (종목 추천을 성향 구분 없이 합니다)\n{RISK_COMMAND_HELP}"
+        label = RISK_PROFILE_LABELS[profile]
+        detail = (
+            "종목 추천에서 변동성 위험을 먼저 짚어 드립니다."
+            if profile == RISK_CONSERVATIVE
+            else "종목 추천에서 기회 요인을 먼저 짚어 드립니다."
+        )
+        if choice is None:
+            return f"현재 투자 성향: {label}. {detail}\n{RISK_COMMAND_HELP}"
+        return f"투자 성향을 {label}(으)로 저장했습니다. {detail}"
 
     async def _handle_level(self, argument: str) -> None:
         """/level 초보|중급. 인자가 없으면 현재 설정을 버튼과 함께 보여준다 (#297).
@@ -2186,6 +2296,17 @@ class TelegramCommandHandler:
                         "text": "📈 좀 해봤어요",
                         "callback_data": f"{LEVEL_CALLBACK_PREFIX}{LEVEL_INTERMEDIATE}",
                     },
+                ]
+            ]
+        }
+
+    def _risk_reply_markup(self) -> dict[str, Any]:
+        return {
+            "inline_keyboard": [
+                [
+                    {"text": "🛡️ 안정형", "callback_data": f"{RISK_CALLBACK_PREFIX}{RISK_CONSERVATIVE}"},
+                    {"text": "🚀 공격형", "callback_data": f"{RISK_CALLBACK_PREFIX}{RISK_AGGRESSIVE}"},
+                    {"text": "↩️ 설정 안 함", "callback_data": f"{RISK_CALLBACK_PREFIX}{RISK_CLEAR}"},
                 ]
             ]
         }

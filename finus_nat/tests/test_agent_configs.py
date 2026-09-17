@@ -473,21 +473,34 @@ def test_router_workflow_is_the_reasoning_trace_agent(config_path: Path):
     )
 
 
-def test_memory_router_wraps_the_transcript_agent_below_the_trace_agent():
-    """#273: router.yml의 auto_memory_agent는 workflow가 아니라 그 아래 함수여야 한다.
+@pytest.mark.parametrize("config_path", _ROUTER_PATHS, ids=[p.name for p in _ROUTER_PATHS])
+def test_router_does_not_store_conversation_text_in_memory(config_path: Path):
+    """#397: 어떤 라우터도 대화 전문을 메모리에 쓰는 구성 요소를 싣지 않는다.
 
-    체인은 finus_reasoning_trace_agent → auto_memory_agent → finus_sqlite_transcript_agent다.
-    auto_memory_agent가 다시 최상위로 올라가면 각주가 그 str 경계에서 사라진다.
+    vendor ``auto_memory_agent``는 사용자 발화와 답변 전문(잔고·금액 포함)을 매 턴 저장하고,
+    vendor ``add_memory``는 LLM이 고른 자유 텍스트를 저장한다. 메모리 모드에서 쓰기 경로는
+    허용목록 게이트가 있는 ``finus_user_preferences`` 하나여야 한다. 메모리 백엔드도 vendor
+    ``mem0_memory``(HTTP 클라이언트 → 외부 서버/api.mem0.ai)가 아니라 로컬 모드여야 한다.
+
+    뮤테이션: router.yml의 workflow를 옛 ``memory_router_agent``(auto_memory_agent)로 되돌리거나
+    ``add_user_memory``를 ``_type: add_memory``로 되돌리면 red.
     """
     import nat_finus_nat.register  # noqa: F401 - 등록 트리거만 필요
     from nat.runtime.loader import load_config
 
-    config = load_config(CONFIGS_ROOT / "router.yml")
-    assert str(config.workflow.inner_agent_name) == "memory_router_agent"
+    config = load_config(config_path)
+    assert str(config.workflow.inner_agent_name) == "transcript_router_agent"
 
-    memory_agent = config.functions["memory_router_agent"]
-    assert type(memory_agent).static_type() == "auto_memory_agent"
-    assert str(memory_agent.inner_agent_name) == "transcript_router_agent"
+    function_types = {str(name): type(fn).static_type() for name, fn in (config.functions or {}).items()}
+    forbidden = {name: t for name, t in function_types.items() if t in {"auto_memory_agent", "add_memory", "get_memory"}}
+    assert not forbidden, f"{config_path.name}: 대화 텍스트를 메모리에 쓸 수 있는 구성 요소: {forbidden}"
+
+    memory_types = {type(mem).static_type() for mem in (config.memory or {}).values()}
+    assert memory_types <= {"finus_mem0_local_memory"}, f"{config_path.name}: 로컬 모드가 아닌 메모리: {memory_types}"
+
+    expected_preferences = "finus_user_preferences" if config_path.name == "router.yml" else "finus_user_preferences_disabled"
+    assert function_types["user_preferences"] == expected_preferences
+    assert function_types["recommend_branch_agent"] == "finus_risk_profile_branch"
 
 
 def test_kis_agents_share_identical_system_prompt():
@@ -605,9 +618,15 @@ _REVIEWED_NON_ORDER_TYPES = {
     "get_memory",
     "finus_memory_disabled",
     "auto_memory_agent",
+    # 사용자 선호 메모리(#397) — 허용목록 선호 값만 읽고 쓴다. KIS에 닿지 않는다
+    "finus_user_preferences",
+    "finus_user_preferences_disabled",
+    "finus_user_memory_get",
+    "finus_user_memory_add_refused",
     # 에이전트·라우팅 래퍼 — 스스로 외부를 부르지 않고 tool_names의 도구만 부른다(아래에서 따로 검사)
     "react_agent",
     "fe_branch",
+    "finus_risk_profile_branch",
     "finus_supervisor_agent",
     "finus_sqlite_transcript_agent",
     "finus_reasoning_trace_agent",

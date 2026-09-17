@@ -49,6 +49,15 @@ general:
         description: "Order verifier: single-shot APPROVE/REJECT on a pre-checked proposal (#299)."
         function_name: order_verifier
 
+      # 사용자 선호(투자 성향) 조회·변경 (#397). 주문 보조와 무관하지만 endpoints는 리스트라
+      # base 병합이 통째로 덮어쓴다 — 엔드포인트를 정의하는 파일이 하나여야 서로 지우지 않는다.
+      # user_preferences는 UserPreferencesRequest를 받고 UserPreferencesResponse를 반환하므로
+      # 요청·응답 모두 모델 JSON 그대로다. 메모리가 꺼진 config에서는 enabled=false만 돌려준다.
+      - path: /v1/user-preferences
+        method: POST
+        description: "User preference store: get/set/clear the investment risk profile (#397)."
+        function_name: user_preferences
+
 llms:
   # 기존 에이전트별 LLM 설정 관례를 그대로 따른다 — 전용 env로 모델만 갈아끼울 수 있게.
   verifier_openai_llm:
