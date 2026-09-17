@@ -1469,14 +1469,14 @@ async def test_buy_command_rejects_unresolved_stock_code_before_quote_and_balanc
         now_factory=lambda: datetime(2026, 5, 20, 10, 0, tzinfo=KST),
     )
 
+    # 해석이 하나뿐인 시장가 형식으로 본다. 해석이 둘인 입력이 모두 미발견일 때의 안내는
+    # test_order_arguments_that_resolve_nowhere_name_both_readings가 본다 (PR #392 리뷰).
     await handler.handle_update(
-        {"message": {"chat": {"id": 123}, "text": "/buy 알수없는종목 1 75000"}}
+        {"message": {"chat": {"id": 123}, "text": "/buy 알수없는종목 1"}}
     )
 
-    # 두 해석 모두 확인하지만 어느 것도 종목이 아니다. 안내는 예전처럼 지정가 해석의 사유다 (#387).
     assert calls == [
         (TRADING_MCP_PARAMS, "resolve_stock_code", {"stock_name": "알수없는종목"}),
-        (TRADING_MCP_PARAMS, "resolve_stock_code", {"stock_name": "알수없는종목 1"}),
     ]
     assert notifier.messages[-1] == "주문 준비 실패: 종목코드를 확인할 수 없습니다."
     assert _orders(handler) == {}
@@ -6764,6 +6764,30 @@ def test_stock_not_found_marker_matches_the_stock_master_error():
     assert telegram_commands.STOCK_NOT_FOUND_ERROR_MARKER in source
 
 
+def test_resolve_stock_code_tool_error_carries_the_stock_master_message():
+    """resolveStock의 오류 문구가 MCP 도구 오류 텍스트까지 실려 온다 (PR #392 리뷰).
+
+    run_mcp_tool은 도구 오류 텍스트를 HTTPException.detail로 올리고 판정은 그 detail에서 문구를 찾는다.
+    문구를 detail까지 옮기는 것은 mcp-trading/index.js callTradingTool의 catch
+    (``${prefix} 에러 발생: ${error.message}``)다. 거기서 error.message가 빠지면 파이썬 대역은 detail을
+    직접 만들어 다른 테스트가 모두 통과하는데, 운영에서는 숫자로 끝나는 종목명 주문이 모두 "주문 준비
+    실패"로 끝난다(주문이 잘못 나가지는 않는다). 그 연결을 원문에서 확인한다.
+
+    이 테스트가 잡는 mutation: catch의 도구 오류 텍스트에서 ``${error.message}`` 제거, resolve_stock_code
+    분기를 callTradingTool 밖으로 옮김.
+    """
+    source = (_STOCK_MASTER_JS_PATH.parent / "index.js").read_text(encoding="utf-8")
+    start = source.index("async function callTradingTool(")
+    end = source.index('throw new Error("존재하지 않는 도구입니다.");', start)
+    body = source[start:end]
+    try_part, _, catch_part = body.partition("} catch (error) {")
+
+    assert 'name === "resolve_stock_code"' in try_part
+    assert "resolveStock(" in try_part
+    assert "isError: true" in catch_part
+    assert re.search(r"text: `[^`]*\$\{error\.message\}[^`]*`", catch_part), catch_part
+
+
 def test_order_argument_readings_offer_both_readings_only_when_the_last_two_tokens_are_numbers():
     """끝 두 토큰이 정수면 지정가·시장가 두 해석, 끝 하나만 정수면 시장가 하나다 (#387).
 
@@ -6905,11 +6929,37 @@ async def test_order_reading_that_cannot_be_checked_blocks_the_order():
 
 
 @pytest.mark.asyncio
-async def test_order_arguments_that_resolve_nowhere_report_the_limit_reading_as_before():
-    """두 해석이 모두 종목이 아니면 예전처럼 지정가 해석의 사유를 알린다 (#387)."""
+async def test_order_arguments_that_resolve_nowhere_name_both_readings():
+    """해석이 둘인데 어느 종목명도 마스터에 없으면 두 이름을 함께 알린다 (PR #392 리뷰).
+
+    ``/buy Kodex 200 10``(대소문자 오타)은 "Kodex"·"Kodex 200" 모두 미발견이다. 예전처럼 지정가 해석의
+    이름만 알리면 사용자가 입력한 적 없는 "Kodex"를 찾지 못했다고 읽힌다. 시세·잔고는 조회하지 않는다.
+
+    이 테스트가 잡는 mutation: 해석이 둘일 때의 안내 분기 제거(지정가 해석의 오류만 알린다), 안내에서
+    시장가 해석 줄을 빠뜨림.
+    """
+    handler, notifier, calls = _master_order_handler(_real_master())
+
+    await handler.handle_update(_order_message("/buy Kodex 200 10"))
+
+    assert _orders(handler) == {}
+    assert notifier.messages[-1] == "\n".join(
+        [
+            "주문 준비 실패: 입력한 종목을 종목 마스터에서 찾지 못했습니다.",
+            "- 'Kodex' (200주, 지정가 10원으로 읽은 경우)",
+            "- 'Kodex 200' (10주, 시장가로 읽은 경우)",
+            "종목명(대소문자·띄어쓰기)을 확인하거나 6자리 종목코드로 입력하세요.",
+        ]
+    )
+    assert [tool for tool, _ in calls] == ["resolve_stock_code", "resolve_stock_code"]
+
+
+@pytest.mark.asyncio
+async def test_single_reading_that_resolves_nowhere_keeps_the_previous_message():
+    """해석이 하나뿐이면 미발견 사유는 예전 그대로다 (#387 회귀)."""
     handler, notifier, _ = _master_order_handler(_real_master())
 
-    await handler.handle_update(_order_message("/buy 없는종목 10 75000"))
+    await handler.handle_update(_order_message("/buy 없는종목 10"))
 
     assert _orders(handler) == {}
     assert notifier.messages[-1].startswith("주문 준비 실패: '없는종목'의 종목 코드를 찾을 수 없습니다.")

@@ -1954,9 +1954,9 @@ class TelegramCommandHandler:
            확인되지 않으면 그 예외를 올린다. 모호함이 없다는 것을 증명하지 못했기 때문이다.
            호출부는 이것을 "주문 준비 실패"로 알린다.
         3. 하나만 해석되면(나머지는 "종목 없음"이 확실) 그 해석이다.
-        4. 아무것도 해석되지 않으면 첫 해석의 결과를 돌려준다 — 호출부가 예전과 같은 사유
-           (종목코드 미확인·미등록 종목)로 알린다. 첫 해석이 예외였으면 2에서 이미 올라갔거나
-           "종목 없음" 예외라 여기서 올린다.
+        4. 아무것도 해석되지 않았을 때: 해석이 둘이면 두 종목명을 함께 적어 "찾지 못했다"고 알리고
+           None이다(PR #392 리뷰). 해석이 하나면 그 결과를 돌려준다 — 호출부가 예전과 같은 사유
+           (종목코드 미확인·미등록 종목)로 알리고, 예외였으면("종목 없음") 여기서 올린다.
 
         "해석됨"은 응답에서 종목코드를 뽑을 수 있고 UNKNOWN 에코가 아닌 것이다. "종목 없음"은
         코드를 못 뽑았거나, UNKNOWN 에코이거나, resolveStock의 미발견 오류(STOCK_NOT_FOUND_ERROR_MARKER)다.
@@ -2000,6 +2000,12 @@ class TelegramCommandHandler:
         if found:
             return found[0]
 
+        if len(readings) >= 2:
+            # 해석이 둘인데 어느 이름도 종목이 아니다. 지정가 해석의 이름("Kodex")만 알리면 사용자가
+            # 입력한 종목명("Kodex 200")이 아닌 것을 찾지 못했다고 읽힌다(PR #392 리뷰). 둘 다 적는다.
+            await self._send_text_or_raise(self._format_unresolved_order_readings(readings))
+            return None
+
         first = results[0]
         if isinstance(first, Exception):
             raise first
@@ -2030,6 +2036,22 @@ class TelegramCommandHandler:
                 example = f"{command} {code} {reading.quantity}"
             lines.append(f"- {name}({code}) {detail} → {example}")
         lines.append("원하는 주문을 종목코드로 다시 입력하세요.")
+        return "\n".join(lines)
+
+    def _format_unresolved_order_readings(self, readings: list[OrderReading]) -> str:
+        """해석이 둘인데 어느 종목명도 종목 마스터에 없을 때의 안내 (PR #392 리뷰).
+
+        ``/buy Kodex 200 10``(대소문자 오타)은 "Kodex"와 "Kodex 200" 모두 미발견이다. 한 이름만 적으면
+        사용자가 입력하지 않은 이름을 찾지 못했다고 읽히므로, 해석마다 종목명과 읽은 뜻을 함께 적는다.
+        """
+        lines = ["주문 준비 실패: 입력한 종목을 종목 마스터에서 찾지 못했습니다."]
+        for reading in readings:
+            if reading.order_type == "LIMIT":
+                detail = f"{reading.quantity:,}주, 지정가 {reading.price:,}원으로 읽은 경우"
+            else:
+                detail = f"{reading.quantity:,}주, 시장가로 읽은 경우"
+            lines.append(f"- '{reading.stock_name}' ({detail})")
+        lines.append("종목명(대소문자·띄어쓰기)을 확인하거나 6자리 종목코드로 입력하세요.")
         return "\n".join(lines)
 
     def _looks_like_natural_order(self, text: str) -> bool:
