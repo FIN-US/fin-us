@@ -3,3 +3,6 @@ npm-debug.log*
 .git
 .gitignore
 .DS_Store
+# 로컬에서 스크립트 pytest(tests/*.py)를 돌리면 tests/·scripts/ 아래에 생긴다.
+# 앞의 **/가 없으면 컨텍스트 최상위만 걸러 하위 __pycache__가 이미지로 들어간다.
+**/__pycache__

@@ -178,8 +178,10 @@ jobs:
   #
   # 프로젝트 파일(pyproject/uv.lock)을 두지 않고 --no-project --with로 pytest만 받는다.
   # mcp-trading은 Node 패키지이고 Dockerfile이 COPY . .라, 프로젝트를 두면 로컬 .venv가
-  # 이미지로 딸려 들어갈 수 있다. pytest는 backend/uv.lock과 같은 버전으로 못 박는다 —
-  # 풀어 두면 상류 릴리스가 관련 없는 PR을 빨간불로 만든다.
+  # 이미지로 딸려 들어갈 수 있다. pytest는 버전을 못 박는다 — 풀어 두면 상류 릴리스가 관련
+  # 없는 PR을 빨간불로 만든다. 9.0.3은 작성 시점 backend/uv.lock의 버전이고, 둘을 묶는 장치는
+  # 없다(backend는 pytest>=9.0,<10 범위라 lock이 올라가도 이 핀은 그대로 남는다).
+  # backend/uv.lock의 pytest를 올릴 때 아래 --with pytest==도 함께 올린다.
   mcp-trading-script-test:
     name: mcp-trading 스크립트 pytest
     runs-on: ubuntu-latest
