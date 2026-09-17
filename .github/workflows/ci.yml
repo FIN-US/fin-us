@@ -166,6 +166,37 @@ jobs:
       - name: mcp-trading 테스트 실행
         run: npm test
 
+  # mcp-trading에는 JS 테스트 말고도 종목 마스터 갱신 스크립트(scripts/update_stock_master.py)의
+  # pytest가 있는데, 위 잡은 node --test만 돌려 이 파일들이 어느 잡에서도 돌지 않았다(#393).
+  # 스크립트는 운영자가 직접 돌려 /buy·/sell의 종목 해석 원천인 stocks.json을 덮어쓰므로,
+  # 그 회귀(TLS 검증, 원자적 쓰기, 빈 결과·코드 형태 이름 거부)를 CI가 잡아야 한다.
+  #
+  # backend 잡에 경로를 더하지 않고 따로 두는 이유: backend 스위트와 한 명령으로 묶으면
+  # 이쪽 수집이 0건이 돼도 backend 테스트가 있어 초록불로 지나간다. 단독 명령이면 pytest가
+  # 0건 수집 시 종료 코드 5로 끝나 잡이 실패한다. 스크립트가 표준 라이브러리만 쓰므로
+  # backend venv(fastapi 등)도 필요 없다.
+  #
+  # 프로젝트 파일(pyproject/uv.lock)을 두지 않고 --no-project --with로 pytest만 받는다.
+  # mcp-trading은 Node 패키지이고 Dockerfile이 COPY . .라, 프로젝트를 두면 로컬 .venv가
+  # 이미지로 딸려 들어갈 수 있다. pytest는 backend/uv.lock과 같은 버전으로 못 박는다 —
+  # 풀어 두면 상류 릴리스가 관련 없는 PR을 빨간불로 만든다.
+  mcp-trading-script-test:
+    name: mcp-trading 스크립트 pytest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: uv 설치 (자체 캐시 활성화)
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Python 3.13 설치
+        run: uv python install 3.13
+
+      - name: mcp-trading 스크립트 테스트 실행
+        run: uv run --no-project --python 3.13 --with pytest==9.0.3 pytest mcp-trading/tests/
+
   # mcp-news는 tests/와 npm test를 갖고 있으면서도 잡이 없어 CI에서 한 번도 돌지
   # 않았다(hadolint 매트릭스에만 들어 있었다). mcp-trading·mcp-dart와 같은 구성이다.
   mcp-news-test:
