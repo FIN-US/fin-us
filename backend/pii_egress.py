@@ -69,6 +69,11 @@ NAT 안에서 KIS 도구로 조회하는 시세는 잔고와 같은 pass-through
 종류별 자리표시자 수)을 남긴다. backend는 INFO로 기동하므로(`main.py`의 `basicConfig`)
 기본으로는 남지 않고, `PII_EGRESS_DEBUG_LOG=true`로 이 로거만 DEBUG로 올린다.
 
+**플래그가 게이트다, 로그 레벨이 아니다.** 플래그가 꺼져 있으면 루트 로거를 DEBUG로 올려도
+(디버깅하려고 전체 레벨만 올리는 흔한 조작) 이 로그는 남지 않는다. 레벨만 보면 로그 레벨 조작
+하나로 평문 잔고가 로그에 쏟아진다 — 켜는 행위가 "평문을 남기겠다"는 명시적 선택이어야 한다
+(PR #404 리뷰).
+
 **켜면 평문 계좌 정보가 로그에 남는다.** 마스킹 전 프롬프트가 곧 이 계층이 외부로 내보내지
 않으려는 값이다. 로컬 개발에서 마스킹 결과를 확인할 때만 켜고, 로그를 수집·전송하는 배포에서는
 켜지 않는다.
@@ -160,7 +165,8 @@ def prepare_egress(prompt: EgressPrompt, *, label: str) -> tuple[str, dict[str, 
         logger.exception("외부 LLM 전송 전 비식별화 실패 — 전송을 차단합니다 (%s)", label)
         raise EgressBlocked() from exc
 
-    if logger.isEnabledFor(logging.DEBUG):
+    # 레벨만 보지 않는다 — 모듈 docstring "마스킹 전후 비교 로그".
+    if PII_EGRESS_DEBUG_LOG and logger.isEnabledFor(logging.DEBUG):
         _log_comparison(label, segments, outgoing, mapping)
     return outgoing, mapping
 

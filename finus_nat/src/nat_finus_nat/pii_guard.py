@@ -68,7 +68,10 @@ from .pii_mask import _FALLBACK_LABEL, mask_pii
 logger = logging.getLogger(__name__)
 # 마스킹 전후 비교 로그 스위치 — backend/config.py의 같은 이름 env와 짝이다(#395).
 # 정확히 "true"만 켠다(backend `_is_truthy_flag`와 같은 기준). 켜면 평문 잔고가 로그에 남는다.
-if os.environ.get("PII_EGRESS_DEBUG_LOG", "").strip() == "true":
+# 이 값이 게이트다. 로거 레벨만 보면 NAT CLI `--log-level debug`(루트를 DEBUG로 올린다)만으로
+# 평문이 로그에 남는다(PR #404 리뷰에서 재현).
+_DEBUG_LOG_ENABLED = os.environ.get("PII_EGRESS_DEBUG_LOG", "").strip() == "true"
+if _DEBUG_LOG_ENABLED:
     logger.setLevel(logging.DEBUG)
 
 # 요청 하나 동안 누적되는 {자리표시자: 원값} 박스. 최상위 에이전트가 심고 도구가 채운다.
@@ -150,9 +153,9 @@ def mask_tool_result(tool_name: str, result: str) -> str:
     예외를 그대로 올리지 않는 것은 도구 경계에서 예외가 탈출하면 ReAct 루프가 끊기기 때문이다
     (``finus_api._TOOL_BUG_EXCEPTIONS`` 주석, #358). 오류 JSON에는 결과 원문을 싣지 않는다.
 
-    DEBUG 로그에는 마스킹 전·후 결과를 남긴다. ``PII_EGRESS_DEBUG_LOG=true``면 이 로거만 DEBUG로
-    올린다 — **평문 잔고가 로그에 남으므로** 로컬 확인용이다(핸들러가 DEBUG를 내보내는지는 NAT
-    로깅 설정을 따른다).
+    ``PII_EGRESS_DEBUG_LOG=true``일 때만 DEBUG 로그에 마스킹 전·후 결과를 남기고 이 로거를
+    DEBUG로 올린다 — **평문 잔고가 로그에 남으므로** 로컬 확인용이다. 플래그 없이 로그 레벨만
+    DEBUG여서는 남지 않는다(핸들러가 DEBUG를 내보내는지는 NAT 로깅 설정을 따른다).
     """
     if tool_name not in MASKED_TOOLS:
         return result
@@ -172,7 +175,7 @@ def mask_tool_result(tool_name: str, result: str) -> str:
             },
             ensure_ascii=False,
         )
-    if logger.isEnabledFor(logging.DEBUG):
+    if _DEBUG_LOG_ENABLED and logger.isEnabledFor(logging.DEBUG):
         logger.debug("도구 결과 마스킹 [%s] 전:\n%s", tool_name, result)
         logger.debug("도구 결과 마스킹 [%s] 후:\n%s", tool_name, masked)
     if not mapping:

@@ -134,9 +134,11 @@ F-17 보호 대상이 아닌 공개 시장 데이터에 마스킹이 걸릴 때 
 | backend 전송 경계 | `backend.pii_egress` | 경로 라벨(`llm_chat:openai`, `order_assist:propose-order` 등), 구간 수·공개 구간 수·종류별 자리표시자 수, 마스킹 전 프롬프트, 마스킹 후 프롬프트 |
 | NAT 도구 결과 | `nat_finus_nat.pii_guard` | 도구 이름, 마스킹 전·후 결과 |
 
-모두 DEBUG다. backend는 INFO로 기동하므로(`main.py`의 `basicConfig`) 기본으로는 남지 않고,
-`PII_EGRESS_DEBUG_LOG=true`가 두 로거만 DEBUG로 올린다(NAT 쪽 핸들러가 DEBUG를 내보내는지는 NAT 로깅
-설정을 따른다). **켜면 평문 잔고·계좌 정보가 로그에 남는다** — 마스킹 전 프롬프트가 곧 이 계층이
+모두 DEBUG다. `PII_EGRESS_DEBUG_LOG=true`일 때만 남고, 켜면 두 로거를 DEBUG로 올린다(NAT 쪽 핸들러가
+DEBUG를 내보내는지는 NAT 로깅 설정을 따른다). **로그 레벨은 게이트가 아니다** — 플래그가 꺼져 있으면
+루트 로거를 DEBUG로 올려도(NAT CLI `--log-level debug`, backend `basicConfig` 레벨 변경) 남지 않는다.
+처음 구현은 로거의 유효 레벨만 봐서, 디버깅하려고 레벨만 올려도 평문 잔고가 찍혔다(PR #404 리뷰에서
+NAT으로 재현). **켜면 평문 잔고·계좌 정보가 로그에 남는다** — 마스킹 전 프롬프트가 곧 이 계층이
 내보내지 않으려는 값이다. 로컬 확인용으로만 켠다.
 
 ### 남는 것

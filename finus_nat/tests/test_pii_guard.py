@@ -280,13 +280,30 @@ class TestMaskToolResult:
         assert mapping_box == {}
         assert "도구 결과 마스킹 실패" in caplog.text
 
-    def test_debug_log_compares_the_result_before_and_after(self, mapping_box, caplog):
+    def test_debug_log_compares_the_result_before_and_after(self, mapping_box, caplog, monkeypatch):
+        from nat_finus_nat import pii_guard
+
+        monkeypatch.setattr(pii_guard, "_DEBUG_LOG_ENABLED", True)
         with caplog.at_level(logging.DEBUG, logger="nat_finus_nat.pii_guard"):
             masked = mask_tool_result("finus_mcp_trading_get_balance", "예수금 1,000,000원")
 
         messages = [record.getMessage() for record in caplog.records]
         assert any("전:" in m and "예수금 1,000,000원" in m for m in messages)
         assert any("후:" in m and masked in m and "1,000,000원" not in m for m in messages)
+
+    def test_debug_level_alone_does_not_log_plaintext_without_the_flag(
+        self, mapping_box, caplog, monkeypatch
+    ):
+        """NAT CLI ``--log-level debug``처럼 루트만 DEBUG여도 평문이 남지 않는다 (PR #404 리뷰)."""
+        from nat_finus_nat import pii_guard
+
+        monkeypatch.setattr(pii_guard, "_DEBUG_LOG_ENABLED", False)
+        with caplog.at_level(logging.DEBUG), caplog.at_level(
+            logging.DEBUG, logger="nat_finus_nat.pii_guard"
+        ):
+            mask_tool_result("finus_mcp_trading_get_balance", "예수금 1,000,000원")
+
+        assert "1,000,000원" not in caplog.text
 
     def test_ledger_verdict_survives_masking(self, mapping_box, ledger):
         """마스킹을 끼운 뒤에도 빈 결과·데이터 있음 판정(#209)이 그대로여야 한다."""
