@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from dataclasses import dataclass
@@ -8,6 +9,7 @@ from typing import Any, Awaitable, Callable, Literal, Protocol
 
 from fastapi import HTTPException
 
+from .telegram_notifier import TelegramTextSender, send_text_settled_receipt
 from .timeutil import KST
 
 logger = logging.getLogger(__name__)
@@ -37,6 +39,72 @@ class PendingOrder:
     created_at: datetime
     order_type: OrderType = "LIMIT"
     callback_token: str = ""
+    # 이 주문의 확정 프롬프트(버튼이 달린 마지막 조각)의 Telegram message_id다 (#386).
+    # 저장할 때는 비어 있다. 프롬프트는 저장이 슬롯을 따낸 뒤에야 보내므로(#247) id는 전송이
+    # 끝나야 생기고, send_order_prompt가 그때 채운다. None은 "모른다"이고, 텍스트
+    # /confirm은 모르는 주문을 실행하지 않는다(prompted_before 참조). 버튼 확정은 이 값을
+    # 보지 않는다. 버튼에는 주문별 callback_token이 실려 있어 다른 주문의 확정을 이미 막는다.
+    prompt_message_id: int | None = None
+
+    def prompted_before(self, message_id: int | None) -> bool:
+        """``message_id`` 메시지보다 이 주문의 확정 프롬프트가 먼저 나갔으면 True (#386).
+
+        텍스트 /confirm이 이 주문을 확정할 수 있는지를 가른다. 한 채팅의 message_id는 봇과
+        사용자 메시지를 합쳐 단조 증가하는 순번이라, 프롬프트 id보다 큰 /confirm은 프롬프트가
+        나간 뒤에 보낸 것이다. 시계를 쓰지 않으므로 텔레그램·호스트 시계 오차가 끼어들 자리가
+        없다.
+
+        둘 중 하나라도 모르면 False, 즉 실행하지 않는 쪽이다. 폴러 적체나 다운타임 뒤에 늦게
+        처리된 /confirm이 그사이 생긴 새 주문을 확정 없이 실행하던 경로가 이 판정으로 닫힌다.
+        """
+        return (
+            self.prompt_message_id is not None
+            and message_id is not None
+            and self.prompt_message_id < message_id
+        )
+
+
+class PromptMessageIdStore(Protocol):
+    """send_order_prompt가 대기 주문 저장소에 요구하는 전부 (#386).
+
+    redis_state.PendingOrderStore의 일부다. 그 Protocol을 여기서 import하지 않는 것은
+    redis_state가 이 모듈의 PendingOrder를 타입으로 끌어오기 때문이다(순환을 만들지 않는다).
+    """
+
+    async def set_prompt_message_id(
+        self, chat_id: str, callback_token: str, message_id: int
+    ) -> bool: ...
+
+
+async def _record_prompt_message_id(
+    store: PromptMessageIdStore, order: PendingOrder, message_id: int | None
+) -> None:
+    """확정 프롬프트를 보낸 뒤 그 message_id를 대기 주문에 남긴다 (#386). send_order_prompt의 몫이다.
+
+    실패해도 예외를 올리지 않는다. 프롬프트는 이미 나갔고 대기 주문도 살아 있으므로, 여기서
+    할 수 있는 것은 기록뿐이다. 기록하지 못한 주문은 id가 없는 채로 남고, 텍스트 /confirm은
+    그것을 실행하지 않는다(fail-closed). 확정 버튼은 그대로 쓸 수 있다.
+    """
+    if message_id is None:
+        logger.warning(
+            "확정 프롬프트의 message_id를 알 수 없다 — 이 대기 주문은 텍스트 /confirm으로 "
+            "실행되지 않고 버튼으로만 확정된다 (#386)"
+        )
+        return
+    try:
+        recorded = await store.set_prompt_message_id(
+            order.chat_id, order.callback_token, message_id
+        )
+    except Exception as exc:
+        logger.error(
+            "확정 프롬프트 message_id 기록 실패 — 이 대기 주문은 텍스트 /confirm으로 실행되지 "
+            "않는다 (#386): %s",
+            exc,
+        )
+        return
+    if not recorded:
+        # 프롬프트를 보내는 사이 주문이 확정·취소·만료됐다. 남길 대상이 없다.
+        logger.info("확정 프롬프트 message_id를 남길 대기 주문이 이미 없다 (#386)")
 
 
 # 확정·취소 콜백 데이터 접두사와 그 버튼을 만드는 함수. ORDER_EXPIRES_AFTER와 같은 이유로
@@ -64,6 +132,33 @@ def order_reply_markup(order: PendingOrder) -> dict[str, Any]:
             ]
         ]
     }
+
+
+async def send_order_prompt(
+    notifier: TelegramTextSender,
+    store: PromptMessageIdStore,
+    order: PendingOrder,
+    text: str,
+    *,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+) -> bool:
+    """저장된 대기 주문의 확정 프롬프트를 보내고, 그 message_id를 주문에 남긴다 (#386).
+
+    대기 주문을 만드는 세 경로(/buy·/sell·자연어 주문, /advise, 룰 트리거 자동 제안)가 모두
+    이 함수 하나로 프롬프트를 보낸다. 전송과 id 기록을 호출부마다 따로 두면 한 경로만 기록을
+    빠뜨릴 자리가 생기고, 그 경로의 주문은 텍스트 /confirm으로 영영 확정되지 않는다(PR #389
+    리뷰). 버튼도 여기서 붙인다 — order_reply_markup과 같은 "한 곳에서만" 규칙이다.
+
+    전송은 settled 재시도를 쓴다(#247). 반환값은 전송 성공 여부이고, 실패하면 호출부가 대기
+    주문을 지운다. id를 남기지 못한 것은 실패로 치지 않는다. 프롬프트는 나갔고 버튼으로 확정할
+    수 있으며, 텍스트 /confirm만 fail-closed로 막힌다.
+    """
+    receipt = await send_text_settled_receipt(
+        notifier, text, reply_markup=order_reply_markup(order), sleep=sleep
+    )
+    if receipt.sent:
+        await _record_prompt_message_id(store, order, receipt.message_id)
+    return receipt.sent
 
 
 @dataclass(frozen=True)

@@ -61,7 +61,7 @@ from .trade_notification_repo import (
     SqliteTradeNotificationRepo,
     TradeNotificationRepo,
 )
-from .trading_orders import is_korean_market_open, order_reply_markup
+from .trading_orders import is_korean_market_open, send_order_prompt
 from .services import (
     ReportSession,
     SignalScore,
@@ -82,7 +82,6 @@ from .presentation import (
 from .telegram_notifier import telegram_notifier
 from .telegram_notifier import (
     TelegramTextSender,
-    send_text_settled,
     should_send_telegram_alert,
 )
 
@@ -2184,11 +2183,13 @@ async def run_rule_triggered_proposal(
         # (≤120초)·검증 왕복(≤40초)과 재제안 냉각을 이미 소비한 뒤라, 단발 전송으로 두면
         # 일시적인 429 한 번에 그 전부가 버려지고 같은 종목은 냉각이 풀릴 때까지(기본
         # 60분) 다시 시도되지도 않는다.
-        sent = await send_text_settled(
-            notifier,
-            format_auto_message(result.message),
-            reply_markup=order_reply_markup(result.order),
-            sleep=_sleep,
+        #
+        # 전송과 message_id 기록은 /buy·/advise와 같은 send_order_prompt 하나다 (#386). 텍스트
+        # /confirm은 그 id보다 뒤에 보낸 것일 때만 이 주문을 실행한다. 이 경로는 폴러 밖이라 저장부터
+        # 기록까지의 창에 텍스트 /confirm이 처리될 수 있는데, 그때는 id가 없어 실행되지 않는다
+        # (fail-closed).
+        sent = await send_order_prompt(
+            notifier, store, result.order, format_auto_message(result.message), sleep=_sleep
         )
         if not sent:
             # /advise와 같은 처리다 (#247). 프롬프트가 끝내 안 나갔으면 사용자는 대기 주문의

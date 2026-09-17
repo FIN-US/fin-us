@@ -77,6 +77,7 @@ from .trading_orders import (
     TradeRecorder,
     is_korean_market_open,
     order_reply_markup,
+    send_order_prompt,
 )
 from .stock_code import (
     _STOCK_CODE_EXTRACT_RE,
@@ -124,6 +125,19 @@ CONFIRM_REPLAY_REFUSED_TEXT = (
     "이 /confirm은 재시작 전에 이미 처리를 시작한 요청이라 다시 실행하지 않았습니다.\n"
     "직전 주문 결과는 증권사 앱에서 확인하고, 확정할 대기 주문이 남아 있으면 "
     "주문 메시지의 확정 버튼을 누르거나 /confirm을 새로 보내세요."
+)
+# 텍스트 /confirm이 지금 대기 주문의 확정 프롬프트보다 먼저 보낸 것일 때의 안내 (#386). 폴러
+# 적체·다운타임 뒤 늦게 처리된 /confirm이나 /buy 처리 중에 미리 보낸 /confirm이 여기 온다.
+# 대기 주문은 그대로 남으므로 내용을 보고 다시 확정하면 된다.
+CONFIRM_BEFORE_PROMPT_TEXT = (
+    "이 /confirm은 현재 대기 주문이 표시되기 전에 보낸 것이라 실행하지 않았습니다.\n"
+    "주문 내용을 확인하고 /confirm을 다시 보내거나 주문 메시지의 확정 버튼을 누르세요."
+)
+# 대기 주문의 확정 프롬프트 id를 모를 때의 안내 (#386). 프롬프트가 아직 전송 중이거나, id를
+# 읽거나 남기지 못한 경우다. 후자는 다시 보낸 /confirm도 같은 이유로 막히므로 버튼을 권한다.
+CONFIRM_PROMPT_UNKNOWN_TEXT = (
+    "이 대기 주문은 안내 메시지가 언제 표시됐는지 확인할 수 없어 /confirm으로 실행하지 "
+    "않았습니다.\n주문 메시지를 확인하고 확정 버튼을 누르세요."
 )
 ALERT_CALLBACK_PREFIX = "alerts:"
 LEVEL_CALLBACK_PREFIX = "level:"
@@ -572,6 +586,27 @@ _update_settled_hook: ContextVar[Callable[[], Awaitable[None]] | None] = Context
 )
 
 
+@dataclass(frozen=True)
+class _TextConfirm:
+    """텍스트 /confirm이 _handle_confirm에 넘기는 식별자 (#383, #386).
+
+    버튼 확정은 이것을 넘기지 않는다. 버튼에는 주문별 토큰이 실려 있어 두 판정(재실행 표지,
+    프롬프트 id 대조) 모두 필요 없다. 값이 None이면 update에서 읽지 못한 것이다 — update_id는
+    표지를 건너뛰고(#383), message_id는 실행하지 않는 쪽으로 읽힌다(#386).
+    """
+
+    update_id: int | None
+    message_id: int | None
+
+
+def _telegram_int(value: Any) -> int | None:
+    """update의 정수 식별자만 통과시킨다. bool은 int의 하위 타입이라 따로 막는다.
+
+    True가 update_id로 새면 표지 키가 1로 뭉치고, message_id로 새면 1로 대조된다.
+    """
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
 def _default_watchlist_repo() -> SqliteWatchlistRepo:
     return SqliteWatchlistRepo(lambda: Session(engine))
 
@@ -703,14 +738,11 @@ class TelegramCommandHandler:
             await self._handle_order_command("SELL", argument, str(chat.get("id", "")).strip())
             return
         if self._matches_command(command, bot_username, "/confirm"):
-            update_id = update.get("update_id")
             await self._handle_confirm(
                 str(chat.get("id", "")).strip(),
-                # bool은 int의 하위 타입이다. True가 update_id로 새면 표지 키가 1로 뭉친다.
-                update_id=(
-                    update_id
-                    if isinstance(update_id, int) and not isinstance(update_id, bool)
-                    else None
+                text_confirm=_TextConfirm(
+                    update_id=_telegram_int(update.get("update_id")),
+                    message_id=_telegram_int(message.get("message_id")),
                 ),
             )
             return
@@ -782,6 +814,17 @@ class TelegramCommandHandler:
         """
         return await send_text_settled(
             self.notifier, text, reply_markup=reply_markup, sleep=self._sleep
+        )
+
+    async def _send_order_prompt(self, order: PendingOrder, text: str) -> bool:
+        """/buy·/sell·자연어 주문과 /advise의 확정 프롬프트 전송 (#386).
+
+        전송과 message_id 기록은 trading_orders.send_order_prompt 하나가 하고, 스케줄러의 자동
+        제안도 같은 함수를 부른다. 여기서는 테스트가 대체할 수 있는 _sleep을 넘겨 주는 것 말고
+        하는 일이 없다 — _send_text_settled와 같은 모양이다.
+        """
+        return await send_order_prompt(
+            self.notifier, self.pending_orders, order, text, sleep=self._sleep
         )
 
     async def _mark_update_settled(self) -> None:
@@ -1351,10 +1394,7 @@ class TelegramCommandHandler:
             await self._send_text_settled(result.message)
             return
 
-        notified = await self._send_text_settled(
-            result.message,
-            reply_markup=self._order_reply_markup(result.order),
-        )
+        notified = await self._send_order_prompt(result.order, result.message)
         if not notified:
             # /buy와 같은 처리다. 프롬프트가 끝내 안 나갔으면 사용자는 대기 주문의
             # 존재를 모르고, 60초 안의 다음 명령이 영문 모를 충돌로 막힌다 (#247).
@@ -1517,9 +1557,10 @@ class TelegramCommandHandler:
             return
         # 대기 주문이 저장된 뒤다 — 재실행은 has_pending에 걸려 "이미 대기 중인 주문이
         # 있습니다"로 끝나고, 사용자는 확인 버튼을 영영 받지 못한다 (#247).
-        notified = await self._send_text_settled(
-            self._format_order_prompt(order, str(quote_result), str(balance_result)),
-            reply_markup=self._order_reply_markup(order),
+        # 프롬프트의 message_id는 여기서 주문에 남는다. 그 전까지 텍스트 /confirm은 이 주문을
+        # 실행하지 않는다(#386).
+        notified = await self._send_order_prompt(
+            order, self._format_order_prompt(order, str(quote_result), str(balance_result))
         )
         if not notified:
             # 프롬프트가 끝내 안 나갔으면 사용자는 대기 주문의 존재를 모른다. 그대로 두면
@@ -1548,36 +1589,56 @@ class TelegramCommandHandler:
         # 대기 주문이 삭제된 뒤다 — 재실행은 "취소할 대기 주문이 없습니다"로 끝난다 (#247).
         await self._send_text_settled("대기 주문을 취소했습니다.")
 
-    async def _handle_confirm(self, chat_id: str, *, update_id: int | None = None) -> None:
+    async def _handle_confirm(self, chat_id: str, *, text_confirm: _TextConfirm | None = None) -> None:
         """대기 주문을 claim해 실행한다.
 
-        ``update_id``는 텍스트 /confirm에서만 넘어온다 (#383). 재시작 전에 처리를 시작한 텍스트
-        /confirm이 재배달되면 claim하지 않고 끝낸다. claim(GETDEL)은 **같은** 주문을 두 번 주지
-        않을 뿐, 재실행이 그사이 생긴 **다른** 대기 주문(자동 제안·새 /buy)을 받는 것은 막지
-        않는다 — 사용자가 본 적도 없는 주문이 확정 없이 실행된다. 메시지를 보낸 뒤 생긴 주문은
-        그 메시지로 확정할 수 없다는 것이 막으려는 규칙이다.
+        ``text_confirm``은 텍스트 /confirm에서만 넘어온다. 막으려는 규칙은 "메시지를 보낸 뒤 생긴 주문은
+        그 메시지로 확정할 수 없다"이다. claim(GETDEL)은 **같은** 주문을 두 번 주지 않을 뿐,
+        /confirm이 그사이 생긴 **다른** 대기 주문(자동 제안·새 /buy)을 받는 것은 막지 않는다.
+        그러면 사용자가 본 적도 없는 주문이 확정 없이 실행된다. 이 규칙은 두 창에서 깨졌다.
 
-        판정은 대기 주문이 아니라 update에 붙인다. 주문을 보고 판정하면(예: message.date와
-        created_at 비교) 텔레그램·호스트 시계 오차가 오판 방향을 정하고, 판정과 claim 사이의
-        틈을 원자적으로 닫으려면 조건부 GETDEL이 필요하다. update 표지는 claim 전에 끝나 대기
-        주문을 건드리지 않으므로 둘 다 필요 없다. 표지는 owner(프로세스)를 담아 프로세스 안의
+        - 재시작 뒤의 재실행(#383): 주문 A를 claim하고 결과 전송 도중 죽으면 같은 update가
+          재배달되고, 그사이 생긴 B를 claim한다.
+        - 늦게 처리된 처음 실행(#386): 폴러는 update를 순서대로 처리한다. 그래서 LLM 대기·재시도
+          대기 뒤에 줄 선 /confirm이나 봇이 내려가 있던 동안 쌓인 /confirm은 늦게 처리된다.
+          그사이 A가 60초 앱 만료를 넘기면 자동 제안이 A를 치우고 B를 넣는다.
+
+        판정은 **프롬프트 message_id 대조**다(#386). 대기 주문은 자기 확정 프롬프트의 message_id를
+        들고 있고(PendingOrder.prompt_message_id), 텍스트 /confirm은 자기 message_id가 그보다 클
+        때만 claim한다. 한 채팅의 message_id는 봇과 사용자 메시지를 합쳐 단조 증가하므로 "프롬프트가
+        나간 뒤에 보낸 /confirm"이 곧 이 대조다. 시계를 쓰지 않는다. message.date와 created_at을
+        비교하면 텔레그램·호스트 시계 오차가 오판 방향을 정하고, 폴러의 수신 시각과 비교하면
+        적체 중에는 수신이 항상 주문 생성보다 늦어 이 경우를 가려내지 못한다. 두 창 모두 이
+        대조로 닫힌다. 재실행된 /confirm의 id는 그사이 생긴 주문의 프롬프트 id보다 작다.
+
+        판정과 claim은 claim_if 한 번에 원자적으로 끝난다. 판정에 걸린 주문은 꺼내지 않으므로 B는
+        소비되지 않고 남는다. 사용자는 B의 프롬프트를 보고 스스로 확정·취소한다.
+
+        fail-closed: 프롬프트 id를 모르면(전송은 됐지만 id를 못 읽음, 기록 실패, 필드가 없는 기존
+        저장값, 저장부터 기록까지의 창) 또는 /confirm의 message_id를 모르면 실행하지 않는다. 저장부터
+        기록까지의 창은 폴러 밖에서 만든 주문(자동 제안)에만 열린다. 폴러 안의 /buy·/advise는 id를
+        기록한 뒤에야 다음 update로 넘어간다.
+
+        #383의 update 표지는 그대로 둔다. 재실행은 이제 id 대조에도 걸리지만, 표지는 주문을 보지
+        않고 update만으로 판정하는 별도 층이다. 표지는 owner(프로세스)를 담아 프로세스 안의
         재시도(전송 실패 뒤 폴러 재시도)는 그대로 통과시킨다.
 
-        버튼 콜백은 ``update_id``를 넘기지 않는다. 버튼에는 주문마다 다른 토큰이 실려 있어
-        _handle_order_callback이 다른 주문의 확정을 이미 거절한다.
+        버튼 콜백은 ``text_confirm``을 넘기지 않아 두 판정 모두 걸리지 않는다. 버튼에는 주문마다 다른
+        토큰이 실려 있어 _handle_order_callback이 다른 주문의 확정을 이미 거절한다.
 
-        남는 경우: 표지는 **재실행**만 가려낸다. 같은 규칙은 처음 실행에서도 깨진다 — 폴러는
-        update를 순서대로 처리하므로 LLM 대기·재시도 대기 뒤에 줄 선 /confirm이나 봇이 내려가
-        있던 동안 쌓인 /confirm은 늦게 처리되고, 그사이 원래 주문이 60초 앱 만료를 넘기면 자동
-        제안이 그것을 치우고 새 주문을 넣을 수 있다. 그러면 처음 실행의 claim이 새 주문을 받는다.
-        창의 크기가 재시작이 아니라 폴러 적체·다운타임이라 이 표지로는 닫히지 않고, 판정 방식
-        (시계 비교 등)을 다시 따져야 해 #386으로 뺐다. 표지를 남기기 전에 죽은 실행의 재배달도
-        같은 처음 실행으로 취급된다 — 그 실행은 claim 전이라 주문을 소비하지 않았다.
+        남는 경우: message_id의 순서는 서버가 /confirm을 **받은** 순서이지 사용자가 누른 순서가
+        아니다. 텔레그램 클라이언트는 연결이 끊긴 동안 보낸 메시지를 로컬 큐에 두었다가 재연결 때
+        올린다. 그래서 A의 프롬프트를 보고 누른 /confirm이 큐에 묶인 사이 A가 60초 만료로
+        치워지고 자동 제안 B의 프롬프트가 먼저 id를 받으면, 뒤늦게 올라간 /confirm은 id가 더 커서
+        대조를 통과하고 B가 확정 없이 실행된다. 창의 상한은 사용자 쪽 전송 지연(오프라인 큐 포함,
+        상한 없음)이다. 폴러 적체·다운타임 창보다는 좁지만 닫히지 않았고, 닫는 방법(자동 제안은
+        버튼으로만 확정, 또는 프롬프트에 단 답장만 받기)은 #390에서 정한다(PR #389 리뷰).
         """
         # order_gateway 부재 체크를 claim 전에 수행해 주문이 소비되지 않게 한다.
         if self.order_gateway is None:
             await self._send_text_or_raise("주문 실행 설정이 준비되지 않았습니다.")
             return
+        update_id = text_confirm.update_id if text_confirm is not None else None
         if update_id is not None:
             try:
                 first_run = await self.pending_orders.mark_confirm_update(
@@ -1595,14 +1656,38 @@ class TelegramCommandHandler:
                 )
                 await self._send_text_or_raise(CONFIRM_REPLAY_REFUSED_TEXT)
                 return
+        refused: PendingOrder | None = None
         try:
             await self._drop_expired_pending_order(chat_id, self.now_factory())
-            # claim(GETDEL): 원자적 읽기+삭제. 멀티워커 경합이나 프로세스 안의 재시도에서 정확히
-            # 하나의 호출만 order를 받고 나머지는 None을 받는다. 재시작 뒤 재배달은 위 표지가
-            # 먼저 걸러낸다(#383).
-            order = await self.pending_orders.claim(chat_id)
+            # 원자적 읽기+삭제. 멀티워커 경합이나 프로세스 안의 재시도에서 정확히 하나의 호출만
+            # order를 받고 나머지는 None을 받는다. 재시작 뒤 재배달은 위 표지가 먼저 걸러낸다(#383).
+            if text_confirm is None:
+                order = await self.pending_orders.claim(chat_id)
+            else:
+                # 텍스트 /confirm은 그 주문의 프롬프트를 본 뒤에 보낸 것일 때만 꺼낸다 (#386).
+                confirm_message_id = text_confirm.message_id
+                outcome = await self.pending_orders.claim_if(
+                    chat_id, lambda pending: pending.prompted_before(confirm_message_id)
+                )
+                order = outcome.order if outcome.claimed else None
+                refused = None if outcome.claimed else outcome.order
         except Exception as exc:
             await self._send_text_or_raise(f"주문 저장소 오류: {_short_error(exc)}")
+            return
+        if refused is not None:
+            # 주문은 저장소에 그대로 있다. 재시도해도 같은 판정에 도달하므로 재시도 가능한 전송이다.
+            logger.warning(
+                "텍스트 /confirm(message_id=%s)이 대기 주문의 프롬프트(message_id=%s)보다 앞서거나 "
+                "순서를 알 수 없어 실행하지 않는다 (#386)",
+                text_confirm.message_id if text_confirm is not None else None,
+                refused.prompt_message_id,
+            )
+            unknown = (
+                refused.prompt_message_id is None or text_confirm is None or text_confirm.message_id is None
+            )
+            await self._send_text_or_raise(
+                CONFIRM_PROMPT_UNKNOWN_TEXT if unknown else CONFIRM_BEFORE_PROMPT_TEXT
+            )
             return
         if order is None:
             await self._send_text_or_raise("확정할 대기 주문이 없습니다.")
@@ -1703,7 +1788,8 @@ class TelegramCommandHandler:
         #
         # 그 경로들의 재실행 창은 수용했다(#383). 재시작이 settled 전송(최대 20초)과 겹칠 때만
         # 열리고 피해는 오표시 한 줄로 유계다. 수용하지 않은 것은 재실행된 텍스트 /confirm이
-        # 그사이 생긴 다른 대기 주문을 실행하는 경우 하나이고, 이 메서드 첫머리의 표지가 막는다.
+        # 그사이 생긴 다른 대기 주문을 실행하는 경우 하나이고, 이 메서드 첫머리의 표지와 프롬프트
+        # id 대조(#386)가 막는다.
         await self._mark_update_settled()
 
         try:
@@ -2708,7 +2794,7 @@ class TelegramCommandPoller:
         #
         # 예외가 하나 있다. 재실행된 텍스트 /confirm이 그사이 생긴 다른 대기 주문(자동 제안·새
         # /buy)을 claim하면 사용자가 본 적 없는 주문이 확정 없이 실행된다. 오표시로 유계가 아니라
-        # 수용하지 않고, _handle_confirm이 update 표지로 막는다.
+        # 수용하지 않고, _handle_confirm이 update 표지와 프롬프트 message_id 대조(#386)로 막는다.
         await self._persist_state()
 
     def _retry_delay(self) -> float:

@@ -3,9 +3,9 @@ import json
 import logging
 import re
 from contextlib import asynccontextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, AsyncIterator, Protocol
+from typing import TYPE_CHECKING, Any, AsyncIterator, Callable, Protocol
 from uuid import uuid4
 
 if TYPE_CHECKING:
@@ -50,6 +50,27 @@ PENDING_ORDER_TTL_SEC = 60 * 10
 # Telegram 서버는 미확정 update를 24시간 보관하므로 그보다 먼저 표지가 사라지면 늦게 도착한
 # 재배달이 표지 없이 통과한다. 표지는 /confirm 한 번에 키 하나라 24시간을 쥐어도 무해하다.
 CONFIRM_UPDATE_MARKER_TTL_SEC = 60 * 60 * 24
+
+# 대기 주문의 조건부 변경(claim_if·set_prompt_message_id)이 "읽은 값"을 조건으로 쓰는 스크립트 (#386).
+# 판정은 파이썬이 하고 redis는 값이 읽은 그대로인지만 본다. RedisSchedulerState.release_lock과 같은
+# compare-and-delete 관용구이고, JSON을 Lua에서 풀지 않으므로 직렬화 규칙이 파이썬 한 곳에 남는다.
+_DELETE_IF_UNCHANGED_SCRIPT = """
+if redis.call("get", KEYS[1]) == ARGV[1] then
+    return redis.call("del", KEYS[1])
+end
+return 0
+"""
+# KEEPTTL(redis 6.0+): id를 남기는 것이 대기 주문의 수명을 늘리지 않게 한다.
+_REPLACE_IF_UNCHANGED_SCRIPT = """
+if redis.call("get", KEYS[1]) == ARGV[1] then
+    redis.call("set", KEYS[1], ARGV[2], "KEEPTTL")
+    return 1
+end
+return 0
+"""
+# 읽은 뒤 값이 바뀌어 조건부 변경이 지면 다시 읽는다. 대기 주문을 바꾸는 쓰기는 사람의 명령과
+# 10분 주기 자동 제안뿐이라 연달아 질 일이 없다. 그래도 지면 판정 없이 진행하지 않고 예외로 끝낸다.
+_CONDITIONAL_WRITE_ATTEMPTS = 3
 
 # redis 소켓 하나가 응답을 기다릴 수 있는 상한 (#268).
 # redis-py asyncio 기본값은 socket_timeout·socket_connect_timeout 둘 다 None = 무한 대기다.
@@ -546,6 +567,28 @@ class RedisTelegramPollerStore:
         )
 
 
+@dataclass(frozen=True)
+class ConditionalClaim:
+    """PendingOrderStore.claim_if의 결과 (#386).
+
+    - ``order is None``: 대기 주문이 없다.
+    - ``claimed is False``: 대기 주문은 있지만 조건에 걸려 꺼내지 않았다. 주문은 저장소에 그대로
+      남아 있고, ``order``는 판정에 쓴 그 주문이다(거절 안내를 고르는 데 쓴다).
+    - ``claimed is True``: 조건을 통과한 ``order``를 꺼내며 지웠다.
+    """
+
+    order: "PendingOrder | None"
+    claimed: bool
+
+
+class PendingOrderContentionError(RuntimeError):
+    """조건부 변경이 읽은 값의 변경에 거듭 져서 끝내 판정하지 못했다 (#386).
+
+    호출부의 "주문 저장소 오류" 분기로 간다. 판정하지 못한 채 진행하지 않는다는 뜻에서 저장소
+    장애와 같은 fail-closed다.
+    """
+
+
 class PendingOrderStore(Protocol):
     """TelegramCommandHandler가 pending_order 저장소에 요구하는 전부 (#271).
 
@@ -563,6 +606,27 @@ class PendingOrderStore(Protocol):
     async def get(self, chat_id: str) -> "PendingOrder | None": ...
 
     async def claim(self, chat_id: str) -> "PendingOrder | None": ...
+
+    async def claim_if(
+        self, chat_id: str, predicate: "Callable[[PendingOrder], bool]"
+    ) -> ConditionalClaim:
+        """``predicate``를 통과한 대기 주문만 원자적으로 꺼낸다 (#386).
+
+        판정과 꺼내기 사이에 주문이 바뀌면 바뀐 주문으로 다시 판정한다. 그래서 판정에 걸린
+        주문은 꺼내지지 않고 남는다. claim 뒤에 판정하고 되돌리는 방식은 되돌리는 틈에 새 주문이
+        들어오면 원래 주문을 잃는다.
+        """
+        ...
+
+    async def set_prompt_message_id(
+        self, chat_id: str, callback_token: str, message_id: int
+    ) -> bool:
+        """지금 대기 주문이 ``callback_token``의 주문이면 확정 프롬프트 id를 남기고 True (#386).
+
+        주문이 없거나 다른 주문으로 바뀌었으면 아무것도 쓰지 않고 False다. 비교와 쓰기가
+        원자적이어야 한다. 그렇지 않으면 그사이 들어온 새 주문을 옛 주문으로 덮어 되살린다.
+        """
+        ...
 
     async def set_if_absent(self, chat_id: str, order: "PendingOrder") -> bool: ...
 
@@ -611,6 +675,28 @@ class InMemoryPendingOrderStore:
         """주문을 원자적으로 꺼내며 삭제한다. 재전송 update의 중복 체결을 방지한다."""
         return self._store.pop(chat_id, None)
 
+    async def claim_if(
+        self, chat_id: str, predicate: "Callable[[PendingOrder], bool]"
+    ) -> ConditionalClaim:
+        """PendingOrderStore.claim_if. 판정과 꺼내기 사이에 await가 없어 원자적이다 (#386)."""
+        order = self._store.get(chat_id)
+        if order is None:
+            return ConditionalClaim(order=None, claimed=False)
+        if not predicate(order):
+            return ConditionalClaim(order=order, claimed=False)
+        del self._store[chat_id]
+        return ConditionalClaim(order=order, claimed=True)
+
+    async def set_prompt_message_id(
+        self, chat_id: str, callback_token: str, message_id: int
+    ) -> bool:
+        """PendingOrderStore.set_prompt_message_id (#386)."""
+        order = self._store.get(chat_id)
+        if order is None or order.callback_token != callback_token:
+            return False
+        self._store[chat_id] = replace(order, prompt_message_id=message_id)
+        return True
+
     async def set_if_absent(self, chat_id: str, order: "PendingOrder") -> bool:
         """이미 대기 주문이 있으면 False. 경합하는 /buy 요청 중 승자를 하나로 고정한다."""
         if chat_id in self._store:
@@ -654,7 +740,9 @@ class RedisPendingOrderStore:
     주문 확인/취소는 금전이 오가는 경로이므로 같은 기준을 적용할 수 없다.
 
     키 패턴과 TTL:
-    - 대기 주문 ``finus:pending_order:{chat_id}`` — PENDING_ORDER_TTL_SEC (600초 = 10분)
+    - 대기 주문 ``finus:pending_order:{chat_id}`` — PENDING_ORDER_TTL_SEC (600초 = 10분).
+      값은 PendingOrder의 JSON이다. 확정 프롬프트 id(#386)는 같은 값 안의 필드로 나중에 채워지고,
+      그 쓰기는 TTL을 늘리지 않는다(KEEPTTL).
     - /confirm 재실행 표지 ``finus:confirm_update:{chat_id}:{update_id}`` —
       CONFIRM_UPDATE_MARKER_TTL_SEC (24시간, #383). 값은 처리를 시작한 프로세스의 owner 문자열이다.
     """
@@ -677,11 +765,26 @@ class RedisPendingOrderStore:
         return json.dumps(data, ensure_ascii=False)
 
     def _deserialize(self, raw: str | bytes) -> "PendingOrder":
-        """raw JSON → PendingOrder. ValueError/TypeError/KeyError는 호출자가 처리한다."""
+        """raw JSON → PendingOrder. ValueError/TypeError/KeyError는 호출자가 처리한다.
+
+        ``prompt_message_id``(#386)가 없는 기존 저장값은 dataclass 기본값 None으로 읽힌다.
+        정수가 아닌 값도 None으로 접는다. 주문 전체를 버리지 않고 "id 모름"으로 두어, 텍스트
+        /confirm만 막히고(fail-closed) 확정 버튼은 그대로 쓸 수 있게 한다. 문자열을 그대로 두면
+        판정의 ``<`` 비교가 TypeError로 터지고, bool은 int의 하위 타입이라 True가 1로 통과한다.
+        """
         from .trading_orders import PendingOrder
 
         data: dict[str, Any] = json.loads(raw if isinstance(raw, str) else raw.decode())
         data["created_at"] = datetime.fromisoformat(data["created_at"])
+        prompt_message_id = data.get("prompt_message_id")
+        if prompt_message_id is not None and (
+            isinstance(prompt_message_id, bool) or not isinstance(prompt_message_id, int)
+        ):
+            logger.warning(
+                "pending_order의 prompt_message_id가 정수가 아니어서 모르는 값으로 읽는다: %r",
+                prompt_message_id,
+            )
+            data["prompt_message_id"] = None
         return PendingOrder(**data)
 
     async def get(self, chat_id: str) -> "PendingOrder | None":
@@ -715,6 +818,67 @@ class RedisPendingOrderStore:
             # getdel로 이미 삭제됨 — 복원 없이 None 반환
             logger.error("pending_order 역직렬화 실패 (claim): %s", exc)
             return None
+
+    async def claim_if(
+        self, chat_id: str, predicate: "Callable[[PendingOrder], bool]"
+    ) -> ConditionalClaim:
+        """GET으로 읽어 판정하고, 읽은 값이 그대로일 때만 지운다 (#386).
+
+        GETDEL로 먼저 꺼낸 뒤 판정하면 걸린 주문을 되돌려 넣어야 하고, 되돌리는 틈에 새 주문이
+        들어오면 원래 주문을 잃는다. 그래서 판정은 읽기만 한 값으로 하고, 지우기는
+        compare-and-delete로 조건을 건다. 지면(그사이 확정·취소·새 주문·id 기록) 다시 읽어
+        바뀐 값으로 판정한다.
+
+        역직렬화할 수 없는 값은 get()처럼 지우고 "주문 없음"으로 답한다. 남겨 두면 /cancel까지
+        막힌다. 지우기에도 같은 조건을 걸어, 그 틈에 들어온 새 주문은 지우지 않는다.
+        """
+        key = self._keys.pending_order(chat_id)
+        for _ in range(_CONDITIONAL_WRITE_ATTEMPTS):
+            raw = await self.redis.get(key)
+            if raw is None:
+                return ConditionalClaim(order=None, claimed=False)
+            try:
+                order = self._deserialize(raw)
+            except (ValueError, TypeError, KeyError) as exc:
+                logger.error("pending_order 역직렬화 실패 (claim_if), 키 삭제: %s", exc)
+                await self.redis.eval(_DELETE_IF_UNCHANGED_SCRIPT, 1, key, raw)
+                return ConditionalClaim(order=None, claimed=False)
+            if not predicate(order):
+                return ConditionalClaim(order=order, claimed=False)
+            if await self.redis.eval(_DELETE_IF_UNCHANGED_SCRIPT, 1, key, raw):
+                return ConditionalClaim(order=order, claimed=True)
+        raise PendingOrderContentionError(
+            f"대기 주문이 판정 도중 계속 바뀌어 확정하지 못했습니다 ({_CONDITIONAL_WRITE_ATTEMPTS}회)"
+        )
+
+    async def set_prompt_message_id(
+        self, chat_id: str, callback_token: str, message_id: int
+    ) -> bool:
+        """같은 토큰의 주문일 때만 id를 넣어 다시 쓴다. 비교와 쓰기는 한 스크립트다 (#386).
+
+        GET 뒤에 무조건 SET하면, 그사이 이 주문이 확정되고 새 주문이 들어온 경우 새 주문을 옛
+        주문으로 덮어 되살린다. 읽은 값이 그대로일 때만 바꾸고, TTL은 KEEPTTL로 유지한다.
+
+        역직렬화할 수 없는 값은 건드리지 않고 False다. 정리는 get()·claim_if의 몫이다.
+        """
+        key = self._keys.pending_order(chat_id)
+        for _ in range(_CONDITIONAL_WRITE_ATTEMPTS):
+            raw = await self.redis.get(key)
+            if raw is None:
+                return False
+            try:
+                order = self._deserialize(raw)
+            except (ValueError, TypeError, KeyError) as exc:
+                logger.error("pending_order 역직렬화 실패 (set_prompt_message_id): %s", exc)
+                return False
+            if order.callback_token != callback_token:
+                return False
+            updated = self._serialize(replace(order, prompt_message_id=message_id))
+            if await self.redis.eval(_REPLACE_IF_UNCHANGED_SCRIPT, 1, key, raw, updated):
+                return True
+        raise PendingOrderContentionError(
+            f"대기 주문이 계속 바뀌어 확정 프롬프트 id를 남기지 못했습니다 ({_CONDITIONAL_WRITE_ATTEMPTS}회)"
+        )
 
     async def set(self, chat_id: str, order: "PendingOrder") -> None:
         """PendingOrder를 JSON 직렬화하여 TTL과 함께 저장한다."""

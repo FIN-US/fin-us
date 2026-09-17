@@ -6,22 +6,29 @@
 - InMemoryPendingOrderStore: 기본 동작, 동기 dict 인터페이스
 - 통합: TTL 만료 후 /confirm 시 명시적 오류, /cancel 시 명시적 오류,
   Redis 장애 시 handler 오류 메시지 전달
+- 확정 프롬프트 message_id(#386): 직렬화 왕복, 기존·손상 저장값, 조건부 claim, id 기록
 """
 
+import json
+from dataclasses import replace
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import pytest
 
 from backend.redis_state import (
+    _DELETE_IF_UNCHANGED_SCRIPT,
+    _REPLACE_IF_UNCHANGED_SCRIPT,
     CONFIRM_UPDATE_MARKER_TTL_SEC,
     PENDING_ORDER_TTL_SEC,
+    ConditionalClaim,
     InMemoryPendingOrderStore,
+    PendingOrderContentionError,
     RedisKeys,
     RedisPendingOrderStore,
 )
 from backend.trading_orders import OrderExecutionResult, PendingOrder
-from backend.telegram_commands import TelegramCommandHandler
+from backend.telegram_commands import CONFIRM_BEFORE_PROMPT_TEXT, TelegramCommandHandler
 
 KST = ZoneInfo("Asia/Seoul")
 
@@ -35,6 +42,7 @@ _SAMPLE_ORDER = PendingOrder(
     created_at=datetime(2026, 5, 20, 10, 0, tzinfo=KST),
     order_type="LIMIT",
     callback_token="abc123",
+    prompt_message_id=4242,
 )
 
 
@@ -78,6 +86,27 @@ class FakeRedis:
         self._check_error()
         return self.store.pop(key, None)
 
+    async def eval(self, script, numkeys, key, *args):
+        """redis_state의 두 조건부 스크립트만 흉내 낸다 (#386).
+
+        스크립트 본문이 실제 redis에서 같은 뜻인지는 test_redis_integration이 대조한다. 여기서
+        모르는 스크립트를 조용히 받아 주면 새 스크립트가 대역을 그냥 통과하므로 끊는다.
+        """
+        self._check_error()
+        assert numkeys == 1
+        expected = args[0]
+        if script == _DELETE_IF_UNCHANGED_SCRIPT:
+            if self.store.get(key) != expected:
+                return 0
+            del self.store[key]
+            return 1
+        if script == _REPLACE_IF_UNCHANGED_SCRIPT:
+            if self.store.get(key) != expected:
+                return 0
+            self.store[key] = args[1]
+            return 1
+        raise AssertionError(f"FakeRedis가 모르는 스크립트다: {script!r}")
+
 
 # ---------------------------------------------------------------------------
 # RedisPendingOrderStore 단위 테스트
@@ -101,8 +130,11 @@ async def test_redis_store_set_get_roundtrip():
     assert recovered.price == 75000
     assert recovered.order_type == "LIMIT"
     assert recovered.callback_token == "abc123"
+    # 확정 프롬프트 id(#386). 왕복에서 빠지면 텍스트 /confirm이 모든 주문을 "id 모름"으로 거절한다.
+    assert recovered.prompt_message_id == 4242
     # datetime 왕복: isoformat → fromisoformat 과정에서 timezone 보존
     assert recovered.created_at == _SAMPLE_ORDER.created_at
+    assert recovered == _SAMPLE_ORDER
 
 
 @pytest.mark.asyncio
@@ -593,6 +625,7 @@ async def test_duplicate_confirm_calls_place_order_only_once():
         price=75000,
         created_at=datetime(2026, 5, 20, 10, 0, 0, tzinfo=KST),
         callback_token="tok",
+        prompt_message_id=100,
     )
     await store.set("123", order)
 
@@ -603,11 +636,12 @@ async def test_duplicate_confirm_calls_place_order_only_once():
         trade_recorder=ledger,
         now_factory=lambda: datetime(2026, 5, 20, 10, 0, 30, tzinfo=KST),
     )
+    confirm = {"message": {"chat": {"id": 123}, "message_id": 101, "text": "/confirm"}}
 
     # 첫 번째 confirm: 정상 체결
-    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/confirm"}})
+    await handler.handle_update(confirm)
     # 두 번째 confirm: 재시작 후 재전송된 update 시뮬레이션
-    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/confirm"}})
+    await handler.handle_update(confirm)
 
     # place_order는 정확히 한 번만 호출되어야 한다
     assert len(gateway.orders) == 1, (
@@ -795,6 +829,234 @@ async def test_redis_confirm_update_marker_lives_outside_the_pending_order_names
     pending_order_prefix = RedisKeys().pending_order("")
     assert list(redis.store) == [RedisKeys().confirm_update("123", 41)]
     assert not any(key.startswith(pending_order_prefix) for key in redis.store)
+
+
+# ---------------------------------------------------------------------------
+# 확정 프롬프트 message_id와 조건부 claim (#386)
+# ---------------------------------------------------------------------------
+
+
+def _raw_order(**overrides) -> str:
+    """역직렬화 경로를 직접 보려고 저장값 JSON을 손으로 만든다."""
+    data = {
+        "chat_id": "123",
+        "stock_name": "삼성전자",
+        "stock_code": "005930",
+        "side": "BUY",
+        "quantity": 1,
+        "price": 75000,
+        "created_at": "2026-05-20T10:00:00+09:00",
+        "order_type": "LIMIT",
+        "callback_token": "tok",
+    }
+    data.update(overrides)
+    return json.dumps(data, ensure_ascii=False)
+
+
+@pytest.mark.asyncio
+async def test_redis_store_reads_a_legacy_value_without_prompt_id_as_unknown():
+    """필드가 생기기 전의 저장값은 'id 모름'으로 읽힌다. 주문 자체는 버리지 않는다 (#386)."""
+    redis = FakeRedis()
+    redis.store[RedisKeys().pending_order("123")] = _raw_order()
+    store = RedisPendingOrderStore(redis)
+
+    order = await store.get("123")
+
+    assert order is not None
+    assert order.prompt_message_id is None
+    assert order.prompted_before(10**9) is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "stored", ["4242", True, 42.0], ids=["str", "bool", "float"]
+)
+async def test_redis_store_reads_a_non_integer_prompt_id_as_unknown(stored):
+    """정수가 아닌 id는 'id 모름'이다. 주문은 버리지 않는다 (#386).
+
+    문자열이 그대로 살면 판정의 ``<``가 TypeError로 터지고, bool은 int의 하위 타입이라
+    True가 1로 대조된다. 주문을 남기므로 확정 버튼은 그대로 쓸 수 있다.
+
+    이 테스트가 잡는 mutation: _deserialize의 정수 검사 제거, bool 제외 제거.
+    """
+    redis = FakeRedis()
+    redis.store[RedisKeys().pending_order("123")] = _raw_order(prompt_message_id=stored)
+    store = RedisPendingOrderStore(redis)
+
+    order = await store.get("123")
+
+    assert order is not None
+    assert order.prompt_message_id is None
+
+
+_BOTH_STORES = pytest.mark.parametrize(
+    "make_store",
+    [InMemoryPendingOrderStore, lambda: RedisPendingOrderStore(FakeRedis())],
+    ids=["memory", "redis"],
+)
+
+
+@pytest.mark.asyncio
+@_BOTH_STORES
+async def test_claim_if_takes_only_an_order_that_passes(make_store):
+    """조건을 통과한 주문만 꺼내고, 걸린 주문은 그대로 남긴다 (#386).
+
+    이 테스트가 잡는 mutation: predicate 무시(걸린 주문까지 꺼낸다), 걸린 주문을 지움.
+    """
+    store = make_store()
+    assert await store.claim_if("123", lambda order: True) == ConditionalClaim(
+        order=None, claimed=False
+    )
+
+    await store.set("123", _SAMPLE_ORDER)
+    refused = await store.claim_if("123", lambda order: False)
+    assert refused == ConditionalClaim(order=_SAMPLE_ORDER, claimed=False)
+    assert await store.get("123") == _SAMPLE_ORDER
+
+    claimed = await store.claim_if("123", lambda order: order.callback_token == "abc123")
+    assert claimed == ConditionalClaim(order=_SAMPLE_ORDER, claimed=True)
+    assert await store.has("123") is False
+
+
+@pytest.mark.asyncio
+@_BOTH_STORES
+async def test_set_prompt_message_id_writes_only_to_the_same_order(make_store):
+    """같은 토큰의 주문에만 id를 남긴다 (#386).
+
+    이 테스트가 잡는 mutation: 토큰 비교 제거(다른 주문에 옛 프롬프트의 id가 붙어, 그 주문의
+    프롬프트를 보기 전에 보낸 /confirm이 통과한다).
+    """
+    store = make_store()
+    order = replace(_SAMPLE_ORDER, prompt_message_id=None)
+    assert await store.set_prompt_message_id("123", "abc123", 77) is False
+
+    await store.set("123", order)
+    assert await store.set_prompt_message_id("123", "other-token", 77) is False
+    assert await store.get("123") == order
+
+    assert await store.set_prompt_message_id("123", "abc123", 77) is True
+    assert await store.get("123") == replace(order, prompt_message_id=77)
+
+
+class _SwapOnFirstEvalRedis(FakeRedis):
+    """첫 조건부 스크립트 직전에 키 값을 ``swap_to``로 바꾼다.
+
+    GET과 EVAL 사이에 다른 쓰기(확정·만료 뒤 새 주문)가 끼어든 경우를 만든다.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.swap_to: str | None = None
+        self.evals = 0
+
+    async def eval(self, script, numkeys, key, *args):
+        self.evals += 1
+        if self.evals == 1 and self.swap_to is not None:
+            self.store[key] = self.swap_to
+        return await super().eval(script, numkeys, key, *args)
+
+
+@pytest.mark.asyncio
+async def test_redis_claim_if_rejudges_an_order_that_changed_after_the_read():
+    """판정한 뒤 꺼내기 전에 주문이 바뀌면, 바뀐 주문으로 다시 판정한다 (#386).
+
+    #386의 틈 그대로다. A를 읽고 통과시킨 사이 A가 치워지고 B가 들어온다. 무조건 지우면
+    판정하지 않은 B를 꺼내 실행하게 된다 — 사용자가 본 적 없는 주문이다.
+
+    이 테스트가 잡는 mutation: compare-and-delete를 무조건 DEL로 바꿈, 조건부 삭제가 져도
+    claimed로 답함.
+    """
+    order_a = replace(_SAMPLE_ORDER, callback_token="tok-a", prompt_message_id=10)
+    order_b = replace(_SAMPLE_ORDER, callback_token="tok-b", prompt_message_id=30)
+    redis = _SwapOnFirstEvalRedis()
+    store = RedisPendingOrderStore(redis)
+    redis.swap_to = store._serialize(order_b)
+    await store.set("123", order_a)
+
+    outcome = await store.claim_if("123", lambda order: order.prompted_before(20))
+
+    assert outcome == ConditionalClaim(order=order_b, claimed=False)
+    assert await store.get("123") == order_b
+
+
+@pytest.mark.asyncio
+async def test_redis_claim_if_gives_up_instead_of_guessing_under_contention():
+    """값이 매번 바뀌면 판정 없이 진행하지 않고 예외로 끝낸다 (#386).
+
+    호출부는 이 예외를 "주문 저장소 오류"로 돌려준다. 주문은 건드리지 않는다.
+    """
+
+    class _AlwaysChangedRedis(FakeRedis):
+        async def eval(self, script, numkeys, key, *args):
+            return 0
+
+    store = RedisPendingOrderStore(_AlwaysChangedRedis())
+    await store.set("123", _SAMPLE_ORDER)
+
+    with pytest.raises(PendingOrderContentionError):
+        await store.claim_if("123", lambda order: True)
+    assert await store.get("123") == _SAMPLE_ORDER
+
+
+@pytest.mark.asyncio
+async def test_redis_set_prompt_message_id_does_not_overwrite_an_order_that_replaced_it():
+    """id를 남기는 사이 주문이 바뀌면 새 주문을 옛 주문으로 덮지 않는다 (#386).
+
+    자동 제안이 B의 프롬프트를 보내는 사이 B가 확정되고 C가 들어온 경우다. 무조건 SET하면
+    C가 사라지고, 이미 실행된 B가 대기 주문으로 되살아난다.
+
+    이 테스트가 잡는 mutation: compare-and-set을 무조건 SET으로 바꿈.
+    """
+    order_b = replace(_SAMPLE_ORDER, callback_token="tok-b", prompt_message_id=None)
+    order_c = replace(_SAMPLE_ORDER, callback_token="tok-c", prompt_message_id=None)
+    redis = _SwapOnFirstEvalRedis()
+    store = RedisPendingOrderStore(redis)
+    redis.swap_to = store._serialize(order_c)
+    await store.set("123", order_b)
+
+    assert await store.set_prompt_message_id("123", "tok-b", 77) is False
+    assert await store.get("123") == order_c
+
+
+@pytest.mark.asyncio
+async def test_late_text_confirm_with_redis_store_keeps_the_newer_order():
+    """늦게 처리된 텍스트 /confirm은 redis 저장소에서도 그사이 생긴 주문을 실행하지 않는다 (#386).
+
+    /confirm(110)은 B의 프롬프트(120)보다 먼저 보낸 것이다. B는 소비되지 않고 남고, B의
+    프롬프트를 본 뒤 보낸 /confirm(121)이 B를 실행한다.
+    """
+    store = RedisPendingOrderStore(FakeRedis())
+    order_b = replace(
+        _SAMPLE_ORDER,
+        quantity=2,
+        callback_token="tok-b",
+        created_at=datetime(2026, 5, 20, 10, 1, 10, tzinfo=KST),
+        prompt_message_id=120,
+    )
+    await store.set("123", order_b)
+    gateway = FakeOrderGateway()
+    notifier = FakeNotifier()
+    handler = TelegramCommandHandler(
+        notifier=notifier,
+        pending_order_store=store,
+        order_gateway=gateway,
+        trade_recorder=FakeTradeLedger(),
+        now_factory=lambda: datetime(2026, 5, 20, 10, 1, 30, tzinfo=KST),
+    )
+
+    await handler.handle_update(
+        {"message": {"chat": {"id": 123}, "message_id": 110, "text": "/confirm"}}
+    )
+
+    assert gateway.orders == []
+    assert await store.get("123") == order_b
+    assert notifier.messages == [CONFIRM_BEFORE_PROMPT_TEXT]
+
+    await handler.handle_update(
+        {"message": {"chat": {"id": 123}, "message_id": 121, "text": "/confirm"}}
+    )
+
+    assert [order.callback_token for order in gateway.orders] == ["tok-b"]
 
 
 @pytest.mark.asyncio

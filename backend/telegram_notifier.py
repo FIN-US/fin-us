@@ -2,6 +2,7 @@ import asyncio
 import logging
 import re
 import time
+from dataclasses import dataclass
 from numbers import Real
 from typing import Any, Awaitable, Callable, Protocol
 
@@ -140,6 +141,29 @@ async def fetch_telegram_api(
     )
 
 
+async def call_telegram_api_reading_body(
+    bot_token: str,
+    method: str,
+    *,
+    payload: dict[str, Any] | None = None,
+    timeout: float = 10.0,
+) -> dict[str, Any]:
+    """성공 판정은 call_telegram_api와 같고, 본문은 읽을 수 있을 때만 돌려준다 (#386).
+
+    확정 프롬프트의 message_id를 얻는 경로다. fetch_telegram_api를 쓰면 200인데 본문을 못
+    읽은 경우가 실패가 되고, settled 전송이 이미 도착한 프롬프트를 한 번 더 보낸다. 여기서는
+    그 경우 빈 dict를 돌려준다. 호출부는 "보냈지만 id를 모른다"로 읽는다.
+    """
+    return await _request_telegram_api(
+        bot_token,
+        method,
+        payload=payload,
+        timeout=timeout,
+        parse_body=True,
+        body_optional=True,
+    )
+
+
 async def _request_telegram_api(
     bot_token: str,
     method: str,
@@ -147,6 +171,7 @@ async def _request_telegram_api(
     payload: dict[str, Any] | None,
     timeout: float,
     parse_body: bool,
+    body_optional: bool = False,
 ) -> dict[str, Any]:
     """봇 토큰이 URL에 실리는 유일한 지점.
 
@@ -163,7 +188,13 @@ async def _request_telegram_api(
             # 본문을 쓰지 않는 호출은 파싱하지 않는다. 무조건 파싱하면 200에 비-JSON이
             # 온 경우 본문을 읽지도 않는 sendMessage까지 실패하는데, 이는 이 리팩터링
             # 전에 없던 동작이다 (#257 자가리뷰).
-            body = response.json() if parse_body else {}
+            if not parse_body:
+                body = {}
+            elif body_optional:
+                # 전송은 이미 성공했다. 본문을 못 읽어도 실패로 올리지 않는다 (#386).
+                body = _response_body(response)
+            else:
+                body = response.json()
     except httpx.HTTPStatusError as exc:
         raise TelegramApiError(
             method,
@@ -292,6 +323,18 @@ def _message_id_from_send_body(body: Any) -> int | None:
     return message_id if isinstance(message_id, int) else None
 
 
+@dataclass(frozen=True)
+class SendReceipt:
+    """전송 결과와, 알 수 있으면 마지막 조각의 message_id (#386).
+
+    ``sent``가 True인데 ``message_id``가 None이면 "보냈지만 id를 모른다"이다. 확정 프롬프트에서는
+    그 주문을 텍스트 /confirm으로 실행하지 않는 쪽(fail-closed)으로 읽힌다.
+    """
+
+    sent: bool
+    message_id: int | None = None
+
+
 class TelegramTextSender(Protocol):
     """send_text_settled가 notifier에게 요구하는 전부 (#319).
 
@@ -309,8 +352,8 @@ class TelegramCommandNotifier(TelegramTextSender, Protocol):
     """TelegramCommandHandler가 notifier에 요구하는 전부 (#319).
 
     ``chat_id``는 메서드가 아니라 상태다 — 핸들러가 자기 채팅의 update만 처리하는
-    판정에 쓴다. 여기 없는 것들(``send_text_returning_id``·``delete_message``·
-    ``edit_message_text``·``bot_username``)은 일부러 뺐다. 핸들러가 전부 getattr로
+    판정에 쓴다. 여기 없는 것들(``send_text_returning_id``·``send_text_receipt``·
+    ``delete_message``·``edit_message_text``·``bot_username``)은 일부러 뺐다. 핸들러가 전부 getattr로
     존재 여부를 물어 없으면 그 기능만 건너뛰므로, 계약에 올리면 "있어야 하는 것"과
     "있으면 쓰는 것"의 구분이 사라진다.
     """
@@ -500,11 +543,39 @@ class TelegramNotifier:
         도착하면 사용자는 빠진 자리를 알 수 없는데, 조각마다 붙는 머리표("📄 2/3")가
         여기서 값을 한다 — 받은 번호가 끊기면 무엇이 오지 않았는지 보인다.
         """
+        return (await self._send_parts(text, reply_markup, want_id=False)).sent
+
+    async def send_text_receipt(
+        self,
+        text: str,
+        *,
+        reply_markup: dict[str, Any] | None = None,
+    ) -> SendReceipt:
+        """:meth:`send_text`와 같이 보내고, 마지막 조각의 ``message_id``를 함께 준다 (#386).
+
+        확정 프롬프트를 보내는 settled 전송이 쓴다. 텍스트 /confirm이 "프롬프트를 본 뒤에 보낸
+        것인가"를 그 id와 대조하기 때문이다. 버튼이 마지막 조각에 달리므로 그 조각의 id를 쓴다.
+
+        :meth:`send_text_returning_id`로 대신하지 않는 이유: 그쪽은 나누지 않고 자르며(#313),
+        실패와 "보냈지만 id 모름"이 둘 다 None이다. 둘을 섞으면 settled 재시도가 이미 도착한
+        프롬프트를 한 번 더 보낸다.
+        """
+        return await self._send_parts(text, reply_markup, want_id=True)
+
+    async def _send_parts(
+        self,
+        text: str,
+        reply_markup: dict[str, Any] | None,
+        *,
+        want_id: bool,
+    ) -> SendReceipt:
+        """send_text·send_text_receipt의 속살. ``want_id``면 마지막 조각의 본문을 읽는다."""
         if not self.enabled:
-            return False
+            return SendReceipt(sent=False)
 
         parts: list[str] = []
         delivered = 0
+        message_id: int | None = None
         try:
             # 분할도 try 안이다. 예전의 text[:LIMIT]은 예외가 불가능했지만 분할은
             # 그렇지 않으므로(이 자리를 벗어나면 "전송 실패는 False"라는 계약이
@@ -513,13 +584,17 @@ class TelegramNotifier:
             for position, part in enumerate(parts, 1):
                 # 버튼은 마지막 조각에만 단다. 앞 조각에 달면 본문이 끝나기 전에 답을
                 # 고르라고 재촉하는 꼴이고, 조각마다 달면 같은 버튼이 여러 벌 남는다.
-                await self._post_message(
-                    part,
-                    reply_markup=reply_markup if position == len(parts) else None,
-                )
+                last = position == len(parts)
+                part_markup = reply_markup if last else None
+                if want_id and last:
+                    message_id = await self._post_message_for_id(
+                        part, reply_markup=part_markup
+                    )
+                else:
+                    await self._post_message(part, reply_markup=part_markup)
                 delivered = position
             self.last_retry_after_seconds = None
-            return True
+            return SendReceipt(sent=True, message_id=message_id)
         except Exception as exc:
             retry_after = _retry_after_seconds(exc)
             # 반환형은 bool로 두되 flood-wait 길이는 호출부가 읽을 수 있게 남긴다.
@@ -542,7 +617,7 @@ class TelegramNotifier:
                     retry_after,
                     exc,
                 )
-            return False
+            return SendReceipt(sent=False)
 
     async def send_text_returning_id(
         self,
@@ -746,6 +821,25 @@ class TelegramNotifier:
             payload=self._send_message_payload(text, reply_markup),
         )
 
+    async def _post_message_for_id(
+        self,
+        text: str,
+        *,
+        reply_markup: dict[str, Any] | None = None,
+    ) -> int | None:
+        """sendMessage를 호출하고, 본문에서 읽을 수 있으면 message_id를 준다 (#386).
+
+        :meth:`_post_message_returning_body`와 달리 본문을 못 읽어도 실패로 올리지 않는다.
+        :meth:`send_text_receipt`는 조각 전송의 성공 여부로 재시도를 가르므로, 여기서 실패로
+        올리면 이미 도착한 조각이 한 번 더 나간다.
+        """
+        body = await call_telegram_api_reading_body(
+            self.bot_token,
+            "sendMessage",
+            payload=self._send_message_payload(text, reply_markup),
+        )
+        return _message_id_from_send_body(body)
+
 
 # 부수효과가 확정된 뒤의 전송은 update 재시도로 되살릴 수 없다(#247). 대신 그 자리에서
 # 짧게 재시도해 429 같은 일시 장애를 흡수한다 — "전송만 별도로 재시도"에 해당한다.
@@ -825,7 +919,45 @@ async def send_text_settled(
     재시도 횟수는 조각마다 새로 세지만 벽시계 상한은 메시지 전체가 나눠 쓴다. 조각 수에
     비례해 폴러를 붙잡는 시간이 늘면 SETTLED_SEND_TIMEOUT_SECONDS가 근거로 삼은 계산(대기
     주문의 60초 만료 창)이 무너지기 때문이다.
+
+    확정 프롬프트는 :func:`send_text_settled_receipt`로 보낸다. 재시도 규칙은 같고 마지막
+    조각의 message_id를 함께 받는다(#386).
     """
+    return (
+        await _send_settled(notifier, text, reply_markup=reply_markup, sleep=sleep, want_id=False)
+    ).sent
+
+
+async def send_text_settled_receipt(
+    notifier: TelegramTextSender,
+    text: str,
+    *,
+    reply_markup: dict[str, Any] | None = None,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+) -> SendReceipt:
+    """:func:`send_text_settled`와 같이 보내고, 버튼이 달린 마지막 조각의 message_id를 준다 (#386).
+
+    대기 주문의 확정 프롬프트가 쓴다. 텍스트 /confirm은 그 id보다 뒤에 보낸 것일 때만 주문을
+    실행한다(PendingOrder.prompted_before).
+
+    id는 notifier가 ``send_text_receipt``를 제공할 때만 얻는다. 없으면 ``send_text``로 보내고
+    id는 None이다. 그러면 그 주문은 텍스트 /confirm으로 실행되지 않는다. 막히는 쪽이라
+    안전하고, 확정 버튼은 그대로 쓸 수 있다.
+    """
+    return await _send_settled(
+        notifier, text, reply_markup=reply_markup, sleep=sleep, want_id=True
+    )
+
+
+async def _send_settled(
+    notifier: TelegramTextSender,
+    text: str,
+    *,
+    reply_markup: dict[str, Any] | None,
+    sleep: Callable[[float], Awaitable[None]],
+    want_id: bool,
+) -> SendReceipt:
+    """:func:`send_text_settled`·:func:`send_text_settled_receipt`의 속살."""
     started_at = time.monotonic()
     parts: list[str] = []
     delivered = 0
@@ -841,23 +973,27 @@ async def send_text_settled(
         # 통과시키므로 폴러의 graceful shutdown을 방해하지 않는다.
         async with asyncio.timeout(SETTLED_SEND_TIMEOUT_SECONDS):
             parts = split_for_telegram(text)
+            receipt = SendReceipt(sent=True)
             for position, part in enumerate(parts, 1):
-                sent = await _send_part_settled(
+                last = position == len(parts)
+                receipt = await _send_part_settled(
                     notifier,
                     part,
                     # 버튼은 마지막 조각에만. notifier.send_text와 같은 규칙이다.
-                    reply_markup if position == len(parts) else None,
+                    reply_markup if last else None,
                     started_at=started_at,
                     position=position,
                     total=len(parts),
                     sleep=sleep,
+                    # id가 필요한 것은 버튼이 달린 마지막 조각뿐이다 (#386).
+                    want_id=want_id and last,
                 )
-                if not sent:
+                if not receipt.sent:
                     # 최종 실패의 메트릭 (#259 5단계). 원인 줄은 _send_part_settled가 남겼다.
                     delivery_metrics.record_failure("settled_send")
-                    return False
+                    return SendReceipt(sent=False)
                 delivered = position
-        return True
+        return receipt
     except TimeoutError:
         logger.error(
             "확정된 부수효과의 결과를 전송하지 못했습니다 "
@@ -868,12 +1004,12 @@ async def send_text_settled(
             SETTLED_SEND_TIMEOUT_SECONDS,
         )
         delivery_metrics.record_failure("settled_send")
-        return False
+        return SendReceipt(sent=False)
     except Exception as exc:
         # 조립이든 전송이든, 예외를 여기서 멈춘다. 이 경로가 존재하는 이유가 "부수효과가
         # 확정돼 update를 재실행할 수 없다"이므로(#247), 예외를 폴러까지 올리면 폴러가
         # 하지 말아야 할 재실행을 한다 — 전송 실패보다 나쁜 결과다. 전송 자체의 실패는
-        # _send_part_settled가 이미 bool로 접어 오므로 여기 걸리는 것은 조립 단계의
+        # _send_part_settled가 이미 SendReceipt로 접어 오므로 여기 걸리는 것은 조립 단계의
         # 예외뿐이다 (PR #328 리뷰).
         #
         # CancelledError는 BaseException이라 이 절을 지나간다. 폴러의 graceful
@@ -885,7 +1021,7 @@ async def send_text_settled(
             exc,
         )
         delivery_metrics.record_failure("settled_send")
-        return False
+        return SendReceipt(sent=False)
 
 
 async def _send_part_settled(
@@ -897,18 +1033,30 @@ async def _send_part_settled(
     position: int,
     total: int,
     sleep: Callable[[float], Awaitable[None]],
-) -> bool:
+    want_id: bool = False,
+) -> SendReceipt:
     """조각 하나를 재시도까지 포함해 보낸다. :func:`send_text_settled`의 속살이다.
 
     ``started_at``은 메시지 전체의 시작 시각이다. 조각별로 다시 재면 flood-wait
     판정이 "이 조각에 남은 시간"을 보게 되는데, 실제로 남은 것은 메시지 전체의
     예산이라 조각 수만큼 과대평가된다.
+
+    ``want_id``면 notifier의 ``send_text_receipt``로 보내 이 조각의 message_id를 받는다
+    (#386). 그 메서드가 없는 notifier는 ``send_text``로 보내고 id는 None이다.
     """
+    receipt_sender: Callable[..., Awaitable[SendReceipt]] | None = (
+        getattr(notifier, "send_text_receipt", None) if want_id else None
+    )
     attempts = len(SETTLED_SEND_RETRY_BACKOFF_SECONDS) + 1
     for index in range(attempts):
-        sent = await notifier.send_text(part, reply_markup=reply_markup)
-        if sent is not False:
-            return True
+        if callable(receipt_sender):
+            receipt = await receipt_sender(part, reply_markup=reply_markup)
+        else:
+            receipt = SendReceipt(
+                sent=await notifier.send_text(part, reply_markup=reply_markup) is not False
+            )
+        if receipt.sent:
+            return receipt
         if index >= len(SETTLED_SEND_RETRY_BACKOFF_SECONDS):
             break
 
@@ -919,8 +1067,8 @@ async def _send_part_settled(
         # 아니라 해롭다 (PR #253 2차 리뷰).
         #
         # last_retry_after_seconds는 notifier에 걸린 공유 가변 상태다. 이 읽기가
-        # 방금 그 send_text의 결과를 보는 근거는 둘뿐이다: send_text가 성공·실패
-        # 양쪽에서 값을 갱신해 호출 간 이월이 없다는 것과, 위 send_text 반환과
+        # 방금 그 send_text(또는 send_text_receipt)의 결과를 보는 근거는 둘뿐이다: 둘 다
+        # 성공·실패 양쪽에서 값을 갱신해 호출 간 이월이 없다는 것과, 위 전송 반환과
         # 이 줄 사이에 await가 없어 이벤트 루프가 다른 코루틴에 넘어가지 않는다는
         # 것. 사이에 await를 하나 넣으면(로깅을 비동기로 바꾸는 정도로도) 다른
         # 전송의 flood-wait을 읽게 된다 (PR #253 3차 리뷰).
@@ -937,7 +1085,7 @@ async def _send_part_settled(
                     retry_after,
                     max(0.0, remaining),
                 )
-                return False
+                return SendReceipt(sent=False)
             delay = max(delay, float(retry_after))
         await sleep(delay)
     # 본문은 남기지 않는다. 이 경로에는 체결 내역·잔고가 실려 있고, 진단에 필요한 것은
@@ -949,7 +1097,7 @@ async def _send_part_settled(
         total,
         attempts,
     )
-    return False
+    return SendReceipt(sent=False)
 
 
 

@@ -10,11 +10,13 @@ import backend.telegram_notifier
 from backend.presentation import SIGNAL_SCORE_LABEL, TELEGRAM_TRUNCATION_SUFFIX
 from backend.telegram_notifier import (
     TELEGRAM_MESSAGE_LIMIT,
+    SendReceipt,
     TelegramApiError,
     TelegramNotifier,
     _retry_after_seconds,
     call_telegram_api,
     fetch_telegram_api,
+    send_text_settled_receipt,
     should_send_telegram_alert,
 )
 
@@ -932,3 +934,159 @@ def test_format_analysis_alert_without_signal_score_is_unchanged():
 
     assert SIGNAL_SCORE_LABEL not in message
     assert message.split("\n")[1].startswith("- 판단: 보유 유지")
+
+
+# ── #386: 확정 프롬프트의 message_id ────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_send_text_receipt_returns_the_id_of_the_part_carrying_the_buttons(mock_httpx):
+    """나뉜 프롬프트는 버튼이 달린 마지막 조각의 id를 준다 (#386).
+
+    텍스트 /confirm은 이 id보다 뒤에 보낸 것일 때만 주문을 실행한다. 첫 조각의 id를 주면
+    프롬프트가 다 도착하기 전에 보낸 /confirm까지 통과한다.
+
+    이 테스트가 잡는 mutation: 첫 조각의 id를 돌려줌, 마지막 조각을 id 없이 보냄.
+    """
+    recorded = mock_httpx(
+        httpx.Response(200, json={"ok": True, "result": {"message_id": 11}}),
+        httpx.Response(200, json={"ok": True, "result": {"message_id": 12}}),
+    )
+    notifier = TelegramNotifier("token", "123")
+    markup = {"inline_keyboard": [[{"text": "✅ 확정", "callback_data": "order:confirm:t"}]]}
+
+    receipt = await notifier.send_text_receipt(
+        "가" * (TELEGRAM_MESSAGE_LIMIT + 500), reply_markup=markup
+    )
+
+    assert receipt == SendReceipt(sent=True, message_id=12)
+    assert len(recorded.calls) == 2
+    assert "reply_markup" not in recorded.calls[0][1]
+    assert recorded.calls[1][1]["reply_markup"] == markup
+
+
+@pytest.mark.asyncio
+async def test_send_text_receipt_counts_an_unreadable_body_as_sent(mock_httpx):
+    """200인데 본문을 못 읽으면 '보냈지만 id 모름'이다. 실패가 아니다 (#386).
+
+    실패로 치면 settled 전송이 이미 도착한 프롬프트를 한 번 더 보낸다. id를 모르는 주문은
+    텍스트 /confirm이 실행하지 않으므로(fail-closed) 여기서 실패로 올릴 이유가 없다.
+
+    이 테스트가 잡는 mutation: 본문 파싱 실패를 전송 실패로 올림(fetch_telegram_api로 되돌림).
+    """
+    recorded = mock_httpx(httpx.Response(200, text="not json"))
+    notifier = TelegramNotifier("token", "123")
+
+    assert await notifier.send_text_receipt("확정 프롬프트") == SendReceipt(
+        sent=True, message_id=None
+    )
+    assert len(recorded.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_send_text_receipt_reports_a_failed_send_and_its_flood_wait(mock_httpx):
+    """실패는 sent=False이고, 429의 flood-wait은 send_text와 같이 남는다 (#386).
+
+    settled 재시도가 그 값을 읽어 간격을 정한다. 프롬프트 경로만 그 값을 잃으면 429에서
+    재시도가 추측 간격으로 돌아간다.
+    """
+    mock_httpx(
+        httpx.Response(
+            429,
+            json={
+                "ok": False,
+                "description": "Too Many Requests: retry after 7",
+                "parameters": {"retry_after": 7},
+            },
+        )
+    )
+    notifier = TelegramNotifier("token", "123")
+
+    assert await notifier.send_text_receipt("확정 프롬프트") == SendReceipt(sent=False)
+    assert notifier.last_retry_after_seconds == 7
+
+
+class _ReceiptNotifier:
+    """조각을 어느 메서드로 보냈는지 기록하는 대역. ``results``는 시도마다의 성공 여부다."""
+
+    def __init__(self, results: list[bool] | None = None) -> None:
+        self.calls: list[tuple[str, str, dict | None]] = []
+        self._results = list(results or [True])
+        self._next_id = 500
+
+    def _result(self) -> bool:
+        return self._results.pop(0) if len(self._results) > 1 else self._results[0]
+
+    async def send_text(self, text, *, reply_markup=None):
+        self.calls.append(("send_text", text, reply_markup))
+        return self._result()
+
+    async def send_text_receipt(self, text, *, reply_markup=None):
+        self.calls.append(("send_text_receipt", text, reply_markup))
+        if not self._result():
+            return SendReceipt(sent=False)
+        self._next_id += 1
+        return SendReceipt(sent=True, message_id=self._next_id)
+
+
+async def _no_sleep(seconds: float) -> None:
+    _ = seconds
+
+
+@pytest.mark.asyncio
+async def test_settled_receipt_takes_the_id_from_the_last_part_after_retries():
+    """settled 전송은 마지막 조각만 id를 받아 오고, 재시도했으면 성공한 시도의 id다 (#386).
+
+    이 테스트가 잡는 mutation: _send_part_settled가 want_id를 무시함(id가 None으로 남는다),
+    앞 조각까지 send_text_receipt로 보냄.
+    """
+    notifier = _ReceiptNotifier(results=[True, False, True])
+    markup = {"inline_keyboard": []}
+
+    receipt = await send_text_settled_receipt(
+        notifier,
+        "나" * (TELEGRAM_MESSAGE_LIMIT + 500),
+        reply_markup=markup,
+        sleep=_no_sleep,
+    )
+
+    assert receipt == SendReceipt(sent=True, message_id=501)
+    assert [(method, reply_markup) for method, _, reply_markup in notifier.calls] == [
+        ("send_text", None),
+        ("send_text_receipt", markup),
+        ("send_text_receipt", markup),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_settled_receipt_without_receipt_support_sends_without_an_id():
+    """send_text_receipt가 없는 notifier로도 프롬프트는 나간다. id만 모른다 (#386).
+
+    id를 모르는 주문은 텍스트 /confirm으로 실행되지 않고 버튼으로만 확정된다. 전송 자체를
+    막으면 사용자는 대기 주문의 존재도 모른다.
+    """
+
+    class _TextOnly:
+        def __init__(self) -> None:
+            self.sent: list[str] = []
+
+        async def send_text(self, text, *, reply_markup=None):
+            self.sent.append(text)
+            return True
+
+    notifier = _TextOnly()
+
+    receipt = await send_text_settled_receipt(notifier, "확정 프롬프트", sleep=_no_sleep)
+
+    assert receipt == SendReceipt(sent=True, message_id=None)
+    assert notifier.sent == ["확정 프롬프트"]
+
+
+@pytest.mark.asyncio
+async def test_settled_receipt_reports_a_send_that_never_went_out():
+    """끝내 못 보냈으면 sent=False다. 호출부가 대기 주문을 지우는 근거다 (#247)."""
+    notifier = _ReceiptNotifier(results=[False])
+
+    receipt = await send_text_settled_receipt(notifier, "확정 프롬프트", sleep=_no_sleep)
+
+    assert receipt == SendReceipt(sent=False)

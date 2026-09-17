@@ -1,17 +1,24 @@
 import asyncio
 import os
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from typing import Awaitable, cast
 from uuid import uuid4
 
 import pytest
 
 from backend.redis_state import (
+    _DELETE_IF_UNCHANGED_SCRIPT,
+    _REPLACE_IF_UNCHANGED_SCRIPT,
+    ConditionalClaim,
     RedisKeys,
+    RedisPendingOrderStore,
     RedisSchedulerState,
     RedisTelegramPollerStore,
     TelegramPollerState,
     signal_hash,
 )
+from backend.trading_orders import PendingOrder
 
 
 pytestmark = pytest.mark.asyncio
@@ -117,6 +124,63 @@ async def test_real_redis_poller_state_survives_a_new_store_instance():
 
         assert loaded.offset == 44
         assert await redis.ttl(keys.telegram_poller_state()) > 0
+    finally:
+        stale = await redis.keys(f"{prefix}:*")
+        if stale:
+            await redis.delete(*stale)
+        await redis.aclose()
+
+
+async def test_real_redis_pending_order_conditional_writes_compare_values_and_keep_ttl():
+    """대기 주문의 조건부 claim·프롬프트 id 기록이 실제 redis에서 뜻대로 돈다 (#386).
+
+    FakeRedis는 두 Lua 스크립트를 파이썬으로 흉내 내므로 스크립트 본문이 틀려도 모른다.
+    KEEPTTL(redis 6.0+)도 여기서만 보인다 — 빠지면 id를 남기는 SET이 TTL을 지워 대기 주문
+    키가 영구히 남는다.
+    """
+    redis = await _redis_client()
+    prefix = f"finus:test:{uuid4().hex}"
+    keys = RedisKeys(prefix=prefix)
+    store = RedisPendingOrderStore(redis, keys=keys, ttl_sec=600)
+    key = keys.pending_order("123")
+    order = PendingOrder(
+        chat_id="123",
+        stock_name="삼성전자",
+        stock_code="005930",
+        side="BUY",
+        quantity=1,
+        price=75000,
+        created_at=datetime(2026, 5, 20, 10, 0, tzinfo=timezone(timedelta(hours=9))),
+        callback_token="tok-a",
+    )
+
+    try:
+        await store.set("123", order)
+
+        # 다른 주문(토큰)에는 쓰지 않고, 같은 주문이면 id를 남기되 TTL은 유지한다.
+        assert await store.set_prompt_message_id("123", "tok-other", 77) is False
+        assert await store.set_prompt_message_id("123", "tok-a", 77) is True
+        stored = await store.get("123")
+        assert stored == replace(order, prompt_message_id=77)
+        assert 0 < await redis.ttl(key) <= 600
+
+        # 읽은 값과 다르면 두 스크립트 모두 아무것도 바꾸지 않는다.
+        deleted = await cast(
+            Awaitable[int], redis.eval(_DELETE_IF_UNCHANGED_SCRIPT, 1, key, "stale")
+        )
+        replaced = await cast(
+            Awaitable[int], redis.eval(_REPLACE_IF_UNCHANGED_SCRIPT, 1, key, "stale", "x")
+        )
+        assert (deleted, replaced) == (0, 0)
+        assert await store.get("123") == stored
+
+        # 조건에 걸리면 남기고, 통과하면 꺼내며 지운다.
+        refused = await store.claim_if("123", lambda pending: pending.prompted_before(77))
+        assert refused == ConditionalClaim(order=stored, claimed=False)
+        assert await redis.exists(key) == 1
+        claimed = await store.claim_if("123", lambda pending: pending.prompted_before(78))
+        assert claimed == ConditionalClaim(order=stored, claimed=True)
+        assert await redis.exists(key) == 0
     finally:
         stale = await redis.keys(f"{prefix}:*")
         if stale:

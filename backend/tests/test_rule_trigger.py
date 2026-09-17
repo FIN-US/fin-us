@@ -14,7 +14,7 @@ import pytest
 from ..order_assist import OrderAssistResult
 from ..order_rules import RULE_ID, OrderAssistRule, RuleMatch
 from ..redis_state import InMemoryPendingOrderStore, RedisSchedulerState
-from ..telegram_notifier import SETTLED_SEND_RETRY_BACKOFF_SECONDS
+from ..telegram_notifier import SETTLED_SEND_RETRY_BACKOFF_SECONDS, SendReceipt
 from ..timeutil import KST
 from ..trading_orders import ORDER_CONFIRM_CALLBACK, PendingOrder
 from .test_scheduler import (
@@ -382,6 +382,44 @@ async def test_approval_send_retries_before_giving_up():
     assert len(notifier.sent) == 3
     # 결국 나갔으므로 대기 주문은 그대로 둔다 — 사용자가 확정 버튼을 보고 있다.
     assert store.deleted == []
+
+
+@pytest.mark.asyncio
+async def test_approval_prompt_message_id_is_recorded_on_the_pending_order():
+    """자동 제안의 확정 프롬프트 id가 대기 주문에 남는다 (#386).
+
+    텍스트 /confirm은 그 id보다 뒤에 보낸 것일 때만 주문을 실행한다. 이 경로가 id를 남기지
+    않으면 자동 제안 주문은 텍스트 /confirm으로 영영 확정되지 않는다(버튼만 된다).
+
+    이 테스트가 잡는 mutation: 스케줄러가 send_order_prompt 대신 send_text_settled(id 없음)로
+    되돌아감, send_order_prompt가 id 기록을 빠뜨림.
+    """
+    from ..scheduler import run_rule_triggered_proposal
+
+    class ReceiptNotifier(FakeNotifier):
+        async def send_text_receipt(self, text, *, reply_markup=None):
+            sent = await self.send_text(text, reply_markup=reply_markup)
+            return SendReceipt(sent=sent, message_id=7001 if sent else None)
+
+    store = RecordingPendingOrderStore()
+    order = _order()
+    # run_order_assist가 하는 저장의 대역. 스텁은 저장하지 않는다.
+    assert await store.set_if_absent("123", order)
+
+    await run_rule_triggered_proposal(
+        [_MATCH],
+        await _state("urgent"),
+        pending_orders=store,
+        notifier=ReceiptNotifier(),
+        now_factory=lambda: OPEN,
+        assist=_assist_stub(
+            OrderAssistResult(status="approved", message="제안 본문", order=order)
+        ),
+    )
+
+    stored = await store.get("123")
+    assert stored is not None
+    assert stored.prompt_message_id == 7001
 
 
 @pytest.mark.asyncio

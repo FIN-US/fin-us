@@ -53,7 +53,10 @@ from backend.redis_state import (
     TelegramPollerState,
     TelegramPollerStore,
 )
+from backend.order_assist import OrderAssistResult, _drop_expired_pending_order
+from backend.order_rules import RULE_ID, RuleMatch
 from backend.services import NatAnswer, NatToolUse
+from backend.telegram_notifier import SendReceipt
 from backend.trading_orders import OrderExecutionResult, PendingOrder
 
 KST = ZoneInfo("Asia/Seoul")
@@ -127,6 +130,26 @@ class FakeCatalystRepo:
         return list(self.events.get(stock_name, []))
 
 
+# 텍스트 /confirm의 message_id 대조(#386)에 쓰는 id들. 프롬프트는 FakeNotifier가 1000번대부터
+# 붙이고, 텍스트 /confirm 대역은 기본으로 그보다 한참 뒤의 id를 쓴다 — "프롬프트를 본 뒤에
+# 보낸 /confirm"이 기본값이고, 그 반대를 보는 테스트만 id를 직접 준다.
+_FIRST_PROMPT_MESSAGE_ID = 1000
+_CONFIRM_AFTER_PROMPTS_MESSAGE_ID = 900_000
+
+
+def _text_confirm(
+    *, message_id: int | None = _CONFIRM_AFTER_PROMPTS_MESSAGE_ID, update_id: int | None = None
+) -> dict:
+    """텍스트 /confirm update. ``message_id=None``이면 그 키를 싣지 않는다."""
+    message: dict = {"chat": {"id": 123}, "text": "/confirm"}
+    if message_id is not None:
+        message["message_id"] = message_id
+    update: dict = {"message": message}
+    if update_id is not None:
+        update["update_id"] = update_id
+    return update
+
+
 class FakeNotifier:
     def __init__(self, chat_id="123", send_text_result=True, bot_username="", fail_sends=0):
         self.chat_id = chat_id
@@ -151,6 +174,10 @@ class FakeNotifier:
         self.reply_markups = []
         self.actions = []
         self.callback_answers = []
+        # send_text_receipt가 붙인 message_id들 (#386). 실제 채팅처럼 증가하고, 텍스트
+        # /confirm 대역(_text_confirm)의 기본 id보다 항상 작다.
+        self.receipt_message_ids: list[int] = []
+        self._next_message_id = _FIRST_PROMPT_MESSAGE_ID
 
     async def send_text(self, text, *, reply_markup=None):
         self.messages.append(text)
@@ -159,6 +186,29 @@ class FakeNotifier:
             self.fail_sends -= 1
             return False
         return self.send_text_result
+
+    async def send_text_receipt(self, text, *, reply_markup=None):
+        """send_text와 똑같이 기록·실패하고, 나간 메시지에 message_id를 붙인다 (#386).
+
+        하위 클래스가 send_text만 바꿔도 그 동작이 여기에 그대로 실린다.
+        """
+        sent = await self.send_text(text, reply_markup=reply_markup)
+        if sent is False:
+            return SendReceipt(sent=False)
+        message_id = self._next_message_id
+        self._next_message_id += 1
+        self.receipt_message_ids.append(message_id)
+        return SendReceipt(sent=True, message_id=message_id)
+
+    def next_user_message_id(self) -> int:
+        """사용자가 지금 메시지를 보냈다면 받을 id (#386).
+
+        실제 채팅처럼 봇 메시지와 같은 순번을 나눠 쓴다. "누가 먼저 보냈는가"를 테스트가
+        호출 순서로 적을 수 있다.
+        """
+        message_id = self._next_message_id
+        self._next_message_id += 1
+        return message_id
 
     async def send_chat_action(self, action="typing"):
         self.actions.append(action)
@@ -1796,7 +1846,7 @@ async def test_confirm_executes_gateway_and_records_trade():
     await handler.handle_update(
         {"message": {"chat": {"id": 123}, "text": "/buy 삼성전자 1 75000"}}
     )
-    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/confirm"}})
+    await handler.handle_update(_text_confirm())
 
     assert len(gateway.orders) == 1
     assert isinstance(gateway.orders[0], PendingOrder)
@@ -1832,7 +1882,7 @@ async def test_confirm_falls_back_to_in_place_retry_when_the_ledger_write_fails(
     notifier.messages.clear()
     notifier.send_text_result = False
 
-    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/confirm"}})
+    await handler.handle_update(_text_confirm())
 
     assert sleeps == list(telegram_commands.SETTLED_SEND_RETRY_BACKOFF_SECONDS)
     assert len(notifier.messages) == len(sleeps) + 1
@@ -1863,7 +1913,7 @@ async def test_confirm_success_marks_the_trade_as_notified():
     await handler.handle_update(
         {"message": {"chat": {"id": 123}, "text": "/buy 삼성전자 1 75000"}}
     )
-    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/confirm"}})
+    await handler.handle_update(_text_confirm())
 
     assert recorder.notified == [(1, now)]
 
@@ -1895,7 +1945,7 @@ async def test_confirm_swallows_a_raising_notifier_after_the_fill():
     await handler.handle_update(
         {"message": {"chat": {"id": 123}, "text": "/buy 삼성전자 1 75000"}}
     )
-    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/confirm"}})
+    await handler.handle_update(_text_confirm())
 
     # 예외가 새지 않았고, 체결은 미통지로 남아 다음 주기가 배달한다.
     assert len(recorder.results) == 1
@@ -1922,7 +1972,7 @@ async def test_confirm_survives_a_failed_notification_marking():
     await handler.handle_update(
         {"message": {"chat": {"id": 123}, "text": "/buy 삼성전자 1 75000"}}
     )
-    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/confirm"}})
+    await handler.handle_update(_text_confirm())
 
     assert notifier.messages[-1] == "주문 완료: 주문 접수"
     assert _orders(handler) == {}
@@ -1959,7 +2009,7 @@ async def test_confirm_records_the_trade_before_sending_the_result():
     await handler.handle_update(
         {"message": {"chat": {"id": 123}, "text": "/buy 삼성전자 1 75000"}}
     )
-    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/confirm"}})
+    await handler.handle_update(_text_confirm())
 
     assert events == ["record", "send"]
 
@@ -2268,8 +2318,8 @@ async def test_confirm_gateway_success_recorder_failure_clears_pending_order():
     await handler.handle_update(
         {"message": {"chat": {"id": 123}, "text": "/buy 삼성전자 1 75000"}}
     )
-    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/confirm"}})
-    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/confirm"}})
+    await handler.handle_update(_text_confirm())
+    await handler.handle_update(_text_confirm())
 
     assert len(gateway.orders) == 1
     assert len(recorder.results) == 1
@@ -2303,7 +2353,7 @@ async def test_confirm_without_gateway_keeps_pending_order():
     await handler.handle_update(
         {"message": {"chat": {"id": 123}, "text": "/buy 삼성전자 1 75000"}}
     )
-    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/confirm"}})
+    await handler.handle_update(_text_confirm())
 
     assert notifier.messages[-1] == "주문 실행 설정이 준비되지 않았습니다."
     assert "123" in _orders(handler)
@@ -2332,8 +2382,8 @@ async def test_confirm_gateway_ambiguous_failure_clears_pending_order_and_blocks
     await handler.handle_update(
         {"message": {"chat": {"id": 123}, "text": "/buy 삼성전자 1 75000"}}
     )
-    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/confirm"}})
-    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/confirm"}})
+    await handler.handle_update(_text_confirm())
+    await handler.handle_update(_text_confirm())
 
     assert len(gateway.orders) == 1
     assert notifier.messages[-2] == (
@@ -2372,7 +2422,7 @@ async def test_confirm_real_order_guard_failure_keeps_pending_order():
     await handler.handle_update(
         {"message": {"chat": {"id": 123}, "text": "/buy 삼성전자 1 75000"}}
     )
-    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/confirm"}})
+    await handler.handle_update(_text_confirm())
 
     assert notifier.messages[-1] == (
         "주문 실패: 실계좌 주문은 KIS_REAL_ORDER_ENABLED=true 설정이 필요합니다."
@@ -5068,7 +5118,7 @@ async def test_confirm_result_send_failure_does_not_ask_poller_to_retry(monkeypa
     notifier.messages.clear()
     notifier.send_text_result = False
 
-    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/confirm"}})
+    await handler.handle_update(_text_confirm())
 
     assert len(gateway.orders) == 1
     # 체결은 원장에 남았고(= outbox가 집을 수 있다) 통지 마킹은 없다(= 아직 안 나갔다).
@@ -5103,7 +5153,7 @@ async def test_confirm_unclear_result_send_failure_does_not_ask_poller_to_retry(
     notifier.messages.clear()
     notifier.send_text_result = False
 
-    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/confirm"}})
+    await handler.handle_update(_text_confirm())
 
     assert len(gateway.orders) == 1
     assert sleeps == list(telegram_commands.SETTLED_SEND_RETRY_BACKOFF_SECONDS)
@@ -5135,7 +5185,7 @@ async def test_confirm_403_keeps_update_retryable_when_order_is_restored():
     notifier.send_text_result = False
 
     with pytest.raises(telegram_commands.TelegramSendError):
-        await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/confirm"}})
+        await handler.handle_update(_text_confirm())
 
     # 인플레이스 재시도 없이 한 번만 시도하고 폴러에 넘긴다.
     assert notifier.messages == ["주문 실패: 실계좌 가드"]
@@ -5355,7 +5405,7 @@ async def test_confirm_counts_the_fill_notification_failures(monkeypatch):
     )
     await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/buy 삼성전자 1 75000"}})
     notifier.send_text_result = False
-    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/confirm"}})
+    await handler.handle_update(_text_confirm())
 
     marking_handler = TelegramCommandHandler(
         notifier=FakeNotifier(),
@@ -5367,7 +5417,7 @@ async def test_confirm_counts_the_fill_notification_failures(monkeypatch):
     await marking_handler.handle_update(
         {"message": {"chat": {"id": 123}, "text": "/buy 삼성전자 1 75000"}}
     )
-    await marking_handler.handle_update({"message": {"chat": {"id": 123}, "text": "/confirm"}})
+    await marking_handler.handle_update(_text_confirm())
 
     assert delivery_metrics.count("fill_notify") == 1
     assert delivery_metrics.count("fill_mark") == 1
@@ -5765,9 +5815,10 @@ async def test_confirmed_order_is_not_reexecuted_when_restart_lands_in_the_fill_
             created_at=now,
             order_type="LIMIT",
             callback_token="token",
+            prompt_message_id=_FIRST_PROMPT_MESSAGE_ID,
         ),
     )
-    update = {"update_id": 41, "message": {"chat": {"id": 123}, "text": "/confirm"}}
+    update = _text_confirm(update_id=41)
 
     def make_poller(notifier):
         notifier.enabled = True
@@ -5882,7 +5933,7 @@ async def test_settled_update_is_not_retried_when_the_handler_fails_after_settli
         if polls > 1:
             raise asyncio.CancelledError
         return [
-            {"update_id": 41, "message": {"chat": {"id": 123}, "text": "/confirm"}},
+            _text_confirm(update_id=41),
             {"update_id": 42, "message": {"chat": {"id": 123}, "text": "/help"}},
         ]
 
@@ -5911,7 +5962,13 @@ async def test_settled_update_is_not_retried_when_the_handler_fails_after_settli
 # ---------------------------------------------------------------------------
 
 
-def _pending_order_for_replay(quantity: int, token: str, now: datetime) -> PendingOrder:
+def _pending_order_for_replay(
+    quantity: int,
+    token: str,
+    now: datetime,
+    *,
+    prompt_message_id: int | None = _FIRST_PROMPT_MESSAGE_ID,
+) -> PendingOrder:
     return PendingOrder(
         chat_id="123",
         stock_name="삼성전자",
@@ -5922,6 +5979,7 @@ def _pending_order_for_replay(quantity: int, token: str, now: datetime) -> Pendi
         created_at=now,
         order_type="LIMIT",
         callback_token=token,
+        prompt_message_id=prompt_message_id,
     )
 
 
@@ -5969,7 +6027,7 @@ async def test_reexecuted_text_confirm_does_not_execute_a_pending_order_created_
     gateway = _FirstOrderUnclearGateway()
     pending_orders = InMemoryPendingOrderStore()
     await pending_orders.set("123", _pending_order_for_replay(1, "token-a", now))
-    update = {"update_id": 41, "message": {"chat": {"id": 123}, "text": "/confirm"}}
+    update = _text_confirm(update_id=41)
 
     # 1) 원래 실행. A를 claim하고 결과 불명확 — 이 settled 전송 도중 죽었다고 본다.
     first_notifier = FakeNotifier()
@@ -5977,7 +6035,14 @@ async def test_reexecuted_text_confirm_does_not_execute_a_pending_order_created_
     assert "상태 확인 필요" in first_notifier.messages[-1]
 
     # 2) 창 안에서 같은 채팅에 대기 주문 B가 생긴다(자동 제안의 대역 — 같은 저장소의 set_if_absent).
-    assert await pending_orders.set_if_absent("123", _pending_order_for_replay(2, "token-b", now))
+    #    B의 프롬프트는 /confirm보다 뒤에 나갔다. 재실행은 표지가 먼저 거르므로 안내 문구는
+    #    재실행 안내다(프롬프트 id 대조(#386)까지 가지 않는다).
+    assert await pending_orders.set_if_absent(
+        "123",
+        _pending_order_for_replay(
+            2, "token-b", now, prompt_message_id=_CONFIRM_AFTER_PROMPTS_MESSAGE_ID + 1
+        ),
+    )
 
     # 3) 재시작. offset이 41을 지나지 않았으므로 같은 update가 재배달된다.
     second_notifier = FakeNotifier()
@@ -6003,7 +6068,7 @@ async def test_in_process_retry_of_a_text_confirm_is_not_refused():
     await pending_orders.set("123", _pending_order_for_replay(1, "token-a", now))
     notifier = FakeNotifier(fail_sends=1)
     handler = _replay_handler(notifier, gateway, pending_orders, now)
-    update = {"update_id": 41, "message": {"chat": {"id": 123}, "text": "/confirm"}}
+    update = _text_confirm(update_id=41)
 
     with pytest.raises(telegram_commands.TelegramSendError):
         await handler.handle_update(update)
@@ -6066,12 +6131,293 @@ async def test_text_confirm_is_not_executed_when_the_replay_marker_cannot_be_wri
     notifier = FakeNotifier()
 
     await _replay_handler(notifier, gateway, pending_orders, now).handle_update(
-        {"update_id": 41, "message": {"chat": {"id": 123}, "text": "/confirm"}}
+        _text_confirm(update_id=41)
     )
 
     assert gateway.orders == []
     assert notifier.messages[-1].startswith("주문 저장소 오류")
     assert await pending_orders.has("123")
+
+
+# ---------------------------------------------------------------------------
+# 늦게 처리된 텍스트 /confirm이 그사이 생긴 대기 주문을 실행하는 창 (#386)
+# ---------------------------------------------------------------------------
+
+
+_ORDER_TIME = datetime(2026, 5, 20, 10, 0, tzinfo=KST)  # 수요일 장중
+_AUTO_MATCH = RuleMatch(rule_id=RULE_ID, stock="삼성전자", source="disclosure", urgency="critical")
+
+
+def _order_handler(notifier, gateway, *, now_factory=lambda: _ORDER_TIME, pending_orders=None):
+    return TelegramCommandHandler(
+        notifier=notifier,
+        mcp_runner=_order_mcp_runner(),
+        order_gateway=gateway,
+        trade_recorder=FakeTradeRecorder(),
+        now_factory=now_factory,
+        pending_order_store=pending_orders,
+    )
+
+
+def _buy_update(notifier: "FakeNotifier") -> dict:
+    return {
+        "message": {
+            "chat": {"id": 123},
+            "message_id": notifier.next_user_message_id(),
+            "text": "/buy 삼성전자 1 75000",
+        }
+    }
+
+
+def _auto_proposal_creating(quantity: int, token: str):
+    """자동 제안(run_order_assist)의 대역. 60초 지난 주문을 치우고 새 주문으로 슬롯을 잡는다."""
+
+    async def _run(trigger, *, pending_orders, now_factory):
+        created_at = now_factory()
+        await _drop_expired_pending_order(pending_orders, trigger.chat_id, created_at)
+        order = PendingOrder(
+            chat_id=trigger.chat_id,
+            stock_name="삼성전자",
+            stock_code="005930",
+            side="BUY",
+            quantity=quantity,
+            price=75000,
+            created_at=created_at,
+            callback_token=token,
+        )
+        assert await pending_orders.set_if_absent(trigger.chat_id, order)
+        return OrderAssistResult(status="approved", message="자동 제안", order=order)
+
+    return _run
+
+
+@pytest.mark.asyncio
+async def test_late_text_confirm_does_not_execute_a_pending_order_created_after_it():
+    """적체 뒤 늦게 처리된 텍스트 /confirm이 그사이 생긴 대기 주문을 실행하지 않는다 (#386).
+
+    창의 정체: 사용자가 A의 프롬프트를 보고 /confirm을 보냈지만, 폴러는 앞선 update(LLM 대기
+    등)에 붙잡혀 그것을 늦게 처리한다. 그사이 A가 60초를 넘기고 자동 제안이 A를 치운 뒤 B를
+    넣는다. claim은 B를 준다 — 사용자가 본 적 없는 B가 확정 없이 실행됐다(수정 전 체결 = [B]).
+    재시작이 없으므로 #383의 표지는 이 경우를 가려내지 못한다.
+
+    B는 소비되지 않고 남아야 하고, B의 프롬프트를 본 뒤 보낸 /confirm은 B를 실행해야 한다.
+    B는 스케줄러의 실제 전달 경로(run_rule_triggered_proposal)로 만든다 — B의 프롬프트 id가
+    기록되는 것까지 같은 경로다.
+    """
+    from backend.scheduler import run_rule_triggered_proposal
+
+    clock = [_ORDER_TIME]
+    notifier = FakeNotifier()
+    gateway = FakeOrderGateway()
+    handler = _order_handler(notifier, gateway, now_factory=lambda: clock[0])
+
+    # 1) /buy A. 프롬프트가 나가고 그 id가 A에 남는다.
+    await handler.handle_update(_buy_update(notifier))
+    order_a = _orders(handler)["123"]
+    assert order_a.prompt_message_id == notifier.receipt_message_ids[-1]
+
+    # 2) 사용자는 A의 프롬프트를 보고 /confirm을 보낸다. 폴러는 아직 처리하지 않는다(적체).
+    late_confirm = _text_confirm(message_id=notifier.next_user_message_id(), update_id=77)
+
+    # 3) 적체 사이 A가 60초를 넘기고, 자동 제안이 A를 치우고 B를 넣어 프롬프트를 보낸다.
+    clock[0] += timedelta(seconds=90)
+    await run_rule_triggered_proposal(
+        [_AUTO_MATCH],
+        None,
+        pending_orders=handler.pending_orders,
+        notifier=notifier,
+        now_factory=lambda: clock[0],
+        assist=_auto_proposal_creating(2, "token-b"),
+    )
+    order_b = _orders(handler)["123"]
+    assert order_b.callback_token == "token-b"
+    assert order_b.prompt_message_id == notifier.receipt_message_ids[-1]
+
+    # 4) 폴러가 적체를 풀고 늦은 /confirm을 처리한다.
+    await handler.handle_update(late_confirm)
+
+    assert gateway.orders == []
+    assert _orders(handler)["123"] == order_b
+    assert notifier.messages[-1] == telegram_commands.CONFIRM_BEFORE_PROMPT_TEXT
+
+    # 5) B의 프롬프트를 본 뒤 보낸 /confirm은 B를 실행한다.
+    await handler.handle_update(
+        _text_confirm(message_id=notifier.next_user_message_id(), update_id=78)
+    )
+
+    assert [order.callback_token for order in gateway.orders] == ["token-b"]
+    assert _orders(handler) == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("confirm_offset", [-1, 0], ids=["before_prompt", "same_id"])
+async def test_text_confirm_not_after_the_prompt_is_refused_and_keeps_the_order(confirm_offset):
+    """프롬프트보다 먼저(또는 같은 id로) 온 텍스트 /confirm은 실행하지 않고 주문을 남긴다 (#386).
+
+    /buy 처리 중에 미리 보낸 /confirm이 대표적이다. 폴러는 /buy를 끝낸 뒤 그것을 처리하는데,
+    예전에는 사용자가 프롬프트를 보기도 전에 주문이 실행됐다. 같은 id는 실제로 생기지 않지만
+    경계를 고정한다.
+
+    이 테스트가 잡는 mutation: prompted_before의 ``<``를 ``<=``로 바꿈(same_id), 텍스트
+    /confirm의 판정 제거(before_prompt).
+    """
+    notifier = FakeNotifier()
+    gateway = FakeOrderGateway()
+    handler = _order_handler(notifier, gateway)
+    await handler.handle_update(_buy_update(notifier))
+    prompt_id = _orders(handler)["123"].prompt_message_id
+    assert prompt_id is not None
+
+    await handler.handle_update(_text_confirm(message_id=prompt_id + confirm_offset))
+
+    assert gateway.orders == []
+    assert "123" in _orders(handler)
+    assert notifier.messages[-1] == telegram_commands.CONFIRM_BEFORE_PROMPT_TEXT
+
+
+class _PromptIdFailingStore(InMemoryPendingOrderStore):
+    async def set_prompt_message_id(
+        self, chat_id: str, callback_token: str, message_id: int
+    ) -> bool:
+        raise RuntimeError("redis unavailable")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cause", ["no_message_id", "record_failed"])
+async def test_text_confirm_does_not_execute_an_order_whose_prompt_id_is_unknown(cause):
+    """프롬프트 id를 모르면 텍스트 /confirm은 실행하지 않는다 (#386, fail-closed).
+
+    - no_message_id: notifier가 id를 돌려주지 못했다(응답 본문을 못 읽은 경우와 같다).
+    - record_failed: id는 받았지만 저장소에 남기지 못했다.
+
+    프롬프트는 나갔고 주문도 남아 있다. 판정할 근거가 없으므로 실행하지 않고 버튼을 권한다.
+
+    이 테스트가 잡는 mutation: prompted_before가 모르는 id를 통과시킴, id 기록 실패를 올림
+    (/buy가 예외로 끝나 폴러가 재시도한다 — 프롬프트는 이미 나갔다).
+    """
+    notifier = FakeNotifier()
+    pending_orders = (
+        InMemoryPendingOrderStore() if cause == "no_message_id" else _PromptIdFailingStore()
+    )
+    if cause == "no_message_id":
+        # send_text_settled_receipt는 이 메서드가 없으면 send_text로 보내고 id를 비운다.
+        setattr(notifier, "send_text_receipt", None)
+    gateway = FakeOrderGateway()
+    handler = _order_handler(notifier, gateway, pending_orders=pending_orders)
+
+    await handler.handle_update(_buy_update(notifier))
+    order = await pending_orders.get("123")
+    assert order is not None and order.prompt_message_id is None
+    assert notifier.reply_markups[-1] is not None  # 프롬프트는 버튼과 함께 나갔다
+
+    await handler.handle_update(_text_confirm())
+
+    assert gateway.orders == []
+    assert await pending_orders.has("123")
+    assert notifier.messages[-1] == telegram_commands.CONFIRM_PROMPT_UNKNOWN_TEXT
+
+
+@pytest.mark.asyncio
+async def test_text_confirm_without_a_message_id_is_not_executed():
+    """/confirm 자신의 message_id를 모르면 실행하지 않는다 (#386, fail-closed).
+
+    이 테스트가 잡는 mutation: prompted_before가 message_id None을 통과시킴.
+    """
+    notifier = FakeNotifier()
+    gateway = FakeOrderGateway()
+    handler = _order_handler(notifier, gateway)
+    await handler.handle_update(_buy_update(notifier))
+
+    await handler.handle_update(_text_confirm(message_id=None))
+
+    assert gateway.orders == []
+    assert "123" in _orders(handler)
+    assert notifier.messages[-1] == telegram_commands.CONFIRM_PROMPT_UNKNOWN_TEXT
+
+
+@pytest.mark.asyncio
+async def test_confirm_button_is_not_gated_by_the_prompt_message_id():
+    """버튼 확정에는 프롬프트 id 판정을 걸지 않는다 (#386).
+
+    id를 모르는 주문도 버튼으로는 확정된다. fail-closed 안내가 버튼을 권하는 근거다. 다른
+    주문의 확정은 주문별 토큰이 막는다
+    (test_redelivered_confirm_button_does_not_execute_a_pending_order_created_after_it).
+
+    이 테스트가 잡는 mutation: 버튼 경로에도 텍스트 /confirm의 판정을 건다.
+    """
+    pending_orders = InMemoryPendingOrderStore()
+    await pending_orders.set(
+        "123", _pending_order_for_replay(1, "token-a", _ORDER_TIME, prompt_message_id=None)
+    )
+    gateway = FakeOrderGateway()
+
+    await _replay_handler(FakeNotifier(), gateway, pending_orders, _ORDER_TIME).handle_update(
+        {
+            "update_id": 41,
+            "callback_query": {
+                "id": "cb-a",
+                "data": "order:confirm:token-a",
+                "message": {"chat": {"id": 123}},
+            },
+        }
+    )
+
+    assert [order.callback_token for order in gateway.orders] == ["token-a"]
+
+
+class _BlockingPromptNotifier(FakeNotifier):
+    """확정 프롬프트 전송을 붙잡아 둔다 — 저장부터 id 기록까지의 창을 연다."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.prompt_started = asyncio.Event()
+        self.release_prompt = asyncio.Event()
+
+    async def send_text_receipt(self, text, *, reply_markup=None):
+        self.prompt_started.set()
+        await self.release_prompt.wait()
+        return await super().send_text_receipt(text, reply_markup=reply_markup)
+
+
+@pytest.mark.asyncio
+async def test_text_confirm_in_the_window_before_the_prompt_id_is_recorded_is_not_executed():
+    """저장부터 프롬프트 id 기록까지의 창에 온 텍스트 /confirm은 실행하지 않는다 (#386).
+
+    프롬프트는 슬롯을 따낸 뒤에야 보내므로(#247) 저장된 주문에는 한동안 id가 없다. 폴러 밖의
+    자동 제안에서는 그 창에 폴러가 /confirm을 처리할 수 있다. 그 /confirm은 B의 프롬프트를
+    볼 수 없었다 — 모르는 id는 실행하지 않는 쪽으로 읽는다. 프롬프트가 나가 id가 남은 뒤의
+    /confirm은 B를 실행한다.
+    """
+    from backend.scheduler import run_rule_triggered_proposal
+
+    notifier = _BlockingPromptNotifier()
+    gateway = FakeOrderGateway()
+    handler = _order_handler(notifier, gateway)
+    proposal = asyncio.create_task(
+        run_rule_triggered_proposal(
+            [_AUTO_MATCH],
+            None,
+            pending_orders=handler.pending_orders,
+            notifier=notifier,
+            now_factory=lambda: _ORDER_TIME,
+            assist=_auto_proposal_creating(2, "token-b"),
+        )
+    )
+    await asyncio.wait_for(notifier.prompt_started.wait(), timeout=5.0)
+
+    await handler.handle_update(_text_confirm(message_id=notifier.next_user_message_id()))
+
+    assert gateway.orders == []
+    assert _orders(handler)["123"].prompt_message_id is None
+    assert notifier.messages[-1] == telegram_commands.CONFIRM_PROMPT_UNKNOWN_TEXT
+
+    notifier.release_prompt.set()
+    await asyncio.wait_for(proposal, timeout=5.0)
+    assert _orders(handler)["123"].prompt_message_id == notifier.receipt_message_ids[-1]
+
+    await handler.handle_update(_text_confirm(message_id=notifier.next_user_message_id()))
+
+    assert [order.callback_token for order in gateway.orders] == ["token-b"]
 
 
 # ---------------------------------------------------------------------------
@@ -6156,7 +6502,7 @@ async def test_confirm_returns_bounded_when_redis_blackholes(monkeypatch):
         )
 
         await asyncio.wait_for(
-            handler.handle_update({"message": {"chat": {"id": 123}, "text": "/confirm"}}),
+            handler.handle_update(_text_confirm()),
             timeout=_BLACKHOLE_BOUND_SECONDS,
         )
 
