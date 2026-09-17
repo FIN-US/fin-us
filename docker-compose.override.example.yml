@@ -1,0 +1,21 @@
+# 개발용 compose override 예시(#396).
+#
+# 기본 구성의 backend는 --reload 없이 뜬다(backend/Dockerfile의 CMD). 소스는 `.:/app`로
+# 마운트돼 있으니 코드를 고친 뒤 `docker compose restart backend`면 반영된다. 저장할 때마다
+# 자동으로 다시 뜨게 하려면 이 파일을 복사해 쓴다.
+#
+#   cp docker-compose.override.example.yml docker-compose.override.yml
+#   docker compose up -d backend
+#
+# `docker compose`는 docker-compose.override.yml을 자동으로 병합한다(복사본은 .gitignore에
+# 들어 있다). 끄려면 복사본을 지우고 다시 `docker compose up -d backend`.
+#
+# ⚠️ 리로드는 스케줄러와 텔레그램 폴러까지 함께 재시작한다 — 파일 저장 하나가 재시작 계기다
+# (backend/telegram_commands.py의 #350 주석). 실계좌(KIS_ORDER_ENV=real) 구성에서는 쓰지 말 것.
+#
+# ⚠️ 여기에 command 말고 다른 키(ports 등)를 넣지 말 것. backend/tests/test_compose_ports.py의
+# 루프백 게시 가드는 docker-compose.yml만 읽으므로, override가 게시를 바꾸면 가드가 실제로
+# 뜨는 구성을 보지 못한다. 이 파일의 모양은 같은 테스트가 고정한다.
+services:
+  backend:
+    command: ["uv", "run", "--project", "./backend", "--locked", "--no-sync", "uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
