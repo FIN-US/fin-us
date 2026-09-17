@@ -63,6 +63,8 @@ from .config import (
 # 호출 시점에 늦게 가져오지만(테스트가 주입하는 것이 기본 경로다) short_error는
 # 순수 포매터라 여기서 바로 묶는다.
 from .services import short_error
+from .pii_egress import prepare_egress
+from .pii_mask import unmask_pii
 # presentation은 의존이 없는 리프 모듈이라 여기서 바로 가져와도 순환하지 않는다.
 # /advise 승인 메시지에는 제안자·검증자가 쓴 문장이 실린다 — 이 봇은 parse_mode를
 # 쓰지 않으므로 마크다운 표기가 남으면 화면에 그대로 별표로 보인다 (#297).
@@ -844,12 +846,18 @@ async def request_proposal(prompt: str, *, timeout: float = ORDER_PROPOSE_TIMEOU
     ``{"input_message": ...}``이고 응답은 ``{"value": "<답변 텍스트>"}``다.
     NAT은 str 반환 함수의 응답을 ``OutputArgsSchema``로 감싼다 — 로컬 기동 후
     curl로 확인한 계약이다(finus_nat/configs/agents/verifier_agent.yml 주석 참조).
+
+    이 경로는 ``services.llm_chat``을 지나지 않고 NAT(→ OpenAI)으로 바로 나가므로 외부 LLM 전송
+    경계를 여기서 직접 태운다(#395). 프롬프트는 사용자가 친 종목 인자와 코드 리터럴뿐이라 전체를
+    개인 구간으로 마스킹해도 잃는 것이 없다 — 템플릿과 ``build_trigger_signal``에는 금액·수량이
+    없다. 비식별화가 실패하면 ``EgressBlocked``가 올라와 NAT을 부르지 않는다.
     """
-    payload = await _post_json("/v1/propose-order", {"input_message": prompt}, timeout)
+    outgoing, mapping = prepare_egress(prompt, label="order_assist:propose-order")
+    payload = await _post_json("/v1/propose-order", {"input_message": outgoing}, timeout)
     if isinstance(payload, dict):
         value = payload.get("value")
         if isinstance(value, str):
-            return value
+            return unmask_pii(value, mapping)
         # 워크플로 실패는 {"code","message","details"} 봉투로 온다(HTTP 200이 아닐 때가 많지만
         # 형식을 신뢰하지 않는다). 답변 텍스트가 아니면 진행하지 않는다.
         raise RuntimeError(f"NAT /v1/propose-order 응답 형식 오류: {json.dumps(payload)[:300]}")

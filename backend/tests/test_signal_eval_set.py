@@ -7,6 +7,7 @@ import csv
 
 import pytest
 
+from backend.pii_egress import public
 from backend.scripts import build_signal_eval_set as eval_set
 from backend.services import SignalScore
 
@@ -117,7 +118,8 @@ async def test_score_articles_sends_title_and_summary_to_the_model(monkeypatch):
         provider="ollama",
     )
 
-    assert seen == ["제목 - 요약", "요약 없는 제목"]
+    # 운영 감시의 news 소스와 같이 공개 데이터로 표시해 넘긴다 (#395).
+    assert seen == [public("제목 - 요약"), public("요약 없는 제목")]
 
 
 def test_write_csv_is_readable_with_the_expected_header(tmp_path):

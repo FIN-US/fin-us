@@ -57,6 +57,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from collections.abc import Mapping
 from contextvars import ContextVar
@@ -65,6 +66,13 @@ from typing import Any, NamedTuple
 from .pii_mask import _FALLBACK_LABEL, mask_pii
 
 logger = logging.getLogger(__name__)
+# 마스킹 전후 비교 로그 스위치 — backend/config.py의 같은 이름 env와 짝이다(#395).
+# 정확히 "true"만 켠다(backend `_is_truthy_flag`와 같은 기준). 켜면 평문 잔고가 로그에 남는다.
+# 이 값이 게이트다. 로거 레벨만 보면 NAT CLI `--log-level debug`(루트를 DEBUG로 올린다)만으로
+# 평문이 로그에 남는다(PR #404 리뷰에서 재현).
+_DEBUG_LOG_ENABLED = os.environ.get("PII_EGRESS_DEBUG_LOG", "").strip() == "true"
+if _DEBUG_LOG_ENABLED:
+    logger.setLevel(logging.DEBUG)
 
 # 요청 하나 동안 누적되는 {자리표시자: 원값} 박스. 최상위 에이전트가 심고 도구가 채운다.
 # None은 "박스가 없다"는 뜻이며, 그때의 동작은 mask_tool_result docstring 참고.
@@ -139,11 +147,37 @@ def mask_tool_result(tool_name: str, result: str) -> str:
     쪽을 우선하는 fail-closed 선택이다. 그 결과 그 요청의 응답에서는 자리표시자가
     원값으로 돌아오지 못하고 중립 문구가 되지만, 그것은 관측 가능한 품질 저하이고
     반대(매핑을 살리려 마스킹을 건너뛰기)는 관측되지 않는 유출이다.
+
+    마스킹 자체가 예외로 실패하면 원문 대신 오류 JSON을 돌려준다(#395). 원문을 흘리는 갈래는
+    없다 — backend 전송 경계(`backend/pii_egress.py`)가 실패 시 전송을 막는 것과 같은 판단이다.
+    예외를 그대로 올리지 않는 것은 도구 경계에서 예외가 탈출하면 ReAct 루프가 끊기기 때문이다
+    (``finus_api._TOOL_BUG_EXCEPTIONS`` 주석, #358). 오류 JSON에는 결과 원문을 싣지 않는다.
+
+    ``PII_EGRESS_DEBUG_LOG=true``일 때만 DEBUG 로그에 마스킹 전·후 결과를 남기고 이 로거를
+    DEBUG로 올린다 — **평문 잔고가 로그에 남으므로** 로컬 확인용이다. 플래그 없이 로그 레벨만
+    DEBUG여서는 남지 않는다(핸들러가 DEBUG를 내보내는지는 NAT 로깅 설정을 따른다).
     """
     if tool_name not in MASKED_TOOLS:
         return result
 
-    masked, mapping = mask_pii(result)
+    try:
+        masked, mapping = mask_pii(result)
+    except Exception:
+        logger.exception("도구 결과 마스킹 실패 — 원문 대신 오류를 돌려줍니다 (%s)", tool_name)
+        return json.dumps(
+            {
+                "error": "pii_masking_failed",
+                "tool": tool_name,
+                "hint": (
+                    "도구 결과를 비식별화하지 못해 내용을 전달하지 않았습니다. 같은 도구를 반복 "
+                    "호출하지 말고, 사용자에게 계좌 데이터를 지금 보여줄 수 없다고 알리세요."
+                ),
+            },
+            ensure_ascii=False,
+        )
+    if _DEBUG_LOG_ENABLED and logger.isEnabledFor(logging.DEBUG):
+        logger.debug("도구 결과 마스킹 [%s] 전:\n%s", tool_name, result)
+        logger.debug("도구 결과 마스킹 [%s] 후:\n%s", tool_name, masked)
     if not mapping:
         return masked
 

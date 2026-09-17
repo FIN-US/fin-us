@@ -52,6 +52,7 @@ from .presentation import (
     render,
     split_for_telegram,
 )
+from .pii_egress import Segment, public
 from .services import llm_chat, run_mcp_tool, short_error as _short_error
 from .watchlist_repo import SqliteWatchlistRepo
 from .telegram_notifier import (
@@ -2509,25 +2510,29 @@ class TelegramCommandHandler:
         period: str | None,
         dart_result: str,
         news_result: str,
-    ) -> str:
+    ) -> list[str | Segment]:
+        # 공개/개인 구분(#395): DART 실적과 뉴스는 공개 데이터라 수치를 그대로 보낸다 — 이
+        # 명령은 매출·영업이익 증감을 읽는 것이 목적이라, 마스킹하면 분석이 성립하지 않는다.
+        # 종목·기간은 사용자가 친 인자라 개인 구간(맨 문자열)으로 둔다. 기준은
+        # backend/pii_egress.py 모듈 docstring.
         period_line = f"조회 기간: {period}" if period else "조회 기간: DART MCP 기본값"
-        return (
+        return [
             "News Analyst 실적 분석 모드로 다음 종목의 구조화된 실적 리포트를 작성하라.\n"
             f"종목: {stock}\n"
             f"{period_line}\n\n"
-            "[DART 실적 데이터]\n"
-            f"{dart_result}\n\n"
-            "[최신 뉴스]\n"
-            f"{news_result}\n\n"
-            "반드시 다음 항목을 포함하라:\n"
+            "[DART 실적 데이터]\n",
+            public(dart_result),
+            "\n\n[최신 뉴스]\n",
+            public(news_result),
+            "\n\n반드시 다음 항목을 포함하라:\n"
             "- 매출/영업이익/순이익 전년 동기 대비 증감\n"
             "- 컨센서스 대비 서프라이즈/미스 판단. 컨센서스 데이터가 없으면 추정하지 말고 데이터 없음으로 표시\n"
             "- 주요 뉴스 기반 정성적 코멘트\n"
             "- 다음 분기 전망\n"
             "첫 줄은 반드시 `호재`, `악재`, `중립` 중 하나의 판정과 한 줄 근거로 시작하라.\n"
             "Markdown 문법(`#`, `**`, 표, 코드블록)을 쓰지 말고 Telegram에서 읽기 쉬운 일반 텍스트로 답하라.\n"
-            "투자 조언은 단정하지 말고, 확인된 DART·뉴스 근거와 한계를 구분해 한국어로 답하라."
-        )
+            "투자 조언은 단정하지 말고, 확인된 DART·뉴스 근거와 한계를 구분해 한국어로 답하라.",
+        ]
 
     def _format_earnings_response(self, text: str) -> str:
         # 출력 계층의 정리기를 쓴다. 예전에는 이 클래스가 자체 정리기(_telegram_plain_text)를

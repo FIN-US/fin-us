@@ -28,6 +28,7 @@ from sqlmodel import Session  # noqa: E402
 
 from backend.config import NEWS_MCP_PARAMS  # noqa: E402
 from backend.database import engine  # noqa: E402
+from backend.pii_egress import public  # noqa: E402
 from backend.scheduler import DEFAULT_MONITOR_STOCKS  # noqa: E402
 from backend.services import run_mcp_tool, score_signal  # noqa: E402
 from backend.watchlist_repo import SqliteWatchlistRepo  # noqa: E402
@@ -104,8 +105,10 @@ async def score_articles(articles: list[Article], provider: str) -> list[dict[st
         if article.summary:
             signal_text = f"{article.title} - {article.summary}"
 
+        # 운영 감시(scheduler.SIGNAL_SOURCES의 news)와 같이 공개 데이터로 표시한다(#395) —
+        # 표시하지 않으면 기사 속 금액이 마스킹돼 운영과 다른 프롬프트를 채점하게 된다.
         scored = await score_signal(
-            article.stock, signal_text, source="news", provider=provider
+            article.stock, public(signal_text), source="news", provider=provider
         )
         # 채점 실패(fail-open)는 is_significant=True에 score=None으로 온다.
         model_score = "" if scored.score is None else scored.score
