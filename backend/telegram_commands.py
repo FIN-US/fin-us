@@ -1940,7 +1940,9 @@ class TelegramCommandHandler:
                 # 이미 코드를 친 사용자에게 보낸다. 하나로 두면 예전 안내("종목마스터에 없는 종목")다.
                 # _looks_like_stock_code는 숫자가 든 6·7·9자만 코드로 보므로 KIWOOM·HANARO 같은
                 # 영문 이름은 여기 걸리지 않는다. 마스터에 "코드 형태 + 숫자" 이름이 없다는 전제는
-                # test_no_master_name_is_a_stock_code_followed_by_a_number가 고정한다.
+                # 커밋된 stocks.json을 test_no_master_name_is_a_stock_code_followed_by_a_number가,
+                # 운영자의 직접 갱신을 mcp-trading/scripts/update_stock_master.py의 쓰기 전 검사가
+                # 막는다. 이 분기를 바꾸면 공유 판정표 unreadable_numeric_name_policy.json을 함께 고친다.
                 return readings
         readings.append(
             OrderReading(

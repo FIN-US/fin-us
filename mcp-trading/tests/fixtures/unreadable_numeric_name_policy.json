@@ -1,0 +1,24 @@
+{
+  "description": "종목명·별칭 label이 backend /buy·/sell 파서(telegram_commands._order_argument_readings)에서 시장가 해석의 종목명이 될 수 없는가(unreadable). backend 테스트는 실제 파서에 '<label> 1'을 넣어 그 이름의 시장가 해석이 있는지로 판정하고, mcp-trading/scripts/update_stock_master.py의 is_unreadable_numeric_name은 같은 표로 판정한다 (PR #392 리뷰).",
+  "cases": [
+    {"label": "ABC123 200", "unreadable": true, "note": "영숫자 6자 코드 형태 + 수량"},
+    {"label": "abc123 200", "unreadable": true, "note": "소문자도 대문자화해 코드 형태"},
+    {"label": "005930 10", "unreadable": true, "note": "숫자 6자 코드"},
+    {"label": "Q570121 3", "unreadable": true, "note": "7자 ETN 코드 형태"},
+    {"label": "F70100026 5", "unreadable": true, "note": "9자 펀드 코드 형태"},
+    {"label": "005930 10,000", "unreadable": true, "note": "쉼표 수량"},
+    {"label": "005930 +10", "unreadable": true, "note": "int()가 받는 부호"},
+    {"label": "KODEX 200", "unreadable": false, "note": "영문 5자 — 코드 형태 아님"},
+    {"label": "KIWOOM 200", "unreadable": false, "note": "숫자 없는 영문 6자 — 코드 형태 아님"},
+    {"label": "HANARO 200", "unreadable": false, "note": "숫자 없는 영문 6자"},
+    {"label": "ABC1234X 5", "unreadable": false, "note": "8자는 코드 형태 아님"},
+    {"label": "ABC12 5", "unreadable": false, "note": "5자는 코드 형태 아님"},
+    {"label": "ABC123 0", "unreadable": false, "note": "0은 수량이 아님"},
+    {"label": "ABC123 -5", "unreadable": false, "note": "음수는 수량이 아님"},
+    {"label": "ABC123 2X", "unreadable": false, "note": "끝 토큰이 정수가 아님"},
+    {"label": "ABC123 우 200", "unreadable": false, "note": "이름 자리가 코드 하나가 아님(세 토큰)"},
+    {"label": "TIGER 200 IT", "unreadable": false, "note": "끝이 정수가 아님"},
+    {"label": "삼성전자", "unreadable": false, "note": "한 토큰"},
+    {"label": "005930", "unreadable": false, "note": "한 토큰 코드"}
+  ]
+}

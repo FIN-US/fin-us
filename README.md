@@ -453,6 +453,8 @@ Backend 스케줄러는 매 거래일 오전 8시 30분에 Telegram 모닝 브�
 python3 mcp-trading/scripts/update_stock_master.py
 ```
 
+> 새 마스터에 종목명·별칭이 "종목코드처럼 생긴 토큰 + 숫자"(예: `ABC123 200`)인 종목이 있으면 스크립트는 파일을 쓰지 않고 그 목록을 출력한 뒤 실패합니다. `/buy`·`/sell`은 `/buy 005930 10 75000`처럼 이름 자리가 종목코드면 지정가로만 읽기 때문에, 그런 종목은 이름으로 시장가 주문을 낼 수 없고 모호한 입력을 되묻지도 못합니다(PR #392). 알고 넘기려면 `--allow-unreadable-numeric-names`를 붙여 다시 실행하고, 그 종목은 종목코드로 주문하도록 안내하세요.
+
 슬래시 명령이 아닌 일반 텍스트는 NAT 채팅으로 전달됩니다. Telegram 채팅은 `telegram:{chat_id}` conversation id를 사용하므로 스케줄러 분석 리포트와 대화 이력이 섞이지 않습니다.
 
 NAT 채팅은 **조회만 합니다**. 채팅으로 매수·매도를 요청하면 주문을 내지 않고, 위 `/buy`·`/sell`·`/advise` 명령을 안내합니다 — 주문은 한도 검사·확정 버튼이 있는 명령 경로로만 나갑니다(#380). 채팅 에이전트가 쓰는 KIS 조회 전용 도구는 국내주식의 순위·수급·재무 같은 조회 TR까지 허용하고, 주문 TR은 막습니다(판정표 `finus_nat/tests/fixtures/kis_domestic_stock_tr_verdicts.json`).
