@@ -43,6 +43,9 @@ from nat.utils.type_converter import GlobalTypeConverter
 
 logger = logging.getLogger(__name__)
 
+# 강제 턴 호출 횟수 상한. 인자 JSON이 깨진 응답(invalid_tool_calls)만 재시도 대상이다.
+FIRST_TURN_MAX_ATTEMPTS = 2
+
 
 class ToolFirstReActAgentGraph(ReActAgentGraph):
     """첫 턴만 도구 호출을 강제하고 나머지는 벤더 ReAct 그래프에 맡긴다."""
@@ -62,18 +65,31 @@ class ToolFirstReActAgentGraph(ReActAgentGraph):
         if state.agent_scratchpad or not state.messages or not str(state.messages[-1].content).strip():
             return await super().agent_node(state)
 
-        # 벤더 _call_llm/_stream_llm을 쓰지 않는다 — 둘 다 응답을 content만으로 재조립해 tool_calls를 버린다.
-        output = await self.first_turn_agent.ainvoke(
-            {"question": str(state.messages[-1].content), "chat_history": self._get_chat_history(state.messages)},
-            config=self._runnable_config,
-        )
-        if not output.tool_calls:
-            # tool_choice를 무시하는 공급자(OpenAI 호환 프록시 등)다. 여기서 막으면 에이전트가
-            # 아예 답하지 못하므로 벤더 경로로 넘기되, #394 증상이 조용히 재발하지 않게 남긴다.
+        inputs = {"question": str(state.messages[-1].content), "chat_history": self._get_chat_history(state.messages)}
+        for attempt in range(1, FIRST_TURN_MAX_ATTEMPTS + 1):
+            # 벤더 _call_llm/_stream_llm을 쓰지 않는다 — 둘 다 응답을 content만으로 재조립해 tool_calls를 버린다.
+            output = await self.first_turn_agent.ainvoke(inputs, config=self._runnable_config)
+            if output.tool_calls:
+                break
+            if not output.invalid_tool_calls:
+                # tool_choice를 무시하는 공급자(OpenAI 호환 프록시 등)다. 여기서 막으면 에이전트가
+                # 아예 답하지 못하므로 벤더 경로로 넘기되, #394 증상이 조용히 재발하지 않게 남긴다.
+                logger.warning(
+                    "%s tool_choice=required 응답에 도구 호출이 없어 텍스트 ReAct로 폴백한다 (#394)",
+                    AGENT_LOG_PREFIX,
+                )
+                return await super().agent_node(state)
+            # 도구는 골랐지만 인자 JSON이 깨져 langchain_openai가 invalid_tool_calls로 뺐다.
+            # 공급자 문제가 아니라 모델의 일회성 실수이므로 강제 호출을 다시 시도한다.
             logger.warning(
-                "%s tool_choice=required 응답에 tool_calls가 없어 텍스트 ReAct로 폴백한다 (#394)",
+                "%s 강제 도구 호출의 인자를 파싱하지 못했다 (시도 %d/%d): %s",
                 AGENT_LOG_PREFIX,
+                attempt,
+                FIRST_TURN_MAX_ATTEMPTS,
+                [(call.get("name"), call.get("error")) for call in output.invalid_tool_calls],
             )
+        else:
+            logger.warning("%s 강제 도구 호출이 계속 유효하지 않아 텍스트 ReAct로 폴백한다 (#394)", AGENT_LOG_PREFIX)
             return await super().agent_node(state)
 
         call = output.tool_calls[0]
@@ -109,6 +125,30 @@ class FinusToolFirstReActAgentConfig(ReActAgentWorkflowConfig, name="finus_tool_
         return self
 
 
+def graph_kwargs(config: ReActAgentWorkflowConfig, *, llm, prompt, tools) -> dict:
+    """벤더 ``react_agent_workflow``가 ``ReActAgentGraph``에 넘기는 인자를 그대로 옮긴다.
+
+    ``callbacks``는 벤더 워크플로도 넘기지 않는다. NAT를 올려 생성자 인자가 늘면 여기서
+    빠진 인자는 조용히 기본값으로 동작하므로, 시그니처와의 일치를
+    ``test_graph_kwargs_cover_vendor_graph_signature``가 지킨다.
+    """
+    return {
+        "llm": llm,
+        "prompt": prompt,
+        "tools": tools,
+        "use_tool_schema": config.include_tool_input_schema_in_tool_description,
+        "detailed_logs": config.verbose,
+        "log_response_max_chars": config.log_response_max_chars,
+        "retry_agent_response_parsing_errors": config.retry_agent_response_parsing_errors,
+        "parse_agent_response_max_retries": config.parse_agent_response_max_retries,
+        "tool_call_max_retries": config.tool_call_max_retries,
+        "pass_tool_call_errors_to_agent": config.pass_tool_call_errors_to_agent,
+        "normalize_tool_input_quotes": config.normalize_tool_input_quotes,
+        "raise_on_parsing_failure": config.raise_on_parsing_failure,
+        "use_native_tool_calling": config.use_native_tool_calling,
+    }
+
+
 @register_function(config_type=FinusToolFirstReActAgentConfig, framework_wrappers=[LLMFrameworkEnum.LANGCHAIN])
 async def finus_tool_first_react_agent(config: FinusToolFirstReActAgentConfig, builder: Builder):
     """벤더 ``react_agent_workflow``와 같은 흐름에 그래프 클래스만 바꾼다.
@@ -125,46 +165,41 @@ async def finus_tool_first_react_agent(config: FinusToolFirstReActAgentConfig, b
         raise ValueError(f"No tools specified for ReAct Agent '{config.llm_name}'")
     wanted = {str(name) for name in config.first_turn_tool_names}
     first_turn_tools = [tool for tool in tools if tool.name in wanted]
-    if {tool.name for tool in first_turn_tools} != wanted:
-        raise ValueError(f"first_turn_tool_names 중 빌드되지 않은 도구가 있습니다: {sorted(wanted)}")
+    missing = wanted - {tool.name for tool in first_turn_tools}
+    if missing:
+        raise ValueError(f"first_turn_tool_names 중 빌드되지 않은 도구가 있습니다: {sorted(missing)}")
     logger.info("%s 첫 턴 강제 도구=%s 전체 도구=%s", AGENT_LOG_PREFIX,
                 [tool.name for tool in first_turn_tools], [tool.name for tool in tools])
 
     graph = await ToolFirstReActAgentGraph(
         first_turn_tools=first_turn_tools,
-        llm=llm,
-        prompt=prompt,
-        tools=tools,
-        use_tool_schema=config.include_tool_input_schema_in_tool_description,
-        detailed_logs=config.verbose,
-        log_response_max_chars=config.log_response_max_chars,
-        retry_agent_response_parsing_errors=config.retry_agent_response_parsing_errors,
-        parse_agent_response_max_retries=config.parse_agent_response_max_retries,
-        tool_call_max_retries=config.tool_call_max_retries,
-        pass_tool_call_errors_to_agent=config.pass_tool_call_errors_to_agent,
-        normalize_tool_input_quotes=config.normalize_tool_input_quotes,
-        raise_on_parsing_failure=config.raise_on_parsing_failure,
-        use_native_tool_calling=config.use_native_tool_calling).build_graph()
+        **graph_kwargs(config, llm=llm, prompt=prompt, tools=tools),
+    ).build_graph()
 
     async def _response_fn(chat_request_or_message: ChatRequestOrMessage) -> ChatResponse | str:
-        message = GlobalTypeConverter.get().convert(chat_request_or_message, to_type=ChatRequest)
-        messages = trim_messages(messages=[m.model_dump() for m in message.messages],
-                                 max_tokens=config.max_history,
-                                 strategy="last",
-                                 token_counter=len,
-                                 start_on="human",
-                                 include_system=True)
-        state = await graph.ainvoke(ReActGraphState(messages=messages),
-                                    config={"recursion_limit": (config.max_tool_calls + 1) * 2})
-        content = str(ReActGraphState(**state).messages[-1].content)
-        prompt_tokens = sum(len(str(msg.content).split()) for msg in message.messages)
-        completion_tokens = len(content.split()) if content else 0
-        response = ChatResponse.from_string(content,
-                                            usage=Usage(prompt_tokens=prompt_tokens,
-                                                        completion_tokens=completion_tokens,
-                                                        total_tokens=prompt_tokens + completion_tokens))
-        if chat_request_or_message.is_string:
-            return GlobalTypeConverter.get().convert(response, to_type=str)
-        return response
+        try:
+            message = GlobalTypeConverter.get().convert(chat_request_or_message, to_type=ChatRequest)
+            messages = trim_messages(messages=[m.model_dump() for m in message.messages],
+                                     max_tokens=config.max_history,
+                                     strategy="last",
+                                     token_counter=len,
+                                     start_on="human",
+                                     include_system=True)
+            state = await graph.ainvoke(ReActGraphState(messages=messages),
+                                        config={"recursion_limit": (config.max_tool_calls + 1) * 2})
+            content = str(ReActGraphState(**state).messages[-1].content)
+            prompt_tokens = sum(len(str(msg.content).split()) for msg in message.messages)
+            completion_tokens = len(content.split()) if content else 0
+            response = ChatResponse.from_string(content,
+                                                usage=Usage(prompt_tokens=prompt_tokens,
+                                                            completion_tokens=completion_tokens,
+                                                            total_tokens=prompt_tokens + completion_tokens))
+            if chat_request_or_message.is_string:
+                return GlobalTypeConverter.get().convert(response, to_type=str)
+            return response
+        except Exception as ex:
+            # 벤더 react_agent_workflow와 같은 로그 한 줄을 남긴다 — 운영 로그에서 두 타입이 같은 모습으로 보이게.
+            logger.error("%s ReAct Agent failed with exception: %s", AGENT_LOG_PREFIX, str(ex))
+            raise
 
     yield FunctionInfo.from_fn(_response_fn, description=config.description)

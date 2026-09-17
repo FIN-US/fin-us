@@ -33,6 +33,8 @@ class _ScriptedChatModel(BaseChatModel):
     """도구가 강제되지 않으면 도구 없이 끝내는 모델."""
 
     honors_tool_choice: bool = True
+    # 강제 호출 중 앞에서 이 횟수만큼은 인자 JSON이 깨진 응답(invalid_tool_calls)을 돌려준다
+    invalid_forced_calls: int = 0
     calls: list[dict[str, Any]] = Field(default_factory=list)
 
     @property
@@ -42,9 +44,18 @@ class _ScriptedChatModel(BaseChatModel):
     def bind_tools(self, tools, **kwargs):
         return self.bind(tools=[t.name for t in tools], **kwargs)
 
+    def forced_calls(self) -> int:
+        return sum(1 for call in self.calls if call.get("tool_choice") == "required")
+
     def _generate(self, messages: list[BaseMessage], stop=None, run_manager=None, **kwargs) -> ChatResult:
         self.calls.append(kwargs)
-        if kwargs.get("tool_choice") == "required" and self.honors_tool_choice:
+        forced = kwargs.get("tool_choice") == "required" and self.honors_tool_choice
+        if forced and self.forced_calls() <= self.invalid_forced_calls:
+            message = AIMessage(content="", invalid_tool_calls=[
+                {"name": kwargs["tools"][0], "args": '{"stock_name": "삼성', "id": "call_0",
+                 "error": "Function arguments are not valid JSON", "type": "invalid_tool_call"},
+            ])
+        elif forced:
             message = AIMessage(content="", tool_calls=[
                 {"name": kwargs["tools"][0], "args": {"stock_name": "삼성전자"}, "id": "call_1"},
             ])
@@ -125,7 +136,63 @@ async def test_falls_back_to_text_react_with_warning_when_provider_ignores_tool_
 
     assert called == []
     assert state.final_answer == "조회 결과가 없어 답할 수 없습니다."
-    assert any("#394" in r.getMessage() for r in caplog.records)
+    assert any("도구 호출이 없어" in r.getMessage() for r in caplog.records)
+
+
+async def test_retries_forced_call_when_tool_arguments_are_invalid_json(caplog):
+    """인자 JSON이 깨진 강제 응답(invalid_tool_calls)은 공급자 문제가 아니므로 폴백하지 않고 다시 강제한다.
+
+    뮤테이션: invalid_tool_calls 분기를 지우면(공급자 무시로 취급해 즉시 폴백) called==[] 로 red.
+    """
+    called: list[str] = []
+    news, memory = _tools(called)
+    llm = _ScriptedChatModel(invalid_forced_calls=1)
+
+    with caplog.at_level(logging.WARNING, logger="nat_finus_nat.tool_first_react"):
+        state = await _run(ToolFirstReActAgentGraph, llm, (news, memory), first_turn_tools=[news])
+
+    assert called == ["news:삼성전자"]
+    assert state.final_answer == "뉴스 요약"
+    assert llm.forced_calls() == 2
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("인자를 파싱하지 못했다" in m and "not valid JSON" in m for m in messages)
+    assert not any("도구 호출이 없어" in m for m in messages)
+
+
+async def test_falls_back_after_repeated_invalid_tool_arguments(caplog):
+    """재시도는 상한까지만 한다 — 계속 깨지면 벤더 경로로 답하고 원인을 구분해 남긴다."""
+    from nat_finus_nat.tool_first_react import FIRST_TURN_MAX_ATTEMPTS
+
+    called: list[str] = []
+    news, memory = _tools(called)
+    llm = _ScriptedChatModel(invalid_forced_calls=FIRST_TURN_MAX_ATTEMPTS)
+
+    with caplog.at_level(logging.WARNING, logger="nat_finus_nat.tool_first_react"):
+        state = await _run(ToolFirstReActAgentGraph, llm, (news, memory), first_turn_tools=[news])
+
+    assert called == []
+    assert llm.forced_calls() == FIRST_TURN_MAX_ATTEMPTS
+    assert state.final_answer == "조회 결과가 없어 답할 수 없습니다."
+    assert any("계속 유효하지 않아" in r.getMessage() for r in caplog.records)
+
+
+def test_graph_kwargs_cover_vendor_graph_signature():
+    """NAT를 올려 ``ReActAgentGraph.__init__``에 인자가 생기거나 사라지면 여기서 드러난다.
+
+    복제한 워크플로가 새 인자를 넘기지 않으면 빌드는 성공하고 그 옵션만 조용히 기본값이 된다.
+    ``callbacks``는 벤더 ``react_agent_workflow``도 넘기지 않는다.
+    뮤테이션: ``graph_kwargs``에서 ``raise_on_parsing_failure`` 한 줄을 지우면 red.
+    """
+    import inspect
+
+    from nat_finus_nat.tool_first_react import graph_kwargs
+
+    vendor = set(inspect.signature(ReActAgentGraph.__init__).parameters) - {"self", "callbacks"}
+    config = FinusToolFirstReActAgentConfig(llm_name="llm", tool_names=["t"], first_turn_tool_names=["t"])
+    passed = set(graph_kwargs(config, llm=None, prompt=None, tools=[]))
+
+    assert passed == vendor, f"빠진 인자: {sorted(vendor - passed)}, 없어진 인자: {sorted(passed - vendor)}"
+    assert set(inspect.signature(ToolFirstReActAgentGraph.__init__).parameters) == {"self", "first_turn_tools", "kwargs"}
 
 
 def test_config_rejects_first_turn_tool_outside_tool_names():

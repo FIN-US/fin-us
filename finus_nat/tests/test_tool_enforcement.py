@@ -121,8 +121,9 @@ def test_gate_trips_on_numeric_claim_with_tool_error():
 def test_gate_passes_on_qualitative_answer_without_tool():
     """도구 없이 정성적 평가만 답해도 수치가 없으면 게이트를 통과한다.
 
-    news_agent·strategy_agent YAML은 직전 대화 맥락만으로 후속 질문에 답하라고
-    명시적으로 지시한다 — 이 경우 도구 없이 답하는 것이 의도된 동작이다.
+    strategy_agent YAML은 직전 대화 맥락만으로 후속 질문에 답하라고 명시적으로 지시한다 —
+    이 경우 도구 없이 답하는 것이 의도된 동작이다. (news_agent는 #394부터 첫 턴에 도구를
+    강제하지만, 게이트는 에이전트와 무관하게 수치 유무로 판정하므로 이 케이스는 그대로다.)
     """
     ledger = DataToolLedger()
     req = _req(
