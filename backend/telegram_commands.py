@@ -83,6 +83,7 @@ from .trading_orders import (
 from .stock_code import (
     _STOCK_CODE_EXTRACT_RE,
     _is_unresolved_echo,
+    _looks_like_stock_code,
     describe_orderable_code_policy,
     extract_stock_name,
     is_orderable_stock_code,
@@ -1902,7 +1903,8 @@ class TelegramCommandHandler:
 
         형식은 ``<종목명> <수량> [지정가]``이다. 끝 토큰이 양의 정수가 아니면 해석이 없다(빈 목록).
 
-        끝 두 토큰이 모두 양의 정수면 해석이 둘이다. 예전에는 무조건 지정가로 읽어, 종목명이
+        끝 두 토큰이 모두 양의 정수면 해석이 둘이다(이름 자리가 종목코드 하나면 지정가 하나뿐 —
+        아래 분기 참조). 예전에는 무조건 지정가로 읽어, 종목명이
         숫자로 끝나는 ``/buy KODEX 200 10``이 ``KODEX`` 200주 지정가 10원이 됐다.
 
         1. 지정가: 앞부분이 종목명, 끝에서 둘째가 수량, 끝이 지정가.
@@ -1931,6 +1933,15 @@ class TelegramCommandHandler:
                     order_type="LIMIT",
                 )
             )
+            if len(parts) == 3 and _looks_like_stock_code(parts[0]):
+                # 이름 자리가 종목코드 하나면(`/buy 005930 10 75000`) 시장가 해석을 만들지 않는다
+                # (PR #392 리뷰). "종목코드 + 숫자"는 종목명이 될 수 없어 조회가 헛돌고, 미등록 코드면
+                # 두 이름 미발견 안내가 "'999999 10' 시장가로 읽은 경우"·"종목코드로 입력하세요"를
+                # 이미 코드를 친 사용자에게 보낸다. 하나로 두면 예전 안내("종목마스터에 없는 종목")다.
+                # _looks_like_stock_code는 숫자가 든 6·7·9자만 코드로 보므로 KIWOOM·HANARO 같은
+                # 영문 이름은 여기 걸리지 않는다. 마스터에 "코드 형태 + 숫자" 이름이 없다는 전제는
+                # test_no_master_name_is_a_stock_code_followed_by_a_number가 고정한다.
+                return readings
         readings.append(
             OrderReading(
                 stock_name=" ".join(parts[:-1]),

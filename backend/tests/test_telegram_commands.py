@@ -6955,6 +6955,88 @@ async def test_order_arguments_that_resolve_nowhere_name_both_readings():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("code", ["999999", "0009Z9"], ids=["numeric", "alnum"])
+async def test_unregistered_stock_code_in_limit_form_keeps_the_stock_master_message(code):
+    """마스터에 없는 종목코드를 지정가 형식으로 넣으면 예전 "종목마스터에 없는 종목" 안내다 (PR #392 리뷰).
+
+    이름 자리가 종목코드 하나면 "코드 + 숫자"를 종목명으로 읽는 시장가 해석을 만들지 않는다. 만들면 두
+    이름 미발견 안내가 "'999999 10' (75,000주, 시장가로 읽은 경우)"와 "6자리 종목코드로 입력하세요"를
+    이미 종목코드를 친 사용자에게 보낸다. 영숫자 코드(#138 형태, 숫자 포함)도 같은 규칙이다.
+
+    이 테스트가 잡는 mutation: 종목코드 이름 자리 분기 제거.
+    """
+    handler, notifier, calls = _master_order_handler(_real_master())
+
+    await handler.handle_update(_order_message(f"/buy {code} 10 75000"))
+
+    assert _orders(handler) == {}
+    assert notifier.messages[-1] == (
+        f"주문 불가: {code}({code}) — 종목마스터에 없는 종목입니다. "
+        "종목코드를 확인하거나 mcp-trading/data/stocks.json을 갱신하세요."
+    )
+    assert calls == [("resolve_stock_code", {"stock_name": code})]
+
+
+@pytest.mark.asyncio
+async def test_registered_stock_code_in_limit_form_is_checked_once():
+    """등록된 종목코드의 지정가 주문은 종목 확인을 한 번만 한다 (PR #392 리뷰)."""
+    handler, _, calls = _master_order_handler(_real_master())
+
+    await handler.handle_update(_order_message("/buy 069500 10 30000"))
+
+    order = _orders(handler)["123"]
+    assert (order.stock_code, order.quantity, order.price, order.order_type) == (
+        "069500",
+        10,
+        30000,
+        "LIMIT",
+    )
+    assert [args for tool, args in calls if tool == "resolve_stock_code"] == [
+        {"stock_name": "069500"}
+    ]
+
+
+def test_order_argument_readings_skip_the_market_reading_only_for_a_stock_code_name():
+    """이름 자리가 종목코드 하나일 때만 시장가 해석을 뺀다 (PR #392 리뷰).
+
+    영문만인 6자 이름(KIWOOM·HANARO)은 코드가 아니라 숫자로 끝나는 종목명의 앞부분일 수 있어 두
+    해석을 그대로 둔다. 코드 뒤에 토큰이 더 붙은 이름 자리도 코드 하나가 아니다.
+    """
+    handler = TelegramCommandHandler(notifier=FakeNotifier())
+    reading = telegram_commands.OrderReading
+
+    assert handler._order_argument_readings("005930 10 75000") == [
+        reading("005930", 10, 75000, "LIMIT")
+    ]
+    assert handler._order_argument_readings("0001a0 10 75000") == [
+        reading("0001a0", 10, 75000, "LIMIT")
+    ]
+    assert handler._order_argument_readings("KIWOOM 200 10") == [
+        reading("KIWOOM", 200, 10, "LIMIT"),
+        reading("KIWOOM 200", 10, 0, "MARKET"),
+    ]
+    assert len(handler._order_argument_readings("005930 우 10 75000")) == 2
+
+
+def test_no_master_name_is_a_stock_code_followed_by_a_number():
+    """마스터에 "종목코드 형태 토큰 + 숫자" 이름·별칭이 없다 — 시장가 해석을 빼는 분기의 전제 (PR #392 리뷰).
+
+    이런 이름이 생기면 `/buy <그 코드> <숫자> <수량>`이 그 종목의 시장가 주문으로 읽힐 수 없게 된다.
+    """
+    offenders = []
+    for stock in _real_master():
+        for label in [stock["name"], *(stock.get("aliases") or [])]:
+            parts = str(label).split()
+            if (
+                len(parts) == 2
+                and telegram_commands._looks_like_stock_code(parts[0])
+                and parts[1].replace(",", "").isdigit()
+            ):
+                offenders.append(label)
+    assert offenders == []
+
+
+@pytest.mark.asyncio
 async def test_single_reading_that_resolves_nowhere_keeps_the_previous_message():
     """해석이 하나뿐이면 미발견 사유는 예전 그대로다 (#387 회귀)."""
     handler, notifier, _ = _master_order_handler(_real_master())
