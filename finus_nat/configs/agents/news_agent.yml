@@ -10,7 +10,9 @@ llms:
 
 functions:
   news_agent:
-    _type: react_agent
+    # 첫 턴 도구 호출을 API로 강제한다(#394). 벤더 react_agent에서는 모델이 첫 턴에
+    # Final Answer로 끝내 도구를 한 번도 부르지 않았다 — 근거는 nat_finus_nat/tool_first_react.py.
+    _type: finus_tool_first_react_agent
     llm_name: news_openai_llm
     tool_names:
       - kis-trading-mcp-tool-readonly
@@ -20,6 +22,12 @@ functions:
       - mcp-dart-get-earnings-report
       - add_user_memory
       - get_user_memory
+    # 메모리 도구는 뺀다 — 데이터를 만들지 않는 도구로 강제 호출을 채우고 끝낼 수 있다.
+    first_turn_tool_names:
+      - kis-trading-mcp-tool-readonly
+      - mcp-news-get-market-news
+      - mcp-dart-get-disclosure-signal
+      - mcp-dart-get-earnings-report
     verbose: false
     use_native_tool_calling: false
     max_history: 8000
