@@ -99,6 +99,37 @@ async def test_cleared_value_is_purged_from_mem0_history(local_editor):
     assert all("aggressive" not in str(value) for row in rows for value in row)
 
 
+def test_history_purge_fails_loudly_when_mem0_internals_move():
+    """이력 삭제가 기대는 mem0 내부 속성이 없으면 조용히 건너뛰지 않고 예외로 드러난다 (PR #403 리뷰).
+
+    뮤테이션: ``self._memory.db``를 ``getattr(self._memory, "db", None)`` + None이면 return으로 되돌리면 red.
+    """
+    editor = FinusPreferenceMemoryEditor(SimpleNamespace())
+    with pytest.raises(AttributeError):
+        editor._purge_history(["memory-id"])
+
+
+def test_second_process_on_the_same_storage_gets_actionable_error(tmp_path):
+    """qdrant 로컬 잠금에 걸리면 해결 방법(저장 경로 분리·메모리 끄기)을 담은 오류가 난다 (PR #403 리뷰).
+
+    같은 프로세스 안에서도 qdrant 로컬 잠금이 걸려 두 번째 기동을 재현할 수 있다.
+    뮤테이션: ``build_local_async_memory``의 ``except RuntimeError`` 안내를 지우면 red(qdrant 원문만 남는다).
+    """
+    from nat_finus_nat.mem0_local import build_local_async_memory
+
+    first = build_local_async_memory(tmp_path / "mem0", "shared")
+    try:
+        with pytest.raises(RuntimeError) as excinfo:
+            build_local_async_memory(tmp_path / "mem0", "shared")
+        message = str(excinfo.value)
+        assert "FINUS_MEM0_STORAGE_DIR" in message
+        assert "FINUS_MEM0_ENABLED=0" in message
+        assert "already accessed" in str(excinfo.value.__cause__)
+    finally:
+        first.vector_store.client.close()
+        first.db.close()
+
+
 def test_mem0_telemetry_embedder_and_llm_cannot_leave_the_process(local_editor):
     """외부로 나갈 수 있는 mem0 경로 셋이 코드로 막혀 있다.
 

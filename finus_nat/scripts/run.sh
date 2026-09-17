@@ -123,19 +123,20 @@ done
 # #397 이후 기본 config(router.yml)는 vendor mem0_memory(HTTP 클라이언트)가 아니라
 # finus_mem0_local_memory(프로세스 안 로컬 모드)를 쓴다. 그래서 두 기본 config 모두 아래
 # 게이트가 3(미사용)을 돌려주고, 이 게이트는 vendor mem0_memory를 쓰는 사용자 지정 config
-# (FINUS_NAT_CONFIG_FILE)에서만 패치를 강제한다. 아래 "--nomemory(기본값)" 서술은 그 이전 기준이다.
+# (FINUS_NAT_CONFIG_FILE)에서만 패치를 강제한다.
 #
 # 이 게이트는 파싱이 끝나 최종값이 된 _CONFIG_FILE(이 실행이 실제로 무엇을
 # 쓰는지)로 판단한다. 예전에는 env(FINUS_MEM0_HOST/MEM0_API_KEY) 존재만 보고
 # 판단했는데, 공용 .env가 항상 MEM0_API_KEY를 갖고 있어 Mem0를 전혀 쓰지 않는
-# 기본 --nomemory 실행까지 벤더 drift 경고에 걸렸다.
+# --nomemory 실행까지 벤더 drift 경고에 걸렸다.
 #
 # 이전 코멘트는 "여기서는 실패해도 런처를 죽이지 않는다 … 강제 지점은 Docker
 # 빌드(Dockerfile)이고, 로컬은 경고로 충분하다"였다. 이제는 뒤집는다: 이 실행이
 # 실제로 mem0_memory를 쓰는 config를 골랐는데 패치가 안 붙었다면, 조용히
 # 넘어가는 것은 사용자에게 원인 불명의 런타임 실패만 남긴다. 게이트가 env
 # 스코프에서 config 스코프로 좁혀졌기 때문에 이제는 로컬에서도 fatal로
-# 처리해도 무관하다 - --nomemory 기본 실행은 애초에 이 블록에 들어오지 않는다.
+# 처리해도 무관하다 - vendor mem0_memory를 쓰지 않는 config(기본 router.yml과
+# router_nomemory.yml 모두)는 애초에 이 블록에 들어오지 않는다.
 #
 # NAT config는 `base:` 상속(재귀 deep-merge, nat/utils/io/yaml_tools.py)을 쓴다.
 # router.yml -> agents/diary_agent.yml -> ... -> ../common.yml처럼 체인이 길게
@@ -152,7 +153,7 @@ done
 # silent-skip이 가드 안에서 재현되는 셈이었다. 셸로 nat 로더를 재구현하며 계속
 # 따라잡는 대신, nat.utils.io.yaml_tools.yaml_load()를 그대로 호출해 병합된
 # dict를 검사한다 - 상속 규칙이 갈라질 여지 자체가 없다. 다만 이건 공짜가
-# 아니다: `--nomemory`(기본값)는 게이트가 3(미사용)을 반환한 뒤 바로 아래
+# 아니다: vendor mem0_memory를 쓰지 않는 config(기본 router.yml 포함)는 게이트가 3(미사용)을 반환한 뒤 바로 아래
 # case 문에서 skip하고 patch_vendor.py를 아예 호출하지 않으므로, "두 줄 뒤
 # 어차피 필요하다"는 말은 이 경로에서는 성립하지 않는다. 실측 비용은
 # 인터프리터 직접 기동 ~180-210ms, `uv run` 경유 시 ~260-280ms인 반면(콜드

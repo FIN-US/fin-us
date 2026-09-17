@@ -128,4 +128,17 @@ def build_local_async_memory(storage_dir: Path, collection_name: str) -> AsyncMe
         provider=LOCAL_EMBEDDER_PROVIDER, config={"embedding_dims": EMBEDDING_DIMS}
     )
     config.llm = LlmConfig.model_construct(provider=REFUSING_LLM_PROVIDER, config={})
-    return AsyncMemory(config)
+    try:
+        return AsyncMemory(config)
+    except RuntimeError as exc:
+        # qdrant 로컬 모드는 저장 디렉터리에 잠금을 건다. 메모리 모드가 기본값이라, 같은 디렉터리로
+        # 두 번째 NAT(예: `run.sh chat`이 떠 있는 동안 `run.sh --once`)을 띄우면 메모리뿐 아니라 NAT
+        # 기동 전체가 실패한다. qdrant 원문은 해결 방법을 알려 주지 않으므로 안내를 붙여 다시 던진다.
+        if "already accessed by another instance" not in str(exc):
+            raise
+        raise RuntimeError(
+            f"사용자 메모리 저장소({storage_dir})를 다른 NAT 프로세스가 쓰고 있습니다. "
+            "qdrant 로컬 모드는 한 프로세스만 열 수 있습니다. 이 프로세스를 띄우려면 "
+            "FINUS_MEM0_STORAGE_DIR을 다른 경로로 주거나, 메모리 없이 띄우세요"
+            "(FINUS_MEM0_ENABLED=0 또는 run.sh --nomemory)."
+        ) from exc

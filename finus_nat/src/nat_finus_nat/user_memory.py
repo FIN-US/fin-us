@@ -125,10 +125,15 @@ class FinusPreferenceMemoryEditor(MemoryEditor):
         self._purge_history([record["id"] for record in records])
 
     def _purge_history(self, memory_ids: list[str]) -> None:
-        """mem0 삭제는 이력 테이블에 옛 값을 남긴다. 사용자가 지운 값은 이력에서도 지운다."""
-        db = getattr(self._memory, "db", None)
-        if db is None or not memory_ids:
+        """mem0 삭제는 이력 테이블에 옛 값을 남긴다. 사용자가 지운 값은 이력에서도 지운다.
+
+        mem0 내부 속성(``db``·``db._lock``·``db.connection``)에 기댄다. 기본값으로 건너뛰지 않는다 —
+        mem0가 바뀌어 속성이 사라지면 "해제한 값은 이력에도 남지 않는다"는 보장이 조용히 깨지므로
+        예외로 드러낸다.
+        """
+        if not memory_ids:
             return
+        db = self._memory.db
         with db._lock:
             db.connection.executemany("DELETE FROM history WHERE memory_id = ?", [(mid,) for mid in memory_ids])
             db.connection.commit()
