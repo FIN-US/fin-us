@@ -28,6 +28,17 @@ DEFAULT_ORDER_ORIGIN: OrderOrigin = "auto_proposal"
 # DEFAULT_ORDER_ORIGIN으로 접는다 — 저장값이 코드보다 오래 살기 때문에 읽는 쪽이 방어한다.
 ORDER_ORIGINS: frozenset[str] = frozenset(("user_command", "auto_proposal"))
 
+# 대기 주문을 보지 않고(출처를 모른 채) "그 주문을 먼저 처리하라"고 안내할 때 쓰는 다음 행동 문장
+# (PR #391 리뷰). 충돌(/buy·/advise·자동 제안이 슬롯에 막힘)과 /confirm 재배달 거절이 쓴다.
+# 확정 버튼을 먼저 권하는 이유: 버튼은 두 출처 모두 확정하지만 텍스트 /confirm은 사용자 주문만
+# 확정한다(#390). "/confirm 또는 /cancel"로 안내하면 자동 제안 앞에서는 안내대로 한 /confirm이
+# 다시 버튼 안내로 돌아온다. 출처를 읽어 분기하지 않는 것은, 안내 시점과 사용자가 행동하는 시점
+# 사이에 대기 주문이 바뀔 수 있어 어느 쪽이든 두 출처를 다 덮는 문장이 필요하기 때문이다.
+PENDING_ORDER_NEXT_STEP_TEXT = (
+    "주문 메시지의 확정 버튼으로 확정하거나 /cancel로 취소하세요. "
+    "직접 낸 주문은 /confirm으로도 확정됩니다."
+)
+
 # 대기 주문의 앱 레벨 만료 창. PendingOrder의 성질이므로 여기 둔다 (#299).
 # telegram_commands가 같은 이름으로 재수출하며(기존 import 경로 유지), order_assist도
 # 여기서 직접 읽는다 — telegram_commands에 두면 order_assist와 순환 import가 된다.

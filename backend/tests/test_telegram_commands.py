@@ -16,6 +16,7 @@ import pytest
 from fastapi import HTTPException
 
 import backend.config as backend_config
+import backend.order_assist as order_assist_module
 import backend.redis_state as redis_state_module
 import backend.telegram_commands as telegram_commands
 import backend.telegram_notifier as telegram_notifier_module
@@ -2503,10 +2504,7 @@ async def test_sell_command_rejects_duplicate_pending_order():
         {"message": {"chat": {"id": 123}, "text": "/sell 삼성전자 1 75000"}}
     )
 
-    assert (
-        notifier.messages[-1]
-        == "이미 대기 중인 주문이 있습니다. /confirm 또는 /cancel로 먼저 처리하세요."
-    )
+    assert notifier.messages[-1] == telegram_commands.PENDING_ORDER_CONFLICT_TEXT
     assert _orders(handler)["123"].side == "BUY"
 
 
@@ -6596,6 +6594,43 @@ async def test_confirm_button_is_not_gated_by_the_order_origin():
     )
 
     assert [order.callback_token for order in gateway.orders] == ["token-auto"]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        telegram_commands.PENDING_ORDER_CONFLICT_TEXT,
+        order_assist_module.CONFLICT_MESSAGE,
+        telegram_commands.CONFIRM_REPLAY_REFUSED_TEXT,
+    ],
+    ids=["order_conflict", "advise_conflict", "confirm_replay"],
+)
+def test_guidance_that_cannot_see_the_origin_points_to_the_button_first(text):
+    """대기 주문의 출처를 모르는 채 나가는 안내는 버튼을 먼저 권하고 /confirm은 사용자 주문으로 한정한다 (PR #391 리뷰).
+
+    충돌·재배달 안내는 대기 주문을 읽지 않고 나간다. 그 주문이 자동 제안이면 텍스트 /confirm은 확정하지
+    않으므로(#390), "/confirm 또는 /cancel로 처리하세요"를 따른 사용자는 버튼 안내로 한 번 더 돌아온다.
+
+    이 테스트가 잡는 mutation: 세 문구 중 하나를 "/confirm 또는 /cancel"·"/confirm을 새로 보내세요"로 되돌림.
+    """
+    assert "확정 버튼" in text
+    assert "직접 낸 주문은 /confirm" in text
+
+
+@pytest.mark.asyncio
+async def test_new_order_blocked_by_an_auto_proposal_is_told_to_use_the_button():
+    """자동 제안이 슬롯을 잡은 채 /buy를 내면 충돌 안내가 버튼을 권한다 (PR #391 리뷰)."""
+    pending_orders = InMemoryPendingOrderStore()
+    await pending_orders.set(
+        "123", _pending_order_for_replay(1, "token-auto", _ORDER_TIME, origin="auto_proposal")
+    )
+    notifier = FakeNotifier()
+    handler = _order_handler(notifier, FakeOrderGateway(), pending_orders=pending_orders)
+
+    await handler.handle_update(_buy_update(notifier))
+
+    assert notifier.messages == [telegram_commands.PENDING_ORDER_CONFLICT_TEXT]
+    assert _orders(handler)["123"].callback_token == "token-auto"
 
 
 # ---------------------------------------------------------------------------

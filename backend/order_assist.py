@@ -77,6 +77,7 @@ from .timeutil import KST
 from .trading_orders import (
     DEFAULT_ORDER_ORIGIN,
     ORDER_EXPIRES_AFTER,
+    PENDING_ORDER_NEXT_STEP_TEXT,
     OrderOrigin,
     OrderSide,
     OrderType,
@@ -89,7 +90,7 @@ logger = logging.getLogger(__name__)
 ProposalSource = Literal["telegram", "scheduler_rule"]
 AssistStatus = Literal["approved", "rejected", "conflict"]
 
-CONFLICT_MESSAGE = "대기 중인 주문이 있어 제안을 보류했어요. /confirm 또는 /cancel로 먼저 처리하세요."
+CONFLICT_MESSAGE = f"대기 중인 주문이 있어 제안을 보류했어요. {PENDING_ORDER_NEXT_STEP_TEXT}"
 
 
 def order_origin_for(source: ProposalSource) -> OrderOrigin:
@@ -1129,8 +1130,8 @@ async def run_order_assist(
     #    검사 전에 만료분을 먼저 치운다(/buy가 같은 자리에서 하는 것과 동일하다).
     #    앱 만료(ORDER_EXPIRES_AFTER 60초)와 redis TTL(PENDING_ORDER_TTL_SEC 600초)이
     #    10배 차이라, 확정도 취소도 하지 않은 주문의 키는 약 9분간 남는다. 그 구간에서
-    #    이 정리를 건너뛰면 /advise만 충돌로 막히면서 "/confirm 또는 /cancel로 먼저
-    #    처리하세요"라고 안내하는데, 정작 그 주문은 이미 만료라 /confirm이 되지 않는
+    #    이 정리를 건너뛰면 /advise만 충돌로 막히면서 "확정하거나 /cancel로 취소하세요"라고
+    #    안내하는데, 정작 그 주문은 이미 만료라 확정이 되지 않는
     #    막다른 길이 된다. InMemoryPendingOrderStore는 TTL 자체가 없어 더 오래 간다.
     try:
         await _drop_expired_pending_order(pending_orders, trigger.chat_id, now)
