@@ -74,14 +74,37 @@ from .stock_code import (
     is_orderable_stock_code_strict,
 )
 from .timeutil import KST
-from .trading_orders import ORDER_EXPIRES_AFTER, OrderSide, OrderType, PendingOrder, is_korean_market_open
+from .trading_orders import (
+    DEFAULT_ORDER_ORIGIN,
+    ORDER_EXPIRES_AFTER,
+    PENDING_ORDER_NEXT_STEP_TEXT,
+    OrderOrigin,
+    OrderSide,
+    OrderType,
+    PendingOrder,
+    is_korean_market_open,
+)
 
 logger = logging.getLogger(__name__)
 
 ProposalSource = Literal["telegram", "scheduler_rule"]
 AssistStatus = Literal["approved", "rejected", "conflict"]
 
-CONFLICT_MESSAGE = "대기 중인 주문이 있어 제안을 보류했어요. /confirm 또는 /cancel로 먼저 처리하세요."
+CONFLICT_MESSAGE = f"대기 중인 주문이 있어 제안을 보류했어요. {PENDING_ORDER_NEXT_STEP_TEXT}"
+
+
+def order_origin_for(source: ProposalSource) -> OrderOrigin:
+    """제안 계기를 대기 주문의 출처로 옮긴다 (#390).
+
+    ``telegram``만 사용자 명령이다 — ``/advise``는 사용자가 방금 친 명령이라 그 사용자의
+    텍스트 /confirm과 같은 기기에서 순서대로 전송된다. 나머지(``scheduler_rule``, 앞으로 늘어날
+    자동 계기)는 사용자 명령 없이 생긴 주문이므로 확정 버튼으로만 확정한다.
+
+    조건을 "auto면 auto_proposal"이 아니라 "telegram이면 user_command"로 쓴 것이 fail-closed의
+    자리다. 새 자동 계기가 ProposalSource에 붙어도 기본값(DEFAULT_ORDER_ORIGIN)으로 떨어져
+    텍스트 확정이 조용히 열리지 않는다.
+    """
+    return "user_command" if source == "telegram" else DEFAULT_ORDER_ORIGIN
 
 # 검증자 응답에서 정성 사유를 한 문장도 건지지 못했을 때 쓰는 고정 문구.
 # 모델이 만든 문장이 아니라 코드 리터럴이다.
@@ -971,7 +994,11 @@ def format_approval_message(
     lines.extend(
         [
             "",
-            "확정 버튼을 누르거나 /confirm을 입력해야 주문이 나갑니다.",
+            # 확정 수단을 출처에서 읽는다 (#390). 자동 제안은 텍스트 /confirm으로 확정되지
+            # 않으므로 여기서 /confirm을 권하면 안내가 곧 막다른 길이 된다.
+            "확정 버튼을 누르거나 /confirm을 입력해야 주문이 나갑니다."
+            if order.text_confirm_allowed()
+            else "확정 버튼을 눌러야 주문이 나갑니다. 자동 제안은 /confirm으로 확정할 수 없습니다.",
             "/cancel 입력 시 대기 주문을 취소합니다.",
             f"이 제안은 {expires_at.astimezone(KST):%H:%M:%S}에 만료됩니다.",
         ]
@@ -1103,8 +1130,8 @@ async def run_order_assist(
     #    검사 전에 만료분을 먼저 치운다(/buy가 같은 자리에서 하는 것과 동일하다).
     #    앱 만료(ORDER_EXPIRES_AFTER 60초)와 redis TTL(PENDING_ORDER_TTL_SEC 600초)이
     #    10배 차이라, 확정도 취소도 하지 않은 주문의 키는 약 9분간 남는다. 그 구간에서
-    #    이 정리를 건너뛰면 /advise만 충돌로 막히면서 "/confirm 또는 /cancel로 먼저
-    #    처리하세요"라고 안내하는데, 정작 그 주문은 이미 만료라 /confirm이 되지 않는
+    #    이 정리를 건너뛰면 /advise만 충돌로 막히면서 "확정하거나 /cancel로 취소하세요"라고
+    #    안내하는데, 정작 그 주문은 이미 만료라 확정이 되지 않는
     #    막다른 길이 된다. InMemoryPendingOrderStore는 TTL 자체가 없어 더 오래 간다.
     try:
         await _drop_expired_pending_order(pending_orders, trigger.chat_id, now)
@@ -1349,6 +1376,9 @@ async def run_order_assist(
         created_at=created_at,
         order_type=proposal.order_type,
         callback_token=secrets.token_urlsafe(8),
+        # 같은 함수가 /advise(사용자 명령)와 룰 트리거 자동 제안을 함께 처리하므로 출처는
+        # 계기에서 온다 (#390). 자동 제안 주문은 텍스트 /confirm으로 확정되지 않는다.
+        origin=order_origin_for(trigger.source),
     )
     try:
         stored = await pending_orders.set_if_absent(trigger.chat_id, order)

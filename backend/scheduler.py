@@ -2184,10 +2184,10 @@ async def run_rule_triggered_proposal(
         # 일시적인 429 한 번에 그 전부가 버려지고 같은 종목은 냉각이 풀릴 때까지(기본
         # 60분) 다시 시도되지도 않는다.
         #
-        # 전송과 message_id 기록은 /buy·/advise와 같은 send_order_prompt 하나다 (#386). 텍스트
-        # /confirm은 그 id보다 뒤에 보낸 것일 때만 이 주문을 실행한다. 이 경로는 폴러 밖이라 저장부터
-        # 기록까지의 창에 텍스트 /confirm이 처리될 수 있는데, 그때는 id가 없어 실행되지 않는다
-        # (fail-closed).
+        # 전송과 message_id 기록은 /buy·/advise와 같은 send_order_prompt 하나다 (#386). 이 주문은
+        # 자동 제안(origin=auto_proposal)이라 텍스트 /confirm으로는 아예 확정되지 않고 확정 버튼으로만
+        # 확정된다 (#390). 사용자가 다른 주문을 보고 보낸 /confirm이 전송 지연 끝에 이 주문에 닿는
+        # 창이 거기서 닫힌다. id는 여전히 남긴다 — 확정 규칙의 한 조건이고 로그의 단서다.
         sent = await send_order_prompt(
             notifier, store, result.order, format_auto_message(result.message), sleep=_sleep
         )

@@ -16,6 +16,7 @@ import pytest
 from fastapi import HTTPException
 
 import backend.config as backend_config
+import backend.order_assist as order_assist_module
 import backend.redis_state as redis_state_module
 import backend.telegram_commands as telegram_commands
 import backend.telegram_notifier as telegram_notifier_module
@@ -53,11 +54,11 @@ from backend.redis_state import (
     TelegramPollerState,
     TelegramPollerStore,
 )
-from backend.order_assist import OrderAssistResult, _drop_expired_pending_order
+from backend.order_assist import OrderAssistResult, _drop_expired_pending_order, order_origin_for
 from backend.order_rules import RULE_ID, RuleMatch
 from backend.services import NatAnswer, NatToolUse
 from backend.telegram_notifier import SendReceipt
-from backend.trading_orders import OrderExecutionResult, PendingOrder
+from backend.trading_orders import OrderExecutionResult, OrderOrigin, PendingOrder
 
 KST = ZoneInfo("Asia/Seoul")
 
@@ -148,6 +149,17 @@ def _text_confirm(
     if update_id is not None:
         update["update_id"] = update_id
     return update
+
+
+def _confirm_button(token: str) -> dict:
+    """``token`` 주문의 확정 버튼을 누른 callback_query update (#390)."""
+    return {
+        "callback_query": {
+            "id": f"cb-{token}",
+            "data": f"order:confirm:{token}",
+            "message": {"chat": {"id": 123}},
+        }
+    }
 
 
 class FakeNotifier:
@@ -2492,10 +2504,7 @@ async def test_sell_command_rejects_duplicate_pending_order():
         {"message": {"chat": {"id": 123}, "text": "/sell 삼성전자 1 75000"}}
     )
 
-    assert (
-        notifier.messages[-1]
-        == "이미 대기 중인 주문이 있습니다. /confirm 또는 /cancel로 먼저 처리하세요."
-    )
+    assert notifier.messages[-1] == telegram_commands.PENDING_ORDER_CONFLICT_TEXT
     assert _orders(handler)["123"].side == "BUY"
 
 
@@ -5816,6 +5825,8 @@ async def test_confirmed_order_is_not_reexecuted_when_restart_lands_in_the_fill_
             order_type="LIMIT",
             callback_token="token",
             prompt_message_id=_FIRST_PROMPT_MESSAGE_ID,
+            # /buy로 만든 주문이다. 텍스트 /confirm은 사용자 주문만 확정한다 (#390).
+            origin="user_command",
         ),
     )
     update = _text_confirm(update_id=41)
@@ -5968,7 +5979,11 @@ def _pending_order_for_replay(
     now: datetime,
     *,
     prompt_message_id: int | None = _FIRST_PROMPT_MESSAGE_ID,
+    origin: OrderOrigin = "user_command",
 ) -> PendingOrder:
+    # 출처 기본값은 사용자 명령이다. 이 대역을 쓰는 #383·#386 테스트는 /buy로 만든 주문의 텍스트
+    # /confirm을 보므로, PendingOrder의 fail-closed 기본값(auto_proposal)을 따르면 모두 출처
+    # 판정(#390)에서 먼저 막혀 보려던 판정에 닿지 못한다.
     return PendingOrder(
         chat_id="123",
         stock_name="삼성전자",
@@ -5980,6 +5995,7 @@ def _pending_order_for_replay(
         order_type="LIMIT",
         callback_token=token,
         prompt_message_id=prompt_message_id,
+        origin=origin,
     )
 
 
@@ -6170,7 +6186,11 @@ def _buy_update(notifier: "FakeNotifier") -> dict:
 
 
 def _auto_proposal_creating(quantity: int, token: str):
-    """자동 제안(run_order_assist)의 대역. 60초 지난 주문을 치우고 새 주문으로 슬롯을 잡는다."""
+    """자동 제안(run_order_assist)의 대역. 60초 지난 주문을 치우고 새 주문으로 슬롯을 잡는다.
+
+    출처는 실제 run_order_assist와 같은 함수(order_origin_for)로 계기에서 읽는다 (#390).
+    run_rule_triggered_proposal이 넘기는 계기는 scheduler_rule이라 auto_proposal이 된다.
+    """
 
     async def _run(trigger, *, pending_orders, now_factory):
         created_at = now_factory()
@@ -6184,6 +6204,7 @@ def _auto_proposal_creating(quantity: int, token: str):
             price=75000,
             created_at=created_at,
             callback_token=token,
+            origin=order_origin_for(trigger.source),
         )
         assert await pending_orders.set_if_absent(trigger.chat_id, order)
         return OrderAssistResult(status="approved", message="자동 제안", order=order)
@@ -6200,9 +6221,13 @@ async def test_late_text_confirm_does_not_execute_a_pending_order_created_after_
     넣는다. claim은 B를 준다 — 사용자가 본 적 없는 B가 확정 없이 실행됐다(수정 전 체결 = [B]).
     재시작이 없으므로 #383의 표지는 이 경우를 가려내지 못한다.
 
-    B는 소비되지 않고 남아야 하고, B의 프롬프트를 본 뒤 보낸 /confirm은 B를 실행해야 한다.
-    B는 스케줄러의 실제 전달 경로(run_rule_triggered_proposal)로 만든다 — B의 프롬프트 id가
-    기록되는 것까지 같은 경로다.
+    B는 소비되지 않고 남아야 한다. B는 스케줄러의 실제 전달 경로(run_rule_triggered_proposal)로
+    만든다 — B의 프롬프트 id가 기록되는 것까지 같은 경로다.
+
+    #390 이후 B는 자동 제안이라 텍스트 /confirm으로는 확정되지 않는다. 늦은 /confirm은 id 대조
+    이전에 출처 판정에서 막히고, B를 확정하는 수단은 B의 버튼뿐이다. id 대조만으로 막히는 경우는
+    사용자 주문으로 본다(test_text_confirm_not_after_the_prompt_is_refused_and_keeps_the_order,
+    test_late_text_confirm_with_redis_store_keeps_the_newer_order).
     """
     from backend.scheduler import run_rule_triggered_proposal
 
@@ -6238,12 +6263,10 @@ async def test_late_text_confirm_does_not_execute_a_pending_order_created_after_
 
     assert gateway.orders == []
     assert _orders(handler)["123"] == order_b
-    assert notifier.messages[-1] == telegram_commands.CONFIRM_BEFORE_PROMPT_TEXT
+    assert notifier.messages[-1] == telegram_commands.CONFIRM_AUTO_PROPOSAL_BUTTON_ONLY_TEXT
 
-    # 5) B의 프롬프트를 본 뒤 보낸 /confirm은 B를 실행한다.
-    await handler.handle_update(
-        _text_confirm(message_id=notifier.next_user_message_id(), update_id=78)
-    )
+    # 5) B의 확정 버튼은 B를 실행한다.
+    await handler.handle_update(_confirm_button("token-b"))
 
     assert [order.callback_token for order in gateway.orders] == ["token-b"]
     assert _orders(handler) == {}
@@ -6385,8 +6408,12 @@ async def test_text_confirm_in_the_window_before_the_prompt_id_is_recorded_is_no
 
     프롬프트는 슬롯을 따낸 뒤에야 보내므로(#247) 저장된 주문에는 한동안 id가 없다. 폴러 밖의
     자동 제안에서는 그 창에 폴러가 /confirm을 처리할 수 있다. 그 /confirm은 B의 프롬프트를
-    볼 수 없었다 — 모르는 id는 실행하지 않는 쪽으로 읽는다. 프롬프트가 나가 id가 남은 뒤의
-    /confirm은 B를 실행한다.
+    볼 수 없었다.
+
+    #390 이후 이 창의 주문은 자동 제안이라 출처 판정이 먼저 막는다. 그래서 프롬프트가 나가
+    id가 남은 뒤의 텍스트 /confirm도 B를 실행하지 않고, B는 버튼으로만 확정된다. id를 모르는
+    사용자 주문의 fail-closed는 test_text_confirm_does_not_execute_an_order_whose_prompt_id_is_unknown이
+    본다.
     """
     from backend.scheduler import run_rule_triggered_proposal
 
@@ -6409,7 +6436,7 @@ async def test_text_confirm_in_the_window_before_the_prompt_id_is_recorded_is_no
 
     assert gateway.orders == []
     assert _orders(handler)["123"].prompt_message_id is None
-    assert notifier.messages[-1] == telegram_commands.CONFIRM_PROMPT_UNKNOWN_TEXT
+    assert notifier.messages[-1] == telegram_commands.CONFIRM_AUTO_PROPOSAL_BUTTON_ONLY_TEXT
 
     notifier.release_prompt.set()
     await asyncio.wait_for(proposal, timeout=5.0)
@@ -6417,7 +6444,193 @@ async def test_text_confirm_in_the_window_before_the_prompt_id_is_recorded_is_no
 
     await handler.handle_update(_text_confirm(message_id=notifier.next_user_message_id()))
 
+    assert gateway.orders == []
+    assert notifier.messages[-1] == telegram_commands.CONFIRM_AUTO_PROPOSAL_BUTTON_ONLY_TEXT
+
+    await handler.handle_update(_confirm_button("token-b"))
+
     assert [order.callback_token for order in gateway.orders] == ["token-b"]
+
+
+# ---------------------------------------------------------------------------
+# 사용자 쪽 전송 지연(오프라인 큐) 끝에 올라간 텍스트 /confirm (#390)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_text_confirm_released_from_the_offline_queue_does_not_execute_an_auto_proposal():
+    """오프라인 큐에 묶였다 늦게 올라간 텍스트 /confirm이 그사이 생긴 자동 제안을 실행하지 않는다 (#390).
+
+    창의 정체: 사용자가 A의 프롬프트를 보고 /confirm을 눌렀지만 기기가 오프라인이라 메시지가 로컬
+    큐에 묶인다. 그사이 A가 60초를 넘기고 자동 제안이 A를 치운 뒤 B를 넣어 프롬프트를 보낸다.
+    재연결 때 올라간 /confirm은 서버가 **그때** 번호를 매기므로 B의 프롬프트보다 id가 크다.
+    #386의 id 대조를 통과해 B가 확정 없이 실행됐다(수정 전 체결 = [B]).
+
+    B는 소비되지 않고 남고, 안내는 버튼을 권한다. B는 자기 버튼으로만 확정된다.
+
+    이 테스트가 잡는 mutation: confirmable_by_text에서 출처 조건 제거(prompted_before만 남김),
+    _auto_proposal_creating이 쓰는 order_origin_for를 상수 user_command로 고정.
+    """
+    from backend.scheduler import run_rule_triggered_proposal
+
+    clock = [_ORDER_TIME]
+    notifier = FakeNotifier()
+    gateway = FakeOrderGateway()
+    handler = _order_handler(notifier, gateway, now_factory=lambda: clock[0])
+
+    # 1) /buy A. 사용자는 A의 프롬프트를 보고 /confirm을 누른다 — 기기 큐에 묶여 아직 번호가 없다.
+    await handler.handle_update(_buy_update(notifier))
+    assert _orders(handler)["123"].origin == "user_command"
+
+    # 2) 큐에 묶인 사이 A가 만료되고, 자동 제안 B가 A를 치우고 프롬프트를 보낸다.
+    clock[0] += timedelta(seconds=90)
+    await run_rule_triggered_proposal(
+        [_AUTO_MATCH],
+        None,
+        pending_orders=handler.pending_orders,
+        notifier=notifier,
+        now_factory=lambda: clock[0],
+        assist=_auto_proposal_creating(2, "token-b"),
+    )
+    order_b = _orders(handler)["123"]
+    assert order_b.origin == "auto_proposal"
+    assert order_b.prompt_message_id is not None
+
+    # 3) 재연결. 서버는 /confirm에 지금 번호를 매긴다 — B의 프롬프트보다 크다.
+    queued_confirm_id = notifier.next_user_message_id()
+    assert queued_confirm_id > order_b.prompt_message_id
+    await handler.handle_update(_text_confirm(message_id=queued_confirm_id, update_id=91))
+
+    assert gateway.orders == []
+    assert _orders(handler)["123"] == order_b
+    assert notifier.messages[-1] == telegram_commands.CONFIRM_AUTO_PROPOSAL_BUTTON_ONLY_TEXT
+
+    # 4) B는 B의 버튼으로 확정된다.
+    await handler.handle_update(_confirm_button("token-b"))
+
+    assert [order.callback_token for order in gateway.orders] == ["token-b"]
+    assert _orders(handler) == {}
+
+
+@pytest.mark.asyncio
+async def test_text_confirm_still_executes_a_user_command_order():
+    """사용자가 낸 /buy 주문은 프롬프트를 본 뒤 보낸 텍스트 /confirm으로 그대로 확정된다 (#390).
+
+    자동 제안만 버튼으로 좁혔다. 사용자 주문의 텍스트 확정까지 막히면 결정의 전제("사용자 주문은
+    이 역전이 성립하지 않으므로 편의를 유지한다")가 깨진다.
+
+    이 테스트가 잡는 mutation: _handle_order_command의 origin="user_command" 제거(기본값
+    auto_proposal로 떨어져 텍스트 확정이 막힌다), text_confirm_allowed가 항상 False.
+    """
+    notifier = FakeNotifier()
+    gateway = FakeOrderGateway()
+    handler = _order_handler(notifier, gateway)
+    await handler.handle_update(_buy_update(notifier))
+    order = _orders(handler)["123"]
+    assert order.origin == "user_command"
+
+    await handler.handle_update(_text_confirm(message_id=notifier.next_user_message_id()))
+
+    assert [placed.callback_token for placed in gateway.orders] == [order.callback_token]
+    assert _orders(handler) == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "prompt_message_id",
+    [_FIRST_PROMPT_MESSAGE_ID, None],
+    ids=["prompt_id_known", "prompt_id_unknown"],
+)
+async def test_text_confirm_on_an_auto_proposal_is_refused_regardless_of_the_prompt_id(
+    prompt_message_id,
+):
+    """자동 제안 주문은 프롬프트 id를 알든 모르든 텍스트 /confirm으로 확정되지 않는다 (#390).
+
+    안내도 id 대조 문구가 아니라 버튼 문구다. id 문구("/confirm을 다시 보내세요")를 보내면 다시
+    보낸 /confirm도 같은 이유로 막혀 사용자가 막다른 길을 돈다. 주문은 그대로 남는다.
+
+    이 테스트가 잡는 mutation: 거절 분기에서 출처 안내 제거(id 문구로 떨어진다).
+    """
+    pending_orders = InMemoryPendingOrderStore()
+    await pending_orders.set(
+        "123",
+        _pending_order_for_replay(
+            1,
+            "token-auto",
+            _ORDER_TIME,
+            prompt_message_id=prompt_message_id,
+            origin="auto_proposal",
+        ),
+    )
+    gateway = FakeOrderGateway()
+    notifier = FakeNotifier()
+
+    await _replay_handler(notifier, gateway, pending_orders, _ORDER_TIME).handle_update(
+        _text_confirm()
+    )
+
+    assert gateway.orders == []
+    assert await pending_orders.has("123")
+    assert notifier.messages == [telegram_commands.CONFIRM_AUTO_PROPOSAL_BUTTON_ONLY_TEXT]
+
+
+@pytest.mark.asyncio
+async def test_confirm_button_is_not_gated_by_the_order_origin():
+    """버튼 확정에는 출처 판정을 걸지 않는다 (#390).
+
+    자동 제안 주문을 확정하는 유일한 수단이 버튼이다. 버튼에도 텍스트 판정을 걸면 자동 제안은
+    어떤 방법으로도 확정되지 않는다.
+
+    이 테스트가 잡는 mutation: 버튼 경로(text_confirm 없음)에도 claim_if(confirmable_by_text)를 건다.
+    """
+    pending_orders = InMemoryPendingOrderStore()
+    await pending_orders.set(
+        "123", _pending_order_for_replay(1, "token-auto", _ORDER_TIME, origin="auto_proposal")
+    )
+    gateway = FakeOrderGateway()
+
+    await _replay_handler(FakeNotifier(), gateway, pending_orders, _ORDER_TIME).handle_update(
+        _confirm_button("token-auto")
+    )
+
+    assert [order.callback_token for order in gateway.orders] == ["token-auto"]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        telegram_commands.PENDING_ORDER_CONFLICT_TEXT,
+        order_assist_module.CONFLICT_MESSAGE,
+        telegram_commands.CONFIRM_REPLAY_REFUSED_TEXT,
+    ],
+    ids=["order_conflict", "advise_conflict", "confirm_replay"],
+)
+def test_guidance_that_cannot_see_the_origin_points_to_the_button_first(text):
+    """대기 주문의 출처를 모르는 채 나가는 안내는 버튼을 먼저 권하고 /confirm은 사용자 주문으로 한정한다 (PR #391 리뷰).
+
+    충돌·재배달 안내는 대기 주문을 읽지 않고 나간다. 그 주문이 자동 제안이면 텍스트 /confirm은 확정하지
+    않으므로(#390), "/confirm 또는 /cancel로 처리하세요"를 따른 사용자는 버튼 안내로 한 번 더 돌아온다.
+
+    이 테스트가 잡는 mutation: 세 문구 중 하나를 "/confirm 또는 /cancel"·"/confirm을 새로 보내세요"로 되돌림.
+    """
+    assert "확정 버튼" in text
+    assert "직접 낸 주문은 /confirm" in text
+
+
+@pytest.mark.asyncio
+async def test_new_order_blocked_by_an_auto_proposal_is_told_to_use_the_button():
+    """자동 제안이 슬롯을 잡은 채 /buy를 내면 충돌 안내가 버튼을 권한다 (PR #391 리뷰)."""
+    pending_orders = InMemoryPendingOrderStore()
+    await pending_orders.set(
+        "123", _pending_order_for_replay(1, "token-auto", _ORDER_TIME, origin="auto_proposal")
+    )
+    notifier = FakeNotifier()
+    handler = _order_handler(notifier, FakeOrderGateway(), pending_orders=pending_orders)
+
+    await handler.handle_update(_buy_update(notifier))
+
+    assert notifier.messages == [telegram_commands.PENDING_ORDER_CONFLICT_TEXT]
+    assert _orders(handler)["123"].callback_token == "token-auto"
 
 
 # ---------------------------------------------------------------------------

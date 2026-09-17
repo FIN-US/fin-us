@@ -17,6 +17,28 @@ logger = logging.getLogger(__name__)
 OrderSide = Literal["BUY", "SELL"]
 OrderType = Literal["LIMIT", "MARKET"]
 
+# 대기 주문을 누가 만들었는가 (#390).
+# - user_command: 사용자가 방금 낸 명령이 만든 주문(/buy·/sell·자연어 주문·/advise).
+# - auto_proposal: 사용자 명령 없이 생긴 주문(룰 트리거 자동 제안, scheduler.run_rule_triggered_proposal).
+# 텍스트 /confirm은 user_command만 확정할 수 있다. 근거는 PendingOrder.confirmable_by_text 참조.
+OrderOrigin = Literal["user_command", "auto_proposal"]
+# 출처의 fail-closed 기본값. 모르는 주문은 자동 제안으로 간주해 텍스트 확정을 막는다.
+DEFAULT_ORDER_ORIGIN: OrderOrigin = "auto_proposal"
+# 저장값을 읽을 때 쓰는 허용 목록. redis_state._deserialize가 이 집합 밖의 값을
+# DEFAULT_ORDER_ORIGIN으로 접는다 — 저장값이 코드보다 오래 살기 때문에 읽는 쪽이 방어한다.
+ORDER_ORIGINS: frozenset[str] = frozenset(("user_command", "auto_proposal"))
+
+# 대기 주문을 보지 않고(출처를 모른 채) "그 주문을 먼저 처리하라"고 안내할 때 쓰는 다음 행동 문장
+# (PR #391 리뷰). 충돌(/buy·/advise·자동 제안이 슬롯에 막힘)과 /confirm 재배달 거절이 쓴다.
+# 확정 버튼을 먼저 권하는 이유: 버튼은 두 출처 모두 확정하지만 텍스트 /confirm은 사용자 주문만
+# 확정한다(#390). "/confirm 또는 /cancel"로 안내하면 자동 제안 앞에서는 안내대로 한 /confirm이
+# 다시 버튼 안내로 돌아온다. 출처를 읽어 분기하지 않는 것은, 안내 시점과 사용자가 행동하는 시점
+# 사이에 대기 주문이 바뀔 수 있어 어느 쪽이든 두 출처를 다 덮는 문장이 필요하기 때문이다.
+PENDING_ORDER_NEXT_STEP_TEXT = (
+    "주문 메시지의 확정 버튼으로 확정하거나 /cancel로 취소하세요. "
+    "직접 낸 주문은 /confirm으로도 확정됩니다."
+)
+
 # 대기 주문의 앱 레벨 만료 창. PendingOrder의 성질이므로 여기 둔다 (#299).
 # telegram_commands가 같은 이름으로 재수출하며(기존 import 경로 유지), order_assist도
 # 여기서 직접 읽는다 — telegram_commands에 두면 order_assist와 순환 import가 된다.
@@ -45,6 +67,32 @@ class PendingOrder:
     # /confirm은 모르는 주문을 실행하지 않는다(prompted_before 참조). 버튼 확정은 이 값을
     # 보지 않는다. 버튼에는 주문별 callback_token이 실려 있어 다른 주문의 확정을 이미 막는다.
     prompt_message_id: int | None = None
+    # 이 주문을 만든 계기 (#390). 기본값이 "자동 제안"인 것은 fail-closed다 — 출처를 싣지 않은
+    # 생성 경로나 이 필드가 없는 기존 저장값은 텍스트 /confirm으로 확정되지 않는 쪽으로 읽힌다.
+    # 텍스트 확정이 조용히 열리는 방향으로는 틀리지 않는다. 확정 버튼은 출처를 보지 않는다.
+    origin: OrderOrigin = DEFAULT_ORDER_ORIGIN
+
+    def text_confirm_allowed(self) -> bool:
+        """텍스트 /confirm으로 확정할 수 있는 출처면 True (#390).
+
+        사용자가 모르는 사이에 대기 주문이 생기는 출처는 자동 제안 하나뿐이고, 텍스트
+        /confirm이 "본 적 없는 주문"을 확정하는 창도 거기서만 열린다. 사용자가 낸 주문은
+        같은 기기에서 /confirm과 순서대로 전송되므로(오프라인 큐도 보낸 순서를 지킨다)
+        /confirm이 뒤에 보낸 주문의 프롬프트를 추월할 수 없다.
+        """
+        return self.origin == "user_command"
+
+    def confirmable_by_text(self, message_id: int | None) -> bool:
+        """``message_id``의 텍스트 /confirm이 이 주문을 확정해도 되면 True (#386, #390).
+
+        claim_if의 판정이자 이 규칙의 정본이다. 두 조건이 함께 서야 한다.
+
+        - 출처가 사용자 명령일 것 (#390). 자동 제안 주문은 확정 버튼으로만 확정한다.
+        - 그 /confirm이 이 주문의 확정 프롬프트보다 뒤에 보낸 것일 것 (#386).
+
+        어느 한쪽이라도 모르면 False, 즉 실행하지 않는 쪽이다.
+        """
+        return self.text_confirm_allowed() and self.prompted_before(message_id)
 
     def prompted_before(self, message_id: int | None) -> bool:
         """``message_id`` 메시지보다 이 주문의 확정 프롬프트가 먼저 나갔으면 True (#386).
@@ -56,6 +104,10 @@ class PendingOrder:
 
         둘 중 하나라도 모르면 False, 즉 실행하지 않는 쪽이다. 폴러 적체나 다운타임 뒤에 늦게
         처리된 /confirm이 그사이 생긴 새 주문을 확정 없이 실행하던 경로가 이 판정으로 닫힌다.
+
+        이것만으로는 텍스트 확정의 조건이 아니다. message_id의 순서는 서버가 **받은** 순서라
+        사용자 기기의 전송 지연에서 뒤집힌다 — 출처 판정(text_confirm_allowed, #390)이 함께
+        서야 하고, 둘을 묶은 것이 confirmable_by_text다.
         """
         return (
             self.prompt_message_id is not None
