@@ -14,6 +14,7 @@ from nat_finus_nat import agents
 from nat_finus_nat import finus_api
 from nat_finus_nat import tool_first_react  # noqa: F401 - finus_tool_first_react_agent 등록 (#394)
 from nat_finus_nat import verifier  # noqa: F401 - finus_order_verifier 등록 (#299)
+from nat_finus_nat import user_memory  # noqa: F401 - 사용자 선호 메모리·추천 성향 주입 등록 (#397)
 
 
 def _build_vendor_patch_status() -> dict[str, str]:

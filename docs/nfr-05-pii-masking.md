@@ -723,6 +723,12 @@ backend는 단일 uvicorn 프로세스로 뜨므로(`backend/Dockerfile`의 CMD�
 
 ### Mem0 저장 경로 — 별도 조치 불필요 (F-17 범위 판정)
 
+> **#397 갱신.** 아래 판정은 `router.yml`이 vendor `auto_memory_agent`를 쓰던 시점 기준이다.
+> #397부터 `router.yml`은 그 래퍼를 쓰지 않고, mem0를 NAT 프로세스 안의 로컬 모드로 띄워
+> 허용목록 값(투자 성향 열거형)만 저장한다(`finus_nat/src/nat_finus_nat/user_memory.py`).
+> 대화 본문은 마스킹 여부와 무관하게 메모리에 들어갈 자리가 없다. `finus_sqlite_transcript_agent`의
+> 히스토리에 관한 아래 서술은 그대로 유효하다.
+
 이슈가 판정을 요구한 항목이다. **별도 조치가 필요 없다**는 결론이며 근거는 배선 위치다.
 
 `router.yml`의 vendor `auto_memory_agent`(`memory_router_agent`)는

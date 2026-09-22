@@ -1,11 +1,11 @@
 base: agents/verifier_agent.yml
 # base 사슬: verifier_agent.yml -> diary_agent.yml -> ... -> common.yml (#299).
 # 검증자 config를 diary와 라우터 사이에 끼워, 라우터가 로드하는 설정에
-# 주문 보조용 엔드포인트 2개와 order_verifier가 함께 들어오게 한다.
+# backend 전용 엔드포인트(주문 보조 2개, 사용자 선호 1개)와 order_verifier가 함께 들어오게 한다.
 # supervisor의 브랜치 6개는 불변이다 — 검증자는 브랜치가 아니며 채팅으로 도달할 수 없다.
 # src/nat_finus_nat/supervisor.py 의 router_supervisor_agent 설정을 확장합니다(common.yml 상속).
-# Mem0(self-hosted) + auto_memory_agent 조합. 실행: ./scripts/run.sh --memory 또는 FINUS_NAT_CONFIG_FILE 로 이 파일 지정.
-# 기본 ./scripts/run.sh 는 router_nomemory.yml 입니다(Mem0 없음).
+# 메모리 모드(기본값, #397): mem0 로컬 스토리지 + 사용자 선호(투자 성향) 허용목록.
+# FINUS_MEM0_ENABLED=0 이면 run.sh·Dockerfile이 router_nomemory.yml을 고릅니다.
 llms:
   router_openai_llm:
     _type: openai
@@ -13,26 +13,29 @@ llms:
     base_url: ${OPENAI_API_BASE_URL:-${OPENAI_BASE_URL:-https://api.openai.com/v1}}
     model_name: ${ROUTER_OPENAI_CHAT_MODEL:-gpt-5.4-mini}
 
-memory: # 라우터 에이전트의 Mem0 메모리 설정
-  router_mem0_memory:
-    _type: mem0_memory
-    host: ${FINUS_MEM0_HOST:-http://localhost:8888}
-    org_id: ${FINUS_MEM0_ORG_ID:-selfhost-org}
-    project_id: ${FINUS_ROUTER_MEM0_PROJECT_ID:-selfhost-router-project}
+# mem0를 이 프로세스 안에서 로컬 파일로 띄웁니다(nat_finus_nat/mem0_local.py). 외부 서비스·
+# 텔레메트리·외부 임베딩을 쓰지 않습니다. 저장할 수 있는 것은 허용목록의 선호 값뿐입니다
+# (nat_finus_nat/user_memory.py). NAT의 mem0_memory(HTTP 클라이언트 → self-hosted 서버나
+# api.mem0.ai)는 쓰지 않습니다.
+memory:
+  finus_user_memory:
+    _type: finus_mem0_local_memory
+    storage_dir: ${FINUS_MEM0_STORAGE_DIR:-.state/mem0}
 
 functions:
+  user_preferences:
+    _type: finus_user_preferences
+    memory_name: finus_user_memory
+
+  # 에이전트는 사용자 메모리에 쓸 수 없습니다 — 성향은 텔레그램 /risk로만 저장합니다.
   add_user_memory:
-    _type: add_memory
-    memory: router_mem0_memory
-    description: |
-      Store durable user traits, preferences, personality, or response style only.
-      Do not store one-off questions, transient market data, or full answers.
+    _type: finus_user_memory_add_refused
+    description: "Agents cannot store user memory. The investment risk profile is set only by the user via the Telegram /risk command."
 
   get_user_memory:
-    _type: get_memory
-    memory: router_mem0_memory
-    description: |
-      Retrieve durable user traits, preferences, personality, or response style before personalized answers.
+    _type: finus_user_memory_get
+    preferences_function_name: user_preferences
+    description: "Read the current user's stored preferences (investment risk profile). Returns a note when nothing is stored."
 
   router_supervisor_agent:
     _type: finus_supervisor_agent
@@ -65,21 +68,9 @@ functions:
     db_path: ${FINUS_TRANSCRIPT_DB_PATH:-.state/conversations.sqlite3}
     max_history_messages: 30
 
-  memory_router_agent: # Mem0 auto_memory_agent를 설정합니다.
-    _type: auto_memory_agent
-    inner_agent_name: transcript_router_agent
-    memory_name: router_mem0_memory
-    llm_name: router_openai_llm
-    add_params:
-      infer: false
-    verbose: true
-    description: "Fin-Us router supervisor with separate Mem0 memory"
-
-# 추론 각주(#260)는 최상위 finus_reasoning_trace_agent가 붙입니다 — vendor
-# auto_memory_agent 바깥입니다(#273). vendor _response_fn 시그니처가
-# (input_message: str) -> str 이라, 안쪽에서 ChatResponse에 붙인
-# routed_agent/tools_used는 이 래퍼를 통과하면서 버려집니다. 부착 지점을 그 위로
-# 올렸으므로 router_nomemory.yml과 같은 자리에서 각주가 실립니다.
+# 추론 각주(#260)는 최상위 finus_reasoning_trace_agent가 붙입니다(#273).
+# vendor auto_memory_agent는 쓰지 않습니다(#397): 사용자 발화와 답변 전문(잔고·금액 포함)을
+# 매 턴 메모리에 저장하기 때문입니다. 체인은 router_nomemory.yml과 같습니다.
 workflow:
   _type: finus_reasoning_trace_agent
-  inner_agent_name: memory_router_agent
+  inner_agent_name: transcript_router_agent

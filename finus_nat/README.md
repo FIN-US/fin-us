@@ -1,13 +1,13 @@
 # Fin-Us NAT 설정
 
-configs/router.yml은 Mem0 self hosted 도커가 설정되어 있을 때 사용하고 설치되어있지 않을때는 router_nomemory.yml을 사용한다.
+기본 config는 configs/router.yml(사용자 메모리 켜짐)이고, `FINUS_MEM0_ENABLED=0`이면 configs/router_nomemory.yml을 씁니다(#397). run.sh와 Docker 이미지(엔트리포인트)가 같은 규칙으로 고릅니다.
 
 finus_nat/scripts/run.sh 으로 실행하여 cli 환경에서 에이전트를 구동해볼 수 있습니다.
---memory 옵션을 사용하면 finus_nat/configs/router.yml을 사용합니다.
---nomemory 옵션을 사용하면 finus_nat/configs/router_nomemory.yml을 사용합니다. 기본적으로 finus_nat/configs/router_nomemory.yml을 사용합니다.
+--memory 옵션을 사용하면 finus_nat/configs/router.yml을 사용합니다(기본값).
+--nomemory 옵션을 사용하면 finus_nat/configs/router_nomemory.yml을 사용합니다.
 --once 옵션을 사용하면 사용자 쿼리를 한번만 실행하고 워크플로우를 종료합니다.
 
-사용 예시) bash finus_nat/scripts/run.sh --memory
+사용 예시) bash finus_nat/scripts/run.sh --nomemory
 
 ## SQLite 대화 히스토리
 
@@ -27,7 +27,7 @@ router.yml과 router_nomemory.yml은 기본적으로 최근 대화 히스토리�
 
 **두 라우터 모두 동작합니다.** 두 config의 최상위 `workflow`는
 `finus_reasoning_trace_agent`이고, 각주는 오직 여기서만 붙습니다(#273). 그 아래에
-무엇이 오든 — router.yml처럼 vendor `auto_memory_agent`가 끼든, router_nomemory.yml처럼
+무엇이 오든 — #397 이전 router.yml처럼 vendor `auto_memory_agent`가 끼든, 지금처럼
 바로 `finus_sqlite_transcript_agent`가 오든 — 부착 지점은 같습니다.
 
 **단일 문자열 입력은 각주 없이 평문만 돌려줍니다.** `nat run --input ...`처럼 단일
@@ -61,41 +61,25 @@ router.yml에서는 경고도 예외도 없이 각주만 사라졌습니다(#273
 분석답변 틀로 렌더됩니다. 오류 문자열에 일지 틀을 씌우지 않는 편이 맞으므로 의도한
 방향이지만, 소비자 쪽 영향이 각주 한 줄에 그치지 않는다는 점은 알아 둘 필요가 있습니다.
 
-## 1. Mem0 self-hosted server 설정
+## 1. 사용자 메모리 (mem0 로컬 모드, #397)
 
-설치하지 않아도 테스트 및 구동에는 문제가 없습니다. 에이전트는 자동으로 router_nomemory.yml을 사용하게 됩니다.
-**Prerequisites**
-`Docker, Docker compose, OPEN_API_KEY, Port 8888 for API and 3000 for dashboard`
+별도 서버나 API 키 없이 기본으로 켜져 있습니다. 텔레그램 `/start`의 두 번째 문항이나 `/risk 안정형|공격형|해제`로 고른 투자 성향이 종목 추천 논조에 반영됩니다(안정형: 변동성 경고 우선, 공격형: 기회 요인 우선). 성향을 고르지 않은 사용자의 추천은 이 기능이 없을 때와 같습니다.
 
-1. `git clone https://github.com/mem0ai/mem0.git`
-2. `해당 레포지토리에서 cp .env.example .env`
-3. `.env에서 OPEN_API_KET 필드에 키를 입력하거나 랜덤한 문자열을 입력한다. LLM API KEY는 boostrap한 이후 dashboard에서 설정할 수 있다.`
-4. `.env의 JWT_SECRET에 랜덤한 문자열을 삽입한다. (필수)`
-5. `cd server && make bootstrap`
-6-1. `컨테이너가 성공적으로 빌드되었다면 터미널에 이메일과 비밀번호가 출력된다. make bootstrap EMAIL=admin@company.com PASSWORD='strong-password' NAME='Admin' 를 사용하여 빌드 이전에 이메일과 비밀번호를 설정할 수 있다.`
-6-2. `만일 정상적으로 빌드가 되지 않는다면 server/.env를 다음과 같이 설정한다`
+**저장 위치는 로컬뿐입니다.** mem0 라이브러리의 `AsyncMemory`를 NAT 프로세스 안에서 띄우고, qdrant 로컬 파일과 sqlite 이력을 `FINUS_MEM0_STORAGE_DIR`(기본 `finus_nat/.state/mem0`)에 둡니다. NAT의 `mem0_memory`(self-hosted 서버나 `api.mem0.ai`로 가는 HTTP 클라이언트)는 쓰지 않습니다. mem0의 PostHog 텔레메트리, OpenAI 임베딩, 추출 LLM은 코드로 막혀 있습니다(`src/nat_finus_nat/mem0_local.py`).
 
-```env
-OPENAI_API_KEY= ...
+**저장하는 값은 투자 성향 열거형뿐입니다.** 쓰기 경로는 `src/nat_finus_nat/user_memory.py`의 허용목록 게이트 하나이고, 대화 본문·계좌·금액은 mem0에 닿기 전에 거부됩니다. 에이전트(LLM)는 메모리에 쓸 수 없습니다 — 대화 전문을 매 턴 저장하던 vendor `auto_memory_agent`는 쓰지 않습니다.
 
-POSTGRES_HOST=postgres
-POSTGRES_PORT=5432
-POSTGRES_DB=
-POSTGRES_USER=postgres
-POSTGRES_COLLECTION_NAME=mem0_vectors # 데이터베이스 이름
-POSTGRES_PASSWORD=postgres
+흐름:
 
-JWT_SECRET= ...
-```
+- 쓰기: 텔레그램 버튼·`/risk` → backend(`backend/user_preferences.py`) → `POST /v1/user-preferences`
+- 읽기: backend가 채팅 스레드(`telegram:<chat_id>`)에만 `x-user-id` 헤더를 싣고, 추천 브랜치(`recommend_branch_agent`, `finus_risk_profile_branch`)가 그 사용자의 성향을 코드로 읽어 `configs/agents/recommend_agent.yml`의 논조 지시를 현재 요청 앞에 붙입니다.
 
-7. `http://localhost:3000 에 접속하여 이메일과 비밀번호로 로그인한다.`
-8. `왼쪽 대시보드 ACCOUNT/API keys 에서 api key를 발급받는다.`
-9. `프로젝트 루트에서 bash scripts/setup_env.sh (이미 만들었다면 생략) — cp .env.example .env로 만들면 FINUS_API_KEY가 빈 채 남고, 이후 setup_env를 돌려도 기존 .env라 채우지 않아 API 인증이 꺼져 있다`
-10. `fin-us/.env에서 Mem0 self-hosted 서버 설정을 위해 필요한 주석(FINUS_MEM0_HOST/ORG_ID/PROJECT_ID 등)을 제거하고 MEM0_API_KEY를 채워넣는다.`
-11. `http://localhost:3000 대시보드의 ACCOUNT/Configuration 에서 LLM Provider를 Provider = openai, Model = gpt-5.4-mini 로 설정하고 API Key를 입력한다.`
+끄려면 `.env`에 `FINUS_MEM0_ENABLED=0`을 두고 NAT을 다시 띄웁니다. 이때 `/risk`는 "사용자 메모리가 꺼져 있다"고 안내하고, 저장돼 있던 파일은 지우지 않습니다(다시 켜면 그대로 쓰입니다). 모두 지우려면 NAT을 멈추고 저장 디렉터리를 삭제합니다.
+
+qdrant 로컬 모드는 디렉터리 잠금을 걸어 한 프로세스만 열 수 있습니다. 같은 저장 디렉터리로 NAT을 두 개 띄우면 두 번째가 기동에 실패합니다.
 
 ## 2. Kis-trade-MCP
 
-**Kis-Trade-MCP도 기본으로 Docker에서 구동할때 Port3000으로 설정되어있지만 Mem0와 충돌하므로 포트를 3300으로 변경한다.**
+**Kis-Trade-MCP도 기본으로 Docker에서 구동할때 Port3000으로 설정되어있지만, Fin-Us 설정의 기본값(`FINUS_KIS_TRADING_MCP_URL`)이 3300이므로 포트를 3300으로 변경한다.**
 
 NAT의 `finus_account_balance`는 원격 MCP에 `call_tool(tool_name, {api_type, params})`만 넘깁니다. URL은 `FINUS_KIS_TRADING_MCP_URL` 등으로 설정합니다.
