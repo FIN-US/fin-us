@@ -219,6 +219,10 @@ def _is_truthy_flag(value: str) -> bool:
 
 KIS_REAL_ORDER_ENABLED = _is_truthy_flag(os.environ.get("KIS_REAL_ORDER_ENABLED", ""))
 
+# 외부 LLM 전송 경계(backend/pii_egress.py, #395)의 마스킹 전후 비교 로그를 켠다.
+# **켜면 마스킹 전 프롬프트 — 평문 잔고·계좌 정보 — 가 로그에 남는다.** 로컬 확인용이다.
+PII_EGRESS_DEBUG_LOG = _is_truthy_flag(os.environ.get("PII_EGRESS_DEBUG_LOG", ""))
+
 
 # ──────────────────────────────────────────────────────────────────────────
 # 주문 보조(#299) 하드 한도 — 코드가 판정하는 값들

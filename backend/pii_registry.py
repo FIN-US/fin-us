@@ -166,10 +166,11 @@ def active_mapping(mapping: dict[str, str]) -> Iterator[None]:
     빈 매핑은 등록하지 않는다 — 마스킹된 것이 없으면 되돌릴 것도 없다. 그래야 마스킹
     대상이 없는 대다수 호출이 등록소를 건드리지 않고 지나간다.
 
-    한 매핑의 자리표시자는 모두 같은 scope를 갖는다(`pii_mask._Counter`가 호출당 하나를
-    뽑는다). 그런데도 scope별로 갈라 등록하는 것은 그 불변을 이 모듈이 **가정하지 않게**
-    하려는 것이다 — 나중에 매핑을 합치는 경로가 생기면 여기서 조용히 한쪽이 사라지는
-    대신 양쪽이 모두 등록된다.
+    한 매핑에 scope가 여럿일 수 있다. `llm_chat`이 넘기는 매핑은 `pii_egress.prepare_egress`가
+    개인 구간마다 `mask_pii`를 따로 부르고 설정 계좌번호 가리기도 자기 `_Counter`를 써서 합친
+    것이다(#395). 그래서 scope별로 갈라 등록한다 — 한 scope로 가정하면 합쳐진 매핑의 나머지
+    scope가 조용히 등록에서 빠진다. 합칠 때 scope가 겹치지 않는 것은 `prepare_egress`가
+    재추첨으로 보장한다.
     """
     grouped: dict[str, dict[str, str]] = {}
     for placeholder, value in mapping.items():

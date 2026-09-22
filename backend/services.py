@@ -30,7 +30,8 @@ from .stock_code import (
     _is_unresolved_echo,
     _looks_like_stock_code,
 )
-from .pii_mask import mask_pii, unmask_pii
+from .pii_egress import EgressPrompt, Segment, personal, prepare_egress, public
+from .pii_mask import unmask_pii
 from .pii_registry import active_mapping
 from .user_preferences import nat_user_id_for_conversation
 
@@ -192,29 +193,36 @@ def _nat_conversation_id(
 
 def _build_trigger_context(
     trigger_source: str | None,
-    trigger_signal: str | None,
-) -> str:
-    """trigger_signal이 있을 때 프롬프트에 삽입할 컨텍스트 블록을 만든다."""
+    trigger_signal: str | Segment | None,
+) -> list[str | Segment]:
+    """trigger_signal이 있을 때 프롬프트에 삽입할 컨텍스트 구간을 만든다.
+
+    trigger_signal의 공개/개인 표시는 호출부가 정한 그대로 옮긴다(#395). 스케줄러는 뉴스·공시
+    원문을 ``public()``으로 넘긴다. 맨 문자열은 출처를 모르는 값이라 개인 구간으로 마스킹된다.
+    """
     if not trigger_signal:
-        return ""
+        return []
+    signal = trigger_signal if isinstance(trigger_signal, Segment) else personal(trigger_signal)
     source_label = trigger_source or "signal"
-    return (
-        f"\n분석 트리거 데이터 출처: {source_label}\n"
-        f"--- 트리거 데이터 ---\n{trigger_signal[:4000]}\n"
-        "------------------\n"
+    return [
+        f"\n분석 트리거 데이터 출처: {source_label}\n--- 트리거 데이터 ---\n",
+        Segment(signal.text[:4000], public=signal.public),
+        "\n------------------\n"
         "위 트리거 데이터를 투자 판단의 주요 근거로 반영하라. "
-        "필요하면 라우터·서브에이전트로 보조 시장 데이터를 추가 확인하라.\n"
-    )
+        "필요하면 라우터·서브에이전트로 보조 시장 데이터를 추가 확인하라.\n",
+    ]
 
 
-def _build_nat_prompt(stock: str, trigger_context: str) -> str:
+def _build_nat_prompt(
+    stock: str, trigger_context: Sequence[str | Segment]
+) -> list[str | Segment]:
     """NAT 멀티에이전트용 프롬프트. 도구를 활용해 BUY/SELL/HOLD 판단을 생성한다.
 
     provider=nat 경로 전용이며, provider_supports_tools=True인 경우에만 호출한다.
     """
-    return (
-        f"종목: {stock}. 라우터·서브에이전트를 활용해 투자 관점 분석을 하라. "
-        f"{trigger_context}"
+    return [
+        f"종목: {stock}. 라우터·서브에이전트를 활용해 투자 관점 분석을 하라. ",
+        *trigger_context,
         "Telegram 알림은 매우 긴급한 경우에만 사용한다. "
         "거래정지·상장폐지 위험, 대규모 공시, 실적 쇼크, 소송·규제 리스크, "
         "보유종목에 대한 급격한 위험 변화처럼 즉시 확인이 필요한 경우에만 "
@@ -231,19 +239,21 @@ def _build_nat_prompt(stock: str, trigger_context: str) -> str:
         '"trading_trend":"수급 한줄 요약 또는 null",'
         '"urgency":"low"|"normal"|"high"|"critical",'
         '"urgency_reason":"긴급 판단 사유 한 줄 또는 null",'
-        '"telegram_alert":true|false}'
-    )
+        '"telegram_alert":true|false}',
+    ]
 
 
-def _build_toolless_prompt(stock: str, trigger_context: str) -> str:
+def _build_toolless_prompt(
+    stock: str, trigger_context: Sequence[str | Segment]
+) -> list[str | Segment]:
     """도구 없는 provider(openai/anthropic/ollama)용 프롬프트.
 
     실시간 시장 데이터(MCP/KIS/뉴스)에 접근하지 못하므로 BUY/SELL/HOLD 판단과
     신뢰도 점수를 생성하지 않는다 (#162 A). 일반적 배경 설명만 허용한다.
     """
-    return (
-        f"종목: {stock}에 대한 일반적인 배경 정보와 투자 관련 개요를 설명하라. "
-        f"{trigger_context}"
+    return [
+        f"종목: {stock}에 대한 일반적인 배경 정보와 투자 관련 개요를 설명하라. ",
+        *trigger_context,
         "이 요청은 실시간 시장 데이터(공시·수급·뉴스 도구)에 접근하지 않는다. "
         "따라서 BUY/SELL/HOLD 판단이나 신뢰도 점수를 생성하지 않는다 — "
         "데이터 없이 만들어진 매매 신호는 소비자를 오도할 수 있다. "
@@ -254,8 +264,8 @@ def _build_toolless_prompt(stock: str, trigger_context: str) -> str:
         '"trading_trend":null,'
         '"urgency":"normal",'
         '"urgency_reason":null,'
-        '"telegram_alert":false}'
-    )
+        '"telegram_alert":false}',
+    ]
 
 
 def _analysis_from_toolless_text(raw: str) -> dict[str, Any]:
@@ -354,13 +364,16 @@ async def perform_stock_analysis(
     session: ReportSession,
     *,
     trigger_source: str | None = None,
-    trigger_signal: str | None = None,
+    trigger_signal: str | Segment | None = None,
     signal_score: "SignalScore | None" = None,
     conversation_id: str | None = None,
 ) -> dict[str, Any]:
     """
     종목 분석을 수행하고 결과를 DB에 저장한 뒤 반환합니다.
     API 엔드포인트와 백그라운드 스케줄러에서 공용으로 사용됩니다.
+
+    trigger_signal: 뉴스·공시 같은 공개 데이터면 호출부가 ``pii_egress.public()``으로 감싸
+    넘긴다. 맨 문자열은 출처를 모르는 값으로 보고 외부 전송 전에 마스킹한다(#395).
 
     provider=nat: NAT 멀티에이전트를 통해 도구(MCP/KIS/뉴스)를 호출하고
     BUY/SELL/HOLD 판단·신뢰도 점수를 생성한다 (#162 A 불변).
@@ -444,39 +457,50 @@ async def perform_stock_analysis(
 
 async def generate_morning_briefing(watchlist: list[str] | None = None) -> dict[str, Any]:
     stocks = list(dict.fromkeys(watchlist or []))
+    # 공개/개인 구분(#395): 뉴스·종목 수급은 공개, 잔고 리포트는 개인이다. 기준은
+    # backend/pii_egress.py 모듈 docstring. 잔고만 마스킹되고 뉴스 속 금액은 그대로 나간다.
     market_summary_source = await _collect_morning_context(
         NEWS_MCP_PARAMS,
         "get_market_news",
         {"stock_name": "미국 증시"},
+        public_source=True,
     )
-    balance_text = await _collect_morning_context(TRADING_MCP_PARAMS, "get_balance", {})
+    balance_text = await _collect_morning_context(
+        TRADING_MCP_PARAMS, "get_balance", {}, public_source=False
+    )
 
-    stock_blocks = []
+    watchlist_context: list[str | Segment] = []
     for stock in stocks:
         news = await _collect_morning_context(
             NEWS_MCP_PARAMS,
             "get_market_news",
             {"stock_name": stock},
+            public_source=True,
         )
         trading = await _collect_morning_context(
             TRADING_MCP_PARAMS,
             "get_investor_trading",
             {"stock_name": stock},
+            public_source=True,
         )
-        stock_blocks.append(f"[{stock}]\n뉴스: {news}\n수급: {trading}")
+        if watchlist_context:
+            watchlist_context.append("\n\n")
+        watchlist_context.extend([f"[{stock}]\n뉴스: ", news, "\n수급: ", trading])
 
-    watchlist_context = "\n\n".join(stock_blocks) if stock_blocks else "관심종목 없음"
-    prompt = (
+    prompt: list[str | Segment] = [
         "Strategy Planner 관점으로 오늘 장 시작 전 Telegram 모닝 브리핑을 작성하라.\n"
         "반드시 다음 JSON 객체 한 개만 출력하라:\n"
         '{"market_summary":"전일 미국/선물 시장 동향과 주요 이슈",'
         '"watchlist":["종목별 뉴스 및 수급 요약"],'
         '"trading_ideas":["오늘의 간략 시나리오"],'
         '"catalysts":["당일/금주 주요 촉매 이벤트"]}\n\n'
-        f"시장 뉴스:\n{market_summary_source}\n\n"
-        f"잔고:\n{balance_text}\n\n"
-        f"관심종목 컨텍스트:\n{watchlist_context}"
-    )
+        "시장 뉴스:\n",
+        market_summary_source,
+        "\n\n잔고:\n",
+        balance_text,
+        "\n\n관심종목 컨텍스트:\n",
+        *(watchlist_context or ["관심종목 없음"]),
+    ]
     raw = await llm_chat("nat", prompt, conversation_id=f"morning-briefing:{date.today().isoformat()}")
     return _morning_briefing_from_text(str(raw))
 
@@ -485,12 +509,20 @@ async def _collect_morning_context(
     mcp_params: StdioServerParameters,
     tool_name: str,
     arguments: dict[str, Any],
-) -> str:
+    *,
+    public_source: bool,
+) -> Segment:
+    """MCP 결과를 프롬프트 구간으로 돌려준다.
+
+    *public_source*는 조회 결과에만 붙인다. 실패 문구는 예외 메시지를 싣고, 예외 메시지에
+    무엇이 들어 있을지는 도구가 정하므로 출처와 무관하게 개인 구간(마스킹 대상)으로 둔다.
+    """
     try:
-        return await run_mcp_tool(mcp_params, tool_name, arguments)
+        result = await run_mcp_tool(mcp_params, tool_name, arguments)
     except Exception as exc:
         logger.error("Morning briefing source failed for %s: %s", tool_name, exc)
-        return f"{tool_name} 조회 실패: {exc}"
+        return personal(f"{tool_name} 조회 실패: {exc}")
+    return public(result) if public_source else personal(result)
 
 
 _BRIEFING_KEYS = ("market_summary", "watchlist", "trading_ideas", "catalysts")
@@ -649,19 +681,20 @@ def _signal_snippet(signal_content: str) -> str:
     return head if separator else truncated
 
 
-def _build_signal_score_prompt(stock: str, source: str, snippet: str) -> str:
+def _build_signal_score_prompt(stock: str, source: str, snippet: Segment) -> list[str | Segment]:
     """채점 프롬프트. 단계별 기준을 모두 적어 모델이 축을 스스로 상상하지 않게 한다.
 
     레인지를 -3~+3으로 좁게 잡은 것은 의도다. 0~100 같은 넓은 축에서 경량 모델은
     같은 기사에 매번 다른 점수를 준다 — 좁은 축은 재현성을 사고, 잃는 해상도는
     이 필터가 애초에 필요로 하지 않는다.
     """
-    headline_count = len([line for line in snippet.splitlines() if line.strip()])
-    return (
+    headline_count = len([line for line in snippet.text.splitlines() if line.strip()])
+    return [
         f"당신은 전문 주식 분석가입니다. 다음은 '{stock}' 종목에 대한 최신 외부 signal입니다.\n"
         f"signal 출처: {source}\n\n"
-        f"--- signal 내용 ---\n{snippet}\n"
-        "------------------\n\n"
+        "--- signal 내용 ---\n",
+        snippet,
+        "\n------------------\n\n"
         f"이 signal이 '{stock}'의 투자 판단에 미치는 영향을 아래 기준으로 채점하십시오.\n"
         "+3: 실적 서프라이즈, 대형 수주·계약, M&A 등 명확한 대형 호재\n"
         "+2: 방향이 분명한 호재 (신규 대형 고객사, 의미 있는 가이던스 상향 등)\n"
@@ -674,13 +707,13 @@ def _build_signal_score_prompt(stock: str, source: str, snippet: str) -> str:
         "headline_scores에는 각 기사를 같은 기준으로 따로 채점한 정수를 원문 순서대로 담으십시오.\n\n"
         "반드시 아래 JSON 객체 하나만 출력하고 다른 설명은 붙이지 마십시오.\n"
         '{"score": <-3~3 정수>, "reason": "<점수 근거 한 줄, 40자 이내>", '
-        '"headline_scores": [<-3~3 정수>, ...]}'
-    )
+        '"headline_scores": [<-3~3 정수>, ...]}',
+    ]
 
 
 async def score_signal(
     stock: str,
-    signal_content: str,
+    signal_content: str | Segment,
     last_signal_content: Optional[str] = None,
     *,
     source: str = "signal",
@@ -697,15 +730,22 @@ async def score_signal(
     바꿔 놓는다.
 
     호출·파싱에 실패하면 예외를 올리지 않고 fail-open한다 — 유의미로 통과시키되
-    점수는 null로 남긴다 (REQ-04 놓침 방지).
+    점수는 null로 남긴다 (REQ-04 놓침 방지). 비식별화 실패로 전송이 차단된 경우
+    (``pii_egress.EgressBlocked``)도 같은 갈래다 — 채점은 fail-open이어도 원문은 나가지 않는다.
+
+    ``signal_content``: 뉴스·공시 원문이면 호출부가 ``pii_egress.public()``으로 감싼다.
+    맨 문자열은 출처를 모르는 값으로 보고 마스킹한다(#395).
     """
-    if not signal_content:
+    signal = signal_content if isinstance(signal_content, Segment) else personal(signal_content)
+    if not signal.text:
         return _SKIPPED_SIGNAL_SCORE
 
-    if signal_content == last_signal_content:
+    if signal.text == last_signal_content:
         return _SKIPPED_SIGNAL_SCORE
 
-    prompt = _build_signal_score_prompt(stock, source, _signal_snippet(signal_content))
+    prompt = _build_signal_score_prompt(
+        stock, source, Segment(_signal_snippet(signal.text), public=signal.public)
+    )
 
     # provider의 출처는 환경변수(scheduler.FILTER_PROVIDER)라 검증된 적이 없다.
     # llm_chat의 마지막 줄은 catch-all이므로 매칭되지 않는 값은 전부 NAT로 떨어진다
@@ -1241,7 +1281,7 @@ def normalize_llm_provider(
 @overload
 async def llm_chat(
     provider_key: Literal["nat"],
-    user_msg: str,
+    user_msg: EgressPrompt,
     *,
     conversation_id: str | None = None,
 ) -> NatAnswer: ...
@@ -1250,7 +1290,7 @@ async def llm_chat(
 @overload
 async def llm_chat(
     provider_key: Literal["openai", "anthropic", "ollama"],
-    user_msg: str,
+    user_msg: EgressPrompt,
     *,
     conversation_id: str | None = None,
 ) -> str: ...
@@ -1258,7 +1298,7 @@ async def llm_chat(
 
 async def llm_chat(
     provider_key: Literal["openai", "anthropic", "nat", "ollama"],
-    user_msg: str,
+    user_msg: EgressPrompt,
     *,
     conversation_id: str | None = None,
 ) -> str:
@@ -1267,6 +1307,11 @@ async def llm_chat(
     #230(F-17/NFR-05): 외부로 나가는 프롬프트는 반드시 이 함수를 거쳐야 마스킹된다.
     _llm_openai_chat 등 provider별 구현을 직접 호출하는 새 경로가 생기면 마스킹
     계층을 우회한다 — backend/tests/test_services.py의 회귀 테스트가 이를 잡는다.
+
+    #395: 마스킹은 `pii_egress.prepare_egress`가 한다. *user_msg*가 문자열이면 종전대로
+    전체를 마스킹하고, 구간 목록이면 ``public()``으로 표시한 공개 데이터 구간은 건너뛴다.
+    비식별화가 실패하면 `EgressBlocked`가 provider 호출 **전에** 올라온다 — 원문 전송
+    fallback은 없다(근거는 pii_egress 모듈 docstring).
 
     mask_pii/unmask_pii는 이 함수 지역 변수(mapping)로만 존재한다. 요청마다 새로
     만들어지므로, llm_chat이 asyncio.gather 등으로 동시에 여러 번 호출돼도 서로의
@@ -1280,7 +1325,7 @@ async def llm_chat(
     덮지 않는다(#354). 등록소 밖으로 나가는 순간 등록은 지워지므로 `unmask_pii`는
     블록 바깥에서 지역 변수로 돈다.
     """
-    masked_msg, mapping = mask_pii(user_msg)
+    masked_msg, mapping = prepare_egress(user_msg, label=f"llm_chat:{provider_key}")
 
     with active_mapping(mapping):
         if provider_key == "openai":
