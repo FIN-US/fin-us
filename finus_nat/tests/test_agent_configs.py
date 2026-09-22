@@ -607,6 +607,8 @@ _REVIEWED_NON_ORDER_TYPES = {
     "auto_memory_agent",
     # 에이전트·라우팅 래퍼 — 스스로 외부를 부르지 않고 tool_names의 도구만 부른다(아래에서 따로 검사)
     "react_agent",
+    # react_agent와 같은 도구 목록만 쓰고 첫 턴 강제 대상도 그 부분집합으로 검증한다 (#394)
+    "finus_tool_first_react_agent",
     "fe_branch",
     "finus_supervisor_agent",
     "finus_sqlite_transcript_agent",
