@@ -172,6 +172,27 @@ async def test_partial_failure_keeps_the_rest_and_marks_the_failed_part(mcp_trad
     assert "[계좌 잔고·보유종목]\n" in observation
 
 
+@pytest.mark.parametrize(
+    "balance_response",
+    [_BALANCE, "", "   \n", _mcp_error("get_balance"), '{"error": "mcp_timeout", "tool": "get_balance"}'],
+    ids=["data", "empty", "whitespace", "is_error", "timeout"],
+)
+async def test_failed_section_marker_agrees_with_the_ledger(mcp_trading, ledger, balance_response):
+    """섹션의 ``조회 실패`` 표시와 원장의 ``ok``가 어떤 응답에서도 같은 판정이다 (PR #409 리뷰).
+
+    두 판정이 따로 있으면 한쪽만 바뀌었을 때 원장에는 성공인 섹션이 Observation에는 실패로 찍힌다.
+
+    뮤테이션: ``_format_diary_snapshot``의 판정을 오류 JSON 정규식만 보는 사본으로 바꾸면
+    empty·whitespace 케이스가 red.
+    """
+    mcp_trading.responses["get_balance"] = balance_response
+
+    observation = await _snapshot()
+
+    balance_record = next(r for r in ledger.records if r.tool_name == "finus_mcp_trading_get_balance")
+    assert ("[계좌 잔고·보유종목 — 조회 실패]" in observation) is (not balance_record.ok)
+
+
 async def test_all_failures_are_an_error_observation_and_trip_the_gate(mcp_trading, ledger):
     """전부 실패하면 원장은 전부 ``ok=False``, Observation은 오류 JSON이고, 수치 답변은 게이트에 걸린다.
 

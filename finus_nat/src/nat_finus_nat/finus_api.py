@@ -295,6 +295,17 @@ def _has_empty_result(tool_name: str, stripped: str) -> bool:
     return False
 
 
+def _is_ok_tool_result(result: str) -> bool:
+    """도구 응답이 성공(원장 ``ok=True``)인가 — 비어 있지 않고 오류 JSON이 아니다.
+
+    원장 기록(:func:`_record_to_ledger`)과 조회 묶음의 실패 섹션 표시
+    (:func:`_format_diary_snapshot`, #405)가 이 판정 하나를 같이 쓴다. 둘이 갈라지면 원장에는
+    성공으로 남은 섹션이 Observation에서는 ``조회 실패``로 찍힌다(반대도 마찬가지).
+    """
+    stripped = result.strip()
+    return bool(stripped) and not _ERROR_JSON_PREFIX_RE.match(stripped)
+
+
 def _record_to_ledger(tool_name: str, result: str) -> None:
     """Record a completed data-tool call into the current context's ledger.
 
@@ -321,7 +332,7 @@ def _record_to_ledger(tool_name: str, result: str) -> None:
         )
         return
     stripped = result.strip()
-    ok = bool(stripped) and not _ERROR_JSON_PREFIX_RE.match(stripped)
+    ok = _is_ok_tool_result(stripped)
     is_read = ok and tool_name not in _SIDE_EFFECT_TOOLS
     # empty: ok=True였지만 결과 집합이 비어 있음(#209 빈 결과 축)
     is_empty = is_read and _has_empty_result(tool_name, stripped)
@@ -770,6 +781,12 @@ class FinusEarningsReportConfig(FinusMarketNewsConfig, name="finus_earnings_repo
 
 class FinusMcpTradingConfig(_FinusMcpStdioConfig, name="finus_mcp_trading_base"):
     """fin-us/mcp-trading stdio MCP 공통 설정 (vendor_root, timeout_sec)."""
+
+
+# 아래 개별 조회 도구 세 개는 #405 이후 어느 configs/에서도 등록하지 않는다(diary는 묶음 도구를 쓴다).
+# 다른 에이전트가 단일 조회로 붙일 수 있게 등록 타입은 남겨 둔다. 묶음 도구가 같은 원장 이름을
+# 쓰므로 MASKED_TOOLS·각주 라벨·빈 결과 리터럴은 그대로 유효하고, test_mcp_is_error.py가
+# 이 래퍼들로 mcp-trading의 isError 경로를 고정한다.
 
 
 class FinusMcpTradingTodayOrdersConfig(FinusMcpTradingConfig, name="finus_mcp_trading_today_orders"):
@@ -1653,21 +1670,20 @@ async def finus_mcp_trading_balance_rlz_pl(config: FinusMcpTradingBalanceRlzPlCo
 _DIARY_SNAPSHOT_FAILED = "diary_snapshot_failed"
 
 
-def _is_failed_tool_text(text: str) -> bool:
-    """원장이 실패(``ok=False``)로 적는 응답인가 — ``_record_to_ledger``와 같은 판정이다."""
-    stripped = text.strip()
-    return not stripped or bool(_ERROR_JSON_PREFIX_RE.match(stripped))
-
-
 def _format_diary_snapshot(parts: list[tuple[str, str]]) -> str:
     """하위 조회 결과(이미 원장 기록·마스킹을 지난 텍스트)를 Observation 하나로 합친다 (#405).
 
     일부만 실패하면 나머지는 그대로 싣고, 실패한 섹션은 #406의 오류 JSON을 그대로 둔 채
-    ``[조회 실패]``로 표시한다. 전부 실패하면 Observation 자체를 오류 JSON으로 돌려준다 —
-    단일 조회 도구가 실패했을 때와 같은 모양이라, 오류 JSON 접두어로 실패를 읽는 소비자가
-    묶음 도구라고 달리 다룰 필요가 없다.
+    머리를 ``[<섹션명> — 조회 실패]``로 표시한다. 전부 실패하면 Observation 자체를 오류 JSON으로
+    돌려준다 — 단일 조회 도구가 실패했을 때와 같은 모양이라, 오류 JSON 접두어로 실패를 읽는
+    소비자가 묶음 도구라고 달리 다룰 필요가 없다.
+
+    실패 판정은 원장과 같은 :func:`_is_ok_tool_result`다. 판정 대상만 다르다 — 원장은 원문을,
+    여기는 마스킹을 지난 텍스트를 본다. 둘이 갈리는 것은 마스킹 자체가 실패해 원문 대신
+    ``pii_masking_failed`` 오류 JSON이 온 경우뿐이고, 그때는 원문이 에이전트에 가지 않았으므로
+    ``조회 실패``로 표시하는 편이 맞다.
     """
-    failed = [title for title, text in parts if _is_failed_tool_text(text)]
+    failed = [title for title, text in parts if not _is_ok_tool_result(text)]
     if len(failed) == len(parts):
         return _err_json(
             _DIARY_SNAPSHOT_FAILED,
