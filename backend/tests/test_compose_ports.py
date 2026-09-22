@@ -20,10 +20,12 @@
 검사 범위는 `docker-compose.yml` 한 파일이다. `docker compose up`은
 `docker-compose.override.yml`이 있으면 자동으로 병합하므로, override 파일을 도입하는
 순간 이 가드는 실제로 뜨는 구성이 아니라 그 절반만 보게 된다. 그때 병합 결과를 보도록
-함께 고칠 것 — 지금은 override 파일이 없다.
+함께 고칠 것 — 지금 추적하는 것은 `docker-compose.override.example.yml`(#396) 하나이고,
+그 파일이 backend의 `command`만 바꾸도록 아래에서 고정해 이 가드의 범위를 지킨다.
 """
 
 import ast
+import json
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -37,6 +39,8 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 _COMPOSE_PATH = _REPO_ROOT / "docker-compose.yml"
 _ENV_EXAMPLE_PATH = _REPO_ROOT / ".env.example"
 _CONFIG_PATH = _REPO_ROOT / "backend" / "config.py"
+_OVERRIDE_EXAMPLE_PATH = _REPO_ROOT / "docker-compose.override.example.yml"
+_BACKEND_DOCKERFILE_PATH = _REPO_ROOT / "backend" / "Dockerfile"
 
 # 전 인터페이스 게시가 의도된 서비스. 여기에 이름을 추가하는 것은 "인증이 있거나,
 # 없어도 노출을 감수한다"는 선언이므로 근거를 함께 남길 것.
@@ -363,3 +367,46 @@ def test_backend_reaches_dependencies_through_compose_aliases(compose_services):
     )
     assert environment["REDIS_URL"] == "redis://redis:6379/0"
     assert environment["NAT_BASE_URL"] == "http://finus-nat:8000"
+
+
+def _backend_dockerfile_cmd():
+    """`backend/Dockerfile`의 exec 형식 CMD를 리스트로 읽는다."""
+
+    lines = [
+        line
+        for line in _BACKEND_DOCKERFILE_PATH.read_text(encoding="utf-8").splitlines()
+        if line.startswith("CMD ")
+    ]
+    assert len(lines) == 1, "backend/Dockerfile에서 CMD 한 줄을 찾지 못했다."
+    return json.loads(lines[0][len("CMD ") :])
+
+
+def test_backend_image_does_not_run_the_dev_reloader():
+    """기본 CMD에 `--reload`가 돌아오지 않게 한다(#396).
+
+    리로드는 `.:/app` 아래 파일 저장 하나로 스케줄러와 텔레그램 폴러를 재시작시킨다.
+    개발 편의는 override 예시로만 켠다.
+    """
+
+    assert "--reload" not in _backend_dockerfile_cmd()
+
+
+def test_override_example_only_adds_reload_to_the_backend_command():
+    """override 예시가 이 파일의 가드 범위를 벗어나지 않게 한다(#396).
+
+    복사본(`docker-compose.override.yml`)은 compose가 자동 병합하는데 위 게시 검사는
+    `docker-compose.yml`만 읽는다. 예시가 `ports` 같은 키를 갖게 되면 그걸 따라 한
+    구성에서 가드가 실제 게시를 보지 못하므로, 모양을 backend의 `command` 하나로 묶는다.
+    `command`는 Dockerfile CMD에 `--reload`만 붙인 것이어야 한다 — 따로 적으면 CMD가
+    바뀌는 날 예시만 옛 명령으로 뜬다.
+    """
+
+    document = yaml.safe_load(_OVERRIDE_EXAMPLE_PATH.read_text(encoding="utf-8"))
+
+    assert document.keys() == {"services"}
+    assert document["services"].keys() == {"backend"}
+    assert document["services"]["backend"].keys() == {"command"}
+    assert document["services"]["backend"]["command"] == [
+        *_backend_dockerfile_cmd(),
+        "--reload",
+    ]

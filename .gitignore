@@ -3,6 +3,9 @@
 .env.*
 !.env.example
 
+# 개인용 compose override(#396). 예시는 docker-compose.override.example.yml로 추적한다.
+docker-compose.override.yml
+
 # Python
 **/venv/
 **/__pycache__/
