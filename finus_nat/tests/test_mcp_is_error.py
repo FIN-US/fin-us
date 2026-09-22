@@ -257,7 +257,8 @@ async def test_stdio_success_is_recorded_as_success(
 
     assert [(r.tool_name, r.ok, r.produced_rows) for r in ledger.records] == [(ledger_name, True, True)]
     # 마스킹 대상 도구(잔고류)는 금액이 자리표시자로 바뀌므로, 오류로 감싸지지 않았다는 것만 본다.
-    assert not observation.lstrip().startswith('{"error"')
+    # 판정 기준은 원장이 쓰는 정규식 하나로 모은다 — 손으로 다시 쓰면 둘이 갈라질 수 있다.
+    assert finus_api._ERROR_JSON_PREFIX_RE.match(observation) is None
 
 
 async def test_gate_blocks_numeric_answer_when_the_only_tool_call_was_is_error(stdio_server, vendor_root):
@@ -362,6 +363,12 @@ async def test_remote_is_error_quote_is_not_read_as_a_current_price(remote_serve
 #
 # 위 테스트는 "실패 = isError"라는 전제 위에 서 있다. 어느 MCP가 실패를 isError 없이 성공
 # 텍스트로 돌려주기 시작하면 원장은 다시 성공으로 기록한다. 그 전제를 소스에서 고정한다.
+#
+# **이 검사가 덮는 범위는 좁다.** ``"에러 발생: ${error.message}"`` 리터럴을 쓰는 도구 catch만
+# 본다. 문구가 다른 catch나 새로 추가된 실패 반환은 세지 않고, 개수도 ``>=``라서 isError 없는
+# 실패 경로가 새로 생겨도 통과한다. "모든 실패 반환이 isError"를 보장하지 않는다 — 현재 도구
+# 핸들러의 catch가 그 형식을 지킨다는 것만 고정한다. 새 실패 반환을 추가할 때는 이 목록과
+# 별개로 isError를 직접 확인해야 한다.
 _NODE_ERROR_SOURCES = {
     "mcp-dart/index.js": 2,  # get_disclosure_signal, get_earnings_report의 catch
     "mcp-news/index.js": 1,  # get_market_news의 catch
