@@ -28,8 +28,10 @@ export const KIS_RATE_LIMIT_MSG_CODES = Object.freeze(["EGW00201", "EGW00133", "
 
 // msg_cd가 아니라 msg1 본문으로도 판정한다. msg_cd 목록이 완전하다는 보장이 없기 때문이다 —
 // docs/issue-138-alnum-stock-code.md:495가 기록하듯 공식 msg_cd FAQ 페이지에 접근하지
-// 못했고, 그래서 "EGW002xx 계열이 이 둘뿐"이라는 것을 확인할 방법이 없다. 한국어 본문은
-// 그 미확인을 메우는 두 번째 증거 경로다(둘 중 하나만 걸려도 유량 제한으로 본다).
+// 못했고, 그래서 목록 밖의 유량 제한 코드가 없다는 것을 확인할 방법이 없다. 실제로 목록이
+// 두 코드뿐이던 때 2026-09-22 모의투자 실측(#210)에서 목록 밖의 EGW00215가 나왔고, 그때
+// 이 문구 경로가 그것을 rate_limit로 잡았다(그 뒤 목록에 추가). 한국어 본문은 그 미확인을
+// 메우는 두 번째 증거 경로다(둘 중 하나만 걸려도 유량 제한으로 본다).
 export const KIS_RATE_LIMIT_MSG1_MARKER = "초당 거래건수";
 
 export const KIS_CLASS_OK = "ok";
