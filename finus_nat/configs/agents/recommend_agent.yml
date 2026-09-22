@@ -11,7 +11,8 @@ llms:
 
 functions:
   recommend_agent:
-    _type: react_agent
+    # 첫 턴 도구 호출을 API로 강제한다(#399) — trading_agent.yml 주석 참조.
+    _type: finus_tool_first_react_agent
 
     llm_name: recommend_openai_llm
     tool_names:
@@ -19,6 +20,10 @@ functions:
       - mcp-news-get-market-news
       - add_user_memory
       - get_user_memory
+    # 메모리 도구는 뺀다 — 데이터를 만들지 않는 도구로 강제 호출을 채우고 끝낼 수 있다.
+    first_turn_tool_names:
+      - kis-trading-mcp-tool-readonly
+      - mcp-news-get-market-news
     verbose: false
     use_native_tool_calling: false
     max_history: 8000
