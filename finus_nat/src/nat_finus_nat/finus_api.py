@@ -526,13 +526,34 @@ def _mcp_child_env() -> dict[str, str]:
     }
 
 
-# MCP call_tool 결과의 첫 텍스트 블록을 추출합니다(stdio/remote 공용).
-def _mcp_call_tool_first_text(result: Any) -> str:
+# MCP 서버가 ``isError: true``로 돌려준 도구 결과를 감싸는 오류 코드 (#400).
+_MCP_TOOL_ERROR = "mcp_tool_error"
+
+
+def _mcp_call_tool_first_text(result: Any, *, tool_name: str) -> str:
+    """MCP call_tool 결과의 첫 텍스트 블록을 추출한다(stdio/remote 공용).
+
+    **``isError``는 여기서 오류 JSON으로 바꾼다 (#400).** MCP 서버는 도구 실패를 예외가
+    아니라 ``isError: true``인 정상 응답으로 돌려준다 — mcp-dart는 회사명 매칭 실패를
+    ``에러 발생: '…'와 정확히 일치하는 DART 상장회사 정보를 찾지 못했습니다.``로,
+    mcp-news·mcp-trading도 같은 ``{content, isError: true}`` 형식으로 돌려준다. 텍스트만
+    꺼내 넘기면 그 신호가 사라져 ``_record_to_ledger``가 실패를 ``ok=True``로 기록하고,
+    도구 강제 게이트가 "도구로 확인했다"고 보고 수치 답변을 통과시킨다.
+
+    오류 JSON(``{"error": ...}``)으로 감싸는 이유: 원장은 이미 그 접두어를 실패로
+    판정하고, 지정가 괴리 가드(``order_price_guard.parse_current_price``)도 그 모양을
+    "현재가 아님"으로 읽는다. 원장 스키마를 바꾸지 않고 모든 소비자가 기존 판정 그대로
+    실패를 본다. MCP가 준 원문은 ``detail``에 남겨 에이전트가 사유를 읽을 수 있게 한다.
+
+    문자열 접두어(``에러 발생:``) 판정은 두지 않는다 — stdio·원격 MCP 호출이 모두 이
+    함수를 지나므로 ``isError``를 잃는 경로가 없고, 문자열 판정은 성공 본문 안의 같은
+    문구를 실패로 오판할 여지만 더한다.
+    """
     blocks = getattr(result, "content", None) or []
-    if not blocks:
-        return ""
-    block0 = blocks[0]
-    return getattr(block0, "text", str(block0))
+    text = getattr(blocks[0], "text", str(blocks[0])) if blocks else ""
+    if getattr(result, "isError", False):
+        return _err_json(_MCP_TOOL_ERROR, tool=tool_name, detail=text)
+    return text
 
 
 async def _run_mcp_timed(inner, *, tool_name: str, timeout_sec: float) -> str:
@@ -628,7 +649,9 @@ async def _mcp_call_tool(
         async with stdio_client(params) as (read, write):
             async with ClientSession(read, write) as session:
                 await session.initialize()
-                return _mcp_call_tool_first_text(await session.call_tool(tool_name, arguments))
+                return _mcp_call_tool_first_text(
+                    await session.call_tool(tool_name, arguments), tool_name=tool_name
+                )
 
     return await _run_mcp_timed(_inner, tool_name=tool_name, timeout_sec=timeout_sec)
 
@@ -652,7 +675,9 @@ async def _mcp_call_tool_remote(
     # 실제 원격 세션을 열고 단일 tool 호출을 수행하는 inner.
     async def _inner() -> str:
         async with _remote_mcp_session(transport=transport, url=url, operation_timeout=timeout_sec) as session:
-            return _mcp_call_tool_first_text(await session.call_tool(tool_name, arguments))
+            return _mcp_call_tool_first_text(
+                await session.call_tool(tool_name, arguments), tool_name=tool_name
+            )
 
     return await _run_mcp_timed(_inner, tool_name=tool_name, timeout_sec=timeout_sec)
 
