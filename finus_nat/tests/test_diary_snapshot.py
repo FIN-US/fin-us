@@ -17,6 +17,7 @@ MCP 전송은 ``_mcp_trading_call``에서 끊는다. ``isError`` → 오류 JSON
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 from nat.data_models.api_server import ChatRequest, Message, UserMessageContentRoleType
@@ -103,14 +104,17 @@ def _records(ledger: DataToolLedger) -> list[tuple[str, bool, bool, bool]]:
 async def test_calls_every_read_only_sub_query_in_order(mcp_trading, ledger):
     """세 조회를 모두 부르고, 부르는 MCP 도구는 조회 도구 세 개뿐이다.
 
+    실전 계좌 응답(모의투자 대체 표지 없음)에서는 실현손익 뒤에 잔고를 따로 조회한다(#408).
+    원장 기록 순서는 호출 순서가 바뀐 뒤에도 전과 같다.
+
     뮤테이션: 잔고 조회(``get_balance``) 줄을 지우면 red — 이 도구가 고치려는 누락 그 자체다.
     """
     await _snapshot()
 
     assert mcp_trading.calls == [
         ("get_today_daily_orders", {}),
-        ("get_balance", {}),
         ("get_balance_rlz_pl", {}),
+        ("get_balance", {}),
     ]
     assert [r.tool_name for r in ledger.records] == list(_SUB_LEDGER_NAMES)
 
@@ -121,8 +125,8 @@ async def test_passes_date_and_stock_filters_to_the_sub_queries_that_take_them(m
 
     assert mcp_trading.calls == [
         ("get_today_daily_orders", {"trade_date": "20260921", "stock_name": "삼성전자"}),
-        ("get_balance", {}),
         ("get_balance_rlz_pl", {"stock_name": "삼성전자"}),
+        ("get_balance", {}),
     ]
 
 
@@ -229,3 +233,166 @@ async def test_account_data_is_masked_before_it_reaches_the_agent(mcp_trading, l
         assert raw not in observation
     assert mapping_box, "마스킹 매핑이 박스에 쌓이지 않았다"
     assert "1,234,000원" in unmask_response(observation)
+
+
+# ---------------------------------------------------------------------------
+# #408: 모의투자에서 실현손익 응답의 잔고를 재사용해 잔고 TR을 한 번만 보낸다
+# ---------------------------------------------------------------------------
+
+_MCP_TRADING_FIXTURES = Path(__file__).resolve().parents[2] / "mcp-trading" / "tests" / "fixtures"
+# 모의투자 대체 응답 계약. mcp-trading(PAPER_RLZ_PL_FALLBACK_NOTE)·backend(_RLZ_PL_PAPER_FALLBACK_MARKER)
+# 스위트가 같은 파일을 읽는다.
+_PAPER_CONTRACT = json.loads((_MCP_TRADING_FIXTURES / "paper_rlz_pl_fallback.json").read_text(encoding="utf-8"))
+# 실제 get_balance 출력(balance.js formatBalanceReport, #137 공유 픽스처).
+_BALANCE_FIXTURE = json.loads((_MCP_TRADING_FIXTURES / "balance_report.json").read_text(encoding="utf-8"))
+_REAL_BALANCE = _BALANCE_FIXTURE["normal"]["expected_text"]
+_REAL_BALANCE_EMPTY = _REAL_BALANCE.split("[보유 종목 리스트]")[0] + "[보유 종목 리스트]\n보유 종목이 없습니다."
+
+
+def _paper_rlz_pl(balance_text: str) -> str:
+    """mcp-trading ``getBalanceRlzPl`` 모의투자 분기가 돌려주는 모양: ``${balanceText}${note}``."""
+    return balance_text + _PAPER_CONTRACT["note"]
+
+
+def test_marker_matches_the_shared_paper_fallback_contract():
+    """NAT 표지가 mcp-trading 대체 안내 문구·backend 표지와 같은 계약이다.
+
+    뮤테이션: ``_PAPER_RLZ_PL_FALLBACK_MARKER``나 ``_PAPER_RLZ_PL_NOTE_PREFIX`` 문구를 바꾸면 red.
+    """
+    assert finus_api._PAPER_RLZ_PL_FALLBACK_MARKER == _PAPER_CONTRACT["marker"]
+    assert _PAPER_CONTRACT["note"].startswith(finus_api._PAPER_RLZ_PL_NOTE_PREFIX)
+
+
+async def test_paper_fallback_reuses_the_balance_and_skips_the_balance_call(mcp_trading, ledger, mapping_box):
+    """모의투자 대체 응답이면 잔고 조회를 부르지 않고, 그 응답의 잔고를 잔고 섹션으로 싣는다.
+
+    잔고 텍스트는 한 번만 실린다(이전에는 잔고 섹션과 실현손익 섹션에 두 번). 원장은 전과 같은 세 건이다.
+
+    뮤테이션: 재사용 분기를 지워 항상 ``get_balance``를 부르면 호출 단언이 red, 실현손익 섹션을
+    원문으로 되돌리면 잔고 1회 단언이 red.
+    """
+    mcp_trading.responses["get_today_daily_orders"] = _ORDERS_EMPTY
+    mcp_trading.responses["get_balance_rlz_pl"] = _paper_rlz_pl(_REAL_BALANCE)
+
+    observation = await _snapshot()
+
+    assert [name for name, _ in mcp_trading.calls] == ["get_today_daily_orders", "get_balance_rlz_pl"]
+    assert _records(ledger) == [
+        ("finus_mcp_trading_today_orders", True, False, True),
+        ("finus_mcp_trading_get_balance", True, True, False),
+        ("finus_mcp_trading_balance_rlz_pl", True, True, False),
+    ]
+    balance_section = observation.split("[계좌 잔고·보유종목]\n", 1)[1].split("\n\n[실현손익]", 1)[0]
+    assert unmask_response(balance_section) == _REAL_BALANCE
+    assert observation.count("[계좌 잔고 현황]") == 1
+    rlz_section = observation.split("[실현손익]\n", 1)[1]
+    assert _PAPER_CONTRACT["marker"] in rlz_section
+    assert "조회 실패" not in observation
+
+
+async def test_paper_fallback_keeps_the_balance_truncation_note_in_the_balance_section(
+    mcp_trading, ledger, mapping_box
+):
+    """잔고 자체의 잘림 안내(``[안내]``)는 잔고 섹션에 남는다 — 대체 안내 문단만 떼어 낸다.
+
+    뮤테이션: ``rfind``를 ``find``(첫 ``[안내]``)로 바꾸면 red.
+    """
+    truncated = _BALANCE_FIXTURE["truncated"]["expected_text"]
+    mcp_trading.responses["get_balance_rlz_pl"] = _paper_rlz_pl(truncated)
+
+    observation = await _snapshot()
+
+    balance_section = observation.split("[계좌 잔고·보유종목]\n", 1)[1].split("\n\n[실현손익]", 1)[0]
+    assert unmask_response(balance_section) == truncated
+
+
+async def test_paper_fallback_without_note_boundary_uses_the_whole_response_as_balance(
+    mcp_trading, ledger, mapping_box
+):
+    """표지는 있는데 ``\\n\\n[안내]`` 경계가 없으면 응답 전체를 잔고 섹션으로 쓴다 (PR #411 리뷰).
+
+    계약상(공유 픽스처의 note) 도달하지 않는 방어 분기다. 경계를 못 찾았다고 잔고 내용을 잘라
+    버리거나 잔고 조회를 다시 부르지 않는다.
+
+    뮤테이션: 경계 없음 분기를 ``return None``으로 바꾸면 red(잔고를 다시 조회한다), 표지 앞에서
+    자르게 바꾸면 red(잔고 섹션이 원문과 달라진다).
+    """
+    raw = _REAL_BALANCE + "\n(모의투자 계좌라 " + _PAPER_CONTRACT["marker"] + ")"
+    mcp_trading.responses["get_balance_rlz_pl"] = raw
+
+    observation = await _snapshot()
+
+    assert [name for name, _ in mcp_trading.calls] == ["get_today_daily_orders", "get_balance_rlz_pl"]
+    balance_section = observation.split("[계좌 잔고·보유종목]\n", 1)[1].split("\n\n[실현손익]", 1)[0]
+    assert unmask_response(balance_section) == raw
+    assert "조회 실패" not in observation
+
+
+async def test_paper_account_without_holdings_or_orders_still_passes_the_gate(mcp_trading, ledger):
+    """보유종목·당일 주문이 모두 없는 모의투자 계좌에서도 잔고 수치 초안이 게이트를 지난다.
+
+    재사용한 잔고를 원장에 ``finus_mcp_trading_get_balance``로 남기는 이유다. 실현손익 기록만 남기면
+    그 텍스트는 "보유 종목이 없습니다."에 ``[계좌 집계]``가 없어 빈 결과로 잡히고, 당일 주문도
+    빈 결과라 ``only_empty_reads``가 된다 — 예수금이 있는데도 초안이 막힌다.
+
+    뮤테이션: 재사용 분기에서 잔고 기록을 빼면 red.
+    """
+    mcp_trading.responses["get_today_daily_orders"] = _ORDERS_EMPTY
+    mcp_trading.responses["get_balance_rlz_pl"] = _paper_rlz_pl(_REAL_BALANCE_EMPTY)
+
+    await _snapshot()
+
+    assert _records(ledger) == [
+        ("finus_mcp_trading_today_orders", True, False, True),
+        ("finus_mcp_trading_get_balance", True, True, False),
+        ("finus_mcp_trading_balance_rlz_pl", True, False, True),
+    ]
+    assert ledger.any_success() and not ledger.only_empty_reads()
+    draft = "Final Answer: 오늘은 거래가 없습니다. 보유 종목은 없고 예수금은 1,000,000원입니다."
+    assert _check_tool_enforcement(draft, ledger, _req("오늘 매매일지 초안 작성해줘")) is False
+
+
+@pytest.mark.parametrize(
+    "rlz_response",
+    [
+        _mcp_error("get_balance_rlz_pl"),
+        # 표지가 오류 detail에 섞여 와도 대체 응답이 아니다 — 잔고로 쓰지 않는다.
+        finus_api._err_json(finus_api._MCP_TOOL_ERROR, tool="get_balance_rlz_pl", detail=_paper_rlz_pl(_REAL_BALANCE)),
+        '{"error": "mcp_timeout", "tool": "get_balance_rlz_pl"}',
+        "",
+    ],
+    ids=["is_error", "marker_inside_error", "timeout", "empty"],
+)
+async def test_failed_rlz_pl_falls_back_to_a_separate_balance_call(mcp_trading, ledger, rlz_response):
+    """실현손익이 실패하면 잔고를 따로 조회해 잔고 섹션을 채운다. 실현손익만 실패로 남는다.
+
+    뮤테이션: ``_split_paper_rlz_pl_fallback``의 성공 판정(``_is_ok_tool_result``)을 지우면
+    marker_inside_error가 red(오류 JSON을 잔고로 싣고 잔고 조회를 건너뛴다).
+    """
+    mcp_trading.responses["get_balance_rlz_pl"] = rlz_response
+
+    observation = await _snapshot()
+
+    assert [name for name, _ in mcp_trading.calls] == [
+        "get_today_daily_orders",
+        "get_balance_rlz_pl",
+        "get_balance",
+    ]
+    assert _records(ledger)[1] == ("finus_mcp_trading_get_balance", True, True, False)
+    assert _records(ledger)[2][:2] == ("finus_mcp_trading_balance_rlz_pl", False)
+    assert "[계좌 잔고·보유종목]\n" in observation
+    assert "조회 실패: 실현손익" in observation
+
+
+async def test_reused_balance_is_masked(mcp_trading, ledger, mapping_box):
+    """재사용한 잔고도 잔고 도구명으로 마스킹을 지나 평문 금액이 Observation에 없다.
+
+    뮤테이션: 재사용 분기에서 잔고 섹션에 ``_record_and_mask`` 반환값 대신 원문을 실으면 red.
+    """
+    mcp_trading.responses["get_balance_rlz_pl"] = _paper_rlz_pl(_REAL_BALANCE)
+
+    observation = await _snapshot()
+
+    for raw in ("1,210,000원", "1,000,000원", "210,000원", "200,500원"):
+        assert raw not in observation
+    assert "1,000,000원" in unmask_response(observation)

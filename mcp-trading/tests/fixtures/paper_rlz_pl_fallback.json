@@ -1,0 +1,5 @@
+{
+  "_comment": "모의투자 실현손익 대체 응답 계약 (#408). mcp-trading getBalanceRlzPl는 모의투자(openapivts)에서 getBalance 결과 뒤에 note를 그대로 이어 붙여 돌려준다. marker는 그 note의 부분 문자열로, backend scheduler._RLZ_PL_PAPER_FALLBACK_MARKER(대체 응답 감지, #367)와 finus_nat finus_api._PAPER_RLZ_PL_FALLBACK_MARKER(매매일지 조회 묶음의 잔고 재사용, #408)가 매칭한다. JS(balance-rlz-pl-report.test.js)·backend(test_scheduler.py)·NAT(test_diary_snapshot.py) 스위트가 이 파일을 함께 읽으므로 한쪽만 바꾸면 그쪽이 red가 된다.",
+  "marker": "잔고 요약으로 대체했습니다",
+  "note": "\n\n[안내] 모의투자(openapivts) 계좌는 실현손익 TR(v1_국내주식-041)을 지원하지 않아 잔고 요약으로 대체했습니다."
+}

@@ -2941,6 +2941,29 @@ def _rlz_pl_text(case: str) -> str:
     return _RLZ_PL_FIXTURE[case]["expected_text"]
 
 
+# 모의투자 실현손익 대체 응답 계약(#408). mcp-trading의 PAPER_RLZ_PL_FALLBACK_NOTE와 NAT
+# 매매일지 조회 묶음(_PAPER_RLZ_PL_FALLBACK_MARKER)이 같은 파일을 읽는다 — 문구를 JS에서만
+# 바꾸면 JS 스위트가, 표지 상수를 여기서만 바꾸면 아래 테스트가 red가 된다.
+_PAPER_FALLBACK_CONTRACT = json.loads(
+    (
+        pathlib.Path(__file__).parent.parent.parent
+        / "mcp-trading" / "tests" / "fixtures" / "paper_rlz_pl_fallback.json"
+    ).read_text(encoding="utf-8")
+)
+
+
+def test_paper_fallback_marker_matches_shared_contract():
+    """backend 표지 상수가 mcp-trading 대체 안내 문구 계약과 같은 문자열이다 (#408).
+
+    이 테스트가 잡는 mutation: _RLZ_PL_PAPER_FALLBACK_MARKER 문구를 다듬는 회귀. 전에는 양쪽
+    리터럴을 함께 고정하는 테스트가 없어 감지가 조용히 꺼질 수 있었다(#371).
+    """
+    from ..scheduler import _RLZ_PL_PAPER_FALLBACK_MARKER
+
+    assert _RLZ_PL_PAPER_FALLBACK_MARKER == _PAPER_FALLBACK_CONTRACT["marker"]
+    assert _RLZ_PL_PAPER_FALLBACK_MARKER in _PAPER_FALLBACK_CONTRACT["note"]
+
+
 def test_parse_rlz_pl_quotes_reads_price_per_code():
     """공유 픽스처의 정상 응답에서 코드별 현재가를 읽는다.
 
@@ -3432,14 +3455,12 @@ def test_sync_portfolio_prices_treats_paper_fallback_as_no_quote(portfolio_sessi
     )
     portfolio_session.commit()
 
-    # index.js의 getBalanceRlzPl가 실제로 붙이는 문구. get_balance 리포트
-    # 뒤에 안내가 따라온다. index.js에 역참조 주석은 있지만 양쪽 리터럴을 함께 고정하는
-    # 테스트는 없다 — 이 테스트는 복사해 둔 문구로 파이썬 쪽 매칭만 고정하므로, index.js의
-    # 문구가 바뀌어도 통과한다. scheduler.py의 표지 상수 주석 참고.
+    # index.js의 getBalanceRlzPl가 실제로 붙이는 문구(공유 계약 픽스처의 note). get_balance
+    # 리포트 뒤에 안내가 따라온다. 문구와 표지 상수의 일치는
+    # test_paper_fallback_marker_matches_shared_contract가 고정한다.
     paper_text = (
         _make_balance_text(("삼성전자", "005930", 10, 70000))
-        + "\n\n[안내] 모의투자(openapivts) 계좌는 실현손익 TR(v1_국내주식-041)을 "
-        "지원하지 않아 잔고 요약으로 대체했습니다."
+        + _PAPER_FALLBACK_CONTRACT["note"]
     )
 
     with caplog.at_level(logging.DEBUG, logger="backend.scheduler"):
@@ -3474,8 +3495,7 @@ def test_sync_portfolio_prices_suppresses_repeated_paper_fallback_info(
 
     paper_text = (
         _make_balance_text(("삼성전자", "005930", 10, 70000))
-        + "\n\n[안내] 모의투자(openapivts) 계좌는 실현손익 TR(v1_국내주식-041)을 "
-        "지원하지 않아 잔고 요약으로 대체했습니다."
+        + _PAPER_FALLBACK_CONTRACT["note"]
     )
 
     with caplog.at_level(logging.DEBUG, logger="backend.scheduler"):
@@ -3509,8 +3529,7 @@ async def test_refresh_portfolio_prices_skips_calls_after_paper_fallback(monkeyp
     calls: list[str] = []
     paper_text = (
         _make_balance_text(("삼성전자", "005930", 10, 70000))
-        + "\n\n[안내] 모의투자(openapivts) 계좌는 실현손익 TR(v1_국내주식-041)을 "
-        "지원하지 않아 잔고 요약으로 대체했습니다."
+        + _PAPER_FALLBACK_CONTRACT["note"]
     )
 
     async def mock_run_mcp_tool(params, name, args):

@@ -1,5 +1,18 @@
 import { formatPercent, formatQuantity, formatWon } from "./formatters.js";
 
+// 모의투자(openapivts) 대체 안내 문구. index.js의 getBalanceRlzPl가 모의투자에서 실현손익 TR 대신
+// getBalance 결과를 돌려줄 때 **그 뒤에 그대로 이어 붙인다**(`${balanceText}${note}`).
+// ⚠️ 이 문구의 부분 문자열 "잔고 요약으로 대체했습니다"를 두 곳이 매칭한다.
+//   - backend/scheduler.py의 _RLZ_PL_PAPER_FALLBACK_MARKER — 모의투자 대체 응답 감지(#367).
+//   - finus_nat finus_api.py의 _PAPER_RLZ_PL_FALLBACK_MARKER — 매매일지 조회 묶음이 이 응답의
+//     잔고를 잔고 섹션으로 재사용하고 잔고 조회를 따로 부르지 않는다(#408). 문구 앞의 잔고
+//     텍스트를 떼어 쓰므로 "\n\n[안내]"로 시작하는 마지막 문단이어야 한다.
+// 문구를 바꾸면 backend 감지와 NAT 재사용이 조용히 꺼진다(NAT는 잔고 TR을 다시 두 번 부른다).
+// 세 곳이 같은 문자열을 쓰는지는 tests/fixtures/paper_rlz_pl_fallback.json을 JS·backend·NAT
+// 스위트가 함께 읽어 고정한다 — 바꿔야 한다면 그 픽스처와 두 상수를 같이 고친다.
+export const PAPER_RLZ_PL_FALLBACK_NOTE =
+  "\n\n[안내] 모의투자(openapivts) 계좌는 실현손익 TR(v1_국내주식-041)을 지원하지 않아 잔고 요약으로 대체했습니다.";
+
 // 잘림 안내 문구. "- "로 시작하면 파싱 오류를 낼 수 있으므로 반드시 "[안내]"로 시작한다.
 // rows.length === 0인 경우에도 출력해야 한다 — 그렇지 않으면 잘림 때문에 빈 결과가 나온 상황을
 // "보유 종목이 없습니다"로 사실로 단언하게 된다.

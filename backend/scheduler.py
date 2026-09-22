@@ -352,10 +352,12 @@ _RLZ_PL_EMPTY_MARKER = "보유 종목이 없습니다"
 # error를 남긴다 — 모의투자 배포에서는 그게 매 주기의 정상 동작이라 error가 아니다.
 # 시세를 못 얻는다는 결론은 같지만, 로그 수준과 운영자가 읽을 원인이 다르다.
 #
-# ⚠️ **JS 리터럴과의 결합**: 아래 문자열은 index.js의 getBalanceRlzPl가 만드는 안내 문구의
-# 부분 문자열이다. index.js의 그 문구 위에 이 상수를 가리키는 경고 주석이 있지만(balance.js의
-# formatTruncationNote 주석과 같은 형태), 양쪽 리터럴을 함께 고정하는 테스트는 없다.
-# 그래서 저 문구를 다듬는 것만으로 이 가드가 조용히 무력화될 수 있다.
+# ⚠️ **JS 리터럴과의 결합**: 아래 문자열은 index.js의 getBalanceRlzPl가 붙이는 안내 문구
+# (balance-rlz-pl-report.js의 PAPER_RLZ_PL_FALLBACK_NOTE)의 부분 문자열이다. finus_nat의
+# 매매일지 조회 묶음도 같은 문자열(finus_api._PAPER_RLZ_PL_FALLBACK_MARKER)로 이 응답을 가려내
+# 잔고를 재사용한다(#408). 세 곳의 일치는 공유 계약 픽스처
+# mcp-trading/tests/fixtures/paper_rlz_pl_fallback.json을 JS·backend·NAT 스위트가 함께 읽어
+# 고정한다(backend는 test_scheduler.py의 test_paper_fallback_marker_matches_shared_contract).
 #
 # 무력화되면 어떻게 되는가: 모의투자 응답이 이 검사를 통과해 마커 부재 가드까지
 # 흘러가고, 거기서 logger.error가 난다. 모의투자는 기본 개발 구성이므로 **모든
