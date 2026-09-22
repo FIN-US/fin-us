@@ -295,6 +295,17 @@ def _has_empty_result(tool_name: str, stripped: str) -> bool:
     return False
 
 
+def _is_ok_tool_result(result: str) -> bool:
+    """도구 응답이 성공(원장 ``ok=True``)인가 — 비어 있지 않고 오류 JSON이 아니다.
+
+    원장 기록(:func:`_record_to_ledger`)과 조회 묶음의 실패 섹션 표시
+    (:func:`_format_diary_snapshot`, #405)가 이 판정 하나를 같이 쓴다. 둘이 갈라지면 원장에는
+    성공으로 남은 섹션이 Observation에서는 ``조회 실패``로 찍힌다(반대도 마찬가지).
+    """
+    stripped = result.strip()
+    return bool(stripped) and not _ERROR_JSON_PREFIX_RE.match(stripped)
+
+
 def _record_to_ledger(tool_name: str, result: str) -> None:
     """Record a completed data-tool call into the current context's ledger.
 
@@ -321,7 +332,7 @@ def _record_to_ledger(tool_name: str, result: str) -> None:
         )
         return
     stripped = result.strip()
-    ok = bool(stripped) and not _ERROR_JSON_PREFIX_RE.match(stripped)
+    ok = _is_ok_tool_result(stripped)
     is_read = ok and tool_name not in _SIDE_EFFECT_TOOLS
     # empty: ok=True였지만 결과 집합이 비어 있음(#209 빈 결과 축)
     is_empty = is_read and _has_empty_result(tool_name, stripped)
@@ -772,6 +783,12 @@ class FinusMcpTradingConfig(_FinusMcpStdioConfig, name="finus_mcp_trading_base")
     """fin-us/mcp-trading stdio MCP 공통 설정 (vendor_root, timeout_sec)."""
 
 
+# 아래 개별 조회 도구 세 개는 #405 이후 어느 configs/에서도 등록하지 않는다(diary는 묶음 도구를 쓴다).
+# 다른 에이전트가 단일 조회로 붙일 수 있게 등록 타입은 남겨 둔다. 묶음 도구가 같은 원장 이름을
+# 쓰므로 MASKED_TOOLS·각주 라벨·빈 결과 리터럴은 그대로 유효하고, test_mcp_is_error.py가
+# 이 래퍼들로 mcp-trading의 isError 경로를 고정한다.
+
+
 class FinusMcpTradingTodayOrdersConfig(FinusMcpTradingConfig, name="finus_mcp_trading_today_orders"):
     """mcp-trading ``get_today_daily_orders`` — 당일 주문·체결 전체 조회."""
 
@@ -782,6 +799,13 @@ class FinusMcpTradingBalanceRlzPlConfig(FinusMcpTradingConfig, name="finus_mcp_t
 
 class FinusMcpTradingGetBalanceConfig(FinusMcpTradingConfig, name="finus_mcp_trading_get_balance"):
     """mcp-trading ``get_balance`` — 계좌 잔고·보유종목 요약 (inquire-balance, 연속조회)."""
+
+
+class FinusMcpTradingDiarySnapshotConfig(FinusMcpTradingConfig, name="finus_mcp_trading_diary_snapshot"):
+    """매매일지 초안용 조회 묶음 — 당일 주문·체결 + 계좌 잔고·보유종목 + 실현손익 (#405).
+
+    mcp-trading 조회 도구 세 개를 코드에 고정해 차례로 부른다. 조회 전용이다(일지 저장은 묶지 않는다).
+    """
 
 
 class FinusSaveDiaryConfig(FunctionBaseConfig, name="finus_save_diary"):
@@ -869,6 +893,11 @@ class FinusMcpTradingTodayOrdersInput(FinusReactToolInput):
 
 class FinusMcpTradingStockNameInput(FinusReactToolInput):
     stock_name: str = Field(default="", description="특정 종목만 조회할 때. 생략 시 전체.")
+
+
+class FinusMcpTradingDiarySnapshotInput(FinusReactToolInput):
+    trade_date: str = Field(default="", description="주문·체결 조회일 YYYYMMDD. 생략 시 당일(KST).")
+    stock_name: str = Field(default="", description="주문·체결과 실현손익을 이 종목으로 좁힐 때. 생략 시 전체.")
 
 
 class FinusSaveDiaryInput(FinusReactToolInput):
@@ -1635,6 +1664,99 @@ async def finus_mcp_trading_balance_rlz_pl(config: FinusMcpTradingBalanceRlzPlCo
         description=doc,
         input_schema=FinusMcpTradingStockNameInput,
         converters=[_finus_react_input_converter(FinusMcpTradingStockNameInput)],
+    )
+
+
+_DIARY_SNAPSHOT_FAILED = "diary_snapshot_failed"
+
+
+def _format_diary_snapshot(parts: list[tuple[str, str]]) -> str:
+    """하위 조회 결과(이미 원장 기록·마스킹을 지난 텍스트)를 Observation 하나로 합친다 (#405).
+
+    일부만 실패하면 나머지는 그대로 싣고, 실패한 섹션은 #406의 오류 JSON을 그대로 둔 채
+    머리를 ``[<섹션명> — 조회 실패]``로 표시한다. 전부 실패하면 Observation 자체를 오류 JSON으로
+    돌려준다 — 단일 조회 도구가 실패했을 때와 같은 모양이라, 오류 JSON 접두어로 실패를 읽는
+    소비자가 묶음 도구라고 달리 다룰 필요가 없다.
+
+    실패 판정은 원장과 같은 :func:`_is_ok_tool_result`다. 판정 대상만 다르다 — 원장은 원문을,
+    여기는 마스킹을 지난 텍스트를 본다. 둘이 갈리는 것은 마스킹 자체가 실패해 원문 대신
+    ``pii_masking_failed`` 오류 JSON이 온 경우뿐이고, 그때는 원문이 에이전트에 가지 않았으므로
+    ``조회 실패``로 표시하는 편이 맞다.
+    """
+    failed = [title for title, text in parts if not _is_ok_tool_result(text)]
+    if len(failed) == len(parts):
+        return _err_json(
+            _DIARY_SNAPSHOT_FAILED,
+            failures={title: text.strip() for title, text in parts},
+            hint="매매일지에 필요한 조회가 모두 실패했습니다. 수치를 지어내지 말고 조회 실패를 사용자에게 알리세요.",
+        )
+    sections = [
+        f"[{title}{' — 조회 실패' if title in failed else ''}]\n{text.strip()}"
+        for title, text in parts
+    ]
+    header = "매매일지 조회 묶음 — 당일 주문·체결, 계좌 잔고·보유종목, 실현손익을 한 번에 조회했습니다."
+    if failed:
+        header += f" 조회 실패: {', '.join(failed)} (해당 섹션의 오류 참고)."
+    return "\n\n".join([header, *sections])
+
+
+@register_function(config_type=FinusMcpTradingDiarySnapshotConfig)
+async def finus_mcp_trading_diary_snapshot(config: FinusMcpTradingDiarySnapshotConfig, _builder: Builder):
+    """매매일지 초안에 필요한 조회를 한 번의 도구 호출로 묶는다 (#405).
+
+    diary_agent의 첫 턴 강제(#399)는 **첫 호출 하나**만 보장한다. 조회가 도구 세 개로 나뉘어
+    있으면 첫 턴에 당일 주문만 조회한 뒤 모델이 잔고 조회 대신 ``Final Answer``를 골라,
+    거래가 없는 날마다 빈 초안이 됐다. 필요한 조회를 코드에서 모두 부르면 그 선택지가 없다.
+
+    하위 조회는 각자의 원장 도구명으로 ``_record_and_mask``를 지난다. 그래서
+    - 원장에는 하위 조회가 한 건씩 남는다. 성공한 것만 ``produced_rows``가 되고, 전부
+      실패하면 전부 ``ok=False``라 게이트가 수치 답변을 막는다. 당일 주문만 비어 있으면
+      (``empty``) 잔고가 데이터를 만들었으므로 ``only_empty_reads``에 걸리지 않는다.
+    - 마스킹은 하위 도구명의 ``MASKED_TOOLS`` 등록을 그대로 탄다. 묶음 전용 원장 이름을
+      따로 두지 않으므로 마스킹 목록·각주 라벨(backend ``TOOL_LABELS``)에 새 키가 없다.
+
+    하위 조회는 차례로 부른다. KIS 모의투자의 초당 호출 한도가 낮아(mcp-trading/index.js
+    ``DAILY_CCLD_PAGE_DELAY_MS`` 주석) 동시에 쏘면 유량 초과로 한꺼번에 실패할 수 있다.
+    """
+    doc = (
+        "Fin-Us mcp-trading stdio MCP: 매매일지 초안용 조회 묶음. 당일 주문·체결(get_today_daily_orders), "
+        "계좌 잔고·보유종목(get_balance), 실현손익(get_balance_rlz_pl)을 한 번에 조회한다. 조회 전용. "
+        "trade_date(YYYYMMDD, 주문·체결 조회일), stock_name(주문·체결·실현손익 종목 필터) 선택."
+    )
+
+    async def get_diary_snapshot(inp: FinusMcpTradingDiarySnapshotInput) -> str:
+        trade_date = inp.trade_date.strip()
+        stock_name = inp.stock_name.strip()
+        order_args: McpCallArguments = {}
+        if trade_date:
+            order_args["trade_date"] = trade_date
+        if stock_name:
+            order_args["stock_name"] = stock_name
+        rlz_args: McpCallArguments = {"stock_name": stock_name} if stock_name else {}
+
+        async def call(tool_name: str, arguments: McpCallArguments) -> str:
+            return await _mcp_trading_call(
+                vendor_root=config.vendor_root,
+                timeout_sec=config.timeout_sec,
+                tool_name=tool_name,
+                arguments=arguments,
+            )
+
+        orders = _record_and_mask("finus_mcp_trading_today_orders", await call("get_today_daily_orders", order_args))
+        balance = _record_and_mask("finus_mcp_trading_get_balance", await call("get_balance", {}))
+        rlz_pl = _record_and_mask("finus_mcp_trading_balance_rlz_pl", await call("get_balance_rlz_pl", rlz_args))
+        return _format_diary_snapshot([
+            ("당일 주문·체결", orders),
+            ("계좌 잔고·보유종목", balance),
+            ("실현손익", rlz_pl),
+        ])
+
+    get_diary_snapshot.__doc__ = doc
+    yield FunctionInfo.from_fn(
+        get_diary_snapshot,
+        description=doc,
+        input_schema=FinusMcpTradingDiarySnapshotInput,
+        converters=[_finus_react_input_converter(FinusMcpTradingDiarySnapshotInput)],
     )
 
 

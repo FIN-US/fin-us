@@ -606,6 +606,8 @@ _REVIEWED_NON_ORDER_TYPES = {
     "finus_mcp_trading_get_balance",
     "finus_mcp_trading_balance_rlz_pl",
     "finus_mcp_trading_today_orders",
+    # 위 세 조회만 코드에 고정해 차례로 부르는 묶음(#405) — 일지 저장·주문 도구를 부르지 않는다
+    "finus_mcp_trading_diary_snapshot",
     # 공개 정보 MCP(뉴스·공시·실적)
     "finus_market_news",
     "finus_disclosure_signal",

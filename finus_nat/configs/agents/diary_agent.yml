@@ -10,16 +10,11 @@ llms:
     model_name: ${DIARY_OPENAI_CHAT_MODEL:-gpt-5.4-mini}
 
 functions:
-  mcp-trading-today-orders:
-    _type: finus_mcp_trading_today_orders
-    timeout_sec: 120
-
-  mcp-trading-balance-rlz-pl:
-    _type: finus_mcp_trading_balance_rlz_pl
-    timeout_sec: 120
-
-  mcp-trading-get-balance:
-    _type: finus_mcp_trading_get_balance
+  # 일지 초안에 필요한 조회(당일 주문·체결 + 잔고·보유종목 + 실현손익)를 한 번에 부르는 묶음 도구 (#405).
+  # 개별 조회 도구 세 개를 따로 두면 첫 턴 강제로 당일 주문만 조회한 뒤 모델이 잔고 조회로 넘어가지
+  # 않았다. 묶음 도구가 날짜·종목 인자도 받으므로 후속 세부 조회도 이것으로 한다.
+  mcp-trading-diary-snapshot:
+    _type: finus_mcp_trading_diary_snapshot
     timeout_sec: 120
 
   # fin-us backend REST API — POST/GET /api/v1/db/diary
@@ -38,17 +33,13 @@ functions:
     _type: finus_tool_first_react_agent
     llm_name: diary_openai_llm
     tool_names:
-      - mcp-trading-today-orders
-      - mcp-trading-get-balance
-      - mcp-trading-balance-rlz-pl
+      - mcp-trading-diary-snapshot
       - finus-save-diary
       - finus-list-diaries
     # 조회 도구만 강제한다. 쓰기 도구 finus-save-diary를 넣으면 사용자가 저장을 요청하지 않은
     # 첫 턴에 강제 호출이 저장으로 채워질 수 있다 — 저장은 모델이 텍스트 ReAct로 고를 때만 나간다.
     first_turn_tool_names:
-      - mcp-trading-today-orders
-      - mcp-trading-get-balance
-      - mcp-trading-balance-rlz-pl
+      - mcp-trading-diary-snapshot
       - finus-list-diaries
     verbose: false
     use_native_tool_calling: false
@@ -58,14 +49,11 @@ functions:
     system_prompt: file://../prompts/react_diary.md
     additional_instructions: |
       === 도구 사용 순서 ===
-      1.`mcp-trading-today-orders`를 사용하여 당일주문내역을 가져옵니다. 해당 조건의 주문·체결이 없다면 2번으로 바로 넘어가세요
-        당일 주문 내역이 있다면 `mcp-trading-balance-rlz-pl`로 실현·평가 손익을 조회합니다.
-        모의투자(KIS_URL에 openapivts)이거나 해당 도구가 실전 전용 오류를 반환하면 `mcp-trading-get-balance`로 대체하세요.
-        tool 호출 결과로 매매일지 초안을 작성합니다. 초안은 종목명, 거래금액, 변동율, 매매 구분, 실현손익 순서로 작성하고 사용자 의견을 적을 공간을 남깁니다.
-
-      2. 당일 거래내역이 없다면 `mcp-trading-get-balance`로 계좌·보유종목 요약을 조회합니다.
-         조회 결과로 초안을 작성하고 맨 마지막에 사용자 의견을 적을 공간을 남깁니다.
-
+      1. `mcp-trading-diary-snapshot`으로 당일 주문·체결, 계좌 잔고·보유종목, 실현손익을 한 번에 조회합니다.
+         결과는 섹션별로 오고, 조회에 실패한 섹션은 `조회 실패`로 표시됩니다. 실패한 섹션의 수치는 지어내지 마세요.
+      2. 당일 주문·체결이 있으면 초안을 종목명, 거래금액, 변동율, 매매 구분, 실현손익 순서로 작성합니다.
+         당일 주문·체결이 없으면 같은 조회 결과의 잔고·보유종목 요약으로 초안을 작성합니다. 잔고를 다시 조회할 필요는 없습니다.
+         모의투자 계좌는 실현손익 대신 잔고 요약이 옵니다. 어느 쪽이든 맨 마지막에 사용자 의견을 적을 공간을 남깁니다.
       3. 사용자가 저장을 요청한 경우에 `finus-save-diary`로 backend에 저장합니다.
       KIS 자격 증명은 fin-us/.env (KIS_URL, KIS_API_KEY, KIS_API_SECRET, KIS_ACCOUNT_NO)에서 mcp-trading이 로드합니다.
       저장 API 오류 시 오류를 알리고 초안은 최종 답변에 포함하세요.
@@ -76,4 +64,4 @@ functions:
   diary_branch_agent:
     _type: fe_branch
     inner_function_name: diary_agent
-    tool_description: "Trading diary: mcp-trading 당일 주문·체결 + 실현손익 → 매매일지 초안 작성 (저장은 사용자 요청 시)."
+    tool_description: "Trading diary: mcp-trading 당일 주문·체결 + 잔고·보유종목 + 실현손익 → 매매일지 초안 작성 (저장은 사용자 요청 시)."

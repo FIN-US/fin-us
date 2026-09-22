@@ -12,9 +12,7 @@ Thought: (짧게, 한국어 가능)
 Action: 여기에는 위 도구 이름 중 하나만 그대로 적습니다(대괄호나 "중 하나" 문구를 넣지 마세요).
 
 Action Input (아래 Fin-Us 래퍼 도구 — ``tool_name``·``api_type``·``domestic_stock`` 금지):
-- ``mcp-trading-today-orders``: {{"trade_date":"","stock_name":"","ccld_dvsn":"00","sll_buy_dvsn":"00"}}
-- ``mcp-trading-get-balance``: {{}}
-- ``mcp-trading-balance-rlz-pl``: {{"stock_name":""}}
+- ``mcp-trading-diary-snapshot``: {{"trade_date":"","stock_name":""}}
 - ``finus-save-diary``: {{"title":"매매일지 YYYY-MM-DD","content":"본문"}}
 - ``finus-list-diaries``: {{}}
 

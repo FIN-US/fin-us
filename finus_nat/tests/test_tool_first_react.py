@@ -233,7 +233,8 @@ _TOOL_FIRST_AGENTS = [
     ("agents/strategy_agent.yml", "strategy_agent",
      {"kis-trading-mcp-tool-readonly", "mcp-news-get-market-news", "mcp-dart-get-disclosure-signal"}),
     ("agents/diary_agent.yml", "diary_agent",
-     {"mcp-trading-today-orders", "mcp-trading-get-balance", "mcp-trading-balance-rlz-pl", "finus-list-diaries"}),
+     # #405: 일지 조회를 묶음 도구 하나로 강제한다 — 개별 조회 도구가 있으면 당일 주문만 조회하고 끝났다
+     {"mcp-trading-diary-snapshot", "finus-list-diaries"}),
 ]
 
 
