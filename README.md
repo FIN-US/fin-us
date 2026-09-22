@@ -119,7 +119,7 @@ Fin-Us는 단일 모델이 모든 일을 처리하지 않고, 역할이 분리�
 
 에이전트별 역할·지침은 각 YAML의 `additional_instructions`에 둡니다. 반면 모든 에이전트가 공유하는 ReAct 출력 골격(`Thought:` / `Action:` / `Action Input:` 형식 규칙)은 `finus_nat/configs/prompts/*.md` 5개로 분리되어 있고, YAML의 `system_prompt`가 `file://../prompts/<파일>.md`로 이를 참조합니다. `react_kis_chat.md`는 trading·monitoring 두 에이전트가 공유하므로 고치면 양쪽에 함께 반영됩니다. 이 파일의 "주문 요청" 절은 텔레그램 주문 명령 문법을 안내하므로, 명령 문법(`backend/telegram_commands.py`)을 바꾸면 함께 고쳐야 합니다 — `backend/tests/test_nat_order_guidance.py`가 둘을 대조합니다.
 
-채팅 에이전트 6개는 모두 `finus_tool_first_react_agent` 타입이라 첫 턴에 `first_turn_tool_names`의 도구 하나를 반드시 호출합니다(#394, #399). 이 목록에는 데이터 조회 도구만 넣고, 메모리 도구나 일지 저장 같은 쓰기 도구는 넣지 않습니다. 자세한 이유는 `finus_nat/src/nat_finus_nat/tool_first_react.py`에 있습니다.
+채팅 에이전트는 모두 `finus_tool_first_react_agent` 타입이라 첫 턴에 `first_turn_tool_names`의 도구 하나를 반드시 호출합니다(#394, #399). 새 에이전트를 벤더 `react_agent`로 추가하면 `finus_nat/tests/test_tool_first_react.py`가 실패합니다. 이 목록에는 데이터 조회 도구만 넣고, 메모리 도구나 일지 저장 같은 쓰기 도구는 넣지 않습니다. 자세한 이유는 `finus_nat/src/nat_finus_nat/tool_first_react.py`에 있습니다.
 
 ```yaml
 # 예시: finus_nat/configs/agents/news_agent.yml

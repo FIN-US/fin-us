@@ -266,4 +266,25 @@ def test_agent_forces_data_tools_only(own_file: str, function_name: str, expecte
     tool_names = {str(name) for name in agent.tool_names}
     assert not forced & (_MEMORY_TOOLS | _WRITE_TOOLS)
     assert forced == expected_forced
-    assert forced == tool_names - _MEMORY_TOOLS - _WRITE_TOOLS
+    assert forced == tool_names - _MEMORY_TOOLS - _WRITE_TOOLS, (
+        f"{function_name}: 새 도구가 쓰기 도구라면 _WRITE_TOOLS에, 조회 도구라면 first_turn_tool_names에 넣는다"
+    )
+
+
+@pytest.mark.parametrize("config_name", ["router.yml", "router_nomemory.yml"])
+def test_every_router_react_agent_is_tool_first(config_name: str):
+    """#399: 라우터가 로드하는 ReAct 에이전트는 예외 없이 첫 턴 강제 타입이다.
+
+    ``_TOOL_FIRST_AGENTS``는 이름으로 나열한 목록이라, 새 에이전트를 벤더 ``react_agent``로
+    추가하면 위 테스트는 그대로 통과하고 #394 증상(도구를 한 번도 부르지 않는 첫 턴)이 새
+    에이전트에서 조용히 재발한다. 전수로 훑어 그 경로를 막는다.
+
+    뮤테이션: 아무 에이전트 yml의 ``_type``을 ``react_agent``로 되돌리면 red.
+    """
+    config = _load_config(config_name)
+    react_agents = {name: fn for name, fn in config.functions.items() if isinstance(fn, ReActAgentWorkflowConfig)}
+
+    assert react_agents, "라우터 설정에서 ReAct 에이전트를 하나도 찾지 못했다 — 전수 검사가 공허하다"
+    vendor_typed = sorted(name for name, fn in react_agents.items()
+                          if not isinstance(fn, FinusToolFirstReActAgentConfig))
+    assert not vendor_typed, f"벤더 react_agent 타입이 남아 있다: {vendor_typed}"
