@@ -1784,19 +1784,20 @@ async def finus_mcp_trading_diary_snapshot(config: FinusMcpTradingDiarySnapshotC
         # 가지 않는다). 원장 기록 순서와 섹션 순서는 호출 순서와 무관하게 전과 같다.
         rlz_pl_raw = await call("get_balance_rlz_pl", rlz_args)
         paper_fallback = _split_paper_rlz_pl_fallback(rlz_pl_raw)
+        fallback_note: str | None = None
         if paper_fallback is None:
             balance_raw = await call("get_balance", {})
         else:
-            balance_raw = paper_fallback[0]
+            balance_raw, fallback_note = paper_fallback
         # 재사용한 잔고도 ``finus_mcp_trading_get_balance``로 기록한다. 잔고 TR은 실제로 나갔고(실현손익
         # 조회 안에서) 그 데이터가 잔고 섹션으로 에이전트에 간다. 기록하지 않으면 보유종목 없는 모의투자
         # 계좌에서 실현손익 기록이 빈 결과("보유 종목이 없습니다.", [계좌 집계] 없음)로 잡혀, 당일 주문도
         # 없는 날 원장이 전부 빈 결과가 되고 게이트가 예수금 같은 잔고 수치를 막는다.
         balance = _record_and_mask("finus_mcp_trading_get_balance", balance_raw)
         rlz_pl = _record_and_mask("finus_mcp_trading_balance_rlz_pl", rlz_pl_raw)
-        if paper_fallback is not None:
+        if fallback_note is not None:
             # 같은 잔고 텍스트를 두 번 싣지 않는다. 안내 문단에는 금액이 없다(공유 계약 픽스처의 note).
-            rlz_pl = f"{paper_fallback[1]}\n실현손익 데이터는 없습니다. 잔고는 [계좌 잔고·보유종목] 섹션에 실었습니다.".strip()
+            rlz_pl = f"{fallback_note}\n실현손익 데이터는 없습니다. 잔고는 [계좌 잔고·보유종목] 섹션에 실었습니다.".strip()
         return _format_diary_snapshot([
             ("당일 주문·체결", orders),
             ("계좌 잔고·보유종목", balance),

@@ -306,6 +306,28 @@ async def test_paper_fallback_keeps_the_balance_truncation_note_in_the_balance_s
     assert unmask_response(balance_section) == truncated
 
 
+async def test_paper_fallback_without_note_boundary_uses_the_whole_response_as_balance(
+    mcp_trading, ledger, mapping_box
+):
+    """표지는 있는데 ``\\n\\n[안내]`` 경계가 없으면 응답 전체를 잔고 섹션으로 쓴다 (PR #411 리뷰).
+
+    계약상(공유 픽스처의 note) 도달하지 않는 방어 분기다. 경계를 못 찾았다고 잔고 내용을 잘라
+    버리거나 잔고 조회를 다시 부르지 않는다.
+
+    뮤테이션: 경계 없음 분기를 ``return None``으로 바꾸면 red(잔고를 다시 조회한다), 표지 앞에서
+    자르게 바꾸면 red(잔고 섹션이 원문과 달라진다).
+    """
+    raw = _REAL_BALANCE + "\n(모의투자 계좌라 " + _PAPER_CONTRACT["marker"] + ")"
+    mcp_trading.responses["get_balance_rlz_pl"] = raw
+
+    observation = await _snapshot()
+
+    assert [name for name, _ in mcp_trading.calls] == ["get_today_daily_orders", "get_balance_rlz_pl"]
+    balance_section = observation.split("[계좌 잔고·보유종목]\n", 1)[1].split("\n\n[실현손익]", 1)[0]
+    assert unmask_response(balance_section) == raw
+    assert "조회 실패" not in observation
+
+
 async def test_paper_account_without_holdings_or_orders_still_passes_the_gate(mcp_trading, ledger):
     """보유종목·당일 주문이 모두 없는 모의투자 계좌에서도 잔고 수치 초안이 게이트를 지난다.
 
