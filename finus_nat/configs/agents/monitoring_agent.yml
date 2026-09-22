@@ -10,7 +10,8 @@ llms:
 
 functions:
   monitoring_agent:
-    _type: react_agent
+    # 첫 턴 도구 호출을 API로 강제한다(#399) — trading_agent.yml 주석 참조.
+    _type: finus_tool_first_react_agent
     llm_name: monitoring_openai_llm
     # trading_agent와 같이 조회 전용 래퍼만 쓴다 (#380). 주문은 react_kis_chat.md의 안내대로
     # 텔레그램 /buy·/sell·/advise로 넘긴다.
@@ -20,6 +21,11 @@ functions:
       - mcp-dart-get-disclosure-signal
       - add_user_memory
       - get_user_memory
+    # 메모리 도구는 뺀다 — 데이터를 만들지 않는 도구로 강제 호출을 채우고 끝낼 수 있다.
+    first_turn_tool_names:
+      - kis-trading-mcp-tool-readonly
+      - mcp-news-get-market-news
+      - mcp-dart-get-disclosure-signal
     verbose: false
     include_tool_input_schema_in_tool_description: true
     use_native_tool_calling: false

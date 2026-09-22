@@ -207,15 +207,84 @@ def test_news_agent_forces_data_tools_only(config_name: str):
 
     뮤테이션: news_agent.yml의 ``_type``을 ``react_agent``로 되돌리면 red.
     """
-    from pathlib import Path
-
-    import nat_finus_nat.register  # noqa: F401
-    from nat.runtime.loader import load_config
-
-    config = load_config(Path(__file__).resolve().parents[1] / "configs" / config_name)
+    config = _load_config(config_name)
     news = config.functions["news_agent"]
 
     assert isinstance(news, FinusToolFirstReActAgentConfig)
     forced = {str(name) for name in news.first_turn_tool_names}
     assert {"mcp-news-get-market-news", "mcp-dart-get-earnings-report"} <= forced
     assert not forced & {"add_user_memory", "get_user_memory"}
+
+
+_MEMORY_TOOLS = {"add_user_memory", "get_user_memory"}
+# 일지 저장처럼 외부 상태를 바꾸는 도구. 강제 턴이 이것으로 채워지면 사용자가 요청하지 않은 쓰기가 나간다.
+_WRITE_TOOLS = {"finus-save-diary"}
+
+# #399: (정의 파일, 함수 이름, 첫 턴에 강제할 도구 전부). 강제 대상은 tool_names에서 메모리·쓰기
+# 도구를 뺀 나머지와 정확히 같아야 한다 — 데이터 도구가 빠지면 그 질문 유형에서 조회를 못 고르고,
+# 메모리·쓰기 도구가 들어가면 조회 없이(또는 쓰기로) 강제 호출을 채울 수 있다.
+_TOOL_FIRST_AGENTS = [
+    ("agents/trading_agent.yml", "trading_agent_react",
+     {"kis-trading-mcp-tool-readonly", "mcp-news-get-market-news", "mcp-dart-get-disclosure-signal"}),
+    ("agents/monitoring_agent.yml", "monitoring_agent",
+     {"kis-trading-mcp-tool-readonly", "mcp-news-get-market-news", "mcp-dart-get-disclosure-signal"}),
+    ("agents/recommend_agent.yml", "recommend_agent",
+     {"kis-trading-mcp-tool-readonly", "mcp-news-get-market-news"}),
+    ("agents/strategy_agent.yml", "strategy_agent",
+     {"kis-trading-mcp-tool-readonly", "mcp-news-get-market-news", "mcp-dart-get-disclosure-signal"}),
+    ("agents/diary_agent.yml", "diary_agent",
+     {"mcp-trading-today-orders", "mcp-trading-get-balance", "mcp-trading-balance-rlz-pl", "finus-list-diaries"}),
+]
+
+
+def _load_config(config_name: str):
+    from pathlib import Path
+
+    import nat_finus_nat.register  # noqa: F401
+    from nat.runtime.loader import load_config
+
+    return load_config(Path(__file__).resolve().parents[1] / "configs" / config_name)
+
+
+@pytest.mark.parametrize("config_source", ["own", "router.yml", "router_nomemory.yml"])
+@pytest.mark.parametrize(("own_file", "function_name", "expected_forced"), _TOOL_FIRST_AGENTS,
+                         ids=[fn for _, fn, _ in _TOOL_FIRST_AGENTS])
+def test_agent_forces_data_tools_only(own_file: str, function_name: str, expected_forced: set[str],
+                                      config_source: str):
+    """#399: trading·monitoring·recommend·strategy·diary도 첫 턴 강제 타입을 쓰고, 강제 대상은
+    메모리·쓰기 도구를 뺀 데이터 조회 도구 전부다. 라우터가 실제로 로드하는 설정에서도 같아야 한다.
+
+    뮤테이션: 각 yml의 ``_type``을 ``react_agent``로 되돌리면 그 에이전트의 3개 케이스가 red.
+    diary의 ``first_turn_tool_names``에 ``finus-save-diary``를 넣거나 어느 에이전트에든 메모리 도구를
+    넣으면 red.
+    """
+    config = _load_config(own_file if config_source == "own" else config_source)
+    agent = config.functions[function_name]
+
+    assert isinstance(agent, FinusToolFirstReActAgentConfig), f"{function_name}: {type(agent).__name__}"
+    forced = {str(name) for name in agent.first_turn_tool_names}
+    tool_names = {str(name) for name in agent.tool_names}
+    assert not forced & (_MEMORY_TOOLS | _WRITE_TOOLS)
+    assert forced == expected_forced
+    assert forced == tool_names - _MEMORY_TOOLS - _WRITE_TOOLS, (
+        f"{function_name}: 새 도구가 쓰기 도구라면 _WRITE_TOOLS에, 조회 도구라면 first_turn_tool_names에 넣는다"
+    )
+
+
+@pytest.mark.parametrize("config_name", ["router.yml", "router_nomemory.yml"])
+def test_every_router_react_agent_is_tool_first(config_name: str):
+    """#399: 라우터가 로드하는 ReAct 에이전트는 예외 없이 첫 턴 강제 타입이다.
+
+    ``_TOOL_FIRST_AGENTS``는 이름으로 나열한 목록이라, 새 에이전트를 벤더 ``react_agent``로
+    추가하면 위 테스트는 그대로 통과하고 #394 증상(도구를 한 번도 부르지 않는 첫 턴)이 새
+    에이전트에서 조용히 재발한다. 전수로 훑어 그 경로를 막는다.
+
+    뮤테이션: 아무 에이전트 yml의 ``_type``을 ``react_agent``로 되돌리면 red.
+    """
+    config = _load_config(config_name)
+    react_agents = {name: fn for name, fn in config.functions.items() if isinstance(fn, ReActAgentWorkflowConfig)}
+
+    assert react_agents, "라우터 설정에서 ReAct 에이전트를 하나도 찾지 못했다 — 전수 검사가 공허하다"
+    vendor_typed = sorted(name for name, fn in react_agents.items()
+                          if not isinstance(fn, FinusToolFirstReActAgentConfig))
+    assert not vendor_typed, f"벤더 react_agent 타입이 남아 있다: {vendor_typed}"

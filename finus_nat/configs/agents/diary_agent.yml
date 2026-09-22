@@ -34,13 +34,21 @@ functions:
     timeout_sec: 60
 
   diary_agent:
-    _type: react_agent
+    # 첫 턴 도구 호출을 API로 강제한다(#399) — trading_agent.yml 주석 참조.
+    _type: finus_tool_first_react_agent
     llm_name: diary_openai_llm
     tool_names:
       - mcp-trading-today-orders
       - mcp-trading-get-balance
       - mcp-trading-balance-rlz-pl
       - finus-save-diary
+      - finus-list-diaries
+    # 조회 도구만 강제한다. 쓰기 도구 finus-save-diary를 넣으면 사용자가 저장을 요청하지 않은
+    # 첫 턴에 강제 호출이 저장으로 채워질 수 있다 — 저장은 모델이 텍스트 ReAct로 고를 때만 나간다.
+    first_turn_tool_names:
+      - mcp-trading-today-orders
+      - mcp-trading-get-balance
+      - mcp-trading-balance-rlz-pl
       - finus-list-diaries
     verbose: false
     use_native_tool_calling: false

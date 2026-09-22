@@ -11,7 +11,9 @@ llms:
 
 functions:
   trading_agent_react:
-    _type: react_agent
+    # 첫 턴 도구 호출을 API로 강제한다(#399, #394와 같은 원인). 벤더 react_agent에서는 모델이
+    # 첫 턴에 Final Answer로 끝내 도구를 한 번도 부르지 않았다 — 근거는 nat_finus_nat/tool_first_react.py.
+    _type: finus_tool_first_react_agent
     llm_name: trading_openai_llm
     # 조회 전용 래퍼만 쓴다 (#380). 전체 권한 도구(주문 가능)는 backend 하드 한도·확정
     # 버튼을 전부 우회하므로 어떤 에이전트에도 붙이지 않는다 — 주문은 텔레그램
@@ -22,6 +24,11 @@ functions:
       - mcp-dart-get-disclosure-signal
       - add_user_memory
       - get_user_memory
+    # 메모리 도구는 뺀다 — 데이터를 만들지 않는 도구로 강제 호출을 채우고 끝낼 수 있다.
+    first_turn_tool_names:
+      - kis-trading-mcp-tool-readonly
+      - mcp-news-get-market-news
+      - mcp-dart-get-disclosure-signal
     verbose: true
     use_native_tool_calling: false
     parse_agent_response_max_retries: 5
