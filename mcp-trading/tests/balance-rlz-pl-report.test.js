@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { readFileSync } from "node:fs";
-import { formatBalanceRlzPlReport } from "../balance-rlz-pl-report.js";
+import { formatBalanceRlzPlReport, PAPER_RLZ_PL_FALLBACK_NOTE } from "../balance-rlz-pl-report.js";
 import { isPaperTradingKisUrl } from "../formatters.js";
 
 const rlzPlFixture = JSON.parse(
@@ -88,6 +88,19 @@ test("formatBalanceRlzPlReport: rows가 있을 때도 잘림 안내가 마지막
   assert.ok(holdingsSection, "[보유 종목] 섹션이 있어야 함");
   const stockLines = holdingsSection.split("\n").filter((l) => l.startsWith("- "));
   assert.ok(stockLines.every((l) => !l.includes("안내")), "안내 문구가 '- ' 줄에 섞이면 안 됨");
+});
+
+// 이슈 #408: 모의투자 대체 안내 문구 계약. backend(_RLZ_PL_PAPER_FALLBACK_MARKER)와
+// NAT(_PAPER_RLZ_PL_FALLBACK_MARKER)가 이 문구의 marker를 매칭하고, NAT는 문구 앞의 잔고 텍스트를
+// 떼어 잔고 섹션으로 쓴다. 문구를 소유한 이 스위트가 먼저 red가 되도록 같은 픽스처와 대조한다.
+test("PAPER_RLZ_PL_FALLBACK_NOTE matches the shared fallback contract (fixtures/paper_rlz_pl_fallback.json)", () => {
+  const contract = JSON.parse(
+    readFileSync(new URL("fixtures/paper_rlz_pl_fallback.json", import.meta.url), "utf-8"),
+  );
+  assert.equal(PAPER_RLZ_PL_FALLBACK_NOTE, contract.note);
+  assert.ok(PAPER_RLZ_PL_FALLBACK_NOTE.includes(contract.marker));
+  // NAT가 잔고 텍스트와 안내를 가르는 경계다 — 잔고 텍스트 뒤 별도 문단이어야 한다.
+  assert.ok(PAPER_RLZ_PL_FALLBACK_NOTE.startsWith("\n\n[안내]"));
 });
 
 test("isPaperTradingKisUrl detects mock trading host", () => {

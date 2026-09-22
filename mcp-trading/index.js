@@ -7,7 +7,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import axios from "axios";
 import dotenv from "dotenv";
 import { z } from "zod";
-import { formatBalanceRlzPlReport } from "./balance-rlz-pl-report.js";
+import { formatBalanceRlzPlReport, PAPER_RLZ_PL_FALLBACK_NOTE } from "./balance-rlz-pl-report.js";
 import {
   buildBalanceParams,
   fetchAllBalance,
@@ -689,15 +689,18 @@ async function getBalanceRlzPl({
 } = {}) {
   if (isPaperTradingKisUrl(KIS_URL)) {
     const balanceText = await getBalance();
-    // 모의투자 대체 안내 문구. 주의: backend/scheduler.py의 _RLZ_PL_PAPER_FALLBACK_MARKER가
-    // 아래 "잔고 요약으로 대체했습니다" 리터럴을 문자열 매칭해 이 대체 응답을 가려낸다.
-    // 이 문구를 바꾸면 backend 감지가 조용히 무력화되어, 모의투자 배포에서 마커 부재 error가
-    // 10분마다 쌓이고 _PAPER_FALLBACK_SKIP_CYCLES의 호출 건너뛰기도 꺼진다.
-    // 이 리터럴을 JS 쪽에서 고정하는 테스트는 없으므로, 바꿔야 한다면 그 상수와
-    // backend/tests/test_scheduler.py에 인라인으로 복사된 대체 응답 문구(3곳)를 함께 고친다.
-    const note =
-      "\n\n[안내] 모의투자(openapivts) 계좌는 실현손익 TR(v1_국내주식-041)을 지원하지 않아 잔고 요약으로 대체했습니다.";
-    return `${balanceText}${note}`;
+    // 모의투자 대체 안내 문구(PAPER_RLZ_PL_FALLBACK_NOTE). 주의: 그 안의 "잔고 요약으로
+    // 대체했습니다"를 두 곳이 문자열 매칭한다.
+    //   - backend/scheduler.py의 _RLZ_PL_PAPER_FALLBACK_MARKER — 이 대체 응답을 가려낸다. 문구가
+    //     바뀌면 모의투자 배포에서 마커 부재 error가 10분마다 쌓이고
+    //     _PAPER_FALLBACK_SKIP_CYCLES의 호출 건너뛰기도 꺼진다.
+    //   - finus_nat finus_api.py의 _PAPER_RLZ_PL_FALLBACK_MARKER — 매매일지 조회 묶음이 이 응답의
+    //     잔고를 재사용해 잔고 조회를 따로 부르지 않는다(#408). 문구가 바뀌면 잔고 TR이 다시
+    //     두 번 나가 초당 한도(EGW00215)에 걸릴 수 있다. 잔고 텍스트 뒤에 문구만 이어 붙이는
+    //     모양도 계약이다 — NAT가 문구 앞부분을 잔고 섹션으로 떼어 쓴다.
+    // 세 곳의 일치는 tests/fixtures/paper_rlz_pl_fallback.json을 JS·backend·NAT 스위트가 함께
+    // 읽어 고정한다(backend의 대체 응답 테스트도 이 픽스처의 note로 응답을 만든다).
+    return `${balanceText}${PAPER_RLZ_PL_FALLBACK_NOTE}`;
   }
 
   const result = await fetchAllBalanceRlzPl({ timeBudgetMs });

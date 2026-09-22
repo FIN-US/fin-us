@@ -1669,6 +1669,37 @@ async def finus_mcp_trading_balance_rlz_pl(config: FinusMcpTradingBalanceRlzPlCo
 
 _DIARY_SNAPSHOT_FAILED = "diary_snapshot_failed"
 
+# mcp-trading 실현손익 조회의 모의투자 대체 응답 표지 (#408). 모의투자(openapivts)에서
+# ``get_balance_rlz_pl``은 실현손익 TR 대신 ``get_balance``와 같은 잔고 텍스트를 돌려주고, 그 뒤에
+# 이 문구가 든 안내 문단을 이어 붙인다(mcp-trading balance-rlz-pl-report.js의
+# ``PAPER_RLZ_PL_FALLBACK_NOTE``). backend ``scheduler._RLZ_PL_PAPER_FALLBACK_MARKER``와 같은
+# 문자열이고, 세 곳의 일치는 공유 계약 픽스처(mcp-trading/tests/fixtures/paper_rlz_pl_fallback.json)를
+# 세 스위트가 함께 읽어 고정한다. 모의투자 판정(URL)을 여기 다시 두지 않고 mcp-trading이 이미
+# 내놓는 이 표지를 읽는다 — 판정이 두 곳에 있으면 한쪽만 바뀌는 날 갈라진다.
+_PAPER_RLZ_PL_FALLBACK_MARKER = "잔고 요약으로 대체했습니다"
+# 대체 응답에서 잔고 텍스트와 안내 문단의 경계. 안내는 잔고 텍스트 뒤 별도 문단으로 붙는다.
+_PAPER_RLZ_PL_NOTE_PREFIX = "\n\n[안내]"
+
+
+def _split_paper_rlz_pl_fallback(result: str) -> tuple[str, str] | None:
+    """실현손익 응답이 모의투자 대체 응답이면 ``(잔고 텍스트, 안내 문단)``, 아니면 ``None``.
+
+    실패 응답(오류 JSON·빈 응답)은 대체 응답이 아니다 — 표지가 오류 ``detail``에 섞여 들어와도
+    잔고로 쓰지 않는다. 안내 문단은 표지를 담은 **마지막** ``[안내]`` 문단이다. 잔고 텍스트 자체에도
+    잘림 안내(balance.js ``formatTruncationNote``)가 붙을 수 있어 첫 ``[안내]``로 자르면 그 안내가
+    잔고 섹션에서 떨어져 나간다.
+    """
+    if not _is_ok_tool_result(result):
+        return None
+    marker_at = result.find(_PAPER_RLZ_PL_FALLBACK_MARKER)
+    if marker_at < 0:
+        return None
+    note_at = result.rfind(_PAPER_RLZ_PL_NOTE_PREFIX, 0, marker_at)
+    if note_at < 0:
+        # 경계가 없으면 문구를 뗄 수 없다. 전체를 잔고로 쓴다 — 잔고 내용은 빠짐없이 들어간다.
+        return result, ""
+    return result[:note_at], result[note_at:].strip()
+
 
 def _format_diary_snapshot(parts: list[tuple[str, str]]) -> str:
     """하위 조회 결과(이미 원장 기록·마스킹을 지난 텍스트)를 Observation 하나로 합친다 (#405).
@@ -1717,6 +1748,10 @@ async def finus_mcp_trading_diary_snapshot(config: FinusMcpTradingDiarySnapshotC
 
     하위 조회는 차례로 부른다. KIS 모의투자의 초당 호출 한도가 낮아(mcp-trading/index.js
     ``DAILY_CCLD_PAGE_DELAY_MS`` 주석) 동시에 쏘면 유량 초과로 한꺼번에 실패할 수 있다.
+
+    순서는 당일 주문·체결 → 실현손익 → (필요할 때만) 잔고다 (#408). 모의투자에서는 실현손익 조회가
+    잔고 조회로 대체되므로(:data:`_PAPER_RLZ_PL_FALLBACK_MARKER`) 그 응답의 잔고를 잔고 섹션으로 쓰고
+    잔고 조회를 따로 부르지 않는다. 그러지 않으면 잔고 TR이 연달아 두 번 나가 초당 한도에 걸렸다.
     """
     doc = (
         "Fin-Us mcp-trading stdio MCP: 매매일지 초안용 조회 묶음. 당일 주문·체결(get_today_daily_orders), "
@@ -1743,8 +1778,25 @@ async def finus_mcp_trading_diary_snapshot(config: FinusMcpTradingDiarySnapshotC
             )
 
         orders = _record_and_mask("finus_mcp_trading_today_orders", await call("get_today_daily_orders", order_args))
-        balance = _record_and_mask("finus_mcp_trading_get_balance", await call("get_balance", {}))
-        rlz_pl = _record_and_mask("finus_mcp_trading_balance_rlz_pl", await call("get_balance_rlz_pl", rlz_args))
+        # 실현손익을 잔고보다 먼저 부른다(#408). 모의투자에서는 실현손익 응답이 잔고 조회 결과 그 자체라
+        # 잔고를 다시 부르지 않는다 — 부르면 잔고 TR이 연달아 두 번 나가 초당 한도(EGW00215)에 걸린다.
+        # 실전 계좌이거나 실현손익이 실패했으면 잔고를 따로 조회한다(실패한 실현손익이 잔고까지 끌고
+        # 가지 않는다). 원장 기록 순서와 섹션 순서는 호출 순서와 무관하게 전과 같다.
+        rlz_pl_raw = await call("get_balance_rlz_pl", rlz_args)
+        paper_fallback = _split_paper_rlz_pl_fallback(rlz_pl_raw)
+        if paper_fallback is None:
+            balance_raw = await call("get_balance", {})
+        else:
+            balance_raw = paper_fallback[0]
+        # 재사용한 잔고도 ``finus_mcp_trading_get_balance``로 기록한다. 잔고 TR은 실제로 나갔고(실현손익
+        # 조회 안에서) 그 데이터가 잔고 섹션으로 에이전트에 간다. 기록하지 않으면 보유종목 없는 모의투자
+        # 계좌에서 실현손익 기록이 빈 결과("보유 종목이 없습니다.", [계좌 집계] 없음)로 잡혀, 당일 주문도
+        # 없는 날 원장이 전부 빈 결과가 되고 게이트가 예수금 같은 잔고 수치를 막는다.
+        balance = _record_and_mask("finus_mcp_trading_get_balance", balance_raw)
+        rlz_pl = _record_and_mask("finus_mcp_trading_balance_rlz_pl", rlz_pl_raw)
+        if paper_fallback is not None:
+            # 같은 잔고 텍스트를 두 번 싣지 않는다. 안내 문단에는 금액이 없다(공유 계약 픽스처의 note).
+            rlz_pl = f"{paper_fallback[1]}\n실현손익 데이터는 없습니다. 잔고는 [계좌 잔고·보유종목] 섹션에 실었습니다.".strip()
         return _format_diary_snapshot([
             ("당일 주문·체결", orders),
             ("계좌 잔고·보유종목", balance),
