@@ -16,13 +16,28 @@ import {
 // "재려면 반드시 있어야 하는 것" — 유량 제한 판정과, 그 판정을 운영자가 읽을 수 있는 한 줄로
 // 만드는 포맷터의 계약이다.
 
-test("EGW00201/EGW00133 msg_cd를 유량 제한으로 분류한다", () => {
+test("EGW00201/EGW00133/EGW00215 msg_cd를 유량 제한으로 분류한다", () => {
   for (const msgCd of KIS_RATE_LIMIT_MSG_CODES) {
     assert.equal(isKisRateLimitError({ msgCd }), true, msgCd);
     assert.equal(classifyKisError({ msgCd }), KIS_CLASS_RATE_LIMIT, msgCd);
   }
   // 목록이 비어 있는 채로 통과하는 상태가 아님을 고정한다.
-  assert.deepEqual([...KIS_RATE_LIMIT_MSG_CODES], ["EGW00201", "EGW00133"]);
+  assert.deepEqual([...KIS_RATE_LIMIT_MSG_CODES], ["EGW00201", "EGW00133", "EGW00215"]);
+});
+
+test("모의투자 실측에서 관측한 EGW00215는 msg1 문구가 없어도 유량 제한 줄로 남는다", () => {
+  // 2026-09-22 모의투자 실측(#210)의 실제 응답 모양: HTTP 500 + rt_cd=1. axios는 500을
+  // 예외로 던지므로 kisApiGet의 catch 경로(error.response)로 들어온다. msg1을 비워
+  // "초당 거래건수" 문구 판정 없이 코드만으로 잡히는지 본다 — 문구가 바뀌어도 게이트가 꺼진
+  // 기본 설정에서 이 줄이 사라지지 않아야 한다.
+  const error = Object.assign(new Error("Request failed with status code 500"), {
+    code: "ERR_BAD_RESPONSE",
+    response: { status: 500, data: { rt_cd: "1", msg_cd: "EGW00215", msg1: "" } },
+  });
+  const { line, rateLimited } = formatKisRequestLog({ trId: "VTTC8434R", elapsedMs: 1026, error, pid: 4242 });
+  assert.equal(rateLimited, true);
+  assert.match(line, /msg_cd=EGW00215/);
+  assert.match(line, /class=rate_limit/);
 });
 
 test("msg_cd 대소문자·공백이 섞여도 유량 제한으로 본다", () => {
