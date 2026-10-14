@@ -2479,7 +2479,7 @@ class TelegramCommandHandler:
 
         # 미해석 에코(name == code)는 이제 주문 준비 단계에서 _is_unresolved_echo가
         # 끊으므로 여기까지 오지 않는다(#151). 마스터에 name == code인 항목이 생기는
-        # 경우에 대비한 방어선으로만 남긴다 — 현재 마스터 4,353종에는 0건이다.
+        # 경우에 대비한 방어선으로만 남긴다 — 현재 마스터 4,401종에는 0건이다.
         if order.stock_name == order.stock_code:
             lines.append(UNRESOLVED_STOCK_WARNING)
 

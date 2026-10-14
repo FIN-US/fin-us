@@ -1516,8 +1516,8 @@ def test_extract_stock_code_ignores_parentheses_in_stock_name():
 def test_extract_stock_code_accepts_seven_and_nine_char_codes():
     """코드 길이 상한을 두지 않는 이유를 고정한다.
 
-    종목마스터 코드 길이는 6자 3,889 / 7자 ETN 389 / 9자 펀드 75종목이다.
-    정규식을 {6}으로 좁히면 464종목이, {6,7}로 좁히면 9자 펀드 75종목이
+    종목마스터 코드 길이는 6자 3,944 / 7자 ETN 368 / 9자 89종목이다.
+    정규식을 {6}으로 좁히면 457종목이, {6,7}로 좁히면 9자 89종목이
     조용히 추출 실패로 돌아간다.
     """
     handler = TelegramCommandHandler(notifier=FakeNotifier())
