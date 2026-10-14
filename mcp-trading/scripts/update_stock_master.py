@@ -99,18 +99,49 @@ def check_unreadable_numeric_names(stocks, *, allow, stream=None):
         file=stream,
     )
     return True
+
+
+# .mst 한 행은 "가변폭 헤더(단축코드·표준코드·한글명) + 고정폭 꼬리"다. 헤더가 어디서 끝나는지는
+# 꼬리 폭으로만 정해지므로 data_width가 이 파서의 유일한 기준점이다.
+#
+# data_width는 KIS 공식 파서(kis_kospi_code_mst.py·kis_kosdaq_code_mst.py)의 field_specs 합이다
+# — KOSPI 227자(70필드) / KOSDAQ 221자(64필드). 공식 파서에 적힌 228·222는 개행을 포함한 폭이다
+# (`row[0:len(row) - 228]`·`row[-228:]`의 row가 개행을 달고 있다). 이 스크립트는 개행을 먼저 떼고
+# 자르므로 1 작은 값을 써야 한다. 전에는 228·222를 그대로 빼서 헤더 끝 1글자를 더 잘라냈고,
+# 이름이 필드를 꽉 채운 종목에서 닫는 괄호가 사라졌다(#138).
+#
+# field_offsets는 꼬리 안에서 종목 분류 필드가 앉은 자리다. 공식 field_specs의 누적 폭으로 계산한
+# 값이고, **두 시장의 레이아웃이 달라 시장별로 둔다** — 같은 필드가 다른 오프셋에 있다.
+# 꼬리에는 ETP 상품구분코드(KOSPI [22:23] / KOSDAQ [18:19])도 있지만, scrt_grp_cls_code가 ETF를
+# EF, ETN을 EN으로 이미 갈라 주고 따로 쓸 곳이 없어 넣지 않았다.
+_KOSPI_FIELD_OFFSETS = {
+    "scrt_grp_cls_code": (0, 2),  # 증권그룹구분코드: ST 주권 / EF ETF / EN ETN / RT 리츠 / BC 수익증권 ...
+    "etpr_undt_objt_co_yn": (29, 30),  # 기업인수목적회사여부(스팩): Y/N
+    "prst_cls_code": (158, 159),  # 우선주 구분 코드: 0 해당없음 / 1 구형우선주 / 2 신형우선주
+}
+_KOSDAQ_FIELD_OFFSETS = {
+    "scrt_grp_cls_code": (0, 2),
+    "etpr_undt_objt_co_yn": (24, 25),
+    "prst_cls_code": (153, 154),
+}
+# stocks.json에 실리는 분류 필드 이름. 두 시장이 같은 집합을 내보내야 소비자가 시장을 보고
+# 필드 유무를 갈라 읽지 않는다.
+CLASSIFICATION_FIELDS = tuple(_KOSPI_FIELD_OFFSETS)
+
 SOURCES = [
     {
         "market": "KOSPI",
         "url": "https://new.real.download.dws.co.kr/common/master/kospi_code.mst.zip",
         "file_name": "kospi_code.mst",
-        "tail_width": 228,
+        "data_width": 227,
+        "field_offsets": _KOSPI_FIELD_OFFSETS,
     },
     {
         "market": "KOSDAQ",
         "url": "https://new.real.download.dws.co.kr/common/master/kosdaq_code.mst.zip",
         "file_name": "kosdaq_code.mst",
-        "tail_width": 222,
+        "data_width": 221,
+        "field_offsets": _KOSDAQ_FIELD_OFFSETS,
     },
 ]
 
@@ -137,23 +168,34 @@ def download_source(source, target_dir):
     return target_dir / source["file_name"]
 
 
-def parse_master_rows(file_path, *, market, tail_width, aliases_by_code):
+def parse_master_rows(file_path, *, market, data_width, field_offsets, aliases_by_code):
     stocks = []
     with file_path.open(encoding="cp949") as file:
         for row in file:
-            header = row[: len(row.rstrip("\n")) - tail_width]
+            line = row.rstrip("\n")
+            header_width = len(line) - data_width
+            # 헤더 폭이 이름 자리(21자) 아래로 내려가면 종목명이 빈 문자열로 나오고 그 행은
+            # 조용히 버려진다. 꼬리 폭이 틀렸거나 마스터 레이아웃이 바뀐 것이므로, 한 행씩
+            # 흘리는 대신 끊는다 — 마스터 일부가 빠진 stocks.json이 쓰이는 게 더 나쁘다.
+            if header_width < 22:
+                raise ValueError(
+                    f"{market} 마스터 행이 너무 짧습니다(행 {len(line)}자, 꼬리 {data_width}자). "
+                    "KIS 마스터 레이아웃이 바뀌었는지 확인하세요."
+                )
+            header, tail = line[:header_width], line[header_width:]
             code = header[:9].strip()
             name = header[21:].strip()
             if not code or not name:
                 continue
-            stocks.append(
-                {
-                    "code": code,
-                    "name": name,
-                    "market": market,
-                    "aliases": aliases_by_code.get(code, []),
-                }
-            )
+            stock = {
+                "code": code,
+                "name": name,
+                "market": market,
+                "aliases": aliases_by_code.get(code, []),
+            }
+            for field, (start, end) in field_offsets.items():
+                stock[field] = tail[start:end].strip()
+            stocks.append(stock)
     return stocks
 
 
@@ -213,7 +255,8 @@ def main(argv=None):
                 parse_master_rows(
                     file_path,
                     market=source["market"],
-                    tail_width=source["tail_width"],
+                    data_width=source["data_width"],
+                    field_offsets=source["field_offsets"],
                     aliases_by_code=aliases_by_code,
                 )
             )

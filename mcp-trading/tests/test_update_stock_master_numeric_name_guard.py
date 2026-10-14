@@ -84,7 +84,10 @@ def _run_main(script, monkeypatch, tmp_path, rows, argv, capsys):
     stocks_path = tmp_path / "stocks.json"
     stocks_path.write_text(json.dumps(_OLD_MASTER, ensure_ascii=False), encoding="utf-8")
     monkeypatch.setattr(script, "STOCKS_PATH", stocks_path)
-    monkeypatch.setattr(script, "SOURCES", [{"market": "KOSPI", "tail_width": 0}])
+    # parse_master_rows를 갈아 끼우므로 폭·오프셋은 main이 꺼내 넘기는지만 중요하다.
+    monkeypatch.setattr(
+        script, "SOURCES", [{"market": "KOSPI", "data_width": 0, "field_offsets": {}}]
+    )
     monkeypatch.setattr(script, "download_source", lambda source, target_dir: target_dir / "x.mst")
     monkeypatch.setattr(script, "parse_master_rows", lambda file_path, **kwargs: list(rows))
     code = script.main(argv)
