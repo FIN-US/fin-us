@@ -36,7 +36,7 @@
 
 종목마스터 `mcp-trading/data/stocks.json`은 **저장소에 커밋되어 있다**(`mcp-trading/stock-master.js:8`의 `DEFAULT_STOCKS_PATH`가 이 파일을 가리킨다). 런타임에 KIS에서 받아오는 구조가 아니므로 전수 대조가 가능했다.
 
-- 파일: `mcp-trading/data/stocks.json` (4,353건, `[{code, name, market, aliases}]` 배열)
+- 파일: `mcp-trading/data/stocks.json` (조사 시점 4,353건, `[{code, name, market, aliases}]` 배열) *(2026-10-14 재생성 후 4,401건이고 분류 필드 3개가 늘어 `[{code, name, market, aliases, scrt_grp_cls_code, etpr_undt_objt_co_yn, prst_cls_code}]`이다 — 5.1 참조)*
 - 갱신 경로: `mcp-trading/scripts/update_stock_master.py` — KRX/KIS 배포 마스터(`kospi_code.mst`, `kosdaq_code.mst`)를 내려받아 재생성
 - 대조 방법: 임시 Node 스크립트로 전수 분류 + **실제 `resolveStock()`·`buildCashOrderBody()`를 776건에 직접 호출**해 통과/거절을 실측 (스크립트는 스크래치패드에 두고 커밋하지 않음)
 
@@ -165,7 +165,9 @@ code = header[:9].strip()
 
 또한 `parse_master_rows`(`:51-67`)는 `tail_width`(KOSPI 228 / KOSDAQ 222)만큼의 꼬리를 **잘라 버린다**. 이 꼬리에 무엇이 들어 있는지는 4.2에서 확인했다.
 
-> **⚠️ 주의 — 꼬리 슬라이스가 공식 파서와 1글자 어긋난다** (확인된 사실)
+> **⚠️ 주의 — 꼬리 슬라이스가 공식 파서와 1글자 어긋난다** (확인된 사실) → **수정 완료(2026-10-14)**
+>
+> `update_stock_master.py`가 `tail_width` 228/222 대신 `data_width` 227/221을 들고, `parse_master_rows`가 `data_width`와 시장별 `field_offsets`를 받는다. 아래 서술은 수정 전 상태의 기록이다.
 >
 > `tail_width` 228/222는 **개행(`\n`)을 포함한 폭**이다. 공식 `kis_kospi_code_mst.py`는 `row`에 개행이 남아 있는 상태에서 `row[0:len(row)-228]`로 자르기 때문에 실제 데이터 폭은 227자(KOSPI)/221자(KOSDAQ)다. 반면 우리 코드(`:55`)는 먼저 `row.rstrip("\n")`으로 개행을 제거한 뒤 228을 빼기 때문에 헤더 끝에서 1글자를 더 잘라 낸다.
 >
@@ -191,6 +193,10 @@ code = header[:9].strip()
 > **§6.1 안 A에 미치는 영향**: 안 A가 꼬리에서 필드를 뽑을 때 이 오프셋 규약이 그대로라면 추출 필드 전체가 1글자씩 밀린다. 1글자 필드가 대부분이라 조용히 **옆 필드 값을 읽는** 결과가 된다. 안 A 구현 전에 반드시 수정해야 할 선행 사항이다.
 >
 > *(참고: 이름 절단 자체는 이 PR이 도입한 문제가 아니라 기존 버그이며, 별도 이슈로 분리하는 것이 맞다.)*
+>
+> **실측 결과(2026-10-14)**: `data_width = tail_width - 1`로 고쳐 마스터를 재생성하니 예고한 9건이 **9/9 전부** 닫는 괄호를 되찾았다. 수정 후 모든 행의 꼬리 길이가 정확히 227자(KOSPI)/221자(KOSDAQ)로 떨어진다. 회귀 가드는 `mcp-trading/tests/test_update_stock_master.py`의 `test_data_width_matches_official_parser_field_specs`·`test_parse_master_rows_keeps_the_last_header_character`이며, 두 테스트는 폭을 228/222로 되돌리면 red가 된다(뮤테이션 확인).
+>
+> 이름 절단에는 예고되지 않은 2차 증상도 있었다. 잘린 이름이 다른 종목의 이름과 같아지면 `deduplicate_stocks`의 `(market, name)` 키가 충돌해 **종목이 통째로 사라진다**. 재생성 결과가 4,353종 → 4,401종으로 늘어난 데에는 마스터 자체의 변동과 함께 이 충돌 해소가 섞여 있다.
 
 ### 4.2 KIS 공식 저장소에서 확인한 것 (문서 근거)
 
@@ -250,6 +256,10 @@ pdno (str): [필수] 상품번호 (종목코드(6자리) , ETN의 경우 7자리
 **KOSPI 오프셋을 KOSDAQ에 적용하면 예외 없이 조용히 오분류된다.** KOSDAQ 행에서 `tail[22:23]`은 `KRX 바이오 여부`, `tail[29:30]`은 `KRX 건설 여부`를 읽는다(둘 다 `Y`/`N`이라 `prst_cls_code`의 `0`/`1`/`2`와 값이 겹치지는 않지만, 파싱은 통과한다). `tail[158:159]`는 `매출액`(`tail[157:166]`) 안쪽의 숫자 한 자를 읽는다 — **숫자라서 `0`/`1`/`2`와 형태가 겹치고, KOSDAQ 신형우선주가 아무 실패 신호 없이 오분류된다.**
 
 우리 `SOURCES`의 `tail_width` 228/222가 공식 파서의 `row[0:len(row)-228]`·`-222`와 동일한 출처임도 여기서 확인된다. `SOURCES`는 이미 시장별로 `tail_width`를 들고 있으므로, 안 A 구현 시 **오프셋 맵도 같은 자리에 시장별로 둔다.** 이 파일들을 정답지로 삼으면 `.h` 대조·실호출 없이 오프셋을 확정할 수 있다.
+
+> **실측 확인(2026-10-14)**: 위 표의 네 오프셋을 실제 `.mst` 데이터로 역검증했고 **전부 맞다**. 근거: `00088K`(한화3우B)의 KOSPI `tail[158:159]`가 `2`(신형우선주)이고, `prst_cls_code=2`인 종목이 KOSPI 21 + KOSDAQ 2 = **23건**으로 2.2가 이름 패턴으로 세었던 신형우선주 23건과 정확히 일치한다. KOSDAQ `tail[24:25]`는 스팩 71건에 예외 없이 `Y`이고 비스팩 1,753건에는 단 한 건도 `Y`가 아니다(이 조건을 만족하는 오프셋은 꼬리 221자 중 24 하나뿐이다). KOSPI는 스팩이 0건이라 `tail[29:30]`이 전부 `N`으로 나와 무모순이다. `scrt_grp_cls_code`는 `EF` 1,176 / `ST` 914 / `EN` 368 / `BC` 84 / `RT` 23 … 으로 상품 분류와 맞물린다.
+>
+> 구현에는 `etp_prod_cls_code`를 **넣지 않았다.** `scrt_grp_cls_code`가 ETF를 `EF`, ETN을 `EN`으로 이미 갈라 주고, KOSDAQ 쪽 `tail[18:19]`은 전수 공백이라 쓸 데가 없다. 오프셋 자체는 위 표에 남겨 둔다.
 
 **(마) 참고한 1차 자료**
 
@@ -317,7 +327,28 @@ pdno (str): [필수] 상품번호 (종목코드(6자리) , ETN의 경우 7자리
 | `mcp-trading/tests/order.test.js:112-123` | `0001A0` 단일 회귀 테스트 | 공유 판정표를 읽는 테스트로 대체(6.4-1) |
 | `backend/tests/test_stock_code.py:163-200` | `TestOrderableStockCodeRe` | 같은 판정표를 함께 읽도록 확장(6.4-3) |
 
-**변경 없음** — `data/stocks.json`, `scripts/update_stock_master.py`, `stock-master.js`, `order-dedup.js`. 즉 **4.1의 off-by-one, 776건 수치, 4.2 라의 오프셋은 현재 main에서도 그대로 유효하다.**
+**변경 없음(`93e9e82` 시점)** — `data/stocks.json`, `scripts/update_stock_master.py`, `stock-master.js`, `order-dedup.js`. 즉 4.1의 off-by-one, 776건 수치, 4.2 라의 오프셋은 그 시점까지 그대로 유효했다.
+
+#### 2026-10-14 — 마스터 재생성으로 수치가 전부 이동했다
+
+`data/stocks.json`과 `scripts/update_stock_master.py`는 이 날짜로 **더 이상 "변경 없음"이 아니다.** off-by-one을 고치고 분류 필드 3개를 추가하면서 마스터를 재생성했고, 그 사이 KRX 쪽 변동(신규 165 / 제외 117 / 개명 50)이 함께 들어왔다. 문서 본문의 수치는 `8c2acd5` 시점 실측값으로 **그대로 둔다**(그 시점의 근거이기 때문이다). 현재 값은 아래 표를 본다.
+
+| 항목 | `8c2acd5` (문서 본문) | 2026-10-14 재생성 후 |
+|---|---:|---:|
+| 마스터 전체 | 4,353 | **4,401** |
+| 숫자 6자 (주문 가능) | 3,577 | **3,539** |
+| 영숫자 6자 | 312 | **405** |
+| 7자 ETN (`Q`) | 389 | **368** |
+| 9자 | 75 | **89** (`F` 84 / `J` 5) |
+| **차단 합계** | **776 (17.8%)** | **862 (19.6%)** |
+| 길이 분포 | 6자 3,889 / 8자 0 | 6자 3,944 / 8자 **여전히 0** |
+| `stocks.json` 크기 | 489K | **895K** (분류 필드 3개 추가분) |
+
+8자가 0건이라는 §2.1의 근거는 재생성 후에도 유지된다 — `_STOCK_CODE_RE`가 `{6,9}` 단순 상한을 쓰지 않는 이유가 그대로 선다.
+
+**대표 코드 2건이 마스터에서 빠졌다.** 문서와 테스트가 "실재하는 예시"로 쓰던 `F70100026`(한투글로벌넥스트웨이브1(A))과 `Q500020`(신한 레버리지 다우존스지수 선물 ETN(H))이 상환·상장폐지로 사라졌다. 형태만 보는 단정(정규식·판정표)은 그대로 두었고, **마스터 실재를 전제하는 테스트만** 현재 상장된 `F70100034`(한투한미넥스트혁신성장1(A))로 바꿨다 — `backend/tests/test_stock_code.py`의 `TestIsKnownMasterCode` 2건, `backend/tests/test_services.py` 2건. 펀드는 설정·상환이 잦아 이 교체는 다음 재생성에서도 또 필요할 수 있다.
+
+마스터 수치를 주석에 적어 둔 코드(`backend/stock_code.py`·`order_assist.py`·`scheduler.py`·`services.py`·`telegram_commands.py`와 각 테스트)도 같은 커밋에서 함께 고쳤다. 런타임 변화는 없다 — docstring을 제외한 AST가 `origin/main`과 동일하다.
 
 G1·G2의 줄 번호(`:77`·`:84`)는 `93e9e82` 시점에 이미 낡아 있었고(당시 `:108`·`:111`), 이 브랜치가 가드를 `buildCashOrderBody()` 안쪽으로 더 밀었다. 그래서 위 표는 줄 번호 대신 **함수와 심볼로** 가리킨다 — 커밋 `a7916bc`가 `stock_code.py` 쪽 주석에 적용한 규약과 같다. 줄 번호로 적힌 참조는 앞으로도 같은 방식으로 늙는다.
 
@@ -353,7 +384,7 @@ etpr_undt_objt_co_yn  → Y 스팩 (scrt_grp_cls_code=ST 안에서 스팩을 가
 - 장점: 신규 상장으로 코드 형식이 또 바뀌어도 정규식을 다시 손댈 필요가 없다. 2023년 KRX 개편으로 코드 체계가 이미 한 번 바뀌었고(`0001A0` 계열의 등장), 또 바뀌지 않는다는 보장이 없다.
 - 장점: #73이 언급한 "마스터 생성 시 주문 불가 종목 표시" 방안과 같은 방향이다.
 - 비용: `stocks.json` 스키마 변경 → `stock-master.js`, `backend/stock_code.py`의 `_load_master_codes`, 관련 테스트 영향. 마스터 재생성 필요.
-- **선행 작업**: `update_stock_master.py:55`의 꼬리 슬라이스 off-by-one을 먼저 수정해야 한다(4.1 주의사항). 수정 전에 구현하면 추출 필드 전체가 1글자씩 밀려 조용히 옆 필드 값을 읽는다. 오프셋은 공식 파서(`kis_kospi_code_mst.py`)로 확정 가능하므로 실호출 없이 착수할 수 있다(4.2 라).
+- ~~**선행 작업**: `update_stock_master.py:55`의 꼬리 슬라이스 off-by-one을 먼저 수정해야 한다(4.1 주의사항).~~ → **완료(2026-10-14)**. off-by-one을 고치고 오프셋 맵을 시장별로 둔 뒤 3개 필드를 `stocks.json`에 실었다. 수정 전에 구현했다면 추출 필드 전체가 1글자씩 밀려 조용히 옆 필드 값을 읽었을 것이다.
 
 **안 B — 판정 지점은 그대로 두고 정규식만 단계적으로 넓힘**
 
@@ -552,10 +583,10 @@ CNDT_PRIC        = ""
 - 776건 전부 `resolveStock()`으로 정상 해석되고, 776건 전부 `buildCashOrderBody()`에서 거절된다(701 / 75 분해도 일치).
 - 차단 지점은 `order.js:77`, `order.js:84`, `backend/stock_code.py:59` 세 곳뿐이다. `backend/stock_code.py:59`가 Telegram 경로에서 가장 앞선다.
 - 조회·추출 계층(`resolve_stock_code`, `get_stock_quote`, `_extract_stock_code`, `scheduler.STOCK_LINE_RE`)은 776건을 전부 통과시킨다.
-- 9자 75건은 전부 펀드가 아니다 — `F` 69건(펀드)과 `J` 6건(신주인수권증서)이 섞여 있다.
+- 9자 75건은 전부 펀드가 아니다 — `F` 69건(펀드)과 `J` 6건(신주인수권증서)이 섞여 있다. *(2026-10-14 재생성 후: 9자 89건 = `F` 84 + `J` 5. 확정 필드로 보면 `F`는 전부 `scrt_grp_cls_code=BC`(수익증권), `J`는 `SW`(신주인수권) 4건과 `SR` 1건으로 갈린다.)*
 - 영숫자 6자 312건 중 23건은 신형우선주(`00088K` 한화3우B 등)로, 이름에 "우"가 들어가는 것이 23/23이다.
 - 종목마스터의 `code`는 KIS가 배포하는 `.mst` 마스터의 9자 단축코드 필드를 그대로 옮긴 값이다(`update_stock_master.py:56`).
-- `update_stock_master.py:55`의 꼬리 슬라이스가 공식 파서와 1글자 어긋난다 — `rstrip("\n")` 후 `tail_width`를 빼기 때문에 헤더 끝 1글자를 더 잘라 낸다. 증상: 이름이 필드를 꽉 채운 종목 **9건**에서 닫는 괄호 `)`가 누락된다 (실측 확인: `0000D0`, `0015E0`, `0015F0`, `276970`, `423920`, `480020`, `Q610036`, `Q610085`, `Q610086`). 안 A 구현 전에 `data_width = tail_width - 1` 규약으로 수정해야 한다(4.1).
+- ~~`update_stock_master.py:55`의 꼬리 슬라이스가 공식 파서와 1글자 어긋난다~~ → **수정 완료(2026-10-14)**. `rstrip("\n")` 후 `tail_width`를 빼서 헤더 끝 1글자를 더 잘라냈다. 증상이던 9건(`0000D0`, `0015E0`, `0015F0`, `276970`, `423920`, `480020`, `Q610036`, `Q610085`, `Q610086`)은 `data_width = tail_width - 1` 적용 후 **9/9 전부** 닫는 괄호를 되찾았다. 예고되지 않았던 2차 증상도 드러났다 — 잘린 이름이 다른 종목과 겹치면 `deduplicate_stocks`의 `(market, name)` 키가 충돌해 종목이 통째로 사라진다(4.1).
 - 이슈가 지목한 파일:줄 3곳이 모두 낡았다(5장).
 - `mcp-trading` 테스트 베이스라인: **138 pass / 0 fail**.
 
@@ -565,14 +596,23 @@ CNDT_PRIC        = ""
 - 스펙 문구에 문자 구성 제약이 없다("숫자 6자리"가 아니라 "6자리").
 - `PDNO` 스펙에 **9자에 대한 언급이 없다.**
 - KIS 마스터 정의(`종목마스터정보(코스피).h`)에 `scrt_grp_cls_code`(`ST`/`EF`/`SR`/`BC` …), `prst_cls_code`(`2`=신형우선주), `etp_prod_cls_code`(`3`=ETN), `etpr_undt_objt_co_yn`(`Y`=스팩) 필드가 실재한다 — `update_stock_master.py`가 버리는 꼬리 안에 있다.
-- `kis_kospi_code_mst.py`·`kis_kosdaq_code_mst.py`(공식 파서)의 `field_specs` 합이 각각 **227자(70필드) / 221자(64필드)** 다. `data_width = tail_width - 1` 규약이 양 시장에서 성립하고, 오프셋도 확정된다 — KOSPI `tail[0:2]`/`tail[22:23]`/`tail[29:30]`/`tail[158:159]`, KOSDAQ `tail[0:2]`/`tail[18:19]`/`tail[24:25]`/`tail[153:154]`. **두 시장의 레이아웃이 다르므로 오프셋 맵은 시장별로 둬야 한다**(4.2 라).
+- `kis_kospi_code_mst.py`·`kis_kosdaq_code_mst.py`(공식 파서)의 `field_specs` 합이 각각 **227자(70필드) / 221자(64필드)** 다. `data_width = tail_width - 1` 규약이 양 시장에서 성립하고, 오프셋도 확정된다. **두 시장의 레이아웃이 다르므로 오프셋 맵은 시장별로 둬야 한다**(4.2 라). 필드와 오프셋은 아래처럼 짝지어 읽어야 한다 — 필드 나열 순서와 오프셋 오름차순이 달라, 늘어놓기만 하면 짝이 어긋나 보인다:
+
+  | 필드 | KOSPI | KOSDAQ |
+  |---|---|---|
+  | `scrt_grp_cls_code` | `tail[0:2]` | `tail[0:2]` |
+  | `etp_prod_cls_code` | `tail[22:23]` | `tail[18:19]` |
+  | `etpr_undt_objt_co_yn` | `tail[29:30]` | `tail[24:25]` |
+  | `prst_cls_code` | `tail[158:159]` | `tail[153:154]` |
+
+  2026-10-14에 실제 `.mst`로 네 오프셋을 전부 역검증했고 모두 맞다(4.2 라의 실측 확인). 구현에는 `etp_prod_cls_code`를 뺀 3개만 넣었다.
 - KIS 공식 저장소에 집합투자증권(펀드) 전용 주문 API가 없다(부재 증거).
 - `order.js`가 쓰는 TR ID(`TTTC0012U` 등)는 현행 값이 맞다. 검색에 흔한 `TTTC0802U` 계열은 구버전이다.
 - `0001A0`(덕양에너젠)은 2026-01-30 코스닥 상장 종목으로 실재한다(복수 독립 소스).
 
 **추정 (근거 있으나 미확정)**:
 
-- 영숫자 6자 289건의 상품 분류(ETF 약 237, 스팩 27, 보통주 23, 리츠 2)는 **종목명 패턴 기반 추정**이다. 정확한 분류는 `scrt_grp_cls_code` + `etpr_undt_objt_co_yn`로 확정된다(스팩은 `scrt_grp_cls_code=ST`여서 두 필드 없이는 보통주와 갈리지 않는다).
+- ~~영숫자 6자 289건의 상품 분류(ETF 약 237, 스팩 27, 보통주 23, 리츠 2)는 **종목명 패턴 기반 추정**이다.~~ → **확정됨(2026-10-14)**. `scrt_grp_cls_code`와 `etpr_undt_objt_co_yn`이 `stocks.json`에 실렸다. 재생성 후 영숫자 6자 **405건**의 확정 분류는 ETF 317 / 주권 52 / **스팩 33** / 사모펀드 2 / 리츠 1이다. 모집단이 289→405로 커져 옛 추정치와 1:1 비교는 안 되지만, 스팩이 이름 패턴 추정(27)보다 많다는 사실은 추정이 스팩을 과소계상했음을 보여 준다 — 스팩은 `scrt_grp_cls_code=ST`라 이름에 “스팩”이 없으면 보통주와 갈리지 않았다. 신형우선주는 `prst_cls_code=2`로 전체 **23건**이며, 그중 차단 대상은 8건이다.
 - 신형우선주·신규 6자 코드가 일반 주식 주문 채널로 거래된다는 것은 **정황 근거**다(주권 범주, 전용 TR 부재, 스펙 문구와 부합). 명시적 확인 문구는 찾지 못했다.
 
 **미확인 (실호출 없이는 확인 불가)**:
@@ -593,4 +633,6 @@ CNDT_PRIC        = ""
 4. 검증 결과와 무관하게 착수 가능한 것:
    - ~~`backend/telegram_commands.py`의 부정확한 문구 수정(6.6)~~ → **완료(Stage 0)**. 상품군을 단정하지 않고 코드 형태만 말하는 문장으로 바꿨다.
    - 이슈 #138 본문의 낡은 파일:줄 참조 갱신(5장)
-   - **안 A의 마스터 필드 추출 착수 — 실호출 불필요**: `update_stock_master.py:55` off-by-one 수정 → `kis_kospi_code_mst.py`·`kis_kosdaq_code_mst.py`로 오프셋 확정(4.2 라) → `stocks.json` 스키마 설계(`scrt_grp_cls_code` / `prst_cls_code` / `etpr_undt_objt_co_yn` 3개 필드 추가) 순으로 7장 검증 결과와 무관하게 진행할 수 있다.
+   - ~~**안 A의 마스터 필드 추출 착수 — 실호출 불필요**~~ → **완료(2026-10-14)**. off-by-one 수정 → 공식 파서 `field_specs`로 오프셋 확정 → `scrt_grp_cls_code` / `prst_cls_code` / `etpr_undt_objt_co_yn` 3개 필드를 `stocks.json`에 실었다. 이로써 **6.5 단계 1~3이 여는 대상을 이름 휴리스틱이 아니라 코드값으로 고를 수 있다** — 단계 1(신형우선주)은 `prst_cls_code == 2`, 단계 3에 섞여 있던 스팩은 `etpr_undt_objt_co_yn == Y`로 정확히 집힌다.
+
+     **소비자 연결은 하지 않았다.** 필드는 마스터에 실려 있을 뿐, `order.js`와 `backend/stock_code.py`의 주문 가능 판정은 여전히 코드 **형태**만 본다. 분류로 판정을 가르는 것은 7장 실측이 끝나고 롤아웃 단계를 열 때 할 일이다.
