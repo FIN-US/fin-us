@@ -9,7 +9,7 @@ from datetime import date
 
 import pytest
 
-import backend.scheduler as scheduler_module
+from backend.scheduler import catalyst as scheduler_catalyst, jobs as scheduler_jobs
 from backend.telegram.presentation import LEVEL_INTERMEDIATE, TERM_FOOTNOTE_MARK
 from backend.repositories.watchlist import SqliteWatchlistRepo
 
@@ -47,7 +47,7 @@ def fake_redis_state(monkeypatch):
         async def _factory():
             yield state
 
-        monkeypatch.setattr(scheduler_module, "redis_state", _factory)
+        monkeypatch.setattr("backend.scheduler.deps.redis_state", _factory)
         return state
 
     return _install
@@ -94,11 +94,11 @@ async def test_morning_briefing_reads_the_saved_level(monkeypatch, fake_redis_st
         # 사전에 있는 말을 넣어, 수준이 무시되면 각주가 붙어 눈에 띄게 한다.
         return {"market_summary": "예수금과 수급을 확인하세요.", "watchlist": [], "trading_ideas": [], "catalysts": []}
 
-    monkeypatch.setattr(scheduler_module, "SqliteWatchlistRepo", lambda factory: FakeWatchlistRepo())
-    monkeypatch.setattr(scheduler_module, "generate_morning_briefing", fake_briefing)
-    monkeypatch.setattr(scheduler_module.telegram_notifier, "send_text", notifier.send_text)
+    monkeypatch.setattr("backend.scheduler.deps.SqliteWatchlistRepo", lambda factory: FakeWatchlistRepo())
+    monkeypatch.setattr("backend.scheduler.jobs.generate_morning_briefing", fake_briefing)
+    monkeypatch.setattr("backend.telegram.notifier.telegram_notifier.send_text", notifier.send_text)
 
-    await scheduler_module.morning_briefing_task()
+    await scheduler_jobs.morning_briefing_task()
 
     assert notifier.messages
     assert TERM_FOOTNOTE_MARK not in notifier.messages[-1]
@@ -113,17 +113,17 @@ async def test_morning_briefing_falls_back_when_the_level_cannot_be_read(monkeyp
         raise ConnectionError("redis unavailable")
         yield  # pragma: no cover
 
-    monkeypatch.setattr(scheduler_module, "redis_state", _broken)
+    monkeypatch.setattr("backend.scheduler.deps.redis_state", _broken)
     notifier = FakeNotifier()
 
     async def fake_briefing(watchlist):
         return {"market_summary": "예수금을 확인하세요.", "watchlist": [], "trading_ideas": [], "catalysts": []}
 
-    monkeypatch.setattr(scheduler_module, "SqliteWatchlistRepo", lambda factory: FakeWatchlistRepo())
-    monkeypatch.setattr(scheduler_module, "generate_morning_briefing", fake_briefing)
-    monkeypatch.setattr(scheduler_module.telegram_notifier, "send_text", notifier.send_text)
+    monkeypatch.setattr("backend.scheduler.deps.SqliteWatchlistRepo", lambda factory: FakeWatchlistRepo())
+    monkeypatch.setattr("backend.scheduler.jobs.generate_morning_briefing", fake_briefing)
+    monkeypatch.setattr("backend.telegram.notifier.telegram_notifier.send_text", notifier.send_text)
 
-    await scheduler_module.morning_briefing_task()
+    await scheduler_jobs.morning_briefing_task()
 
     # 기본값(초보)으로 떨어져 설명이 붙는 쪽을 택한다.
     assert notifier.messages
@@ -149,9 +149,9 @@ async def test_catalyst_alerts_carry_the_saved_level(monkeypatch, fake_redis_sta
     )()
     repo = FakeCatalystRepo([event])
 
-    monkeypatch.setattr(scheduler_module, "_collect_catalyst_events", lambda *a, **k: _noop())
+    monkeypatch.setattr("backend.scheduler.catalyst._collect_catalyst_events", lambda *a, **k: _noop())
 
-    await scheduler_module.catalyst_calendar_task(
+    await scheduler_catalyst.catalyst_calendar_task(
         watchlist_repo=FakeWatchlistRepo(),
         catalyst_repo=repo,
         notifier=notifier,
@@ -174,11 +174,11 @@ async def test_a_no_redis_run_does_not_open_redis_for_the_level(monkeypatch):
         raise AssertionError("redis를 열면 안 된다")
         yield  # pragma: no cover
 
-    monkeypatch.setattr(scheduler_module, "redis_state", _tripwire)
-    monkeypatch.setattr(scheduler_module, "_collect_catalyst_events", lambda *a, **k: _noop())
+    monkeypatch.setattr("backend.scheduler.deps.redis_state", _tripwire)
+    monkeypatch.setattr("backend.scheduler.catalyst._collect_catalyst_events", lambda *a, **k: _noop())
     notifier = FakeNotifier()
 
-    await scheduler_module.catalyst_calendar_task(
+    await scheduler_catalyst.catalyst_calendar_task(
         watchlist_repo=FakeWatchlistRepo(),
         catalyst_repo=FakeCatalystRepo([]),
         notifier=notifier,

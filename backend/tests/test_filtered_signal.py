@@ -283,7 +283,7 @@ def test_fill_score_axis_warns_when_dropping_out_of_axis_buckets(caplog):
 def test_source_filter_matches_signal_sources():
     """조회 필터가 받는 값이 실제 감시 출처와 어긋나면 조회가 조용히 빈다."""
     from backend.main import SignalSourceName
-    from backend.scheduler import SIGNAL_SOURCES
+    from backend.scheduler.monitor import SIGNAL_SOURCES
 
     assert set(get_args(SignalSourceName)) == {source.name for source in SIGNAL_SOURCES}
 

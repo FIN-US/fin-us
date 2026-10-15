@@ -29,7 +29,7 @@ from sqlmodel import Session  # noqa: E402
 from backend.core.config import NEWS_MCP_PARAMS  # noqa: E402
 from backend.core.database import engine  # noqa: E402
 from backend.pii.egress import public  # noqa: E402
-from backend.scheduler import DEFAULT_MONITOR_STOCKS  # noqa: E402
+from backend.scheduler.monitor import DEFAULT_MONITOR_STOCKS  # noqa: E402
 from backend.ai.services import run_mcp_tool, score_signal  # noqa: E402
 from backend.repositories.watchlist import SqliteWatchlistRepo  # noqa: E402
 

@@ -423,7 +423,7 @@ async def test_stock_analysis_trigger_follows_the_callers_marking(captured_provi
 @pytest.mark.asyncio
 async def test_monitored_public_source_reaches_scoring_and_analysis_as_public(monkeypatch):
     """스케줄러는 SignalSource.public_data에 따라 원문을 표시한다 — 기본값은 개인이다."""
-    from backend import scheduler
+    from backend.scheduler import deps, monitor
 
     seen: list[tuple[str, object]] = []
 
@@ -447,17 +447,17 @@ async def test_monitored_public_source_reaches_scoring_and_analysis_as_public(mo
         return None
 
     sources = [
-        scheduler.SignalSource(name="news", mcp_params=object(), tool_name="get_market_news", public_data=True),
-        scheduler.SignalSource(name="custom", mcp_params=object(), tool_name="get_custom"),
+        monitor.SignalSource(name="news", mcp_params=object(), tool_name="get_market_news", public_data=True),
+        monitor.SignalSource(name="custom", mcp_params=object(), tool_name="get_custom"),
     ]
-    monkeypatch.setattr(scheduler, "run_mcp_tool", fake_run_mcp_tool)
-    monkeypatch.setattr(scheduler, "score_signal", fake_score_signal)
-    monkeypatch.setattr(scheduler, "perform_stock_analysis", fake_analysis)
-    monkeypatch.setattr(scheduler, "_send_telegram_alert_if_needed", fake_alert)
-    monkeypatch.setattr(scheduler.manager, "broadcast", fake_broadcast)
+    monkeypatch.setattr(deps, "run_mcp_tool", fake_run_mcp_tool)
+    monkeypatch.setattr(monitor, "score_signal", fake_score_signal)
+    monkeypatch.setattr(monitor, "perform_stock_analysis", fake_analysis)
+    monkeypatch.setattr(monitor, "_send_telegram_alert_if_needed", fake_alert)
+    monkeypatch.setattr(monitor.manager, "broadcast", fake_broadcast)
 
     for source in sources:
-        await scheduler._monitor_signal("삼성전자", source, object(), None)  # type: ignore[arg-type]
+        await monitor._monitor_signal("삼성전자", source, object(), None)  # type: ignore[arg-type]
 
     assert seen == [
         ("score:news", public("get_market_news: 매출 500억원")),
@@ -469,9 +469,9 @@ async def test_monitored_public_source_reaches_scoring_and_analysis_as_public(mo
 
 def test_production_signal_sources_are_the_public_feeds():
     """운영 감시 소스가 공개 표시를 잃으면 채점·분석 프롬프트의 뉴스 수치가 다시 마스킹된다."""
-    from backend import scheduler
+    from backend.scheduler import monitor
 
-    assert {(s.tool_name, s.public_data) for s in scheduler.SIGNAL_SOURCES} == {
+    assert {(s.tool_name, s.public_data) for s in monitor.SIGNAL_SOURCES} == {
         ("get_market_news", True),
         ("get_disclosure_signal", True),
     }

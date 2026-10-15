@@ -22,12 +22,8 @@ from backend.core.config import (
 from backend.repositories.filtered_signal import fill_score_axis, score_histogram
 from backend.pii.registry import placeholder_kind, restore_live_placeholders
 from backend.core.ws_manager import manager
-from backend.scheduler import (
-    format_price_updated_at,
-    is_price_fresh,
-    start_scheduler,
-    stop_scheduler,
-)
+from backend.scheduler.jobs import start_scheduler, stop_scheduler
+from backend.scheduler.portfolio import format_price_updated_at, is_price_fresh
 from backend.telegram.commands import start_telegram_commands, stop_telegram_commands
 from backend.core.schemas import CommonResponse, DiaryCreate
 from backend.ai.services import (
