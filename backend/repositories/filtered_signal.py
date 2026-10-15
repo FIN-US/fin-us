@@ -109,7 +109,7 @@ class SqliteFilteredSignalRepo:
         """걸러진 신호 한 건의 채점 결과를 남긴다. ``score``가 None이면 남기지 않는다.
 
         점수 없이 걸러지는 경로가 실제로 있다 — 본문이 비었거나 직전과 같은 signal은
-        LLM을 부르지도 않고 걸러진다(services._SKIPPED_SIGNAL_SCORE). 그런 행을 남기면
+        LLM을 부르지도 않고 걸러진다(ai.signals._SKIPPED_SIGNAL_SCORE). 그런 행을 남기면
         점수 분포에 보탤 정보는 0인데, 감시 루프가 종목·소스마다 10분 주기로 도는 탓에
         "이번 주기에도 새 소식이 없었다"는 행만 테이블을 가득 채운다. 그래서 여기 남는
         행은 전부 "모델이 실제로 채점했고 그 점수가 임계값에 못 미쳤다"는 뜻이다.
@@ -224,7 +224,7 @@ def fill_score_axis(
     거친다.
 
     축 밖의 점수는 표시할 자리가 없어 버려지는데, 그러면 응답의 total과 buckets의 합이
-    어긋난다. 지금은 채점이 -3~+3으로 clamp되어(services._coerce_signal_score) 도달할
+    어긋난다. 지금은 채점이 -3~+3으로 clamp되어(ai.signals._coerce_signal_score) 도달할
     수 없는 상태지만, 그 clamp가 사라지면 무증상으로 깨지므로 버릴 때 로그를 남긴다.
     """
     out_of_axis = [bucket for bucket in buckets if not low <= bucket.score <= high]

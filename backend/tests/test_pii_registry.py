@@ -35,7 +35,7 @@ from backend.pii import mask as pii_mask
 
 from backend.pii import registry as pii_registry
 
-from backend.ai import services
+from backend.ai import llm as ai_llm
 from backend.core.database import get_session
 from backend.main import app
 from backend.core.models import Diary
@@ -330,11 +330,11 @@ class TestConcurrentRequests:
             seen.append((masked_msg, restored))
             return "확인했습니다"
 
-        monkeypatch.setattr(services, "_llm_nat_chat", fake_nat)
+        monkeypatch.setattr(ai_llm, "_llm_nat_chat", fake_nat)
 
         await asyncio.gather(
-            services.llm_chat("nat", "300만원 벌었어"),
-            services.llm_chat("nat", "잔고 12,345,000원"),
+            ai_llm.llm_chat("nat", "300만원 벌었어"),
+            ai_llm.llm_chat("nat", "잔고 12,345,000원"),
         )
 
         assert sorted(restored for _, restored in seen) == sorted(
@@ -477,9 +477,9 @@ class TestSaveDuringLlmChat:
             assert saved.status_code == 200
             return "일지를 저장했습니다"
 
-        monkeypatch.setattr(services, "_llm_nat_chat", fake_nat)
+        monkeypatch.setattr(ai_llm, "_llm_nat_chat", fake_nat)
 
-        answer = await services.llm_chat("nat", "300만원 벌었어, 일지 써줘")
+        answer = await ai_llm.llm_chat("nat", "300만원 벌었어, 일지 써줘")
 
         assert answer == "일지를 저장했습니다"
         assert session.exec(select(Diary)).one().content == "300만원 벌었어, 일지 써줘"
@@ -502,11 +502,11 @@ class TestSaveDuringLlmChat:
             assert saved.status_code == 200
             return "저장 완료"
 
-        monkeypatch.setattr(services, "_llm_nat_chat", fake_nat)
+        monkeypatch.setattr(ai_llm, "_llm_nat_chat", fake_nat)
 
         await asyncio.gather(
-            services.llm_chat("nat", "300만원 벌었어", conversation_id="a"),
-            services.llm_chat("nat", "잔고가 12,345,000원이야", conversation_id="b"),
+            ai_llm.llm_chat("nat", "300만원 벌었어", conversation_id="a"),
+            ai_llm.llm_chat("nat", "잔고가 12,345,000원이야", conversation_id="b"),
         )
 
         stored = {d.title: d.content for d in session.exec(select(Diary)).all()}
@@ -530,8 +530,8 @@ class TestSaveDuringLlmChat:
             leaked["masked"] = masked_msg
             return "확인했습니다"
 
-        monkeypatch.setattr(services, "_llm_nat_chat", fake_nat)
-        await services.llm_chat("nat", "300만원 벌었어")
+        monkeypatch.setattr(ai_llm, "_llm_nat_chat", fake_nat)
+        await ai_llm.llm_chat("nat", "300만원 벌었어")
 
         response = await asgi_client.post(
             "/api/v1/db/diary",

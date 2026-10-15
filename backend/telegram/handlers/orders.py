@@ -9,7 +9,7 @@ from typing import Any
 
 from fastapi import HTTPException
 
-from backend.ai.services import short_error as _short_error
+from backend.ai.mcp_tools import short_error as _short_error
 from backend.core.config import TRADING_MCP_PARAMS
 from backend.core.timeutil import KST
 from backend.telegram.delivery_alarm import delivery_metrics
@@ -228,7 +228,7 @@ class OrderCommands(HandlerBase):
             # 입력을 market="UNKNOWN"으로 그대로 에코하므로("999999 (999999, UNKNOWN)")
             # 코드 추출은 성공하고 아래 숫자 6~7자 검사도 통과한다. 백엔드가 여기서
             # 끊지 않으면 실재 여부 확인이 KIS 왕복이나 /confirm 시점 브로커 거절로
-            # 미뤄진다 — 리포트 저장 경로(services._resolve_stock_code)는 이미 같은
+            # 미뤄진다 — 리포트 저장 경로(ai.analysis._resolve_stock_code)는 이미 같은
             # 판정으로 막고 있으므로, 위험도가 더 높은 주문 경로도 같은 선에서 막는다.
             if _is_unresolved_echo(str(resolved)):
                 await self._send_text_or_raise(

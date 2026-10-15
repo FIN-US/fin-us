@@ -9,7 +9,7 @@
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from sqlmodel import Session
 
-from backend.ai.services import run_mcp_tool
+from backend.ai.mcp_tools import run_mcp_tool
 from backend.core.database import engine
 from backend.core.redis_state import redis_state
 from backend.core.timeutil import KST

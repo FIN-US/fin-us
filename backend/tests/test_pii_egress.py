@@ -23,7 +23,10 @@ from backend.pii import egress as pii_egress
 
 from backend.pii import mask as pii_mask
 
-from backend.ai import services
+from backend.ai import analysis as ai_analysis
+from backend.ai import llm as ai_llm
+from backend.ai import mcp_tools as ai_mcp
+from backend.ai import signals as ai_signals
 from backend.pii.egress import (
     EgressBlocked,
     Segment,
@@ -255,11 +258,11 @@ def captured_providers(monkeypatch):
 
     async def fake_nat(user_msg, *, conversation_id=None):
         sent["nat"].append(user_msg)
-        return services.NatAnswer("ok")
+        return ai_llm.NatAnswer("ok")
 
-    monkeypatch.setattr(services, "_llm_openai_chat", fake_openai)
-    monkeypatch.setattr(services, "_llm_anthropic_chat", fake_anthropic)
-    monkeypatch.setattr(services, "_llm_nat_chat", fake_nat)
+    monkeypatch.setattr(ai_llm, "_llm_openai_chat", fake_openai)
+    monkeypatch.setattr(ai_llm, "_llm_anthropic_chat", fake_anthropic)
+    monkeypatch.setattr(ai_llm, "_llm_nat_chat", fake_nat)
     return sent
 
 
@@ -276,7 +279,7 @@ async def test_external_provider_receives_masked_account_and_amounts(
         public(PUBLIC_NEWS),
     ]
 
-    await services.llm_chat(provider, prompt)
+    await ai_llm.llm_chat(provider, prompt)
 
     (sent,) = captured_providers[provider]
     assert "87654321" not in sent
@@ -295,7 +298,7 @@ async def test_blocked_masking_never_reaches_the_provider(captured_providers, mo
     monkeypatch.setattr(pii_egress, "mask_pii", broken_mask)
 
     with pytest.raises(EgressBlocked):
-        await services.llm_chat("openai", "예수금 1,000,000원")
+        await ai_llm.llm_chat("openai", "예수금 1,000,000원")
 
     assert captured_providers["openai"] == []
 
@@ -305,9 +308,9 @@ async def test_response_placeholders_from_personal_segments_are_restored(monkeyp
     async def echo_openai(user_msg):
         return f"받은 값: {_placeholders(user_msg)[0]}"
 
-    monkeypatch.setattr(services, "_llm_openai_chat", echo_openai)
+    monkeypatch.setattr(ai_llm, "_llm_openai_chat", echo_openai)
 
-    answer = await services.llm_chat("openai", [personal("예수금 1,000,000원"), public(" 매출 500억원")])
+    answer = await ai_llm.llm_chat("openai", [personal("예수금 1,000,000원"), public(" 매출 500억원")])
 
     assert answer == "받은 값: 1,000,000원"
 
@@ -330,9 +333,9 @@ async def test_morning_briefing_masks_balance_but_keeps_news_and_flows(
             return "기관 2,500주 순매도, 외국인 12,000주 순매수"
         raise AssertionError(tool_name)
 
-    monkeypatch.setattr(services, "run_mcp_tool", fake_run_mcp_tool)
+    monkeypatch.setattr(ai_mcp, "run_mcp_tool", fake_run_mcp_tool)
 
-    await services.generate_morning_briefing(["삼성전자"])
+    await ai_analysis.generate_morning_briefing(["삼성전자"])
 
     (sent,) = captured_providers["nat"]
     for value in BALANCE_PRIVATE_VALUES:
@@ -352,9 +355,9 @@ async def test_morning_briefing_failure_text_is_not_trusted_as_public(
             raise RuntimeError("예수금 1,000,000원 조회 중 오류")
         return "없음"
 
-    monkeypatch.setattr(services, "run_mcp_tool", fake_run_mcp_tool)
+    monkeypatch.setattr(ai_mcp, "run_mcp_tool", fake_run_mcp_tool)
 
-    await services.generate_morning_briefing([])
+    await ai_analysis.generate_morning_briefing([])
 
     (sent,) = captured_providers["nat"]
     assert "get_market_news 조회 실패" in sent
@@ -372,7 +375,7 @@ async def test_earnings_command_sends_dart_figures_unmasked(captured_providers):
     handler = TelegramCommandHandler(
         notifier=notifier,
         mcp_runner=mcp_runner,
-        llm_runner=services.llm_chat,
+        llm_runner=ai_llm.llm_chat,
     )
 
     await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/earnings 삼성전자"}})
@@ -386,8 +389,8 @@ async def test_earnings_command_sends_dart_figures_unmasked(captured_providers):
 async def test_score_signal_keeps_public_figures_and_masks_unmarked_text(
     captured_providers,
 ):
-    await services.score_signal("삼성전자", public(PUBLIC_NEWS), source="news", provider="openai")
-    await services.score_signal("삼성전자", PUBLIC_NEWS, source="news", provider="openai")
+    await ai_signals.score_signal("삼성전자", public(PUBLIC_NEWS), source="news", provider="openai")
+    await ai_signals.score_signal("삼성전자", PUBLIC_NEWS, source="news", provider="openai")
 
     marked, unmarked = captured_providers["openai"]
     for value in PUBLIC_VALUES:
@@ -400,17 +403,17 @@ async def test_stock_analysis_trigger_follows_the_callers_marking(captured_provi
     async def fake_run_mcp_tool(params, tool_name, arguments):
         return "삼성전자 (005930, KOSPI)"
 
-    monkeypatch.setattr(services, "run_mcp_tool", fake_run_mcp_tool)
+    monkeypatch.setattr(ai_mcp, "run_mcp_tool", fake_run_mcp_tool)
 
     class Session:
         def add(self, _instance): ...
         def commit(self): ...
         def refresh(self, _instance): ...
 
-    await services.perform_stock_analysis(
+    await ai_analysis.perform_stock_analysis(
         "삼성전자", "anthropic", Session(), trigger_source="disclosure", trigger_signal=public(PUBLIC_NEWS)
     )
-    await services.perform_stock_analysis(
+    await ai_analysis.perform_stock_analysis(
         "삼성전자", "anthropic", Session(), trigger_source="disclosure", trigger_signal=PUBLIC_NEWS
     )
 
@@ -434,7 +437,7 @@ async def test_monitored_public_source_reaches_scoring_and_analysis_as_public(mo
 
     async def fake_score_signal(stock, current, last, *, source, provider):
         seen.append(("score:" + source, current))
-        return services.SignalScore(3, "근거", None, (3,), True)
+        return ai_signals.SignalScore(3, "근거", None, (3,), True)
 
     async def fake_analysis(stock, provider, session, **kwargs):
         seen.append(("analysis:" + kwargs["trigger_source"], kwargs["trigger_signal"]))

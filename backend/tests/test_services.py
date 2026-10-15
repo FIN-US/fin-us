@@ -15,9 +15,12 @@ import pytest
 from fastapi import HTTPException
 from mcp import StdioServerParameters
 
-from backend.ai import services
+from backend.ai import analysis as ai_analysis
+from backend.ai import llm as ai_llm
+from backend.ai import mcp_tools as ai_mcp
+from backend.ai import signals as ai_signals
 from backend.pii.egress import render_unmasked
-from backend.ai.services import SignalScore
+from backend.ai.signals import SignalScore
 
 
 class FakeSession:
@@ -89,9 +92,9 @@ async def test_check_signal_significance_uses_generic_source_prompt(monkeypatch)
         prompts.append((provider, prompt))
         return "YES"
 
-    monkeypatch.setattr(services, "llm_chat", fake_llm_chat)
+    monkeypatch.setattr(ai_llm, "llm_chat", fake_llm_chat)
 
-    result = await services.check_signal_significance(
+    result = await ai_signals.check_signal_significance(
         "삼성전자",
         "긍정 SNS 언급 급증",
         source="sns",
@@ -106,11 +109,11 @@ async def test_check_signal_significance_uses_generic_source_prompt(monkeypatch)
 
 @pytest.mark.asyncio
 async def test_run_mcp_tool_raises_tool_level_error_detail(monkeypatch):
-    monkeypatch.setattr(services, "stdio_client", lambda server_params: FakeStdioClient())
-    monkeypatch.setattr(services, "ClientSession", FakeMcpSession)
+    monkeypatch.setattr(ai_mcp, "stdio_client", lambda server_params: FakeStdioClient())
+    monkeypatch.setattr(ai_mcp, "ClientSession", FakeMcpSession)
 
     with pytest.raises(HTTPException) as exc_info:
-        await services.run_mcp_tool(
+        await ai_mcp.run_mcp_tool(
             # stdio_client가 대역이라 이 값은 어디에도 쓰이지 않는다. 그래도 선언
             # 타입대로 넘긴다 — 임의의 객체를 넘기면 주입 지점의 계약이 이 호출에서만
             # 사라진다 (#319).
@@ -137,10 +140,10 @@ async def test_perform_stock_analysis_includes_trigger_signal(monkeypatch):
     async def fake_run_mcp_tool(params, tool_name, arguments):
         return "삼성전자 (005930, KOSPI)"
 
-    monkeypatch.setattr(services, "llm_chat", fake_llm_chat)
-    monkeypatch.setattr(services, "run_mcp_tool", fake_run_mcp_tool)
+    monkeypatch.setattr(ai_llm, "llm_chat", fake_llm_chat)
+    monkeypatch.setattr(ai_mcp, "run_mcp_tool", fake_run_mcp_tool)
 
-    await services.perform_stock_analysis(
+    await ai_analysis.perform_stock_analysis(
         "삼성전자",
         "nat",
         FakeSession(),
@@ -162,7 +165,7 @@ async def test_provider_supports_tools_matches_llm_chat_dispatch(monkeypatch):
 
     이전 버전은 provider_is_tool_backed의 출력을 하드코딩된 기대값 4개와만
     비교했다 - llm_chat 자체의 라우팅이 깨져도(예: openai를 실수로 _llm_nat_chat에
-    연결해도) 통과했다. 여기서는 각 provider_key로 실제 services.llm_chat()을
+    연결해도) 통과했다. 여기서는 각 provider_key로 실제 ai_llm.llm_chat()을
     호출해 내부적으로 어떤 _llm_*_chat 구현이 실행됐는지 관측하고, 그 관측치와
     provider_supports_tools()의 답을 대조한다.
 
@@ -190,12 +193,12 @@ async def test_provider_supports_tools_matches_llm_chat_dispatch(monkeypatch):
         invoked.append("nat")
         return "ok"
 
-    monkeypatch.setattr(services, "_llm_openai_chat", fake_openai)
-    monkeypatch.setattr(services, "_llm_anthropic_chat", fake_anthropic)
-    monkeypatch.setattr(services, "_llm_ollama_chat", fake_ollama)
-    monkeypatch.setattr(services, "_llm_nat_chat", fake_nat)
+    monkeypatch.setattr(ai_llm, "_llm_openai_chat", fake_openai)
+    monkeypatch.setattr(ai_llm, "_llm_anthropic_chat", fake_anthropic)
+    monkeypatch.setattr(ai_llm, "_llm_ollama_chat", fake_ollama)
+    monkeypatch.setattr(ai_llm, "_llm_nat_chat", fake_nat)
 
-    annotation = inspect.signature(services.llm_chat).parameters["provider_key"].annotation
+    annotation = inspect.signature(ai_llm.llm_chat).parameters["provider_key"].annotation
     provider_keys = typing.get_args(annotation)
     assert provider_keys, "llm_chat의 provider_key가 Literal이 아니게 되면 이 전제부터 깨진다"
 
@@ -205,13 +208,13 @@ async def test_provider_supports_tools_matches_llm_chat_dispatch(monkeypatch):
 
     for key in provider_keys:
         invoked.clear()
-        await services.llm_chat(key, "테스트")
+        await ai_llm.llm_chat(key, "테스트")
         assert len(invoked) == 1, f"{key}가 정확히 하나의 _llm_*_chat 구현으로 라우팅되어야 한다"
         dispatched_to = invoked[0]
         expected = dispatched_to in tool_dispatch_targets
-        assert services.provider_supports_tools(key) is expected, (
+        assert ai_llm.provider_supports_tools(key) is expected, (
             f"provider_key={key!r}가 실제로는 {dispatched_to!r}로 라우팅되는데 "
-            f"provider_supports_tools({key!r})={services.provider_supports_tools(key)}은 "
+            f"provider_supports_tools({key!r})={ai_llm.provider_supports_tools(key)}은 "
             f"{expected}와 어긋난다"
         )
 
@@ -229,14 +232,14 @@ async def test_toolless_providers_pass_no_tools_to_the_model(monkeypatch):
             )
 
     monkeypatch.setattr(
-        services,
+        ai_llm,
         "AsyncOpenAI",
         lambda api_key: SimpleNamespace(
             chat=SimpleNamespace(completions=FakeCompletions())
         ),
     )
-    monkeypatch.setattr(services, "OPENAI_API_KEY", "test-key")
-    await services._llm_openai_chat("hi")
+    monkeypatch.setattr(ai_llm, "OPENAI_API_KEY", "test-key")
+    await ai_llm._llm_openai_chat("hi")
     assert "tools" not in captured, (
         "openai가 tools를 넘기면 provider_supports_tools(False)가 거짓이 된다"
     )
@@ -259,11 +262,11 @@ async def test_perform_stock_analysis_marks_toolless_provider_report_unverified(
     async def fake_run_mcp_tool(params, tool_name, arguments):
         return "삼성전자 (005930, KOSPI)"
 
-    monkeypatch.setattr(services, "llm_chat", fake_llm_chat)
-    monkeypatch.setattr(services, "run_mcp_tool", fake_run_mcp_tool)
+    monkeypatch.setattr(ai_llm, "llm_chat", fake_llm_chat)
+    monkeypatch.setattr(ai_mcp, "run_mcp_tool", fake_run_mcp_tool)
 
     session = FakeSession()
-    result = await services.perform_stock_analysis("삼성전자", "openai", session)
+    result = await ai_analysis.perform_stock_analysis("삼성전자", "openai", session)
 
     assert session.report.provider_supports_tools is False
     assert result["provider"] == "openai"
@@ -287,11 +290,11 @@ async def test_perform_stock_analysis_marks_nat_report_tool_supporting(monkeypat
     async def fake_run_mcp_tool(params, tool_name, arguments):
         return "삼성전자 (005930, KOSPI)"
 
-    monkeypatch.setattr(services, "llm_chat", fake_llm_chat)
-    monkeypatch.setattr(services, "run_mcp_tool", fake_run_mcp_tool)
+    monkeypatch.setattr(ai_llm, "llm_chat", fake_llm_chat)
+    monkeypatch.setattr(ai_mcp, "run_mcp_tool", fake_run_mcp_tool)
 
     session = FakeSession()
-    result = await services.perform_stock_analysis("삼성전자", "nat", session)
+    result = await ai_analysis.perform_stock_analysis("삼성전자", "nat", session)
 
     assert session.report.provider_supports_tools is True
     assert result["provider"] == "nat"
@@ -309,11 +312,11 @@ async def test_perform_stock_analysis_resolves_stock_code_via_mcp(monkeypatch):
         mcp_calls.append((tool_name, arguments))
         return "삼성전자 (005930, KOSPI)"
 
-    monkeypatch.setattr(services, "llm_chat", fake_llm_chat)
-    monkeypatch.setattr(services, "run_mcp_tool", fake_run_mcp_tool)
+    monkeypatch.setattr(ai_llm, "llm_chat", fake_llm_chat)
+    monkeypatch.setattr(ai_mcp, "run_mcp_tool", fake_run_mcp_tool)
 
     fake_session = FakeSession()
-    await services.perform_stock_analysis("삼성전자", "openai", fake_session)
+    await ai_analysis.perform_stock_analysis("삼성전자", "openai", fake_session)
 
     assert fake_session.report.stock_code == "005930"
     assert fake_session.report.stock_name == "삼성전자"
@@ -337,11 +340,11 @@ async def test_perform_stock_analysis_resolves_alphanumeric_stock_code(monkeypat
         mcp_calls.append((tool_name, arguments))
         return "덕양에너젠 (0001A0, KOSDAQ)"
 
-    monkeypatch.setattr(services, "llm_chat", fake_llm_chat)
-    monkeypatch.setattr(services, "run_mcp_tool", fake_run_mcp_tool)
+    monkeypatch.setattr(ai_llm, "llm_chat", fake_llm_chat)
+    monkeypatch.setattr(ai_mcp, "run_mcp_tool", fake_run_mcp_tool)
 
     fake_session = FakeSession()
-    await services.perform_stock_analysis("덕양에너젠", "openai", fake_session)
+    await ai_analysis.perform_stock_analysis("덕양에너젠", "openai", fake_session)
 
     assert fake_session.report.stock_code == "0001A0"
     assert mcp_calls == [("resolve_stock_code", {"stock_name": "덕양에너젠"})]
@@ -357,9 +360,9 @@ def test_normalize_stock_input_handles_interleaved_bom_and_whitespace():
     멈춰서, 공백과 BOM이 교대로 나오는 입력을 끝까지 벗기지 못했다. 문자열
     내부의 BOM은 이 함수가 여전히 지우지 않는다(캐시 키 뭉개짐 방지).
     """
-    assert services._normalize_stock_input(" ﻿ ﻿SAMSUNG") == "SAMSUNG"
-    assert services._normalize_stock_input("﻿ ﻿005930") == "005930"
-    assert services._normalize_stock_input("SAM﻿SUNG") == "SAM﻿SUNG"
+    assert ai_analysis._normalize_stock_input(" ﻿ ﻿SAMSUNG") == "SAMSUNG"
+    assert ai_analysis._normalize_stock_input("﻿ ﻿005930") == "005930"
+    assert ai_analysis._normalize_stock_input("SAM﻿SUNG") == "SAM﻿SUNG"
 
 
 @pytest.mark.asyncio
@@ -376,12 +379,12 @@ async def test_perform_stock_analysis_falls_back_to_empty_stock_code_on_mcp_fail
         call_count += 1
         raise HTTPException(status_code=500, detail="종목코드 조회 도구 오류")
 
-    monkeypatch.setattr(services, "llm_chat", fake_llm_chat)
-    monkeypatch.setattr(services, "run_mcp_tool", failing_run_mcp_tool)
+    monkeypatch.setattr(ai_llm, "llm_chat", fake_llm_chat)
+    monkeypatch.setattr(ai_mcp, "run_mcp_tool", failing_run_mcp_tool)
 
     fake_session = FakeSession()
-    with caplog.at_level(logging.WARNING, logger=services.logger.name):
-        result = await services.perform_stock_analysis("삼성전자", "openai", fake_session)
+    with caplog.at_level(logging.WARNING, logger="backend.ai"):
+        result = await ai_analysis.perform_stock_analysis("삼성전자", "openai", fake_session)
 
     # 종목코드 조회 실패해도 리포트 저장은 정상적으로 진행되어야 한다.
     assert fake_session.report.stock_code == ""
@@ -391,10 +394,10 @@ async def test_perform_stock_analysis_falls_back_to_empty_stock_code_on_mcp_fail
 
     # 예외 경로 결과도 캐시되면 안 된다. cached("") is not None이 True가 되어
     # 두 번째 호출이 MCP를 건너뛰게 되는 회귀를 막는다.
-    await services.perform_stock_analysis("삼성전자", "openai", FakeSession())
+    await ai_analysis.perform_stock_analysis("삼성전자", "openai", FakeSession())
 
     assert call_count == 2
-    assert services._stock_code_cache == {}
+    assert ai_analysis._stock_code_cache == {}
 
 
 @pytest.mark.asyncio
@@ -412,12 +415,12 @@ async def test_perform_stock_analysis_falls_back_to_empty_stock_code_on_extracti
     async def fake_run_mcp_tool(params, tool_name, arguments):
         return ""
 
-    monkeypatch.setattr(services, "llm_chat", fake_llm_chat)
-    monkeypatch.setattr(services, "run_mcp_tool", fake_run_mcp_tool)
+    monkeypatch.setattr(ai_llm, "llm_chat", fake_llm_chat)
+    monkeypatch.setattr(ai_mcp, "run_mcp_tool", fake_run_mcp_tool)
 
     fake_session = FakeSession()
-    with caplog.at_level(logging.WARNING, logger=services.logger.name):
-        result = await services.perform_stock_analysis("삼성전자", "openai", fake_session)
+    with caplog.at_level(logging.WARNING, logger="backend.ai"):
+        result = await ai_analysis.perform_stock_analysis("삼성전자", "openai", fake_session)
 
     assert fake_session.report.stock_code == ""
     assert result is not None
@@ -439,16 +442,16 @@ async def test_perform_stock_analysis_extraction_failure_not_cached(monkeypatch)
         mcp_calls.append(arguments)
         return ""
 
-    monkeypatch.setattr(services, "llm_chat", fake_llm_chat)
-    monkeypatch.setattr(services, "run_mcp_tool", fake_run_mcp_tool)
+    monkeypatch.setattr(ai_llm, "llm_chat", fake_llm_chat)
+    monkeypatch.setattr(ai_mcp, "run_mcp_tool", fake_run_mcp_tool)
 
-    await services.perform_stock_analysis("삼성전자", "openai", FakeSession())
-    await services.perform_stock_analysis("삼성전자", "openai", FakeSession())
+    await ai_analysis.perform_stock_analysis("삼성전자", "openai", FakeSession())
+    await ai_analysis.perform_stock_analysis("삼성전자", "openai", FakeSession())
 
     # 캐시된 값이 없어야 두 번째 호출도 MCP를 다시 탄다. `if cached is not None`이
     # `if cached:`로 바뀌면 캐시된 ""도 참으로 취급되어 이 단정이 깨진다.
     assert len(mcp_calls) == 2
-    assert services._stock_code_cache == {}
+    assert ai_analysis._stock_code_cache == {}
 
 
 @pytest.mark.asyncio
@@ -471,12 +474,12 @@ async def test_perform_stock_analysis_rejects_digitless_extracted_code(monkeypat
     async def fake_run_mcp_tool(params, tool_name, arguments):
         return "SIMPAC (SIMPAC, UNKNOWN)"
 
-    monkeypatch.setattr(services, "llm_chat", fake_llm_chat)
-    monkeypatch.setattr(services, "run_mcp_tool", fake_run_mcp_tool)
+    monkeypatch.setattr(ai_llm, "llm_chat", fake_llm_chat)
+    monkeypatch.setattr(ai_mcp, "run_mcp_tool", fake_run_mcp_tool)
 
     fake_session = FakeSession()
-    with caplog.at_level(logging.WARNING, logger=services.logger.name):
-        await services.perform_stock_analysis("SIMPAC", "openai", fake_session)
+    with caplog.at_level(logging.WARNING, logger="backend.ai"):
+        await ai_analysis.perform_stock_analysis("SIMPAC", "openai", fake_session)
 
     assert fake_session.report.stock_code == ""
     assert "종목코드 추출 실패" in caplog.text
@@ -504,14 +507,14 @@ async def test_perform_stock_analysis_digitless_extracted_code_not_cached(monkey
         mcp_calls.append(arguments)
         return "가상종목 (ABCDEF, KOSDAQ)"
 
-    monkeypatch.setattr(services, "llm_chat", fake_llm_chat)
-    monkeypatch.setattr(services, "run_mcp_tool", fake_run_mcp_tool)
+    monkeypatch.setattr(ai_llm, "llm_chat", fake_llm_chat)
+    monkeypatch.setattr(ai_mcp, "run_mcp_tool", fake_run_mcp_tool)
 
-    await services.perform_stock_analysis("가상종목", "openai", FakeSession())
-    await services.perform_stock_analysis("가상종목", "openai", FakeSession())
+    await ai_analysis.perform_stock_analysis("가상종목", "openai", FakeSession())
+    await ai_analysis.perform_stock_analysis("가상종목", "openai", FakeSession())
 
     assert len(mcp_calls) == 2
-    assert services._stock_code_cache == {}
+    assert ai_analysis._stock_code_cache == {}
 
 
 @pytest.mark.asyncio
@@ -532,11 +535,11 @@ async def test_perform_stock_analysis_resolves_nine_char_fund_code(monkeypatch):
     async def fake_run_mcp_tool(params, tool_name, arguments):
         return "한투한미넥스트혁신성장1(A) (F70100034, KOSPI)"
 
-    monkeypatch.setattr(services, "llm_chat", fake_llm_chat)
-    monkeypatch.setattr(services, "run_mcp_tool", fake_run_mcp_tool)
+    monkeypatch.setattr(ai_llm, "llm_chat", fake_llm_chat)
+    monkeypatch.setattr(ai_mcp, "run_mcp_tool", fake_run_mcp_tool)
 
     fake_session = FakeSession()
-    await services.perform_stock_analysis("한투한미넥스트혁신성장1(A)", "openai", fake_session)
+    await ai_analysis.perform_stock_analysis("한투한미넥스트혁신성장1(A)", "openai", fake_session)
 
     assert fake_session.report.stock_code == "F70100034"
 
@@ -549,11 +552,11 @@ async def test_perform_stock_analysis_skips_mcp_when_stock_is_already_code(monke
     async def unexpected_run_mcp_tool(params, tool_name, arguments):
         raise AssertionError("이미 종목코드가 주어진 경우 MCP를 호출하면 안 된다")
 
-    monkeypatch.setattr(services, "llm_chat", fake_llm_chat)
-    monkeypatch.setattr(services, "run_mcp_tool", unexpected_run_mcp_tool)
+    monkeypatch.setattr(ai_llm, "llm_chat", fake_llm_chat)
+    monkeypatch.setattr(ai_mcp, "run_mcp_tool", unexpected_run_mcp_tool)
 
     fake_session = FakeSession()
-    await services.perform_stock_analysis("005930", "openai", fake_session)
+    await ai_analysis.perform_stock_analysis("005930", "openai", fake_session)
 
     assert fake_session.report.stock_code == "005930"
 
@@ -573,11 +576,11 @@ async def test_perform_stock_analysis_skips_mcp_for_known_master_fund_code(monke
     async def unexpected_run_mcp_tool(params, tool_name, arguments):
         raise AssertionError("마스터에 실재하는 코드는 MCP를 호출하면 안 된다")
 
-    monkeypatch.setattr(services, "llm_chat", fake_llm_chat)
-    monkeypatch.setattr(services, "run_mcp_tool", unexpected_run_mcp_tool)
+    monkeypatch.setattr(ai_llm, "llm_chat", fake_llm_chat)
+    monkeypatch.setattr(ai_mcp, "run_mcp_tool", unexpected_run_mcp_tool)
 
     fake_session = FakeSession()
-    await services.perform_stock_analysis("F70100034", "openai", fake_session)
+    await ai_analysis.perform_stock_analysis("F70100034", "openai", fake_session)
 
     assert fake_session.report.stock_code == "F70100034"
 
@@ -607,12 +610,12 @@ async def test_perform_stock_analysis_master_unknown_code_not_saved_without_veri
         mcp_calls.append(arguments)
         return "999999 (999999, UNKNOWN)"
 
-    monkeypatch.setattr(services, "llm_chat", fake_llm_chat)
-    monkeypatch.setattr(services, "run_mcp_tool", fake_run_mcp_tool)
+    monkeypatch.setattr(ai_llm, "llm_chat", fake_llm_chat)
+    monkeypatch.setattr(ai_mcp, "run_mcp_tool", fake_run_mcp_tool)
 
     fake_session = FakeSession()
-    with caplog.at_level(logging.WARNING, logger=services.logger.name):
-        await services.perform_stock_analysis("999999", "openai", fake_session)
+    with caplog.at_level(logging.WARNING, logger="backend.ai"):
+        await ai_analysis.perform_stock_analysis("999999", "openai", fake_session)
 
     # 마스터 대조에서 걸러져 지름길을 포기하고 실제로 MCP 경로를 탔는지 확인한다.
     assert mcp_calls == [{"stock_name": "999999"}]
@@ -643,19 +646,19 @@ async def test_perform_stock_analysis_bom_prefixed_name_caches_under_normalized_
         mcp_calls.append(arguments)
         return "삼성전자 (005930, KOSPI)"
 
-    monkeypatch.setattr(services, "llm_chat", fake_llm_chat)
-    monkeypatch.setattr(services, "run_mcp_tool", fake_run_mcp_tool)
+    monkeypatch.setattr(ai_llm, "llm_chat", fake_llm_chat)
+    monkeypatch.setattr(ai_mcp, "run_mcp_tool", fake_run_mcp_tool)
 
-    await services.perform_stock_analysis("﻿삼성전자", "openai", FakeSession())
+    await ai_analysis.perform_stock_analysis("﻿삼성전자", "openai", FakeSession())
 
     assert len(mcp_calls) == 1
-    assert services._stock_code_cache == {"삼성전자": "005930"}
+    assert ai_analysis._stock_code_cache == {"삼성전자": "005930"}
 
     # 서로 다른 BOM 변형도 같은 정규화 키로 수렴해야 MCP를 다시 타지 않는다.
-    await services.perform_stock_analysis("﻿﻿삼성전자", "openai", FakeSession())
+    await ai_analysis.perform_stock_analysis("﻿﻿삼성전자", "openai", FakeSession())
 
     assert len(mcp_calls) == 1
-    assert services._stock_code_cache == {"삼성전자": "005930"}
+    assert ai_analysis._stock_code_cache == {"삼성전자": "005930"}
 
 
 @pytest.mark.asyncio
@@ -679,17 +682,17 @@ async def test_perform_stock_analysis_interior_bom_name_not_served_from_unrelate
         mcp_calls.append(arguments)
         return "삼성전자 (005930, KOSPI)"
 
-    monkeypatch.setattr(services, "llm_chat", fake_llm_chat)
-    monkeypatch.setattr(services, "run_mcp_tool", fake_run_mcp_tool)
+    monkeypatch.setattr(ai_llm, "llm_chat", fake_llm_chat)
+    monkeypatch.setattr(ai_mcp, "run_mcp_tool", fake_run_mcp_tool)
 
     # "삼성전자" 캐시 엔트리를 먼저 채운다.
-    await services.perform_stock_analysis("삼성전자", "openai", FakeSession())
-    assert services._stock_code_cache == {"삼성전자": "005930"}
+    await ai_analysis.perform_stock_analysis("삼성전자", "openai", FakeSession())
+    assert ai_analysis._stock_code_cache == {"삼성전자": "005930"}
     assert len(mcp_calls) == 1
 
     # 내부에 BOM이 낀 입력은 위 캐시 엔트리를 재사용하면 안 되고 MCP를 다시 타야 한다.
     interior_bom_session = FakeSession()
-    await services.perform_stock_analysis("삼성﻿전자", "openai", interior_bom_session)
+    await ai_analysis.perform_stock_analysis("삼성﻿전자", "openai", interior_bom_session)
 
     assert len(mcp_calls) == 2
     assert mcp_calls[1] == {"stock_name": "삼성﻿전자"}
@@ -713,11 +716,11 @@ async def test_perform_stock_analysis_bom_prefixed_code_skips_mcp(monkeypatch):
     async def unexpected_run_mcp_tool(params, tool_name, arguments):
         raise AssertionError("BOM 붙은 종목코드는 정규화 후 MCP를 호출하면 안 된다")
 
-    monkeypatch.setattr(services, "llm_chat", fake_llm_chat)
-    monkeypatch.setattr(services, "run_mcp_tool", unexpected_run_mcp_tool)
+    monkeypatch.setattr(ai_llm, "llm_chat", fake_llm_chat)
+    monkeypatch.setattr(ai_mcp, "run_mcp_tool", unexpected_run_mcp_tool)
 
     fake_session = FakeSession()
-    await services.perform_stock_analysis("﻿005930", "openai", fake_session)
+    await ai_analysis.perform_stock_analysis("﻿005930", "openai", fake_session)
 
     assert fake_session.report.stock_code == "005930"
 
@@ -735,22 +738,22 @@ async def test_perform_stock_analysis_stock_code_cache_is_capped(monkeypatch, ca
     async def fake_run_mcp_tool(params, tool_name, arguments):
         return "새종목 (999999, KOSPI)"
 
-    monkeypatch.setattr(services, "llm_chat", fake_llm_chat)
-    monkeypatch.setattr(services, "run_mcp_tool", fake_run_mcp_tool)
+    monkeypatch.setattr(ai_llm, "llm_chat", fake_llm_chat)
+    monkeypatch.setattr(ai_mcp, "run_mcp_tool", fake_run_mcp_tool)
 
-    services._stock_code_cache.update(
-        {f"기존종목{i}": f"{i:06d}" for i in range(services._STOCK_CODE_CACHE_MAX)}
+    ai_analysis._stock_code_cache.update(
+        {f"기존종목{i}": f"{i:06d}" for i in range(ai_analysis._STOCK_CODE_CACHE_MAX)}
     )
 
     fake_session = FakeSession()
-    with caplog.at_level(logging.WARNING, logger=services.logger.name):
-        await services.perform_stock_analysis("새종목", "openai", fake_session)
+    with caplog.at_level(logging.WARNING, logger="backend.ai"):
+        await ai_analysis.perform_stock_analysis("새종목", "openai", fake_session)
 
     assert fake_session.report.stock_code == "999999"
     # 상한을 유지한 채 가장 오래된 항목("기존종목0")은 축출되고 새 항목은 들어와야 한다.
-    assert len(services._stock_code_cache) == services._STOCK_CODE_CACHE_MAX
-    assert "새종목" in services._stock_code_cache
-    assert "기존종목0" not in services._stock_code_cache
+    assert len(ai_analysis._stock_code_cache) == ai_analysis._STOCK_CODE_CACHE_MAX
+    assert "새종목" in ai_analysis._stock_code_cache
+    assert "기존종목0" not in ai_analysis._stock_code_cache
     assert "종목코드 캐시 상한 도달" in caplog.text
 
 
@@ -765,11 +768,11 @@ async def test_perform_stock_analysis_caches_resolved_stock_code(monkeypatch):
         mcp_calls.append(arguments)
         return "삼성전자 (005930, KOSPI)"
 
-    monkeypatch.setattr(services, "llm_chat", fake_llm_chat)
-    monkeypatch.setattr(services, "run_mcp_tool", fake_run_mcp_tool)
+    monkeypatch.setattr(ai_llm, "llm_chat", fake_llm_chat)
+    monkeypatch.setattr(ai_mcp, "run_mcp_tool", fake_run_mcp_tool)
 
-    await services.perform_stock_analysis("삼성전자", "openai", FakeSession())
-    await services.perform_stock_analysis("삼성전자", "openai", FakeSession())
+    await ai_analysis.perform_stock_analysis("삼성전자", "openai", FakeSession())
+    await ai_analysis.perform_stock_analysis("삼성전자", "openai", FakeSession())
 
     assert len(mcp_calls) == 1
 
@@ -798,10 +801,10 @@ async def test_generate_morning_briefing_collects_market_watchlist_and_strategy(
             '"catalysts":["오늘 CPI 발표"]}'
         )
 
-    monkeypatch.setattr(services, "run_mcp_tool", fake_run_mcp_tool)
-    monkeypatch.setattr(services, "llm_chat", fake_llm_chat)
+    monkeypatch.setattr(ai_mcp, "run_mcp_tool", fake_run_mcp_tool)
+    monkeypatch.setattr(ai_llm, "llm_chat", fake_llm_chat)
 
-    briefing = await services.generate_morning_briefing(["삼성전자", "NAVER"])
+    briefing = await ai_analysis.generate_morning_briefing(["삼성전자", "NAVER"])
 
     assert briefing == {
         "market_summary": "전일 미국 증시 상승",
@@ -824,7 +827,7 @@ async def test_generate_morning_briefing_collects_market_watchlist_and_strategy(
 
 
 def test_analysis_from_nat_text_backfills_source_signals():
-    data = services.analysis_from_nat_text(
+    data = ai_analysis.analysis_from_nat_text(
         (
             '{"summary":"요약",'
             '"details":{"decision":"HOLD","confidence_score":0.5,'
@@ -840,7 +843,7 @@ def test_analysis_from_nat_text_backfills_source_signals():
 
 
 def test_analysis_from_nat_text_defaults_telegram_urgency_fields():
-    data = services.analysis_from_nat_text(
+    data = ai_analysis.analysis_from_nat_text(
         (
             '{"summary":"요약",'
             '"details":{"decision":"HOLD","confidence_score":0.5,'
@@ -869,11 +872,11 @@ def test_find_http_exception_unwraps_nested_exception_group():
         ],
     )
 
-    assert services._find_http_exception(grouped) is http_exc
+    assert ai_mcp._find_http_exception(grouped) is http_exc
 
 
 def test_analysis_from_nat_text_parses_telegram_urgency_fields():
-    data = services.analysis_from_nat_text(
+    data = ai_analysis.analysis_from_nat_text(
         (
             '{"summary":"긴급 요약",'
             '"details":{"decision":"SELL","confidence_score":0.8,'
@@ -901,7 +904,7 @@ def test_analysis_from_nat_text_parses_nested_json_object():
         '"source_news":[],"trading_trend":null}'
     )
 
-    result = services.analysis_from_nat_text(raw, "삼성전자")
+    result = ai_analysis.analysis_from_nat_text(raw, "삼성전자")
 
     assert result["summary"] == "도구 인증 설정 오류로 실시간 분석 불가"
     assert result["details"]["decision"] == "HOLD"
@@ -921,7 +924,7 @@ def test_analysis_from_nat_text_extracts_json_object_from_wrapped_text():
         '"source_news":["헤드라인"],"trading_trend":"외국인 순매수"}'
     )
 
-    result = services.analysis_from_nat_text(raw, "삼성전자")
+    result = ai_analysis.analysis_from_nat_text(raw, "삼성전자")
 
     assert result["summary"] == "요약"
     assert result["details"]["decision"] == "BUY"
@@ -937,13 +940,13 @@ async def test_llm_nat_chat_logs_bounded_response_preview(monkeypatch, caplog):
         json={"choices": [{"message": {"content": long_content}}]},
     )
     monkeypatch.setattr(
-        services.httpx,
+        ai_llm.httpx,
         "AsyncClient",
         mock_async_client_factory(response),
     )
 
-    with caplog.at_level(logging.DEBUG, logger=services.logger.name):
-        result = await services._llm_nat_chat("삼성전자 분석")
+    with caplog.at_level(logging.DEBUG, logger="backend.ai"):
+        result = await ai_llm._llm_nat_chat("삼성전자 분석")
 
     assert result == long_content
     assert "NAT response received: status_code=200 body_length=" in caplog.text
@@ -955,14 +958,14 @@ async def test_llm_nat_chat_logs_bounded_response_preview(monkeypatch, caplog):
 async def test_llm_nat_chat_logs_json_parse_failure(monkeypatch, caplog):
     response = httpx.Response(200, text="not-json")
     monkeypatch.setattr(
-        services.httpx,
+        ai_llm.httpx,
         "AsyncClient",
         mock_async_client_factory(response),
     )
 
-    with caplog.at_level(logging.DEBUG, logger=services.logger.name):
+    with caplog.at_level(logging.DEBUG, logger="backend.ai"):
         with pytest.raises(HTTPException) as exc_info:
-            await services._llm_nat_chat("삼성전자 분석")
+            await ai_llm._llm_nat_chat("삼성전자 분석")
 
     assert exc_info.value.status_code == 502
     assert "NAT response received: status_code=200 body_length=8" in caplog.text
@@ -987,15 +990,15 @@ async def test_llm_nat_chat_carries_reasoning_metadata(monkeypatch):
             ],
         },
     )
-    monkeypatch.setattr(services.httpx, "AsyncClient", mock_async_client_factory(response))
+    monkeypatch.setattr(ai_llm.httpx, "AsyncClient", mock_async_client_factory(response))
 
-    result = await services._llm_nat_chat("삼성전자 뉴스")
+    result = await ai_llm._llm_nat_chat("삼성전자 뉴스")
 
     assert result == "삼성전자 뉴스입니다."
     assert result.routed_agent == "news_agent"
     assert result.tools_used == (
-        services.NatToolUse("finus_account_balance", ok=False),
-        services.NatToolUse("finus_market_news", ok=True),
+        ai_llm.NatToolUse("finus_account_balance", ok=False),
+        ai_llm.NatToolUse("finus_market_news", ok=True),
     )
 
 
@@ -1016,14 +1019,14 @@ async def test_llm_nat_chat_result_is_a_plain_string_for_existing_callers(monkey
             "tools_used": [],
         },
     )
-    monkeypatch.setattr(services.httpx, "AsyncClient", mock_async_client_factory(response))
+    monkeypatch.setattr(ai_llm.httpx, "AsyncClient", mock_async_client_factory(response))
 
-    result = await services._llm_nat_chat("삼성전자 분석")
+    result = await ai_llm._llm_nat_chat("삼성전자 분석")
 
     assert isinstance(result, str)
     assert str(result) == raw
     # scheduler 경로의 파서가 메타데이터 추가와 무관하게 그대로 동작한다.
-    parsed = services.analysis_from_nat_text(str(result), "삼성전자")
+    parsed = ai_analysis.analysis_from_nat_text(str(result), "삼성전자")
     assert parsed["summary"] == "요약"
     assert parsed["details"]["decision"] == "BUY"
 
@@ -1032,9 +1035,9 @@ async def test_llm_nat_chat_result_is_a_plain_string_for_existing_callers(monkey
 async def test_llm_nat_chat_without_metadata_yields_empty_trace(monkeypatch):
     """두 필드를 싣지 않는 구버전 agents 응답도 그대로 처리된다."""
     response = httpx.Response(200, json={"choices": [{"message": {"content": "답변"}}]})
-    monkeypatch.setattr(services.httpx, "AsyncClient", mock_async_client_factory(response))
+    monkeypatch.setattr(ai_llm.httpx, "AsyncClient", mock_async_client_factory(response))
 
-    result = await services._llm_nat_chat("질문")
+    result = await ai_llm._llm_nat_chat("질문")
 
     assert result == "답변"
     assert result.routed_agent is None
@@ -1052,9 +1055,9 @@ async def test_llm_nat_chat_ignores_malformed_metadata(monkeypatch):
             "tools_used": {"not": "a list"},
         },
     )
-    monkeypatch.setattr(services.httpx, "AsyncClient", mock_async_client_factory(response))
+    monkeypatch.setattr(ai_llm.httpx, "AsyncClient", mock_async_client_factory(response))
 
-    result = await services._llm_nat_chat("질문")
+    result = await ai_llm._llm_nat_chat("질문")
 
     assert result == "답변"
     assert result.routed_agent is None
@@ -1062,7 +1065,7 @@ async def test_llm_nat_chat_ignores_malformed_metadata(monkeypatch):
 
 
 def test_nat_reasoning_trace_dedupes_and_keeps_call_order():
-    routed_agent, tools_used = services._nat_reasoning_trace_from_payload(
+    routed_agent, tools_used = ai_llm._nat_reasoning_trace_from_payload(
         {
             "routed_agent": "  news_agent  ",
             "tools_used": [
@@ -1078,21 +1081,21 @@ def test_nat_reasoning_trace_dedupes_and_keeps_call_order():
     assert routed_agent == "news_agent"
     # ok가 없는 항목은 실패로 본다 — 근거를 과장하지 않는 쪽으로 기운다.
     assert tools_used == (
-        services.NatToolUse("finus_market_news", ok=True),
-        services.NatToolUse("finus_save_diary", ok=False),
+        ai_llm.NatToolUse("finus_market_news", ok=True),
+        ai_llm.NatToolUse("finus_save_diary", ok=False),
     )
 
 
 def test_nat_reasoning_trace_caps_tool_count():
     """다른 서비스가 보내는 값이므로 개수를 backend에서 잘라 둔다 (각주가 본문을 밀어냄 방지)."""
-    _, tools_used = services._nat_reasoning_trace_from_payload(
+    _, tools_used = ai_llm._nat_reasoning_trace_from_payload(
         {
             "routed_agent": "news_agent",
             "tools_used": [{"name": f"tool_{i}", "ok": True} for i in range(100)],
         }
     )
 
-    assert len(tools_used) == services.NAT_MAX_TOOLS_USED
+    assert len(tools_used) == ai_llm.NAT_MAX_TOOLS_USED
 
 
 def test_nat_reasoning_trace_reads_the_empty_result_flag():
@@ -1102,7 +1105,7 @@ def test_nat_reasoning_trace_reads_the_empty_result_flag():
     empty를 버리면 NAT가 '[조회 결과 없음]'을 본문으로 돌려준 답변에도 각주는
     '확인한 자료: 뉴스 검색'이라고 적어 본문과 정면으로 어긋난다.
     """
-    _, tools_used = services._nat_reasoning_trace_from_payload(
+    _, tools_used = ai_llm._nat_reasoning_trace_from_payload(
         {
             "routed_agent": "news_agent",
             "tools_used": [
@@ -1114,20 +1117,20 @@ def test_nat_reasoning_trace_reads_the_empty_result_flag():
     )
 
     assert tools_used == (
-        services.NatToolUse("finus_market_news", ok=True, empty=True),
-        services.NatToolUse("finus_earnings_report", ok=True, empty=False),
+        ai_llm.NatToolUse("finus_market_news", ok=True, empty=True),
+        ai_llm.NatToolUse("finus_earnings_report", ok=True, empty=False),
         # empty를 싣지 않는 구버전 agents — '빈 결과라는 관측이 없음'으로 읽는다.
-        services.NatToolUse("finus_account_balance", ok=True, empty=False),
+        ai_llm.NatToolUse("finus_account_balance", ok=True, empty=False),
     )
 
 
 def test_nat_reasoning_trace_never_marks_a_failed_call_as_empty():
     """ok=False와 empty=True가 동시에 서지 않게 한다 — 각주 표기가 갈라지지 않는다."""
-    _, tools_used = services._nat_reasoning_trace_from_payload(
+    _, tools_used = ai_llm._nat_reasoning_trace_from_payload(
         {"tools_used": [{"name": "finus_market_news", "ok": False, "empty": True}]}
     )
 
-    assert tools_used == (services.NatToolUse("finus_market_news", ok=False, empty=False),)
+    assert tools_used == (ai_llm.NatToolUse("finus_market_news", ok=False, empty=False),)
 
 
 @pytest.mark.asyncio
@@ -1143,32 +1146,32 @@ async def test_llm_chat_preserves_nat_reasoning_metadata(monkeypatch):
     """
 
     async def fake_nat(user_msg, *, conversation_id=None):
-        return services.NatAnswer(
+        return ai_llm.NatAnswer(
             "답변",
             routed_agent="news_agent",
-            tools_used=(services.NatToolUse("finus_market_news", ok=True),),
+            tools_used=(ai_llm.NatToolUse("finus_market_news", ok=True),),
         )
 
-    monkeypatch.setattr(services, "_llm_nat_chat", fake_nat)
+    monkeypatch.setattr(ai_llm, "_llm_nat_chat", fake_nat)
 
-    result = await services.llm_chat("nat", "질의")
+    result = await ai_llm.llm_chat("nat", "질의")
 
-    assert isinstance(result, services.NatAnswer)
+    assert isinstance(result, ai_llm.NatAnswer)
     assert result.routed_agent == "news_agent"
-    assert result.tools_used == (services.NatToolUse("finus_market_news", ok=True),)
+    assert result.tools_used == (ai_llm.NatToolUse("finus_market_news", ok=True),)
 
 
 def test_nat_answer_with_text_keeps_reasoning_metadata():
     """텍스트를 가공하는 계층은 with_text로 갈아끼워야 각주가 살아남는다 (PR #263 리뷰)."""
-    original = services.NatAnswer(
+    original = ai_llm.NatAnswer(
         "원본 답변",
         routed_agent="trading_agent",
-        tools_used=(services.NatToolUse("finus_account_balance", ok=True, empty=True),),
+        tools_used=(ai_llm.NatToolUse("finus_account_balance", ok=True, empty=True),),
     )
 
     replaced = original.with_text(original.replace("원본", "가공된"))
 
-    assert isinstance(replaced, services.NatAnswer)
+    assert isinstance(replaced, ai_llm.NatAnswer)
     assert str(replaced) == "가공된 답변"
     assert replaced.routed_agent == "trading_agent"
     assert replaced.tools_used == original.tools_used
@@ -1182,7 +1185,7 @@ def test_build_toolless_prompt_does_not_request_decision_or_confidence_score():
     요청해서는 안 된다. 이 두 단어가 프롬프트에 포함되면 모델이 매매 판단을
     지어낼 수 있다 — 프롬프트를 제거하면 이 테스트가 깨진다.
     """
-    prompt = render_unmasked(services._build_toolless_prompt("삼성전자", []))
+    prompt = render_unmasked(ai_analysis._build_toolless_prompt("삼성전자", []))
     # JSON 포맷으로 매매 판단을 요청하는 표현이 없어야 한다.
     # 설명 문구에 "BUY/SELL/HOLD"가 언급될 수 있으므로 JSON 키·값 형식으로만 확인한다.
     assert '"decision"' not in prompt
@@ -1198,7 +1201,7 @@ def test_build_nat_prompt_includes_decision_and_confidence_score():
     파싱하는 analysis_from_nat_text가 결과를 얻지 못한다 — nat 경로의
     동작이 불변이어야 한다는 수용 기준(#162)을 이 테스트가 고정한다.
     """
-    prompt = render_unmasked(services._build_nat_prompt("삼성전자", []))
+    prompt = render_unmasked(ai_analysis._build_nat_prompt("삼성전자", []))
     assert '"decision"' in prompt
     assert '"confidence_score"' in prompt
     assert '"source_signals"' in prompt
@@ -1220,13 +1223,13 @@ async def test_toolless_provider_does_not_generate_decision(monkeypatch):
     async def fake_run_mcp_tool(params, tool_name, arguments):
         return "삼성전자 (005930, KOSPI)"
 
-    monkeypatch.setattr(services, "llm_chat", fake_llm_chat)
-    monkeypatch.setattr(services, "run_mcp_tool", fake_run_mcp_tool)
+    monkeypatch.setattr(ai_llm, "llm_chat", fake_llm_chat)
+    monkeypatch.setattr(ai_mcp, "run_mcp_tool", fake_run_mcp_tool)
 
     for provider in ("openai", "anthropic", "ollama"):
         captured_prompts.clear()
         session = FakeSession()
-        result = await services.perform_stock_analysis("삼성전자", provider, session)
+        result = await ai_analysis.perform_stock_analysis("삼성전자", provider, session)
 
         # DB
         assert session.report.decision is None, (
@@ -1266,11 +1269,11 @@ async def test_nat_provider_decision_is_preserved(monkeypatch):
     async def fake_run_mcp_tool(params, tool_name, arguments):
         return "삼성전자 (005930, KOSPI)"
 
-    monkeypatch.setattr(services, "llm_chat", fake_llm_chat)
-    monkeypatch.setattr(services, "run_mcp_tool", fake_run_mcp_tool)
+    monkeypatch.setattr(ai_llm, "llm_chat", fake_llm_chat)
+    monkeypatch.setattr(ai_mcp, "run_mcp_tool", fake_run_mcp_tool)
 
     session = FakeSession()
-    result = await services.perform_stock_analysis("삼성전자", "nat", session)
+    result = await ai_analysis.perform_stock_analysis("삼성전자", "nat", session)
 
     assert session.report.decision == "BUY"
     assert session.report.confidence_score == pytest.approx(0.8)
@@ -1284,20 +1287,20 @@ def test_analysis_from_toolless_text_always_returns_none_details():
     details를 출력해도 파싱 단계에서 걸러내야 한다.
     """
     # 정상 JSON
-    result = services._analysis_from_toolless_text(
+    result = ai_analysis._analysis_from_toolless_text(
         '{"summary":"요약","source_news":[],"trading_trend":null}'
     )
     assert result["details"] is None
 
     # JSON에 details가 있어도 무시
-    result = services._analysis_from_toolless_text(
+    result = ai_analysis._analysis_from_toolless_text(
         '{"summary":"요약","details":{"decision":"BUY","confidence_score":0.9,'
         '"reason":"강세","target_stock":"삼성전자"},"source_news":[]}'
     )
     assert result["details"] is None
 
     # JSON 파싱 실패 (평문)
-    result = services._analysis_from_toolless_text("plain text response")
+    result = ai_analysis._analysis_from_toolless_text("plain text response")
     assert result["details"] is None
     assert result["summary"] == "plain text response"
 
@@ -1316,7 +1319,7 @@ def test_analysis_from_toolless_text_urgency_valid_high_preserves_summary_and_ne
     즉 이 테스트를 지우면 _URGENCY_LEVELS 스키마-파생의 안전망도 함께 사라진다.
     """
     raw = '{"summary":"삼성전자 요약","source_news":["뉴스1"],"urgency":"high"}'
-    result = services._analysis_from_toolless_text(raw)
+    result = ai_analysis._analysis_from_toolless_text(raw)
     assert result["summary"] == "삼성전자 요약"
     assert result["source_news"] == ["뉴스1"]
     assert result["urgency"] == "high"
@@ -1329,7 +1332,7 @@ def test_analysis_from_toolless_text_urgency_null_preserves_summary_and_news():
     summary에 노출되어 이 테스트가 red가 된다.
     """
     raw = '{"summary":"삼성전자 요약","source_news":["뉴스1"],"urgency":null}'
-    result = services._analysis_from_toolless_text(raw)
+    result = ai_analysis._analysis_from_toolless_text(raw)
     assert result["summary"] == "삼성전자 요약", "urgency=null이 원본 JSON을 summary에 노출해서는 안 된다"
     assert result["source_news"] == ["뉴스1"]
     assert result["urgency"] == "normal"
@@ -1342,7 +1345,7 @@ def test_analysis_from_toolless_text_urgency_unsupported_string_preserves_summar
     summary에 노출되어 이 테스트가 red가 된다.
     """
     raw = '{"summary":"삼성전자 요약","source_news":["뉴스1"],"urgency":"medium"}'
-    result = services._analysis_from_toolless_text(raw)
+    result = ai_analysis._analysis_from_toolless_text(raw)
     assert result["summary"] == "삼성전자 요약", "urgency=medium이 원본 JSON을 summary에 노출해서는 안 된다"
     assert result["source_news"] == ["뉴스1"]
     assert result["urgency"] == "normal"
@@ -1351,7 +1354,7 @@ def test_analysis_from_toolless_text_urgency_unsupported_string_preserves_summar
 def test_analysis_from_toolless_text_urgency_key_absent_defaults_to_normal():
     """urgency 키가 없으면 기본값 "normal"이 적용되고 summary·source_news가 보존된다."""
     raw = '{"summary":"삼성전자 요약","source_news":["뉴스1"]}'
-    result = services._analysis_from_toolless_text(raw)
+    result = ai_analysis._analysis_from_toolless_text(raw)
     assert result["summary"] == "삼성전자 요약"
     assert result["source_news"] == ["뉴스1"]
     assert result["urgency"] == "normal"
@@ -1364,7 +1367,7 @@ def test_analysis_from_toolless_text_fallback_source_signals_is_empty_list():
     source_signals를 명시하지 않으면 AnalysisReport 기본값 None이 나가고,
     NAT 경로(source_signals=None → source_news 되채움 보정)와 비대칭이 생긴다.
     """
-    result = services._analysis_from_toolless_text("JSON이 없는 순수 텍스트 응답")
+    result = ai_analysis._analysis_from_toolless_text("JSON이 없는 순수 텍스트 응답")
     assert result["source_signals"] == [], (
         "폴백 경로의 source_signals는 None이 아니라 []여야 한다"
     )
@@ -1400,7 +1403,7 @@ def test_analysis_from_toolless_text_urgency_non_string_does_not_raise(urgency_v
     raw = json.dumps(
         {"summary": "삼성전자 요약", "source_news": ["뉴스1"], "urgency": urgency_value}
     )
-    result = services._analysis_from_toolless_text(raw)
+    result = ai_analysis._analysis_from_toolless_text(raw)
     assert result["urgency"] == "normal", (
         f"urgency={urgency_value!r}는 비문자열이므로 'normal'로 정규화되어야 한다"
     )
@@ -1421,7 +1424,7 @@ def test_analysis_from_toolless_text_urgency_dict_does_not_raise():
     raw = json.dumps(
         {"summary": "삼성전자 요약", "source_news": ["뉴스1"], "urgency": {"level": "high"}}
     )
-    result = services._analysis_from_toolless_text(raw)
+    result = ai_analysis._analysis_from_toolless_text(raw)
     assert isinstance(result, dict), "dict urgency여도 예외 없이 dict를 반환해야 한다"
     assert result["urgency"] == "normal"
     # #218: 중첩된 urgency dict가 후보로 선택되어 summary를 오염시키면 안 된다
@@ -1443,7 +1446,7 @@ def test_analysis_from_toolless_text_normalized_urgency_clears_reason_and_alert(
         '{"summary":"삼성전자 요약","source_news":["뉴스1"],'
         '"urgency":"medium","urgency_reason":"delisting imminent","telegram_alert":true}'
     )
-    result = services._analysis_from_toolless_text(raw)
+    result = ai_analysis._analysis_from_toolless_text(raw)
     assert result["urgency"] == "normal"
     assert result["urgency_reason"] is None, (
         "urgency 하향 시 urgency_reason도 None이어야 한다"
@@ -1459,7 +1462,7 @@ def test_analysis_from_toolless_text_valid_urgency_preserves_reason_and_alert():
         '{"summary":"삼성전자 요약","source_news":["뉴스1"],'
         '"urgency":"high","urgency_reason":"거래정지 위험","telegram_alert":true}'
     )
-    result = services._analysis_from_toolless_text(raw)
+    result = ai_analysis._analysis_from_toolless_text(raw)
     assert result["urgency"] == "high"
     assert result["urgency_reason"] == "거래정지 위험"
     assert result["telegram_alert"] is True
@@ -1478,7 +1481,7 @@ def test_analysis_from_toolless_text_absent_urgency_preserves_reason_and_alert(r
     `raw_urgency is not None` 가드가 빠지면, urgency 키가 없을 때도 normalized=True가
     되어 urgency_reason·telegram_alert이 부당하게 버려진다.
     """
-    result = services._analysis_from_toolless_text(raw_json)
+    result = ai_analysis._analysis_from_toolless_text(raw_json)
     assert result["urgency"] == "normal"
     assert result["urgency_reason"] == "거래정지 위험", (
         "urgency 키 부재·null은 하향이 아니므로 urgency_reason을 보존해야 한다"
@@ -1502,7 +1505,7 @@ def test_analysis_from_toolless_text_nested_json_uses_outer_summary():
     올라와 summary가 원본 JSON 전체로, source_news가 []로 나와 두 단정 모두 실패한다.
     """
     raw = '{"summary":"삼성전자 요약","source_news":["뉴스1"],"detail":{"pe":12}}'
-    result = services._analysis_from_toolless_text(raw)
+    result = ai_analysis._analysis_from_toolless_text(raw)
     assert result["summary"] == "삼성전자 요약", (
         "중첩 JSON이 있을 때 원본 JSON 전체가 summary로 노출되어서는 안 된다"
     )
@@ -1517,7 +1520,7 @@ def test_analysis_from_toolless_text_no_summary_json_still_falls_back():
     ValidationError는 발생하지 않는다 — AnalysisReport 생성 인수가 모두 강제 변환되기 때문이다.
     """
     raw = '{"count":3,"items":["a","b","c"]}'
-    result = services._analysis_from_toolless_text(raw)
+    result = ai_analysis._analysis_from_toolless_text(raw)
     # 루프 내 폴백: data.get("summary") or text[:8000] → 원문 전체가 summary
     assert result["summary"] == raw
     assert result["source_news"] == []
@@ -1537,7 +1540,7 @@ def test_analysis_from_toolless_text_invalid_candidate_is_skipped():
         '{"summary":"유효 요약","source_news":["뉴스1"],"trading_trend":"상승"} '
         '{"summary":"깨진 후보","trading_trend":12}'
     )
-    result = services._analysis_from_toolless_text(raw)
+    result = ai_analysis._analysis_from_toolless_text(raw)
     assert result["summary"] == "유효 요약"
     assert result["trading_trend"] == "상승"
 
@@ -1558,7 +1561,7 @@ def test_analysis_from_toolless_text_inner_summary_drift_prevented():
     된다.
     """
     raw = '{"summary":"OUTER","source_news":["뉴스1"],"detail":{"summary":"INNER"}}'
-    result = services._analysis_from_toolless_text(raw)
+    result = ai_analysis._analysis_from_toolless_text(raw)
     assert result["summary"] == "OUTER", (
         "안쪽 summary가 바깥 summary를 덮어써서는 안 된다"
     )
@@ -1581,7 +1584,7 @@ def test_analysis_from_nat_text_nested_inner_summary_no_drift():
         '"source_news":["헤드라인"],'
         '"detail":{"summary":"INNER","pe":12}}'
     )
-    result = services.analysis_from_nat_text(raw, "삼성전자")
+    result = ai_analysis.analysis_from_nat_text(raw, "삼성전자")
     assert result["summary"] == "OUTER NAT 요약", (
         "안쪽 summary가 바깥 summary를 덮어써서는 안 된다"
     )
@@ -1606,7 +1609,7 @@ def test_morning_briefing_from_text_nested_object_fields_filled():
         '"catalysts":["CPI 발표"],'
         '"detail":{"pe":12}}'
     )
-    result = services._morning_briefing_from_text(raw)
+    result = ai_analysis._morning_briefing_from_text(raw)
     assert result["market_summary"] == "오늘 시장 요약", (
         "중첩 객체가 있을 때 market_summary가 빈 문자열이 되어서는 안 된다"
     )
@@ -1632,7 +1635,7 @@ def test_analysis_from_toolless_text_sort_guard_for_independent_top_level_jsons(
     """
     # summary 있는 객체가 앞, summary 없는 객체가 뒤 → reversed 후 summary 없는 쪽이 선두
     raw = '{"summary":"유효 요약","source_news":["뉴스1"]} {"count":3}'
-    result = services._analysis_from_toolless_text(raw)
+    result = ai_analysis._analysis_from_toolless_text(raw)
     assert result["summary"] == "유효 요약", (
         "summary 없는 후보가 reversed 선두에 와도 sort가 summary 있는 후보를 먼저 시도해야 한다"
     )
@@ -1656,7 +1659,7 @@ def test_analysis_from_toolless_text_envelope_wrapper_fallback():
     sort 제거. 둘 다 지우면 래퍼가 선두에 남아 summary가 원문 전체가 된다.
     """
     raw = '{"response":{"summary":"삼성전자 요약","source_news":["뉴스1"]}}'
-    result = services._analysis_from_toolless_text(raw)
+    result = ai_analysis._analysis_from_toolless_text(raw)
     assert result["summary"] == "삼성전자 요약", (
         "래퍼 JSON 안의 summary가 올바르게 추출되어야 한다"
     )
@@ -1679,7 +1682,7 @@ def test_analysis_from_nat_text_envelope_wrapper_fallback():
         '"reason":"수급 개선","target_stock":"삼성전자"},'
         '"source_news":["헤드라인"]}}'
     )
-    result = services.analysis_from_nat_text(raw, "삼성전자")
+    result = ai_analysis.analysis_from_nat_text(raw, "삼성전자")
     assert result["summary"] == "NAT 요약", (
         "래퍼 JSON 안의 summary가 올바르게 추출되어야 한다"
     )
@@ -1702,7 +1705,7 @@ def test_morning_briefing_from_text_envelope_wrapper_fallback():
         '"trading_ideas":["눌림목 관찰"],'
         '"catalysts":["CPI 발표"]}}'
     )
-    result = services._morning_briefing_from_text(raw)
+    result = ai_analysis._morning_briefing_from_text(raw)
     assert result["market_summary"] == "오늘 시장 요약", (
         "래퍼 JSON 안의 market_summary가 올바르게 추출되어야 한다"
     )
@@ -1725,7 +1728,7 @@ def test_morning_briefing_from_text_skips_non_briefing_candidates():
         '{"market_summary":"시장 요약","watchlist":["삼성전자"],'
         '"trading_ideas":[],"catalysts":[]} {"count":3}'
     )
-    result = services._morning_briefing_from_text(raw)
+    result = ai_analysis._morning_briefing_from_text(raw)
     assert result["market_summary"] == "시장 요약", (
         "브리핑 키 없는 후보가 reversed 선두에 와도 건너뛰고 올바른 후보를 써야 한다"
     )
@@ -1764,10 +1767,10 @@ async def test_llm_chat_masks_pii_before_dispatching_to_provider(monkeypatch):
         captured.append(user_msg)
         return "ok"
 
-    monkeypatch.setattr(services, "_llm_openai_chat", fake_openai)
+    monkeypatch.setattr(ai_llm, "_llm_openai_chat", fake_openai)
 
     pii_text = "12345678-01 계좌, 삼성전자 3주, 평가금액 12,345,000원"
-    await services.llm_chat("openai", pii_text)
+    await ai_llm.llm_chat("openai", pii_text)
 
     assert len(captured) == 1
     sent = captured[0]
@@ -1794,10 +1797,10 @@ async def test_llm_chat_unmasks_response_placeholders(monkeypatch):
         first, second = (m.group(0) for m in _SCOPED_PLACEHOLDER_RE.finditer(user_msg))
         return f"요약: {first}은 {second}보다 작습니다."
 
-    monkeypatch.setattr(services, "_llm_openai_chat", fake_openai)
+    monkeypatch.setattr(ai_llm, "_llm_openai_chat", fake_openai)
 
     pii_text = "평가금액 12,345,000원, 총자산 45,678,000원"
-    result = await services.llm_chat("openai", pii_text)
+    result = await ai_llm.llm_chat("openai", pii_text)
 
     assert result == "요약: 12,345,000원은 45,678,000원보다 작습니다."
     assert "<AMOUNT" not in result
@@ -1821,9 +1824,9 @@ async def test_llm_chat_unmask_fails_open_on_unknown_placeholder(monkeypatch):
         # 둘 다 이번 호출의 매핑에 없는 자리표시자다.
         return "총자산은 <AMOUNT_deadbe_9>이고 예수금은 <AMOUNT_9>입니다."
 
-    monkeypatch.setattr(services, "_llm_openai_chat", fake_openai)
+    monkeypatch.setattr(ai_llm, "_llm_openai_chat", fake_openai)
 
-    result = await services.llm_chat("openai", "평가금액 12,345,000원")
+    result = await ai_llm.llm_chat("openai", "평가금액 12,345,000원")
 
     # <AMOUNT_deadbe_9>: 형식 유효, 매핑에 없음 -> 중립 문구로 치환
     assert "(이전 금액 1)" in result
@@ -1853,20 +1856,18 @@ async def test_llm_chat_masking_does_not_leak_between_concurrent_calls():
 
         return _inner
 
-    from backend.ai import services as services_module
-
-    orig_openai = services_module._llm_openai_chat
-    orig_anthropic = services_module._llm_anthropic_chat
+    orig_openai = ai_llm._llm_openai_chat
+    orig_anthropic = ai_llm._llm_anthropic_chat
     try:
-        services_module._llm_openai_chat = make_capturing("a", 0.02)
-        services_module._llm_anthropic_chat = make_capturing("b", 0)
+        ai_llm._llm_openai_chat = make_capturing("a", 0.02)
+        ai_llm._llm_anthropic_chat = make_capturing("b", 0)
 
         text_a = "평가금액 11,111,111원"
         text_b = "평가금액 22,222,222원"
 
         result_a, result_b = await asyncio.gather(
-            services_module.llm_chat("openai", text_a),
-            services_module.llm_chat("anthropic", text_b),
+            ai_llm.llm_chat("openai", text_a),
+            ai_llm.llm_chat("anthropic", text_b),
         )
 
         # 각 호출이 받은 마스킹된 텍스트에 서로의 원본 금액이 섞이지 않아야 한다.
@@ -1876,8 +1877,8 @@ async def test_llm_chat_masking_does_not_leak_between_concurrent_calls():
         assert result_a == text_a
         assert result_b == text_b
     finally:
-        services_module._llm_openai_chat = orig_openai
-        services_module._llm_anthropic_chat = orig_anthropic
+        ai_llm._llm_openai_chat = orig_openai
+        ai_llm._llm_anthropic_chat = orig_anthropic
 
 
 @pytest.mark.asyncio
@@ -1885,7 +1886,7 @@ async def test_placeholders_do_not_collide_across_calls_in_same_conversation(mon
     """같은 conversation_id로 연속 호출할 때 이전 턴 자리표시자가 현재 턴 값으로 복원되면 안 된다.
 
     NAT 경로는 마스킹 매핑과 달리 대화 히스토리를 **호출을 넘어 서버 쪽에 유지**한다:
-    backend/services.py의 _llm_nat_chat이 messages에 현재 메시지 1건만 보내고
+    backend/ai/llm.py의 _llm_nat_chat이 messages에 현재 메시지 1건만 보내고
     conversation-id 헤더로 세션을 식별하면, agents/src/finus_agents/agents.py의
     _load_history()가 SQLite chat_messages에서 과거 턴을 읽어 오고 같은 파일의
     finus_sqlite_transcript_agent가 `history + chat_request.messages`로 합쳐
@@ -1914,10 +1915,10 @@ async def test_placeholders_do_not_collide_across_calls_in_same_conversation(mon
         turn1_placeholder = turn1_match.group(0)
         return f"앞서 말씀하신 {turn1_placeholder} 기준으로는"
 
-    monkeypatch.setattr(services, "_llm_nat_chat", echo_prev)
+    monkeypatch.setattr(ai_llm, "_llm_nat_chat", echo_prev)
 
-    await services.llm_chat("nat", "잔고 12,345,000원", conversation_id="telegram:1")
-    result = await services.llm_chat("nat", "5,000,000원 더", conversation_id="telegram:1")
+    await ai_llm.llm_chat("nat", "잔고 12,345,000원", conversation_id="telegram:1")
+    result = await ai_llm.llm_chat("nat", "5,000,000원 더", conversation_id="telegram:1")
 
     assert "5,000,000원" not in result, "이전 턴 자리표시자가 현재 턴 값으로 잘못 복원됐다"
     assert "12,345,000원" not in result, "이전 턴 매핑이 호출을 넘어 살아 있으면 안 된다"
@@ -1927,7 +1928,7 @@ async def test_placeholders_do_not_collide_across_calls_in_same_conversation(mon
 async def test_llm_chat_nat_answer_preserves_metadata_through_masking(monkeypatch):
     """llm_chat("nat", ...)이 마스킹 계층을 거친 뒤에도 NatAnswer의 각주를 유지해야 한다.
 
-    services.NatAnswer는 str 서브클래스라 re.sub(= unmask_pii 내부)를 거치면 plain str이
+    ai_llm.NatAnswer는 str 서브클래스라 re.sub(= unmask_pii 내부)를 거치면 plain str이
     된다. unmask_pii의 타입 보존 로직이 routed_agent/tools_used를 살린다는 것을 고정한다.
 
     PII가 있는 경우(텍스트가 실제로 바뀌는 경로)와 없는 경우(mapping이 비어 있는 경로)
@@ -1945,18 +1946,18 @@ async def test_llm_chat_nat_answer_preserves_metadata_through_masking(monkeypatc
                 text = f"잔고는 {ph}입니다."
             else:
                 text = "잔고 정보가 없습니다."
-            return services.NatAnswer(
+            return ai_llm.NatAnswer(
                 text,
                 routed_agent="trading_agent",
-                tools_used=(services.NatToolUse(name="kis-trading", ok=True, empty=False),),
+                tools_used=(ai_llm.NatToolUse(name="kis-trading", ok=True, empty=False),),
             )
         return fake_nat
 
     # 경로 1: PII 있음 — unmask_pii가 텍스트를 실제로 바꾼다.
-    monkeypatch.setattr(services, "_llm_nat_chat", make_fake_nat(pii_in_response=True))
-    result = await services.llm_chat("nat", "잔고 12,345,000원")
+    monkeypatch.setattr(ai_llm, "_llm_nat_chat", make_fake_nat(pii_in_response=True))
+    result = await ai_llm.llm_chat("nat", "잔고 12,345,000원")
 
-    assert isinstance(result, services.NatAnswer), (
+    assert isinstance(result, ai_llm.NatAnswer), (
         "PII 있는 경로: 마스킹 계층을 거치며 NatAnswer가 plain str로 벗겨졌다"
     )
     assert result.routed_agent == "trading_agent", "PII 있는 경로: routed_agent 소실"
@@ -1966,10 +1967,10 @@ async def test_llm_chat_nat_answer_preserves_metadata_through_masking(monkeypatc
     assert "12,345,000원" in result, "PII 있는 경로: 역치환이 실패했다"
 
     # 경로 2: PII 없음 — mapping이 비어 unmask_pii가 텍스트를 바꾸지 않는다.
-    monkeypatch.setattr(services, "_llm_nat_chat", make_fake_nat(pii_in_response=False))
-    result2 = await services.llm_chat("nat", "그럼 팔까?")
+    monkeypatch.setattr(ai_llm, "_llm_nat_chat", make_fake_nat(pii_in_response=False))
+    result2 = await ai_llm.llm_chat("nat", "그럼 팔까?")
 
-    assert isinstance(result2, services.NatAnswer), (
+    assert isinstance(result2, ai_llm.NatAnswer), (
         "PII 없는 경로: NatAnswer가 plain str로 벗겨졌다"
     )
     assert result2.routed_agent == "trading_agent", "PII 없는 경로: routed_agent 소실"
@@ -1983,7 +1984,7 @@ def test_no_bypass_of_llm_chat_masking_layer():
 
     1) provider별 구현(_llm_openai_chat/_llm_anthropic_chat/_llm_ollama_chat/
        _llm_nat_chat)은 마스킹되지 않은 원문을 그대로 외부로 보낸다. 이 넷은
-       services.py의 llm_chat() 안에서만 참조돼야 한다.
+       backend/ai/llm.py의 llm_chat() 안에서만 참조돼야 한다.
     2) 외부 LLM SDK 클라이언트 생성자(AsyncOpenAI/AsyncAnthropic)는 위 provider
        함수들 안에서만 만들어져야 한다. 이 단언이 없으면 (1)의 하드코딩된 이름
        목록을 그대로 빠져나가는 우회 경로 두 개가 열려 있다 — "새 provider 함수
@@ -2003,7 +2004,7 @@ def test_no_bypass_of_llm_chat_masking_layer():
     - 모듈 최상위(함수 밖) 사용: func_stack이 비면 "<module>"로 기록해 llm_chat이
       아닌 스코프로 잡힌다
 
-    ast.Attribute 분기(`services._llm_openai_chat()`처럼 속성 접근으로 부르는 형태)는
+    ast.Attribute 분기(`ai_llm._llm_openai_chat()`처럼 속성 접근으로 부르는 형태)는
     visit_Name으로 잡히지 않으므로 visit_Call에 남겨 둔다.
 
     스코프는 `파일경로::함수명`으로 기록한다. 파일을 붙이지 않으면 다른 모듈에
@@ -2027,9 +2028,9 @@ def test_no_bypass_of_llm_chat_masking_layer():
     - import 시 이름을 바꾸는 경우: `from openai import AsyncOpenAI as _OAI`
     - SDK를 쓰지 않고 httpx 등으로 provider HTTP API를 직접 때리는 코드
       (감시 대상 이름이 소스에 나타나지 않는다)
-    - 동적 참조: `getattr(services, "_llm_openai_chat")`, importlib
+    - 동적 참조: `getattr(ai_llm, "_llm_openai_chat")`, importlib
     """
-    backend_dir = pathlib.Path(inspect.getfile(services)).parents[1]
+    backend_dir = pathlib.Path(inspect.getfile(ai_llm)).parents[1]
     provider_fns = {
         "_llm_openai_chat",
         "_llm_anthropic_chat",
@@ -2062,7 +2063,7 @@ def test_no_bypass_of_llm_chat_masking_layer():
     scanned = {path.relative_to(backend_dir).as_posix() for path in py_files}
     # 재귀 스캔이 깨지면(예: rglob -> glob 회귀) 조용히 통과하지 않도록 앵커를 못 박는다.
     # scripts/는 과거 비재귀 glob("*.py") 시절의 실제 사각지대였다.
-    for anchor in ("ai/services.py", "scripts/build_signal_eval_set.py"):
+    for anchor in ("ai/llm.py", "scripts/build_signal_eval_set.py"):
         assert anchor in scanned, (
             f"{anchor}이 스캔 범위에서 빠졌습니다 — backend/ 재귀 스캔이 깨졌습니다."
         )
@@ -2094,11 +2095,11 @@ def test_no_bypass_of_llm_chat_masking_layer():
             self._record(node.id)
             self.generic_visit(node)
 
-        def visit_Call(self, node):
-            # `services._llm_openai_chat()`처럼 속성 접근으로 부르는 형태는 ast.Name이
-            # 아니므로 visit_Name이 잡지 못한다 - 이 분기를 남겨 둔다.
-            if isinstance(node.func, ast.Attribute):
-                self._record(node.func.attr)
+        def visit_Attribute(self, node):
+            # `llm._llm_openai_chat()`처럼 속성으로 부르는 형태는 ast.Name이 아니므로
+            # visit_Name이 잡지 못한다. 호출만 보면 `f = llm._llm_openai_chat`처럼 호출 없이
+            # 속성만 가져가는 별칭 대입이 빠지므로, 호출 여부와 무관하게 속성 접근을 기록한다.
+            self._record(node.attr)
             self.generic_visit(node)
 
     visitor = _RefVisitor()
@@ -2107,13 +2108,13 @@ def test_no_bypass_of_llm_chat_masking_layer():
         visitor.visit(ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file)))
 
     for fn_name in sorted(provider_fns):
-        assert refs[fn_name] == {"ai/services.py::llm_chat"}, (
-            f"{fn_name}이 services.py의 llm_chat() 밖({sorted(refs[fn_name])})에서도 "
+        assert refs[fn_name] == {"ai/llm.py::llm_chat"}, (
+            f"{fn_name}이 ai/llm.py의 llm_chat() 밖({sorted(refs[fn_name])})에서도 "
             "참조/호출됩니다. 마스킹 계층(mask_pii/unmask_pii)을 우회하는 새 호출 경로가 "
             "생긴 것으로 보입니다 — PII가 마스킹되지 않은 채 외부 LLM provider로 나갈 수 있습니다."
         )
 
-    allowed_sdk_scopes = {f"ai/services.py::{fn}" for fn in provider_fns}
+    allowed_sdk_scopes = {f"ai/llm.py::{fn}" for fn in provider_fns}
     for ctor in sorted(sdk_ctors):
         assert refs[ctor], (
             f"{ctor} 참조가 backend/ 어디에도 없습니다. SDK를 교체했다면 sdk_ctors를 "
@@ -2130,7 +2131,7 @@ def test_no_bypass_of_llm_chat_masking_layer():
 
 
 def test_parse_signal_score_reads_score_reason_and_headline_scores():
-    parsed = services.parse_signal_score(
+    parsed = ai_signals.parse_signal_score(
         '{"score": -2, "reason": "주요 고객 이탈 보도", "headline_scores": [-3, -2, -1]}'
     )
 
@@ -2143,7 +2144,7 @@ def test_parse_signal_score_reads_score_reason_and_headline_scores():
 
 def test_parse_signal_score_ignores_prose_around_the_json():
     """경량 모델은 JSON만 달라고 해도 설명을 앞뒤로 붙인다. 그걸로 실패하면 안 된다."""
-    parsed = services.parse_signal_score(
+    parsed = ai_signals.parse_signal_score(
         '분석 결과입니다.\n{"score": 3, "reason": "대형 수주 공시", "headline_scores": [3]}\n감사합니다.'
     )
 
@@ -2158,7 +2159,7 @@ def scored(payload: str) -> SignalScore:
     아래에 있다. 여기 단언들은 "파싱에 성공한 값"만 다루므로 그 사실을 한 번 좁혀
     두고, 파싱이 깨지면 검사기 대신 이 단언이 실패한다.
     """
-    parsed = services.parse_signal_score(payload)
+    parsed = ai_signals.parse_signal_score(payload)
     assert parsed is not None
     return parsed
 
@@ -2184,20 +2185,20 @@ def test_parse_signal_score_rejects_non_numeric_score():
 
     bool은 int의 하위형이라 별도로 막지 않으면 True가 1점으로 샌다.
     """
-    assert services.parse_signal_score('{"score": "매우 긍정적"}') is None
-    assert services.parse_signal_score('{"score": null}') is None
-    assert services.parse_signal_score('{"score": true}') is None
-    assert services.parse_signal_score('{"reason": "점수 없음"}') is None
+    assert ai_signals.parse_signal_score('{"score": "매우 긍정적"}') is None
+    assert ai_signals.parse_signal_score('{"score": null}') is None
+    assert ai_signals.parse_signal_score('{"score": true}') is None
+    assert ai_signals.parse_signal_score('{"reason": "점수 없음"}') is None
 
 
 def test_parse_signal_score_returns_none_for_broken_json():
-    assert services.parse_signal_score('{"score": -2, "reason": ') is None
-    assert services.parse_signal_score("YES") is None
-    assert services.parse_signal_score("") is None
+    assert ai_signals.parse_signal_score('{"score": -2, "reason": ') is None
+    assert ai_signals.parse_signal_score("YES") is None
+    assert ai_signals.parse_signal_score("") is None
 
 
 def test_parse_signal_score_drops_unusable_headline_entries():
-    parsed = services.parse_signal_score(
+    parsed = ai_signals.parse_signal_score(
         '{"score": 1, "headline_scores": [2, "몰라", null, -1]}'
     )
 
@@ -2207,44 +2208,44 @@ def test_parse_signal_score_drops_unusable_headline_entries():
 
 def test_parse_signal_score_collapses_multiline_reason():
     """reason은 알림 한 줄에 들어간다. 줄바꿈이 그대로 들어가면 메시지 형식이 깨진다."""
-    parsed = services.parse_signal_score('{"score": 2, "reason": "수주\\n공시\\n확인"}')
+    parsed = ai_signals.parse_signal_score('{"score": 2, "reason": "수주\\n공시\\n확인"}')
 
     assert parsed is not None
     assert parsed.reason == "수주 공시 확인"
 
 
 def test_parse_signal_score_truncates_overlong_reason():
-    parsed = services.parse_signal_score(
+    parsed = ai_signals.parse_signal_score(
         '{"score": 2, "reason": "%s"}' % ("가" * 500)
     )
 
     assert parsed is not None
     assert parsed.reason is not None
-    assert len(parsed.reason) == services._SIGNAL_REASON_MAX_CHARS
+    assert len(parsed.reason) == ai_signals._SIGNAL_REASON_MAX_CHARS
 
 
 def test_signal_score_uncertainty_is_none_below_two_headlines():
     """1건이면 0.0이 아니라 None이다. 0.0은 '기사들이 완전히 일치했다'는 뜻이다."""
-    assert services.signal_score_uncertainty([]) is None
-    assert services.signal_score_uncertainty([2]) is None
+    assert ai_signals.signal_score_uncertainty([]) is None
+    assert ai_signals.signal_score_uncertainty([2]) is None
 
 
 def test_signal_score_uncertainty_is_population_stdev():
-    assert services.signal_score_uncertainty([2, 2, 2]) == 0.0
-    assert services.signal_score_uncertainty([-3, 3]) == 3.0
-    assert services.signal_score_uncertainty([1, 2]) == 0.5
+    assert ai_signals.signal_score_uncertainty([2, 2, 2]) == 0.0
+    assert ai_signals.signal_score_uncertainty([-3, 3]) == 3.0
+    assert ai_signals.signal_score_uncertainty([1, 2]) == 0.5
 
 
 def test_parse_signal_score_computes_uncertainty_from_headline_scores():
     """불확실성은 LLM이 신고한 값이 아니라 기사별 점수에서 코드로 계산해야 한다."""
-    parsed = services.parse_signal_score(
+    parsed = ai_signals.parse_signal_score(
         '{"score": 0, "headline_scores": [3, -3], "uncertainty": 0.0}'
     )
 
     assert parsed is not None
     assert parsed.uncertainty == 3.0  # LLM이 준 0.0이 아니라 코드 계산값
 
-    single = services.parse_signal_score('{"score": 2, "headline_scores": [2]}')
+    single = ai_signals.parse_signal_score('{"score": 2, "headline_scores": [2]}')
     assert single is not None
     assert single.uncertainty is None
 
@@ -2265,9 +2266,9 @@ def test_parse_signal_score_computes_uncertainty_from_headline_scores():
 )
 def test_significance_is_threshold_on_absolute_score(monkeypatch, score, threshold, expected):
     """유의성은 |score| >= 임계값이다. 부호(호재/악재)는 판정에 영향을 주지 않는다."""
-    monkeypatch.setattr(services, "SIGNAL_SCORE_THRESHOLD", threshold)
+    monkeypatch.setattr(ai_signals, "SIGNAL_SCORE_THRESHOLD", threshold)
 
-    parsed = services.parse_signal_score('{"score": %d}' % score)
+    parsed = ai_signals.parse_signal_score('{"score": %d}' % score)
 
     assert parsed is not None
     assert parsed.is_significant is expected
@@ -2282,9 +2283,9 @@ async def test_score_signal_fails_open_when_llm_call_raises(monkeypatch):
     async def exploding_llm_chat(provider, prompt, *, conversation_id=None):
         raise RuntimeError("ollama 연결 실패")
 
-    monkeypatch.setattr(services, "llm_chat", exploding_llm_chat)
+    monkeypatch.setattr(ai_llm, "llm_chat", exploding_llm_chat)
 
-    scored = await services.score_signal("삼성전자", "긴급 공시", source="news")
+    scored = await ai_signals.score_signal("삼성전자", "긴급 공시", source="news")
 
     assert scored.is_significant is True
     assert scored.score is None
@@ -2297,9 +2298,9 @@ async def test_score_signal_fails_open_when_response_is_unparseable(monkeypatch)
     async def fake_llm_chat(provider, prompt, *, conversation_id=None):
         return "죄송합니다. 점수를 매길 수 없습니다."
 
-    monkeypatch.setattr(services, "llm_chat", fake_llm_chat)
+    monkeypatch.setattr(ai_llm, "llm_chat", fake_llm_chat)
 
-    scored = await services.score_signal("삼성전자", "긴급 공시", source="news")
+    scored = await ai_signals.score_signal("삼성전자", "긴급 공시", source="news")
 
     assert scored.is_significant is True
     assert scored.score is None
@@ -2314,10 +2315,10 @@ async def test_score_signal_skips_empty_and_unchanged_content(monkeypatch):
         calls.append(prompt)
         return '{"score": 3}'
 
-    monkeypatch.setattr(services, "llm_chat", fake_llm_chat)
+    monkeypatch.setattr(ai_llm, "llm_chat", fake_llm_chat)
 
-    empty = await services.score_signal("삼성전자", "", source="news")
-    unchanged = await services.score_signal("삼성전자", "같은 뉴스", "같은 뉴스", source="news")
+    empty = await ai_signals.score_signal("삼성전자", "", source="news")
+    unchanged = await ai_signals.score_signal("삼성전자", "같은 뉴스", "같은 뉴스", source="news")
 
     assert empty.is_significant is False and empty.score is None
     assert unchanged.is_significant is False and unchanged.score is None
@@ -2332,9 +2333,9 @@ async def test_score_signal_prompt_states_the_scale_and_headline_count(monkeypat
         prompts.append(prompt)
         return '{"score": 2, "reason": "수주", "headline_scores": [2, 2, 2]}'
 
-    monkeypatch.setattr(services, "llm_chat", fake_llm_chat)
+    monkeypatch.setattr(ai_llm, "llm_chat", fake_llm_chat)
 
-    await services.score_signal(
+    await ai_signals.score_signal(
         "삼성전자",
         "기사1 - 내용\n기사2 - 내용\n기사3 - 내용",
         source="news",
@@ -2357,9 +2358,9 @@ async def test_check_signal_significance_still_returns_plain_bool(monkeypatch):
     async def fake_llm_chat(provider, prompt, *, conversation_id=None):
         return '{"score": -3, "reason": "회계 이슈", "headline_scores": [-3, -2]}'
 
-    monkeypatch.setattr(services, "llm_chat", fake_llm_chat)
+    monkeypatch.setattr(ai_llm, "llm_chat", fake_llm_chat)
 
-    result = await services.check_signal_significance("삼성전자", "감리 착수", source="news")
+    result = await ai_signals.check_signal_significance("삼성전자", "감리 착수", source="news")
 
     assert result is True
 
@@ -2369,9 +2370,9 @@ async def test_check_news_significance_keeps_delegating(monkeypatch):
     async def fake_llm_chat(provider, prompt, *, conversation_id=None):
         return '{"score": 0, "reason": "홍보성 기사"}'
 
-    monkeypatch.setattr(services, "llm_chat", fake_llm_chat)
+    monkeypatch.setattr(ai_llm, "llm_chat", fake_llm_chat)
 
-    result = await services.check_news_significance("삼성전자", "신제품 홍보")
+    result = await ai_signals.check_news_significance("삼성전자", "신제품 홍보")
 
     assert result is False
 
@@ -2382,24 +2383,24 @@ def test_signal_snippet_drops_the_line_cut_by_the_char_limit():
     남겨 두면 모델이 반토막을 온전한 기사 1건으로 세어 점수를 매기고, 그 값이
     headline_scores를 거쳐 signal_uncertainty(표준편차)까지 오염시킨다.
     """
-    limit = services._SIGNAL_SNIPPET_CHARS
+    limit = ai_signals._SIGNAL_SNIPPET_CHARS
     first = "가" * (limit - 10)
     content = f"{first}\n두 번째 기사인데 상한에서 잘린다"
 
-    assert services._signal_snippet(content) == first
+    assert ai_signals._signal_snippet(content) == first
 
 
 def test_signal_snippet_keeps_a_single_overlong_line():
     """상한 안에 줄바꿈이 없으면 버릴 온전한 줄이 없다 — 자른 그대로 쓴다."""
-    content = "가" * (services._SIGNAL_SNIPPET_CHARS + 50)
+    content = "가" * (ai_signals._SIGNAL_SNIPPET_CHARS + 50)
 
-    snippet = services._signal_snippet(content)
+    snippet = ai_signals._signal_snippet(content)
 
-    assert len(snippet) == services._SIGNAL_SNIPPET_CHARS
+    assert len(snippet) == ai_signals._SIGNAL_SNIPPET_CHARS
 
 
 def test_signal_snippet_passes_short_content_through():
-    assert services._signal_snippet("기사1\n기사2") == "기사1\n기사2"
+    assert ai_signals._signal_snippet("기사1\n기사2") == "기사1\n기사2"
 
 
 @pytest.mark.asyncio
@@ -2411,12 +2412,12 @@ async def test_score_signal_prompt_counts_only_whole_articles(monkeypatch):
         prompts.append(prompt)
         return '{"score": 1}'
 
-    monkeypatch.setattr(services, "llm_chat", fake_llm_chat)
+    monkeypatch.setattr(ai_llm, "llm_chat", fake_llm_chat)
 
-    limit = services._SIGNAL_SNIPPET_CHARS
+    limit = ai_signals._SIGNAL_SNIPPET_CHARS
     content = "기사1\n" + "가" * (limit - 10) + "\n잘리는 기사"
 
-    await services.score_signal("삼성전자", content, source="news")
+    await ai_signals.score_signal("삼성전자", content, source="news")
 
     assert "기사 2건" in render_unmasked(prompts[0])
 
@@ -2434,10 +2435,10 @@ async def test_perform_stock_analysis_persists_signal_score(monkeypatch):
     async def fake_run_mcp_tool(params, tool_name, arguments):
         return "삼성전자 (005930, KOSPI)"
 
-    monkeypatch.setattr(services, "llm_chat", fake_llm_chat)
-    monkeypatch.setattr(services, "run_mcp_tool", fake_run_mcp_tool)
+    monkeypatch.setattr(ai_llm, "llm_chat", fake_llm_chat)
+    monkeypatch.setattr(ai_mcp, "run_mcp_tool", fake_run_mcp_tool)
 
-    scored = services.SignalScore(
+    scored = ai_signals.SignalScore(
         score=-2,
         reason="주요 고객 이탈 보도",
         uncertainty=1.5,
@@ -2446,7 +2447,7 @@ async def test_perform_stock_analysis_persists_signal_score(monkeypatch):
     )
 
     session = FakeSession()
-    result = await services.perform_stock_analysis(
+    result = await ai_analysis.perform_stock_analysis(
         "삼성전자", "openai", session, signal_score=scored
     )
 
@@ -2470,11 +2471,11 @@ async def test_perform_stock_analysis_leaves_signal_score_null_without_filter(mo
     async def fake_run_mcp_tool(params, tool_name, arguments):
         return "삼성전자 (005930, KOSPI)"
 
-    monkeypatch.setattr(services, "llm_chat", fake_llm_chat)
-    monkeypatch.setattr(services, "run_mcp_tool", fake_run_mcp_tool)
+    monkeypatch.setattr(ai_llm, "llm_chat", fake_llm_chat)
+    monkeypatch.setattr(ai_mcp, "run_mcp_tool", fake_run_mcp_tool)
 
     session = FakeSession()
-    result = await services.perform_stock_analysis("삼성전자", "openai", session)
+    result = await ai_analysis.perform_stock_analysis("삼성전자", "openai", session)
 
     assert session.report.signal_score is None
     assert session.report.signal_reason is None

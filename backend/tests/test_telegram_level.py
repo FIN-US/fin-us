@@ -18,7 +18,7 @@ from backend.telegram.presentation import (
 )
 from backend.telegram.commands import TelegramCommandHandler
 from backend.telegram.handlers.texts import LEVEL_COMMAND_HELP, LEVEL_ONBOARDING_QUESTION
-from backend.ai.services import NatAnswer, NatToolUse
+from backend.ai.llm import NatAnswer, NatToolUse
 
 
 @pytest.fixture(autouse=True)

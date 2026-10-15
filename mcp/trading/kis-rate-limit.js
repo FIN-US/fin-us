@@ -145,7 +145,7 @@ export function classifyKisError(input = {}) {
  * error.code를 토큰 화이트리스트로 걸러 낸다.
  *
  * ts와 pid를 줄 안에 직접 싣는다. 이 둘이 없으면 실측의 핵심 질문에 답할 수 없기 때문이다 —
- * mcp-trading은 도구 호출 1건마다 새로 뜨는 단명 프로세스이고(backend/services.py의
+ * mcp-trading은 도구 호출 1건마다 새로 뜨는 단명 프로세스이고(backend/ai/mcp_tools.py의
  * run_mcp_tool, agents의 finus_api.py가 호출마다 stdio_client를 새로 연다), 그 자식들의
  * stderr는 전부 같은 부모 stderr 하나로 합쳐진다. 합쳐진 스트림에서 "동시에 뜬 별개
  * 프로세스들의 요청이 겹쳤는가"(PR #264 리뷰의 계좌 단위 가설)를 보려면 줄 자체가 시각과

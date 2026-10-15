@@ -1,6 +1,6 @@
 """NAT 프로세스 안에서 도구 결과를 마스킹하는 계층 (#231, F-17 / NFR-05).
 
-#230이 backend에 세운 마스킹 계층(`backend/ai/services.py`의 `llm_chat`)은 backend가
+#230이 backend에 세운 마스킹 계층(`backend/ai/llm.py`의 `llm_chat`)은 backend가
 NAT에 보내는 `user_msg`만 본다. 그런데 계좌·잔고 데이터는 backend가 아니라 **NAT
 프로세스 안에서** MCP 도구 호출로 생성돼, 그대로 ReAct 컨텍스트에 실려
 `openai_cloud_llm`(`configs/common.yml`)으로 나간다. 즉 유출량이 가장 큰 경로가

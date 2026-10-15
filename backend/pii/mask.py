@@ -1,6 +1,6 @@
 """외부 LLM 호출 직전 PII 마스킹 계층 (#230, F-17 / NFR-05).
 
-`backend/ai/services.py`의 `llm_chat()`이 4개 provider 경로(OpenAI/Anthropic/Ollama/NAT)의
+`backend/ai/llm.py`의 `llm_chat()`이 4개 provider 경로(OpenAI/Anthropic/Ollama/NAT)의
 단일 진입점이므로, 마스킹은 거기서 이 모듈의 `mask_pii`/`unmask_pii`를 호출하는
 방식으로 끼운다. 이 모듈 자체는 provider를 모르고 순수 텍스트 변환만 담당한다.
 
@@ -28,7 +28,7 @@ test_unit_and_bare_won_amounts_coexist_losslessly에 있다.
 대상 3종(한국 계좌번호/원화 금액/보유 수량)은 모두 정규식으로 충분히 식별 가능한
 구조화된 패턴이다. 이 계층에는 자유 입력 경로가 실제로 존재한다 —
 `backend/telegram/commands.py`의 `_handle_chat_fallback`은 텔레그램 사용자
-원문을 가공 없이 `llm_chat`으로 넘기고, `backend/ai/services.py`의
+원문을 가공 없이 `llm_chat`으로 넘기고, `backend/ai/signals.py`의
 `check_signal_significance`는 외부 뉴스 원문 1000자를 프롬프트에 넣는다. 다만 F-17이
 정의한 대상 3종은 그 자유 입력 안에서도 정규식으로 충분히 식별되며, 한국어 인명·연락처
 등 NER이 필요한 대상은 이번 이슈(#230) 범위 밖이다. presidio-analyzer는 spaCy NER 모델
@@ -56,7 +56,7 @@ backend를 COPY하지 않으므로(`agents/Dockerfile`) import로 공유할 수 
 - Telegram 경로 중 **LLM을 아예 거치지 않고 원값을 그대로 사용자에게 표시하는** 것들
   (예: `/balance`)은 이 계층이 손댈 지점이 없다 (#232에서 다룬다). 반대로
   `telegram/commands.py`의 `_handle_chat_fallback`과 `telegram/handlers/lookup.py`의 `/earnings`(`_handle_earnings`)는
-  둘 다 `llm_runner("nat", ...)`를 부르고, `llm_runner`의 기본값이 `services.llm_chat`
+  둘 다 `llm_runner("nat", ...)`를 부르고, `llm_runner`의 기본값이 `ai.llm.llm_chat`
   이므로(`TelegramCommandHandler.__init__`의 기본 인자) 이 계층을 탄다 —
   "Telegram 명령은 이 경로를 타지 않는다"는 진술은 사실이 아니다.
 - 정규식 기반이므로 위 3종 패턴에서 벗어난 표기(예: 계좌번호를 자릿수가 다른 증권사
@@ -480,7 +480,7 @@ class _Counter:
     카운터가 호출마다 0에서 다시 시작하므로 모든 호출이 항상 <AMOUNT_1>부터 쓴다.
     그런데 NAT 경로의 대화 히스토리는 **호출을 넘어 서버 쪽에 유지**된다:
 
-    - backend/services.py의 _llm_nat_chat() — backend는 messages에 현재 메시지 1건만
+    - backend/ai/llm.py의 _llm_nat_chat() — backend는 messages에 현재 메시지 1건만
       보내고, conversation-id 헤더로 세션을 식별한다.
     - agents/src/finus_agents/agents.py의 `_load_history()` — SQLite
       chat_messages에서 `WHERE conversation_id = ?`로 과거 메시지를 로드한다.
@@ -490,7 +490,7 @@ class _Counter:
     - agents/configs/router.yml의 `transcript_router_agent`에
       `max_history_messages: 30`으로 실제 배선됨(같은 파일 `router_supervisor_agent`
       쪽의 6과 다른 값이라 키 이름만으로는 구분되지 않는다).
-    - conversation_id는 호출 간 재사용된다: backend/services.py의
+    - conversation_id는 호출 간 재사용된다: backend/ai/analysis.py의
       `_nat_conversation_id`는 "{trigger_source}:{stock}:{today}"(하루에 같은 종목을
       여러 번 분석하면 동일), backend/telegram/commands.py의 `_handle_chat_fallback`은
       f"telegram:{chat_id}"(그 사용자의 모든 메시지가 영구히 같은 스레드).
@@ -542,13 +542,13 @@ def mask_pii(text: None) -> tuple[None, dict[str, str]]: ...
 # 아래 docstring이 명시하듯 None도 받는다(빈 입력 가드). 구현부만 `str`로 적으면
 # 그 계약이 타입에서 사라져 backend/tests/test_pii_mask.py의 빈 입력 테스트가
 # 타입 오류가 된다. 반대로 구현부만 `str | None`으로 넓히면 이번엔 반환값도
-# `str | None`이 되어, user_msg가 항상 str인 services.llm_chat 호출부가
+# `str | None`이 되어, user_msg가 항상 str인 ai.llm.llm_chat 호출부가
 # _llm_openai_chat 등에 `str | None`을 넘기는 오류로 번진다. 오버로드는 그
 # "들어온 것과 같은 것이 나간다"를 그대로 표현해 양쪽을 모두 만족시킨다.
 def mask_pii(text: str | None) -> tuple[str | None, dict[str, str]]:
     """계좌번호·원화 금액·보유 수량을 자리표시자로 치환한다.
 
-    반환된 mapping은 이 호출 전용이다 — 호출자(services.llm_chat)가 요청 스코프
+    반환된 mapping은 이 호출 전용이다 — 호출자(ai.llm.llm_chat)가 요청 스코프
     지역 변수로만 들고 있어야 하며, 모듈 전역에 저장하면 동시 요청의 매핑이
     서로 덮어써진다.
 
@@ -634,7 +634,7 @@ def unmask_pii(text: None, mapping: dict[str, str]) -> None: ...
 
 
 # mask_pii와 같은 이유로 오버로드다. 빈 입력 가드가 None을 그대로 돌려주는 것이
-# 계약이고, services.llm_chat의 `return unmask_pii(raw, mapping)`은 `-> str`을
+# 계약이고, ai.llm.llm_chat의 `return unmask_pii(raw, mapping)`은 `-> str`을
 # 유지해야 한다.
 def unmask_pii(text: str | None, mapping: dict[str, str]) -> str | None:
     """자리표시자를 원값으로 역치환한다.
@@ -705,10 +705,10 @@ def unmask_pii(text: str | None, mapping: dict[str, str]) -> str | None:
 
     # 입력이 str 서브클래스면 그 타입과 인스턴스 속성을 유지해 돌려준다. re.sub은 항상
     # plain str을 반환하므로, 호출자가 str을 상속해 메타데이터를 얹은 값을 넘기면
-    # (#260의 services.NatAnswer — 답변 텍스트에 routed_agent/tools_used를 얹어 각주를
+    # (#260의 ai.llm.NatAnswer — 답변 텍스트에 routed_agent/tools_used를 얹어 각주를
     # 만든다) 역치환을 통과하는 순간 그 메타데이터가 조용히 사라진다.
     #
-    # #263이 먼저 머지됐다. services.NatAnswer.with_text()는 유지된다 —
+    # #263이 먼저 머지됐다. ai.llm.NatAnswer.with_text()는 유지된다 —
     # llm_chat의 `return unmask_pii(raw, mapping)` 경로에서 이 제네릭 복원이
     # routed_agent/tools_used를 보존한다. with_text()의 제거 여부는 이 PR(#230)이
     # 결정하지 않으며 #263 후속에서 다룬다.

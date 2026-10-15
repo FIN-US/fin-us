@@ -7,7 +7,7 @@ CSV를 만든다. 사람 채점은 이 스크립트가 하지 않는다 — 나�
 기사 하나씩 채점하는 이유: 운영 파이프라인은 기사 여러 건을 한 번에 넘겨 종합
 점수를 받지만, 그 점수는 사람이 채점하기 어렵다("이 3건을 합치면 몇 점인가?"에는
 정답이 없다). 기사 단위라면 사람과 모델이 같은 질문에 답하므로 비교가 성립한다.
-운영 프롬프트와 같은 함수(services.score_signal)를 그대로 쓰므로 기준은 공유된다.
+운영 프롬프트와 같은 함수(ai.signals.score_signal)를 그대로 쓰므로 기준은 공유된다.
 
 사용:
     python -m backend.scripts.build_signal_eval_set --count 30 --output eval.csv
@@ -30,7 +30,8 @@ from backend.core.config import NEWS_MCP_PARAMS  # noqa: E402
 from backend.core.database import engine  # noqa: E402
 from backend.pii.egress import public  # noqa: E402
 from backend.scheduler.monitor import DEFAULT_MONITOR_STOCKS  # noqa: E402
-from backend.ai.services import run_mcp_tool, score_signal  # noqa: E402
+from backend.ai.mcp_tools import run_mcp_tool  # noqa: E402
+from backend.ai.signals import score_signal  # noqa: E402
 from backend.repositories.watchlist import SqliteWatchlistRepo  # noqa: E402
 
 DEFAULT_COUNT = 30

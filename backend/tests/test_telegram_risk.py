@@ -9,7 +9,7 @@
 
 import pytest
 
-import backend.ai.services as services
+from backend.ai import llm as ai_llm
 import backend.ai.user_preferences as user_preferences
 from backend.telegram.commands import TelegramCommandHandler
 from backend.telegram.handlers.texts import (
@@ -286,9 +286,9 @@ async def test_nat_chat_sends_user_header_only_for_chat_threads(monkeypatch, con
     """뮤테이션: ``_llm_nat_chat``에서 ``x-user-id`` 부착을 지우면 telegram 케이스가 red."""
     requests = []
     response = _FakeResponse(200, {"choices": [{"message": {"content": "답변"}}]})
-    monkeypatch.setattr(services.httpx, "AsyncClient", _fake_async_client(requests, response))
+    monkeypatch.setattr(ai_llm.httpx, "AsyncClient", _fake_async_client(requests, response))
 
-    await services._llm_nat_chat("반도체 종목 추천해줘", conversation_id=conversation_id)
+    await ai_llm._llm_nat_chat("반도체 종목 추천해줘", conversation_id=conversation_id)
 
     assert requests[0]["headers"].get("x-user-id") == expected_header
     assert requests[0]["headers"]["conversation-id"] == conversation_id
