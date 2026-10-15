@@ -67,7 +67,7 @@ _DEFAULT_SCORING_PROVIDER: _ScoringProvider = "ollama"
 # resolve_stock_code MCP 호출은 매번 새 stdio 서브프로세스를 띄우는 비용이 있고
 # (run_mcp_tool 참고), 종목명-코드 매핑은 사실상 불변이므로 캐싱해 재조회를 피한다.
 _stock_code_cache: dict[str, str] = {}
-# 종목마스터는 4,353종(별칭 포함해도 여유롭게 포함)이므로 이 상한을 정상적으로
+# 종목마스터는 4,401종(별칭 포함해도 여유롭게 포함)이므로 이 상한을 정상적으로
 # 채울 일은 없다. _normalize_stock_input의 정규화가 stock-master.js의 정규화와
 # 다시 어긋나는 미래의 변경이 있어도(둘은 서로 다른 언어의 별개 구현이다) 캐시가
 # 무한정 자라지 않도록 하는 독립적인 방어선이다.
@@ -145,7 +145,7 @@ async def _resolve_stock_code(stock: str) -> str:
                 resolved,
             )
             return ""
-        # 상한 도달은 정상 조건이 아니다 — 종목마스터 4,353종 규모에서는 일어나지
+        # 상한 도달은 정상 조건이 아니다 — 종목마스터 4,401종 규모에서는 일어나지
         # 않아야 하며, 발생했다면 입력 정규화가 stock-master.js와 다시 어긋났다는
         # 신호다. dict는 자동으로 비우지 않으므로 침묵한 채 자라기만 하면 상한을
         # 채운 항목들이 영구히 자리를 차지해, 그 이후 정상적인 신규 종목명마다

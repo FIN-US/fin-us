@@ -9,12 +9,28 @@ const STOCKS_WITH_Q570121 = [
   { code: "Q570121", name: "신한 레버리지 금선물 ETN(H)", market: "KOSDAQ", aliases: [] },
 ];
 
+// The bundled master carries classification fields that resolveStock passes through
+// as-is (scrt_grp_cls_code / etpr_undt_objt_co_yn / prst_cls_code, added for #138).
+// Tests that assert *resolution* compare the identity only, so a KRX reclassification
+// cannot turn them red. The schema itself is pinned once, by the 카카오 test below.
+const identity = ({ code, name, market, aliases }) => ({ code, name, market, aliases });
+
+// This deepEqual doubles as the schema pin for a bundled master entry: resolveStock
+// spreads the matched row as-is, so any field added by
+// mcp-trading/scripts/update_stock_master.py shows up here. The classification fields
+// (scrt_grp_cls_code / etpr_undt_objt_co_yn / prst_cls_code) came in with #138 to let the
+// alphanumeric-code rollout tell a SPAC from a common share. They are carried, not
+// formatted: the resolve_stock_code tool still prints only name/code/market, so the MCP
+// contract is unchanged.
 test("resolveStock resolves names from the expanded domestic stock master", () => {
   assert.deepEqual(resolveStock("카카오"), {
     code: "035720",
     name: "카카오",
     market: "KOSPI",
     aliases: [],
+    scrt_grp_cls_code: "ST",
+    etpr_undt_objt_co_yn: "N",
+    prst_cls_code: "0",
   });
 });
 
@@ -121,7 +137,7 @@ test("resolveStock loads the default stock master at most once across multiple c
 });
 
 test("resolveStock resolves deduplicated ETN names without ambiguity", () => {
-  assert.deepEqual(resolveStock("한투 금선물 ETN"), {
+  assert.deepEqual(identity(resolveStock("한투 금선물 ETN")), {
     code: "Q570121",
     name: "한투 금선물 ETN",
     market: "KOSPI",
@@ -141,7 +157,7 @@ test("resolveStock resolves deduplicated ETN names without ambiguity", () => {
 // real master entry.
 
 test("resolveStock resolves SIMPAC to its real KOSPI code instead of echoing the name as a code", () => {
-  assert.deepEqual(resolveStock("SIMPAC"), {
+  assert.deepEqual(identity(resolveStock("SIMPAC")), {
     code: "009160",
     name: "SIMPAC",
     market: "KOSPI",
@@ -150,7 +166,7 @@ test("resolveStock resolves SIMPAC to its real KOSPI code instead of echoing the
 });
 
 test("resolveStock resolves INVENI to its real KOSPI code instead of echoing the name as a code", () => {
-  assert.deepEqual(resolveStock("INVENI"), {
+  assert.deepEqual(identity(resolveStock("INVENI")), {
     code: "015360",
     name: "INVENI",
     market: "KOSPI",
@@ -159,7 +175,7 @@ test("resolveStock resolves INVENI to its real KOSPI code instead of echoing the
 });
 
 test("resolveStock resolves WISCOM to its real KOSPI code instead of echoing the name as a code", () => {
-  assert.deepEqual(resolveStock("WISCOM"), {
+  assert.deepEqual(identity(resolveStock("WISCOM")), {
     code: "024070",
     name: "WISCOM",
     market: "KOSPI",
@@ -172,7 +188,7 @@ test("resolveStock resolves a lowercase code-shaped name case-insensitively, not
   // back just like the uppercase form. This asserts the fix's name-matching
   // fallback is likewise case-insensitive for code-shaped input, catching a
   // regression where only exact-case name matching was restored.
-  assert.deepEqual(resolveStock("simpac"), {
+  assert.deepEqual(identity(resolveStock("simpac")), {
     code: "009160",
     name: "SIMPAC",
     market: "KOSPI",
@@ -213,11 +229,14 @@ test("resolveStock resolves a fund's Korean name to its real 9 char code, unaffe
   // misses and Step 2 (name/alias matching) answers. It pins that the
   // reordering did not disturb matching for names containing parentheses.
   // The 9-char CODE input itself is NOT name/alias-only: since #174 Step 1 is
-  // length-agnostic, "F70100026" resolves directly — see the
+  // length-agnostic, a 9-char code resolves directly — see the
   // "9 char fund code ... present in master" test below.
-  assert.deepEqual(resolveStock("한투글로벌넥스트웨이브1(A)"), {
-    code: "F70100026",
-    name: "한투글로벌넥스트웨이브1(A)",
+  // The fund named here must be one the bundled master currently lists: funds are
+  // created and wound up often, and the previous pick (F70100026
+  // 한투글로벌넥스트웨이브1(A)) had left the master by the time it was regenerated.
+  assert.deepEqual(identity(resolveStock("한투한미넥스트혁신성장1(A)")), {
+    code: "F70100034",
+    name: "한투한미넥스트혁신성장1(A)",
     market: "KOSPI",
     aliases: [],
   });

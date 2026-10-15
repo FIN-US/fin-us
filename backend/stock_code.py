@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 # resolve_stock_code 응답 형식: "종목명 (코드, 시장)" — mcp-trading/index.js
 # 종목명 자체에 괄호가 들어가는 경우가 있어(예: "...1(A)", 닫히지 않는 "(H")
 # 단순 괄호 매칭 대신 코드+쉼표 조합에 앵커한다. 종목명에 쉼표가 들어가는 종목은 없다.
-# 코드 길이는 6자(3,889종목)·7자 ETN(389종목)·9자 펀드(75종목)가 섞여 있어 상한을 두지 않는다.
+# 코드 길이는 6자(3,944종목)·7자 ETN(368종목)·9자(89종목)가 섞여 있어 상한을 두지 않는다.
 # 숫자 불변식(_has_code_digit 적용)을 함께 거쳐야 최종 유효 코드로 인정한다.
 _STOCK_CODE_EXTRACT_RE = re.compile(r"\(([0-9A-Z]{6,}),")
 
@@ -29,7 +29,7 @@ def extract_stock_name(resolved_text: str) -> str | None:
 
     코드 앵커 **앞부분 전체**가 종목명이다. ``split("(")[0]``으로 자르면 위 주석이
     말하는 그 경우 — 이름 자체에 괄호가 든 종목 — 에서 이름이 잘려 나간다.
-    주문 가능 코드(6~7자리 숫자)만 세어도 mcp-trading/data/stocks.json에 178건이
+    주문 가능 코드(6~7자리 숫자)만 세어도 mcp-trading/data/stocks.json에 174건이
     해당한다(예: ``132030 KODEX 골드선물(H)`` → "KODEX 골드선물").
 
     잘린 이름은 PendingOrder.stock_name → 승인 메시지 → TradeHistory.stock_name까지
@@ -45,9 +45,9 @@ def extract_stock_name(resolved_text: str) -> str | None:
 # ──────────────────────────────────────────────────────────────────────────
 # 입력이 이미 종목코드 형태인지 판정 (MCP 조회 생략 여부)
 # ──────────────────────────────────────────────────────────────────────────
-# {6,7} → 실제 분포(6·7·9자)에 정확히 맞춤: 9자 펀드 코드 75종목을 커버하되, 8자는
-# 종목마스터 4,353종 전수(mcp-trading/data/stocks.json)에 0건이라 제외한다(#140).
-#   길이 분포(전수 실측): 6자 3,889종목 / 7자 389종목(ETN) / 9자 75종목(펀드) / 8자 0건
+# {6,7} → 실제 분포(6·7·9자)에 정확히 맞춤: 9자 코드 89종목을 커버하되, 8자는
+# 종목마스터 4,401종 전수(mcp-trading/data/stocks.json)에 0건이라 제외한다(#140).
+#   길이 분포(전수 실측): 6자 3,944종목 / 7자 368종목(ETN) / 9자 89종목(펀드 84·신주인수권 5) / 8자 0건
 # KIS 국내 종목코드는 6자리 숫자(005930)만이 아니다. 코스닥 스팩·리츠 등 약 18%가
 # 영문이 섞인 형태(0001A0)이고, 펀드는 9자(F70100026).
 # mcp-trading/stock-master.js의 resolveStock()은 #174 이후 코드 완전일치를 길이 무관으로
@@ -206,7 +206,7 @@ def _master_stocks_path(mcp_dir: Path) -> Path:
 _MASTER_LOAD_FAILED = object()
 
 # 지연 로딩 캐시: None=아직 로드 안 함, frozenset=로드 성공, _MASTER_LOAD_FAILED=로드 실패.
-# 요청마다 489K짜리 stocks.json을 다시 파싱하면 지름길을 둔 이유(MCP 왕복 생략)가
+# 요청마다 895K짜리 stocks.json을 다시 파싱하면 지름길을 둔 이유(MCP 왕복 생략)가
 # 사라지므로, 프로세스 수명 동안 한 번만 읽고 캐시한다.
 # _master_codes_cache_path는 캐시가 어느 경로에서 만들어졌는지 기록한다 — 경로 계산을
 # 매 호출로 바꾸면서 함께 필요해졌다. 경로가 바뀌면(_TRADING_MCP_DIR 변경) 캐시를
@@ -236,7 +236,7 @@ def _load_master_codes():
         raw = path.read_text(encoding="utf-8")
         stocks = json.loads(raw)
         # 항목 단위로 건너뛴다. 마스터는 외부 KIS 파일에서 생성되므로 code 키가 빠진
-        # 항목이 섞일 수 있는데, 하나의 KeyError로 4,353건 전체 검증이 fail-open되면
+        # 항목이 섞일 수 있는데, 하나의 KeyError로 4,401건 전체 검증이 fail-open되면
         # 그 한 건 때문에 #151이 통째로 꺼진다. stock-master.js도 String(s.code ?? "")로
         # 항목 단위로 방어한다.
         codes = frozenset(
@@ -315,7 +315,7 @@ def _is_unresolved_echo(resolved_text: str) -> bool:
 
 
 def _has_code_digit(value: str) -> bool:
-    """실제 종목코드는 항상 숫자를 포함한다(종목마스터 4,353종 전수 확인, 0건 예외).
+    """실제 종목코드는 항상 숫자를 포함한다(종목마스터 4,401종 전수 확인, 0건 예외).
 
     입력 판정(_looks_like_stock_code)과 MCP 추출 결과 검증(_resolve_stock_code)이
     같은 불변식을 쓰도록 한 곳에 둔다.

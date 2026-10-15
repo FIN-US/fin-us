@@ -26,7 +26,7 @@ from backend.stock_code import (
     is_orderable_stock_code_strict,
 )
 
-# 종목마스터 실제 데이터(4,353종 전수) — 판정 함수가 이름·별칭을 코드로 오인하지
+# 종목마스터 실제 데이터(4,401종 전수) — 판정 함수가 이름·별칭을 코드로 오인하지
 # 않는지 검증하는 데 쓴다. 이 파일은 레포에 커밋돼 있어야 한다.
 _STOCKS_JSON_PATH = Path(__file__).resolve().parents[2] / "mcp-trading" / "data" / "stocks.json"
 
@@ -124,7 +124,7 @@ class TestStockCodeExtractRe:
         assert m.group(1) == "Q500020"
 
     def test_nine_char_fund_code(self):
-        """9자 펀드 코드(75종목)를 추출한다 — {6,7}로 좁히면 조용히 실패하는 경로."""
+        """9자 펀드 코드(84종목)를 추출한다 — {6,7}로 좁히면 조용히 실패하는 경로."""
         m = _STOCK_CODE_EXTRACT_RE.search(
             "한투글로벌넥스트웨이브1(A) (F70100026, KOSPI)"
         )
@@ -183,7 +183,8 @@ class TestLooksLikeStockCode:
         """{6,7} → {6,9} 확대의 핵심 회귀 가드.
 
         뮤테이션 ①: _STOCK_CODE_RE를 {6,7}로 되돌리면 이 케이스가 red가 된다.
-        F70100026은 종목마스터 실제 항목(코드 길이 9, 펀드 75종 중 하나).
+        F70100026은 9자 펀드 코드의 형태 예시다. 이 단정은 형태만 보므로 마스터에
+        실재하는지와 무관하다(실제로 이 코드는 2026-10 마스터에서 상환돼 빠졌다).
         #140 이전에는 False → MCP 서브프로세스를 불필요하게 호출했다.
         """
         assert _looks_like_stock_code("F70100026")
@@ -216,7 +217,7 @@ class TestLooksLikeStockCode:
         assert not _looks_like_stock_code("F701000260")  # 10자
 
     def test_rejects_eight_char(self):
-        """8자는 종목마스터 4,353종 전수(mcp-trading/data/stocks.json)에 0건이라 거절한다.
+        """8자는 종목마스터 4,401종 전수(mcp-trading/data/stocks.json)에 0건이라 거절한다.
 
         뮤테이션 ①: _STOCK_CODE_RE를 {6,9} 단순 상한 확대로 되돌리면 이 케이스가
         red가 된다. 실재하지 않는 8자 입력이 코드 형태로 통과하면 MCP 존재 검증을
@@ -468,8 +469,12 @@ class TestIsKnownMasterCode:
         assert _is_known_master_code("005930") is True
 
     def test_known_nine_char_fund_code_returns_true(self):
-        """#140 회귀 가드: 마스터에 실재하는 9자 펀드 코드는 계속 지름길을 통과해야 한다."""
-        assert _is_known_master_code("F70100026") is True
+        """#140 회귀 가드: 마스터에 실재하는 9자 펀드 코드는 계속 지름길을 통과해야 한다.
+
+        여기 적는 코드는 **커밋된 마스터에 실재해야** 한다. 펀드는 설정·상환이 잦아
+        마스터를 갱신하면 빠질 수 있다 — 앞서 쓰던 F70100026이 그렇게 빠졌다(#138).
+        """
+        assert _is_known_master_code("F70100034") is True
 
     def test_unknown_numeric_code_returns_false(self):
         """#151 재현 케이스: 마스터에 없는 숫자 6자는 존재하지 않는다고 판정해야 한다."""
@@ -506,7 +511,7 @@ class TestIsKnownMasterCode:
         """code 키가 빠진 항목 하나가 마스터 전체 검증을 꺼뜨리면 안 된다.
 
         마스터는 외부 KIS 파일에서 생성되므로 형태가 변할 수 있다. 항목 전체를 한
-        try로 묶으면 결손 1건의 KeyError가 4,353건 전부를 fail-open으로 만들고,
+        try로 묶으면 결손 1건의 KeyError가 4,401건 전부를 fail-open으로 만들고,
         실패는 캐시되므로 경고조차 프로세스 수명 동안 한 번만 찍힌다.
         """
         master = tmp_path / "data" / "stocks.json"
@@ -555,7 +560,7 @@ class TestIsKnownMasterCode:
         assert "종목마스터 로드 실패" in caplog.text
 
     def test_master_codes_loaded_from_disk_at_most_once(self, monkeypatch):
-        """지름길 경로가 요청마다 stocks.json(489K)을 다시 파싱하면 지름길을 둔
+        """지름길 경로가 요청마다 stocks.json(895K)을 다시 파싱하면 지름길을 둔
         이유(MCP 왕복 생략)가 무색해진다 — 첫 호출 이후로는 캐시만 써야 한다.
         """
         read_calls = []
@@ -571,7 +576,7 @@ class TestIsKnownMasterCode:
 
         assert _is_known_master_code("005930") is True
         assert _is_known_master_code("999999") is False
-        assert _is_known_master_code("F70100026") is True
+        assert _is_known_master_code("F70100034") is True
 
         assert len(read_calls) == 1
 
@@ -623,7 +628,7 @@ def test_master_path_wiring_follows_trading_mcp_dir_without_reload(tmp_path, mon
 
     뮤테이션: _load_master_codes 안의 `_master_stocks_path(_TRADING_MCP_DIR)`를
     `_master_stocks_path(Path(__file__).resolve().parents[1] / "mcp-trading")`처럼
-    하드코딩으로 되돌리면, 아래 두 단정 모두 실제 마스터(4,353종)를 읽게 되어 red가
+    하드코딩으로 되돌리면, 아래 두 단정 모두 실제 마스터(4,401종)를 읽게 되어 red가
     된다 — "111111"은 실제 마스터에 없고 "005930"은 실제 마스터에 있으므로.
     """
     mcp_dir = tmp_path / "custom-mcp"

@@ -1175,7 +1175,7 @@ async def run_order_assist(
             (LimitViolation("unresolved_stock", f"{stock} — 종목마스터에서 확인하지 못했습니다."),),
         )
     stock_code = code_match.group(1).upper()
-    # split("(")로 자르면 이름에 괄호가 든 종목(주문 가능 코드만 178건)이 잘려 나간다.
+    # split("(")로 자르면 이름에 괄호가 든 종목(주문 가능 코드만 174건)이 잘려 나간다.
     resolved_name = extract_stock_name(resolved) or stock
 
     # "이 코드로 주문을 낼 수 있는가"는 순수 함수 하나로 끝난다. 주문 금지 종목에

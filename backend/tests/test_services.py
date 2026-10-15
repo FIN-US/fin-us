@@ -518,10 +518,10 @@ async def test_perform_stock_analysis_digitless_extracted_code_not_cached(monkey
 async def test_perform_stock_analysis_resolves_nine_char_fund_code(monkeypatch):
     """회귀 가드용 테스트 — 이 유닛의 변경 전/후 모두 통과한다.
 
-    실제 stocks.json 항목(코드 F70100026, 종목명 "한투글로벌넥스트웨이브1(A)",
+    실제 stocks.json 항목(코드 F70100034, 종목명 "한투한미넥스트혁신성장1(A)",
     시장 KOSPI)을 실제 응답 포맷 "{name} ({code}, {market})"으로 재현한다.
     이 테스트가 막으려는 것은 추출부에서 `_looks_like_stock_code`를 재사용하려는
-    유혹이다. 그 함수의 `{6,7}` 상한은 9자 펀드 코드 75종 전부를 조용히 떨어뜨린다.
+    유혹이다. 그 함수의 `{6,7}` 상한은 9자 펀드 코드 84종 전부를 조용히 떨어뜨린다.
     또한 종목명에 괄호가 포함된 경우("...1(A)")에도 코드+쉼표 앵커링이
     올바르게 동작하는지도 함께 고정한다.
     """
@@ -530,15 +530,15 @@ async def test_perform_stock_analysis_resolves_nine_char_fund_code(monkeypatch):
         return "plain analysis"
 
     async def fake_run_mcp_tool(params, tool_name, arguments):
-        return "한투글로벌넥스트웨이브1(A) (F70100026, KOSPI)"
+        return "한투한미넥스트혁신성장1(A) (F70100034, KOSPI)"
 
     monkeypatch.setattr(services, "llm_chat", fake_llm_chat)
     monkeypatch.setattr(services, "run_mcp_tool", fake_run_mcp_tool)
 
     fake_session = FakeSession()
-    await services.perform_stock_analysis("한투글로벌넥스트웨이브1(A)", "openai", fake_session)
+    await services.perform_stock_analysis("한투한미넥스트혁신성장1(A)", "openai", fake_session)
 
-    assert fake_session.report.stock_code == "F70100026"
+    assert fake_session.report.stock_code == "F70100034"
 
 
 @pytest.mark.asyncio
@@ -562,7 +562,9 @@ async def test_perform_stock_analysis_skips_mcp_when_stock_is_already_code(monke
 async def test_perform_stock_analysis_skips_mcp_for_known_master_fund_code(monkeypatch):
     """#151과 별개로 #140의 지름길(9자 펀드 코드)을 회귀시키면 안 된다.
 
-    F70100026은 종목마스터 실제 항목(수용 기준: 존재하는 펀드 코드는 정상 해석).
+    F70100034는 종목마스터 실제 항목(수용 기준: 존재하는 펀드 코드는 정상 해석).
+    펀드는 설정·상환이 잦아 마스터 갱신으로 빠질 수 있다 — 앞서 쓰던 F70100026이
+    그렇게 빠졌다(#138). 여기 적는 코드는 커밋된 마스터에 실재해야 한다.
     """
 
     async def fake_llm_chat(provider, prompt, *, conversation_id=None):
@@ -575,9 +577,9 @@ async def test_perform_stock_analysis_skips_mcp_for_known_master_fund_code(monke
     monkeypatch.setattr(services, "run_mcp_tool", unexpected_run_mcp_tool)
 
     fake_session = FakeSession()
-    await services.perform_stock_analysis("F70100026", "openai", fake_session)
+    await services.perform_stock_analysis("F70100034", "openai", fake_session)
 
-    assert fake_session.report.stock_code == "F70100026"
+    assert fake_session.report.stock_code == "F70100034"
 
 
 @pytest.mark.asyncio

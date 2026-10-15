@@ -1495,7 +1495,7 @@ async def test_proposal_without_a_stock_code_is_rejected():
 
 @pytest.mark.asyncio
 async def test_stock_name_with_parentheses_survives_resolution():
-    """이름에 괄호가 든 종목(주문 가능 코드만 178건)이 잘리지 않는다."""
+    """이름에 괄호가 든 종목(주문 가능 코드만 174건)이 잘리지 않는다."""
     mcp = _mcp_runner(resolved="KODEX 골드선물(H) (132030, KOSPI)")
     proposal = PROPOSAL_JSON.replace('"stock_code": "005930"', '"stock_code": "132030"')
 
