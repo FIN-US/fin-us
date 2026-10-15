@@ -1852,7 +1852,7 @@ async def finus_save_diary(config: FinusSaveDiaryConfig, _builder: Builder):
         # 거부하지 않는다 (#354). backend가 llm_chat의 매핑을 요청 범위로 들고 있다가
         # POST 시점에 되돌리므로(backend/pii_registry.py), 여기서 막으면 그 복구를
         # 우리가 막는 셈이 된다. 되돌릴 수 없는 낯선 scope는 backend가 같은 자리에서
-        # 422로 거부한다 — 판정을 값이 있는 쪽이 한다. 근거는 docs/nfr-05-pii-masking.md.
+        # 422로 거부한다 — 판정을 값이 있는 쪽이 한다. 근거는 docs/pii-masking.md.
         leftover = unrestorable_placeholders(title) + unrestorable_placeholders(content)
         if leftover:
             # 자리표시자 원문은 로그에만 남긴다. 오류 JSON은 Observation으로 LLM
