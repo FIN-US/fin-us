@@ -7,7 +7,7 @@ from uuid import uuid4
 
 import pytest
 
-from backend.redis_state import (
+from backend.core.redis_state import (
     _DELETE_IF_UNCHANGED_SCRIPT,
     _REPLACE_IF_UNCHANGED_SCRIPT,
     ConditionalClaim,
@@ -18,7 +18,7 @@ from backend.redis_state import (
     TelegramPollerState,
     signal_hash,
 )
-from backend.trading_orders import PendingOrder
+from backend.trading.orders import PendingOrder
 
 
 pytestmark = pytest.mark.asyncio

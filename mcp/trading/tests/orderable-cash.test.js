@@ -99,7 +99,7 @@ test("formatOrderableCashReport shows the limit price as the basis", () => {
   assert.match(text, /VTTC8908R/);
 });
 
-// backend/order_assist.py `_CASH_RE`가 읽는 줄이다. 이 정규식이 그쪽 파일의 복제본이라는
+// backend/trading/order_assist.py `_CASH_RE`가 읽는 줄이다. 이 정규식이 그쪽 파일의 복제본이라는
 // 점이 이 테스트의 전부다 — 라벨을 바꾸면 /advise가 전부 fail-closed 거부로 떨어진다 (#310).
 const BACKEND_CASH_RE = /주문가능금액:\s*([\d,]+)\s*원/;
 

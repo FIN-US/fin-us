@@ -179,7 +179,7 @@ backend를 기다리지 않아도 됩니다. backend가 없는 동안에는 `/ap
 > 적용되지 않아, 이 검사가 없으면 임의 사이트가 브로드캐스트를 수신할 수 있습니다
 > (Cross-Site WebSocket Hijacking). 미들웨어가 사라진 지금은 **이 검사가 그 목록의 유일한
 > 소비자**라 더더욱 쓰이지 않는 설정으로 보이기 쉽습니다. `http://localhost:8080`은 계속
-> 포함돼야 하고(`backend/config.py`의 `ALLOW_ORIGINS` 기본값, `.env.example` 참고), 다른
+> 포함돼야 하고(`backend/core/config.py`의 `ALLOW_ORIGINS` 기본값, `.env.example` 참고), 다른
 > 호스트(예: Tailscale 주소)로 시연할 때는 해당 오리진을 `ALLOW_ORIGINS`에 추가해야 합니다.
 > 지우면 화면은 정상적으로 뜨는데 실시간 알림 연결만 403으로 죽어서 원인을 찾기 어렵습니다.
 >

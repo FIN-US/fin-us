@@ -1,4 +1,4 @@
-"""외부 LLM 전송 경계(backend/pii_egress.py) 회귀 테스트 (#395).
+"""외부 LLM 전송 경계(backend/pii/egress.py) 회귀 테스트 (#395).
 
 세 층으로 본다.
 
@@ -17,8 +17,14 @@ import re
 
 import pytest
 
-from backend import order_assist, pii_egress, pii_mask, services
-from backend.pii_egress import (
+from backend.trading import order_assist
+
+from backend.pii import egress as pii_egress
+
+from backend.pii import mask as pii_mask
+
+from backend.ai import services
+from backend.pii.egress import (
     EgressBlocked,
     Segment,
     personal,
@@ -26,9 +32,9 @@ from backend.pii_egress import (
     public,
     render_unmasked,
 )
-from backend.pii_mask import unmask_pii
-from backend.pii_registry import _SCOPED_PLACEHOLDER_RE
-from backend.telegram_commands import TelegramCommandHandler
+from backend.pii.mask import unmask_pii
+from backend.pii.registry import _SCOPED_PLACEHOLDER_RE
+from backend.telegram.commands import TelegramCommandHandler
 from backend.tests.test_balance_parser import REAL_BALANCE_TEXT
 from backend.tests.test_telegram_commands import FakeNotifier
 
@@ -194,7 +200,7 @@ class TestFailSafeBlocksTheCall:
 class TestComparisonLog:
     def test_debug_log_shows_before_and_after(self, caplog, monkeypatch):
         monkeypatch.setattr(pii_egress, "PII_EGRESS_DEBUG_LOG", True)
-        caplog.set_level(logging.DEBUG, logger="backend.pii_egress")
+        caplog.set_level(logging.DEBUG, logger="backend.pii.egress")
 
         outgoing, _ = prepare_egress(
             ["잔고 ", personal("예수금 1,000,000원"), " 뉴스 ", public("매출 500억원")],
@@ -214,20 +220,20 @@ class TestComparisonLog:
         """디버깅하려고 루트 레벨만 DEBUG로 올려도 평문 잔고가 로그에 남지 않는다 (PR #404 리뷰)."""
         monkeypatch.setattr(pii_egress, "PII_EGRESS_DEBUG_LOG", False)
         caplog.set_level(logging.DEBUG)  # 루트 로거
-        caplog.set_level(logging.DEBUG, logger="backend.pii_egress")
+        caplog.set_level(logging.DEBUG, logger="backend.pii.egress")
 
         prepare_egress("예수금 1,000,000원", label="test")
 
         assert "1,000,000원" not in caplog.text
-        assert not [r for r in caplog.records if r.name == "backend.pii_egress"]
+        assert not [r for r in caplog.records if r.name == "backend.pii.egress"]
 
     def test_nothing_is_logged_above_debug(self, caplog, monkeypatch):
         monkeypatch.setattr(pii_egress, "PII_EGRESS_DEBUG_LOG", True)
-        caplog.set_level(logging.INFO, logger="backend.pii_egress")
+        caplog.set_level(logging.INFO, logger="backend.pii.egress")
 
         prepare_egress("예수금 1,000,000원", label="test")
 
-        assert not [r for r in caplog.records if r.name == "backend.pii_egress"]
+        assert not [r for r in caplog.records if r.name == "backend.pii.egress"]
 
 
 # ---------------------------------------------------------------------------

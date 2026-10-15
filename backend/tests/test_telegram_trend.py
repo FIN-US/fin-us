@@ -9,7 +9,7 @@ import re
 
 import pytest
 
-from backend.telegram_commands import (
+from backend.telegram.commands import (
     MARKET_TREND_DETAIL_CALLBACK,
     trend_detail_button_text,
     TelegramCommandHandler,

@@ -13,7 +13,7 @@ from typing import Any, Callable, Optional, Protocol, Sequence, cast
 from sqlalchemy import CursorResult, delete, func
 from sqlmodel import Session, col, select
 
-from .models import FilteredSignal
+from backend.core.models import FilteredSignal
 
 logger = logging.getLogger(__name__)
 

@@ -19,7 +19,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from backend.telegram_commands import TelegramCommandHandler
+from backend.telegram.commands import TelegramCommandHandler
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _POLICY_PATH = _REPO_ROOT / "mcp" / "trading" / "tests" / "fixtures" / "unreadable_numeric_name_policy.json"

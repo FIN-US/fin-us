@@ -1,4 +1,4 @@
-"""backend/stock_code.py 공용 모듈 테스트 (#140).
+"""backend/trading/stock_code.py 공용 모듈 테스트 (#140).
 
 _STOCK_CODE_EXTRACT_RE, _STOCK_CODE_RE / _looks_like_stock_code, _ORDERABLE_STOCK_CODE_RE에 대한
 순수 단위 테스트. 각 호출부 고유 동작(services.py의 빈 문자열 폴백,
@@ -13,8 +13,8 @@ from pathlib import Path
 
 import pytest
 
-from backend import stock_code
-from backend.stock_code import (
+from backend.trading import stock_code
+from backend.trading.stock_code import (
     _ORDERABLE_STOCK_CODE_RE,
     _STOCK_CODE_EXTRACT_RE,
     _has_code_digit,
@@ -587,7 +587,7 @@ class TestIsKnownMasterCode:
 def test_master_stocks_path_follows_trading_mcp_dir(tmp_path):
     """마스터 경로는 백엔드가 MCP를 띄우는 디렉터리(TRADING_MCP_DIR)에서 파생돼야 한다.
 
-    stock_code.py 위치에 고정하면 개발 환경에서는 두 경로가 우연히 같아 문제가
+    trading/stock_code.py 위치에 고정하면 개발 환경에서는 두 경로가 우연히 같아 문제가
     드러나지 않지만, backend/Dockerfile은 백엔드 소스(/app bind mount)와 MCP
     디렉터리(/opt/mcp-trading 이미지 스냅샷)를 실제로 갈라놓는다. TRADING_MCP_DIR이
     레포 바깥을 가리키면 backend 쪽 경로에 파일이 없어 fail-open으로 #151 검증이

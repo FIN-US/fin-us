@@ -8,7 +8,7 @@ import json
 
 import pytest
 
-from backend.ws_manager import ConnectionManager
+from backend.core.ws_manager import ConnectionManager
 
 
 class FakeWebSocket:

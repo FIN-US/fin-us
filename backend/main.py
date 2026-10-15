@@ -8,7 +8,7 @@ from fastapi import FastAPI, HTTPException, Query, Depends, Request, WebSocket, 
 from fastapi.responses import JSONResponse
 from sqlmodel import Session, col, select
 
-from .config import (
+from backend.core.config import (
     NEWS_MCP_PARAMS,
     TRADING_MCP_PARAMS,
     DART_MCP_PARAMS,
@@ -19,28 +19,28 @@ from .config import (
     SIGNAL_SCORE_MIN,
     SIGNAL_SCORE_THRESHOLD,
 )
-from .filtered_signal_repo import fill_score_axis, score_histogram
-from .pii_registry import placeholder_kind, restore_live_placeholders
-from .ws_manager import manager
-from .scheduler import (
+from backend.repositories.filtered_signal import fill_score_axis, score_histogram
+from backend.pii.registry import placeholder_kind, restore_live_placeholders
+from backend.core.ws_manager import manager
+from backend.scheduler import (
     format_price_updated_at,
     is_price_fresh,
     start_scheduler,
     stop_scheduler,
 )
-from .telegram_commands import start_telegram_commands, stop_telegram_commands
-from .schemas import CommonResponse, DiaryCreate
-from .services import (
+from backend.telegram.commands import start_telegram_commands, stop_telegram_commands
+from backend.core.schemas import CommonResponse, DiaryCreate
+from backend.ai.services import (
     run_mcp_tool,
     normalize_llm_provider,
     llm_chat,
     analysis_from_nat_text,
     perform_stock_analysis
 )
-from .database import init_db, get_session
-from .delivery_alarm import delivery_metrics, trade_outbox_stall
-from .models import Portfolio, TradeHistory, AgentReport, Diary, CatalystEvent
-from .timeutil import today_kst
+from backend.core.database import init_db, get_session
+from backend.telegram.delivery_alarm import delivery_metrics, trade_outbox_stall
+from backend.core.models import Portfolio, TradeHistory, AgentReport, Diary, CatalystEvent
+from backend.core.timeutil import today_kst
 
 # 로깅 설정: 모든 모듈의 로그를 터미널에 출력하도록 설정
 logging.basicConfig(

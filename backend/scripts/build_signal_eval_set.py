@@ -26,12 +26,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from sqlmodel import Session  # noqa: E402
 
-from backend.config import NEWS_MCP_PARAMS  # noqa: E402
-from backend.database import engine  # noqa: E402
-from backend.pii_egress import public  # noqa: E402
+from backend.core.config import NEWS_MCP_PARAMS  # noqa: E402
+from backend.core.database import engine  # noqa: E402
+from backend.pii.egress import public  # noqa: E402
 from backend.scheduler import DEFAULT_MONITOR_STOCKS  # noqa: E402
-from backend.services import run_mcp_tool, score_signal  # noqa: E402
-from backend.watchlist_repo import SqliteWatchlistRepo  # noqa: E402
+from backend.ai.services import run_mcp_tool, score_signal  # noqa: E402
+from backend.repositories.watchlist import SqliteWatchlistRepo  # noqa: E402
 
 DEFAULT_COUNT = 30
 DEFAULT_OUTPUT = "signal_eval_set.csv"

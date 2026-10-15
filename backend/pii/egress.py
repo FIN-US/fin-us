@@ -64,7 +64,7 @@ NAT 안에서 KIS 도구로 조회하는 시세는 잔고와 같은 pass-through
 
 ## 마스킹 전후 비교 로그
 
-`backend.pii_egress` 로거의 DEBUG 레벨로 전송마다 마스킹 전·후 프롬프트와 요약(구간 수,
+`backend.pii.egress` 로거의 DEBUG 레벨로 전송마다 마스킹 전·후 프롬프트와 요약(구간 수,
 종류별 자리표시자 수)을 남긴다. backend는 INFO로 기동하므로(`main.py`의 `basicConfig`)
 기본으로는 남지 않고, `PII_EGRESS_DEBUG_LOG=true`로 이 로거만 DEBUG로 올린다.
 
@@ -88,8 +88,8 @@ from typing import Union
 
 from fastapi import HTTPException
 
-from .config import PII_EGRESS_DEBUG_LOG
-from .pii_mask import _Counter, mask_pii
+from backend.core.config import PII_EGRESS_DEBUG_LOG
+from backend.pii.mask import _Counter, mask_pii
 
 logger = logging.getLogger(__name__)
 if PII_EGRESS_DEBUG_LOG:

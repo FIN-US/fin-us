@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi.testclient import TestClient
 
-from backend.delivery_alarm import (
+from backend.telegram.delivery_alarm import (
     DELIVERY_FAILURE_KINDS,
     DeliveryMetrics,
     OutboxStallTracker,
@@ -163,7 +163,7 @@ def test_ending_one_stall_and_starting_another_yields_only_the_ending():
 def test_record_failure_counts_per_kind_and_leaves_a_countable_line(caplog):
     metrics = DeliveryMetrics(now_factory=lambda: NOW)
 
-    with caplog.at_level(logging.WARNING, logger="backend.delivery_alarm"):
+    with caplog.at_level(logging.WARNING, logger="backend.telegram.delivery_alarm"):
         metrics.record_failure("fill_redelivery", trade_id=7)
         metrics.record_failure("fill_redelivery", trade_id=8)
         metrics.record_failure("settled_send")
@@ -189,7 +189,7 @@ def test_redelivery_failure_is_counted_once_per_trade(caplog):
     clock = [NOW]
     metrics = DeliveryMetrics(now_factory=lambda: clock[0])
 
-    with caplog.at_level(logging.WARNING, logger="backend.delivery_alarm"):
+    with caplog.at_level(logging.WARNING, logger="backend.telegram.delivery_alarm"):
         metrics.record_failure("fill_redelivery", trade_id=7)
         clock[0] = NOW + timedelta(minutes=5)
         metrics.record_failure("fill_redelivery", trade_id=7)

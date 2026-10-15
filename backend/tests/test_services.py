@@ -15,9 +15,9 @@ import pytest
 from fastapi import HTTPException
 from mcp import StdioServerParameters
 
-from backend import services
-from backend.pii_egress import render_unmasked
-from backend.services import SignalScore
+from backend.ai import services
+from backend.pii.egress import render_unmasked
+from backend.ai.services import SignalScore
 
 
 class FakeSession:
@@ -1735,7 +1735,7 @@ def test_morning_briefing_from_text_skips_non_briefing_candidates():
 # ──────────────────────────────────────────────────────────────────────────
 # PII 마스킹 계층 통합 테스트 (#230, F-17/NFR-05)
 #
-# backend/pii_mask.py 자체의 recognizer/왕복 무손실 단위 테스트는
+# backend/pii/mask.py 자체의 recognizer/왕복 무손실 단위 테스트는
 # backend/tests/test_pii_mask.py에 있다. 여기서는 llm_chat()이 그 모듈을
 # 실제로 호출하는지 - 요청·응답 경계에서의 배선 - 만 확인한다.
 # ──────────────────────────────────────────────────────────────────────────
@@ -1853,7 +1853,7 @@ async def test_llm_chat_masking_does_not_leak_between_concurrent_calls():
 
         return _inner
 
-    from backend import services as services_module
+    from backend.ai import services as services_module
 
     orig_openai = services_module._llm_openai_chat
     orig_anthropic = services_module._llm_anthropic_chat
@@ -2029,7 +2029,7 @@ def test_no_bypass_of_llm_chat_masking_layer():
       (감시 대상 이름이 소스에 나타나지 않는다)
     - 동적 참조: `getattr(services, "_llm_openai_chat")`, importlib
     """
-    backend_dir = pathlib.Path(inspect.getfile(services)).parent
+    backend_dir = pathlib.Path(inspect.getfile(services)).parents[1]
     provider_fns = {
         "_llm_openai_chat",
         "_llm_anthropic_chat",
@@ -2062,7 +2062,7 @@ def test_no_bypass_of_llm_chat_masking_layer():
     scanned = {path.relative_to(backend_dir).as_posix() for path in py_files}
     # 재귀 스캔이 깨지면(예: rglob -> glob 회귀) 조용히 통과하지 않도록 앵커를 못 박는다.
     # scripts/는 과거 비재귀 glob("*.py") 시절의 실제 사각지대였다.
-    for anchor in ("services.py", "scripts/build_signal_eval_set.py"):
+    for anchor in ("ai/services.py", "scripts/build_signal_eval_set.py"):
         assert anchor in scanned, (
             f"{anchor}이 스캔 범위에서 빠졌습니다 — backend/ 재귀 스캔이 깨졌습니다."
         )
@@ -2107,13 +2107,13 @@ def test_no_bypass_of_llm_chat_masking_layer():
         visitor.visit(ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file)))
 
     for fn_name in sorted(provider_fns):
-        assert refs[fn_name] == {"services.py::llm_chat"}, (
+        assert refs[fn_name] == {"ai/services.py::llm_chat"}, (
             f"{fn_name}이 services.py의 llm_chat() 밖({sorted(refs[fn_name])})에서도 "
             "참조/호출됩니다. 마스킹 계층(mask_pii/unmask_pii)을 우회하는 새 호출 경로가 "
             "생긴 것으로 보입니다 — PII가 마스킹되지 않은 채 외부 LLM provider로 나갈 수 있습니다."
         )
 
-    allowed_sdk_scopes = {f"services.py::{fn}" for fn in provider_fns}
+    allowed_sdk_scopes = {f"ai/services.py::{fn}" for fn in provider_fns}
     for ctor in sorted(sdk_ctors):
         assert refs[ctor], (
             f"{ctor} 참조가 backend/ 어디에도 없습니다. SDK를 교체했다면 sdk_ctors를 "

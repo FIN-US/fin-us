@@ -47,7 +47,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Collection, Literal, get_args
 
-from .trade_notification_repo import to_naive_utc
+from backend.repositories.trade_notification import to_naive_utc
 
 logger = logging.getLogger(__name__)
 

@@ -3,7 +3,7 @@ from datetime import date
 import pytest
 from sqlmodel import SQLModel, Session, create_engine
 
-from backend.catalyst_repo import CatalystEventInput, SqliteCatalystEventRepo
+from backend.repositories.catalyst import CatalystEventInput, SqliteCatalystEventRepo
 
 
 @pytest.fixture()

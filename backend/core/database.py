@@ -1,7 +1,7 @@
 from sqlalchemy import inspect, text
 from sqlalchemy.exc import OperationalError
 from sqlmodel import create_engine, Session, SQLModel
-from .config import DATABASE_URL, DB_ECHO
+from backend.core.config import DATABASE_URL, DB_ECHO
 
 # SQLite 사용 시 connect_args={"check_same_thread": False}가 필요함
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False}, echo=DB_ECHO)

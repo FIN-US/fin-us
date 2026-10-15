@@ -10,8 +10,8 @@ from datetime import date
 import pytest
 
 import backend.scheduler as scheduler_module
-from backend.presentation import LEVEL_INTERMEDIATE, TERM_FOOTNOTE_MARK
-from backend.watchlist_repo import SqliteWatchlistRepo
+from backend.telegram.presentation import LEVEL_INTERMEDIATE, TERM_FOOTNOTE_MARK
+from backend.repositories.watchlist import SqliteWatchlistRepo
 
 
 class FakeState:

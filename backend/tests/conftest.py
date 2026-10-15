@@ -5,9 +5,13 @@ from typing import Any
 import httpx
 import pytest
 
-from backend import services, stock_code, telegram_commands
-from backend.delivery_alarm import delivery_metrics, trade_outbox_stall
-from backend.trading_orders import TradeRecorder
+from backend.ai import services
+
+from backend.trading import stock_code
+
+from backend.telegram import commands as telegram_commands
+from backend.telegram.delivery_alarm import delivery_metrics, trade_outbox_stall
+from backend.trading.orders import TradeRecorder
 
 # mock_httpx가 받는 응답 지정: 그대로 돌려줄 응답, 또는 요청을 받아 응답을 만들거나 던지는 함수.
 _ResponseSpec = httpx.Response | Callable[[httpx.Request], httpx.Response]
@@ -71,8 +75,8 @@ def mock_httpx(monkeypatch):
     아니라 예외가 필요한 경우다 — 함수가 던지면 ``client.post``에서 그대로 올라온다. 예외
     메시지에 URL을 싣고 싶으면 테스트가 지어내지 말고 받은 ``request.url``을 쓴다.
 
-    패치 대상은 **전역 httpx 모듈**이다(``backend.telegram_notifier.httpx``도
-    ``backend.order_assist.httpx``도 같은 객체). 테스트 도중 만들어지는 다른 클라이언트도
+    패치 대상은 **전역 httpx 모듈**이다(``backend.telegram.notifier.httpx``도
+    ``backend.trading.order_assist.httpx``도 같은 객체). 테스트 도중 만들어지는 다른 클라이언트도
     같은 transport를 탄다.
 
     **시그니처가 아니라 계약으로 지켜야 하는 것**: 구 대역의 ``def __init__(self, *, timeout)``은

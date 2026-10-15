@@ -87,7 +87,7 @@ def check_unreadable_numeric_names(stocks, *, allow, stream=None):
         print(f"  {code}\t{label}", file=stream)
     if not allow:
         print(
-            "stocks.json을 쓰지 않았습니다. backend/telegram_commands.py _order_argument_readings의 "
+            "stocks.json을 쓰지 않았습니다. backend/telegram/commands.py _order_argument_readings의 "
             "종목코드 이름 자리 분기를 먼저 재검토하거나, 알고 넘기려면 "
             "--allow-unreadable-numeric-names로 다시 실행하세요.",
             file=stream,

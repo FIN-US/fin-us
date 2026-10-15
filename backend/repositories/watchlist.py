@@ -2,7 +2,7 @@ from typing import Callable, Protocol
 
 from sqlmodel import Session, col, select
 
-from .models import WatchlistItem
+from backend.core.models import WatchlistItem
 
 
 class WatchlistReader(Protocol):

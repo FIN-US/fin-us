@@ -9,8 +9,8 @@ from typing import Any, Awaitable, Callable, Literal, Protocol
 
 from fastapi import HTTPException
 
-from .telegram_notifier import TelegramTextSender, send_text_settled_receipt
-from .timeutil import KST
+from backend.telegram.notifier import TelegramTextSender, send_text_settled_receipt
+from backend.core.timeutil import KST
 
 logger = logging.getLogger(__name__)
 
@@ -260,7 +260,7 @@ class TradeRecorder:
         ``notified_at``은 비운 채로 남긴다. 그 상태가 outbox의 "미통지"이며, 통지가
         나가야 ``mark_notified``가 채운다.
         """
-        from .models import TradeHistory
+        from backend.core.models import TradeHistory
 
         if result.price <= 0:
             # 여기서 막지는 않는다. 주문은 이미 나갔고, 행을 통째로 빠뜨리면 일 주문
@@ -318,7 +318,7 @@ class TradeRecorder:
         재배달 경로가 같은 컬럼을 각자 UPDATE하면 한쪽만 조건이 바뀌는 날 절반의 통지가
         다시 미통지로 보인다.
         """
-        from .trade_notification_repo import mark_trade_notified
+        from backend.repositories.trade_notification import mark_trade_notified
 
         mark_trade_notified(self.session_factory, trade_id, notified_at=notified_at)
 

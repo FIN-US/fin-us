@@ -1,4 +1,4 @@
-"""backend/pii_mask.py 단위 테스트 (#230, F-17/NFR-05).
+"""backend/pii/mask.py 단위 테스트 (#230, F-17/NFR-05).
 
 recognizer 3종(계좌번호/원화 금액/보유 수량) 각각과 복합 케이스, 왕복 무손실,
 그리고 자리표시자 역치환의 fail-open 동작을 고정한다.
@@ -8,7 +8,7 @@ import pathlib
 import re
 import time
 
-from backend.pii_mask import _AMOUNT_UNIT_RE, mask_pii, unmask_pii
+from backend.pii.mask import _AMOUNT_UNIT_RE, mask_pii, unmask_pii
 
 _FIXTURE_PATH = (
     pathlib.Path(__file__).parent.parent.parent
@@ -1056,7 +1056,7 @@ class TestUnmaskFailOpen:
         """
         mapping = {"<AMOUNT_deadbe_1>": "12,345,000원"}
         text = "평가금액은 <AMOUNT_deadbe_1>이고 총자산은 <AMOUNT_deadbe_9>이다."
-        with caplog.at_level("WARNING", logger="backend.pii_mask"):
+        with caplog.at_level("WARNING", logger="backend.pii.mask"):
             restored = unmask_pii(text, mapping)
         assert restored == "평가금액은 12,345,000원이고 총자산은 (이전 금액 1)이다."
         assert "<AMOUNT_deadbe_9>" not in restored, "내부 토큰이 사용자 화면에 노출됐다"
@@ -1139,7 +1139,7 @@ class TestUnmaskFailOpen:
 
         이 테스트가 잡는 mutation: unmask_pii의 조기 반환에 `not mapping`을 다시 추가.
         """
-        with caplog.at_level("WARNING", logger="backend.pii_mask"):
+        with caplog.at_level("WARNING", logger="backend.pii.mask"):
             result = unmask_pii("앞서 말씀하신 <AMOUNT_deadbe_1> 기준으로는", {})
         assert "(이전 금액 1)" in result, "중립 문구로 치환되지 않았다"
         assert "<AMOUNT_deadbe_1>" not in result, "내부 토큰이 사용자 화면에 노출됐다"

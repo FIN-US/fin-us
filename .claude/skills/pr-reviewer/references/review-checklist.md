@@ -4,21 +4,21 @@ CI(`ci.yml`)가 돌리는 것 — backend·agents pytest, mcp-trading·mcp-news�
 mcp-trading 스크립트 pytest(`mcp/trading/tests/*.py`), Unity `Assets`/`Build` 드리프트, hadolint, `nginx -t` — 은 **결과만 확인**하고 여기서 반복하지
 않는다. 빨간불은 리뷰할 일이 아니라 고칠 일이다.
 
-## 돈이 나가는 경로 (`backend/trading_orders.py`, `mcp/trading/`)
+## 돈이 나가는 경로 (`backend/trading/orders.py`, `mcp/trading/`)
 
 - [ ] 부수효과(주문 저장·체결)를 확정한 뒤의 실패가 재시도에서 **같은 결과로 수렴**하는가
 - [ ] 중복 체결 방지가 살아 있는가 (`mcp/trading/order-dedup.js`의 `OrderDedupStore`)
-- [ ] 종목코드 검증 가드를 우회하는 경로가 생기지 않았는가 (`backend/stock_code.py`)
+- [ ] 종목코드 검증 가드를 우회하는 경로가 생기지 않았는가 (`backend/trading/stock_code.py`)
 - [ ] 새 주문 경로에 사용자 확인 단계가 있는가
 
-## Redis 상태 (`backend/redis_state.py`)
+## Redis 상태 (`backend/core/redis_state.py`)
 
 - [ ] 실패 시 상태가 유실되면 사용자가 무엇을 보게 되는가 — 조용한 유실인가 로그가 남는가
 - [ ] 새 필드에 기본값이 있어 **구버전 레코드가 역직렬화되는가** (배포 시 남아 있는 레코드)
 - [ ] 소켓 타임아웃 없이 무한 대기할 수 있는 호출이 추가되지 않았는가
 - [ ] 실 redis 없이 도는 테스트가 실제 동작을 검증한다고 착각하게 만들지 않는가
 
-## 텔레그램 (`backend/telegram_commands.py`, `telegram_notifier.py`)
+## 텔레그램 (`backend/telegram/commands.py`, `telegram_notifier.py`)
 
 - [ ] 새 `except Exception`이 `TelegramSendError` 재전파를 가로막지 않는가
       (`tests/test_telegram_commands.py`의 ast 기반 구조 검사가 강제한다. **allowlist에

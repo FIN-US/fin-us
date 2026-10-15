@@ -31,12 +31,16 @@ import pytest_asyncio
 from sqlmodel import Session, SQLModel, create_engine, select
 from sqlmodel.pool import StaticPool
 
-from backend import pii_mask, pii_registry, services
-from backend.database import get_session
+from backend.pii import mask as pii_mask
+
+from backend.pii import registry as pii_registry
+
+from backend.ai import services
+from backend.core.database import get_session
 from backend.main import app
-from backend.models import Diary
-from backend.pii_mask import _PLACEHOLDER_RE, mask_pii
-from backend.pii_registry import (
+from backend.core.models import Diary
+from backend.pii.mask import _PLACEHOLDER_RE, mask_pii
+from backend.pii.registry import (
     _REGISTRY,
     active_mapping,
     placeholder_kind,

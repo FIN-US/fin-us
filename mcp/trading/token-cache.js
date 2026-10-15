@@ -25,7 +25,7 @@ export const DEFAULT_TOKEN_TTL_MARGIN_MS = 60_000;
 // 넘기면 무락 발급으로 넘어간다(fail-open) — 락 때문에 토큰 발급 자체가 막히는 쪽이
 // 더 나쁘기 때문이다.
 //
-// 상위 시간 예산과의 관계. MCP 호출 하나의 상한은 backend/services.py run_mcp_tool의
+// 상위 시간 예산과의 관계. MCP 호출 하나의 상한은 backend/ai/services.py run_mcp_tool의
 // 30초이고, 이 상한을 통째로 소진하는 경우(보유자가 자기 타임아웃마저 넘겨 멈춘 드문
 // 상황)의 토큰 확보 최악은 대기 10초 + 자기 발급 8초 = 18초다.
 //   - 조회 경로: 18 + 조회 요청 1회 8초 + 기동 ~2초 = 28초 < 30초. get_balance의 15초

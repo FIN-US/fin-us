@@ -17,7 +17,7 @@ from typing import Any
 
 import httpx
 
-from .config import NAT_BASE_URL
+from backend.core.config import NAT_BASE_URL
 
 RISK_CONSERVATIVE = "conservative"
 RISK_AGGRESSIVE = "aggressive"

@@ -14,17 +14,17 @@ import pytest
 from sqlmodel import Session, SQLModel, create_engine
 
 from backend import scheduler as scheduler_module
-from backend.delivery_alarm import delivery_metrics
-from backend.models import TradeHistory
-from backend.presentation import split_for_telegram
-from backend.trading_orders import _extract_order_message
-from backend.redis_state import SCHEDULER_LOCK_TTL_SEC, RedisKeys
-from backend.trade_notification_repo import (
+from backend.telegram.delivery_alarm import delivery_metrics
+from backend.core.models import TradeHistory
+from backend.telegram.presentation import split_for_telegram
+from backend.trading.orders import _extract_order_message
+from backend.core.redis_state import SCHEDULER_LOCK_TTL_SEC, RedisKeys
+from backend.repositories.trade_notification import (
     PendingTradeNotification,
     SqliteTradeNotificationRepo,
     mark_trade_notified,
 )
-from backend.trading_orders import OrderExecutionResult, TradeRecorder
+from backend.trading.orders import OrderExecutionResult, TradeRecorder
 
 NOW = datetime(2026, 5, 20, 6, 0, 0, tzinfo=timezone.utc)
 GRACE = timedelta(seconds=60)

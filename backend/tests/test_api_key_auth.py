@@ -15,7 +15,7 @@ nginx 액세스 로그에 평문으로 남는 원인이었다(#355). 그 경로�
 여기서 고정한다.
 
 인증은 `FINUS_API_KEY`가 설정된 배포에서만 걸린다(비우면 꺼지고, 값은 새 설치에서만
-setup_env가 채운다 — 근거는 `backend/config.py`의 해당 주석). 그래서 여기서는 **켠 상태**와 **끈 상태** 양쪽을
+setup_env가 채운다 — 근거는 `backend/core/config.py`의 해당 주석). 그래서 여기서는 **켠 상태**와 **끈 상태** 양쪽을
 모두 본다. 끈 상태를 보지 않으면 "언제나 401"이라는 회귀가 통과해 버린다.
 
 `TestClient`를 `with` 없이 쓴다. `with`는 `main.py`의 lifespan을 실행해 `init_db()`·

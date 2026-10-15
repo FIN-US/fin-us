@@ -1,6 +1,6 @@
 """NAT 프로세스 안에서 도구 결과를 마스킹하는 계층 (#231, F-17 / NFR-05).
 
-#230이 backend에 세운 마스킹 계층(`backend/services.py`의 `llm_chat`)은 backend가
+#230이 backend에 세운 마스킹 계층(`backend/ai/services.py`의 `llm_chat`)은 backend가
 NAT에 보내는 `user_msg`만 본다. 그런데 계좌·잔고 데이터는 backend가 아니라 **NAT
 프로세스 안에서** MCP 도구 호출로 생성돼, 그대로 ReAct 컨텍스트에 실려
 `openai_cloud_llm`(`configs/common.yml`)으로 나간다. 즉 유출량이 가장 큰 경로가
@@ -151,7 +151,7 @@ def mask_tool_result(tool_name: str, result: str) -> str:
     반대(매핑을 살리려 마스킹을 건너뛰기)는 관측되지 않는 유출이다.
 
     마스킹 자체가 예외로 실패하면 원문 대신 오류 JSON을 돌려준다(#395). 원문을 흘리는 갈래는
-    없다 — backend 전송 경계(`backend/pii_egress.py`)가 실패 시 전송을 막는 것과 같은 판단이다.
+    없다 — backend 전송 경계(`backend/pii/egress.py`)가 실패 시 전송을 막는 것과 같은 판단이다.
     예외를 그대로 올리지 않는 것은 도구 경계에서 예외가 탈출하면 ReAct 루프가 끊기기 때문이다
     (``finus_api._TOOL_BUG_EXCEPTIONS`` 주석, #358). 오류 JSON에는 결과 원문을 싣지 않는다.
 
@@ -250,7 +250,7 @@ def unrestorable_placeholders(text: str) -> list[str]:
     scope로 다시 마스킹된다).
 
     #354가 그 전제를 바꿨다. backend는 이제 ``llm_chat``의 매핑을 provider 호출 동안
-    scope 키로 등록해 두고(``backend/pii_registry.py``), ``create_db_diary``가 저장
+    scope 키로 등록해 두고(``backend/pii/registry.py``), ``create_db_diary``가 저장
     직전에 그 등록소로 되돌린다. 낯선 scope 중 **지금 응답을 기다리는 그 요청의 것**은
     backend가 원값으로 되돌릴 수 있다 — 여기서 거부하면 그 복구를 우리가 막는다.
 

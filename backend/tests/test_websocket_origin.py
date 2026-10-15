@@ -119,7 +119,7 @@ def test_websocket_rejection_does_not_register_connection(monkeypatch):
 
     active_connections에 남으면 이후 broadcast가 죽은 소켓으로 계속 전송을 시도한다.
     """
-    from backend.ws_manager import manager
+    from backend.core.ws_manager import manager
 
     monkeypatch.setattr("backend.main.ALLOW_ORIGINS", ["http://localhost:8080"])
     client = TestClient(app)

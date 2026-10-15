@@ -1,7 +1,7 @@
 """NAT 경로 MCP 자식 프로세스 env 화이트리스트(_MCP_ENV_ALLOWED_PREFIXES) 테스트.
 
 backend/config.py에 같은 목적의 화이트리스트가 별도로 존재한다(#130). 이 파일은
-NAT 쪽 접두사 규칙만 검증하고, 마지막 테스트에서만 backend/config.py 소스를
+NAT 쪽 접두사 규칙만 검증하고, 마지막 테스트에서만 backend/core/config.py 소스를
 정적으로 읽어(import하지 않는다) 두 경로가 반드시 같이 움직여야 하는 차원이
 어긋나지 않는지 확인한다.
 """
@@ -17,7 +17,7 @@ def _prefix_tuple(path: Path, name: str) -> tuple[str, ...]:
     # backend와 agents은 별도 uv 프로젝트(별도 venv)라 backend.config를
     # import하면 dotenv·mcp 같은 전이 의존성 여부(현재는 우연히 agents
     # venv에도 있다)에 이 테스트 파일 전체의 수집(collection)이 묶이고,
-    # backend/config.py:9-10의 load_dotenv()가 import 시점에 실행되어 NAT
+    # backend/core/config.py:9-10의 load_dotenv()가 import 시점에 실행되어 NAT
     # 테스트 세션 전체의 os.environ을 개발자의 실제 저장소 루트 .env로
     # 오염시킨다(CI는 .env가 없어 이 회귀가 CI에서는 절대 드러나지 않는다).
     # 그래서 파일을 소스 텍스트로만 읽어 AST로 상수를 파싱한다 — 표준
@@ -101,7 +101,7 @@ def test_every_backend_prefix_is_subsumed_by_a_nat_prefix():
     # 시나리오 — 누군가 backend에 새 접두사를 추가하고 NAT을 깜빡하는 것 —
     # 를 정확히 잡는다. 자기 자신과만 비교하는 "KIS_ in ..." 식의 단순 포함
     # 검사보다 엄격하다.
-    backend_prefixes = _prefix_tuple(_REPO_ROOT / "backend" / "config.py", "_MCP_ENV_ALLOWED_PREFIXES")
+    backend_prefixes = _prefix_tuple(_REPO_ROOT / "backend" / "core" / "config.py", "_MCP_ENV_ALLOWED_PREFIXES")
 
     assert all(
         any(backend_prefix.startswith(nat_prefix) for nat_prefix in _MCP_ENV_ALLOWED_PREFIXES)

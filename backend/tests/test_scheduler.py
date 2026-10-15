@@ -7,10 +7,10 @@ from datetime import date, datetime, timezone
 from types import SimpleNamespace
 from fastapi.testclient import TestClient
 from unittest.mock import MagicMock
-from ..main import app
-from ..pii_egress import personal
-from ..redis_state import RedisSchedulerState
-from ..services import SignalScore
+from backend.main import app
+from backend.pii.egress import personal
+from backend.core.redis_state import RedisSchedulerState
+from backend.ai.services import SignalScore
 from .test_balance_parser import TRUNCATION_NOTES_BY_REASON
 
 
@@ -142,7 +142,7 @@ def test_scheduler_lifecycle(monkeypatch):
 
 
 def test_default_signal_sources_include_news_and_disclosure():
-    from ..scheduler import SIGNAL_SOURCES
+    from backend.scheduler import SIGNAL_SOURCES
 
     assert [(source.name, source.tool_name) for source in SIGNAL_SOURCES] == [
         ("news", "get_market_news"),
@@ -151,7 +151,7 @@ def test_default_signal_sources_include_news_and_disclosure():
 
 
 def test_start_scheduler_runs_market_monitoring_immediately(monkeypatch):
-    from .. import scheduler as scheduler_module
+    from backend import scheduler as scheduler_module
 
     added_jobs = []
 
@@ -175,7 +175,7 @@ def test_start_scheduler_runs_market_monitoring_immediately(monkeypatch):
 
 
 def test_start_scheduler_registers_weekday_morning_briefing(monkeypatch):
-    from .. import scheduler as scheduler_module
+    from backend import scheduler as scheduler_module
 
     added_jobs = []
 
@@ -202,7 +202,7 @@ def test_start_scheduler_registers_weekday_morning_briefing(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_morning_briefing_task_sends_telegram_message(monkeypatch):
-    from ..scheduler import morning_briefing_task
+    from backend.scheduler import morning_briefing_task
 
     calls = []
     briefing = {
@@ -239,7 +239,7 @@ async def test_ping_task_execution(monkeypatch):
     """
     ping_task가 실행될 때 WebSocket 브로드캐스트가 호출되는지 확인합니다.
     """
-    from ..scheduler import ping_task
+    from backend.scheduler import ping_task
     
     mock_broadcast = MagicMock(return_value=asyncio.Future())
     mock_broadcast.return_value.set_result(None)
@@ -260,7 +260,7 @@ async def test_monitor_market_task_filtering(monkeypatch):
     """
     Redis 장애 시 fallback 경로에서도 뉴스가 새로운 경우에만 분석을 수행하는지 확인합니다.
     """
-    from ..scheduler import SignalSource, monitor_market_task, last_analyzed_news_cache
+    from backend.scheduler import SignalSource, monitor_market_task, last_analyzed_news_cache
     
     # 캐시 초기화
     last_analyzed_news_cache.clear()
@@ -383,7 +383,7 @@ class FakeRedis:
 
 @pytest.mark.asyncio
 async def test_monitor_signal_sends_telegram_for_urgent_analysis(monkeypatch):
-    from ..scheduler import SignalSource, _monitor_signal
+    from backend.scheduler import SignalSource, _monitor_signal
 
     state = RedisSchedulerState(FakeRedis())
     source = SignalSource(name="news", mcp_params=object(), tool_name="get_market_news")
@@ -424,7 +424,7 @@ async def test_monitor_signal_sends_telegram_for_urgent_analysis(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_monitor_signal_sends_telegram_for_all_mode_analysis(monkeypatch):
-    from ..scheduler import SignalSource, _monitor_signal
+    from backend.scheduler import SignalSource, _monitor_signal
 
     state = RedisSchedulerState(FakeRedis())
     await state.set_telegram_alert_mode("all")
@@ -465,7 +465,7 @@ async def test_monitor_signal_sends_telegram_for_all_mode_analysis(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_monitor_signal_skips_telegram_when_alert_mode_off(monkeypatch):
-    from ..scheduler import SignalSource, _monitor_signal
+    from backend.scheduler import SignalSource, _monitor_signal
 
     state = RedisSchedulerState(FakeRedis())
     await state.set_telegram_alert_mode("off")
@@ -507,7 +507,7 @@ async def test_monitor_signal_skips_telegram_when_alert_mode_off(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_monitor_signal_keeps_websocket_when_telegram_fails(monkeypatch):
-    from ..scheduler import SignalSource, _monitor_signal
+    from backend.scheduler import SignalSource, _monitor_signal
 
     state = RedisSchedulerState(FakeRedis())
     source = SignalSource(name="news", mcp_params=object(), tool_name="get_market_news")
@@ -552,7 +552,7 @@ async def test_monitor_market_task_uses_default_stocks_when_balance_empty(monkey
     """
     보유 종목이 없으면 기본 감시 종목 4개를 대상으로 모니터링합니다.
     """
-    from ..scheduler import DEFAULT_MONITOR_STOCKS, SignalSource, monitor_market_task, last_analyzed_news_cache
+    from backend.scheduler import DEFAULT_MONITOR_STOCKS, SignalSource, monitor_market_task, last_analyzed_news_cache
 
     state = RedisSchedulerState(FakeRedis())
 
@@ -606,7 +606,7 @@ async def test_monitor_market_task_uses_default_stocks_when_balance_empty(monkey
 
 @pytest.mark.asyncio
 async def test_monitor_market_task_uses_redis_hash_to_skip_duplicate_news(monkeypatch):
-    from ..scheduler import SignalSource, monitor_market_task
+    from backend.scheduler import SignalSource, monitor_market_task
 
     state = RedisSchedulerState(FakeRedis())
 
@@ -658,7 +658,7 @@ async def test_monitor_market_task_uses_redis_hash_to_skip_duplicate_news(monkey
 
 @pytest.mark.asyncio
 async def test_monitor_market_task_processes_multiple_signal_sources_independently(monkeypatch):
-    from ..scheduler import SignalSource, monitor_market_task
+    from backend.scheduler import SignalSource, monitor_market_task
 
     state = RedisSchedulerState(FakeRedis())
     sources = [
@@ -723,7 +723,7 @@ async def test_agent_analysis_broadcast_carries_no_analysis_body(monkeypatch):
     키 이름만 보지 않고 분석 본문 문자열이 payload 어디에도 없는지까지 확인해,
     "content" 등 다른 키로 같은 내용을 실어 보내는 변형도 함께 잡는다.
     """
-    from ..scheduler import SignalSource, monitor_market_task
+    from backend.scheduler import SignalSource, monitor_market_task
 
     state = RedisSchedulerState(FakeRedis())
     secret = "이 문장은 WebSocket으로 나가면 안 됩니다"
@@ -785,7 +785,7 @@ async def test_agent_analysis_broadcast_carries_no_analysis_body(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_monitor_market_task_skips_when_scheduler_lock_is_held(monkeypatch):
-    from ..scheduler import SignalSource, monitor_market_task
+    from backend.scheduler import SignalSource, monitor_market_task
 
     state = RedisSchedulerState(FakeRedis())
     await state.acquire_scheduler_lock()
@@ -811,7 +811,7 @@ async def test_monitor_market_task_skips_when_scheduler_lock_is_held(monkeypatch
 
 @pytest.mark.asyncio
 async def test_concurrent_monitor_market_task_runs_once_with_scheduler_lock(monkeypatch):
-    from ..scheduler import SignalSource, monitor_market_task
+    from backend.scheduler import SignalSource, monitor_market_task
 
     state = RedisSchedulerState(FakeRedis())
 
@@ -869,7 +869,7 @@ async def test_concurrent_monitor_market_task_runs_once_with_scheduler_lock(monk
 @pytest.mark.asyncio
 async def test_monitor_market_task_includes_watchlist_stocks(monkeypatch):
     """관심 종목이 있으면 보유 종목과 합쳐서 모니터링합니다."""
-    from ..scheduler import SignalSource, monitor_market_task
+    from backend.scheduler import SignalSource, monitor_market_task
 
     state = RedisSchedulerState(FakeRedis())
 
@@ -906,7 +906,7 @@ async def test_monitor_market_task_includes_watchlist_stocks(monkeypatch):
 @pytest.mark.asyncio
 async def test_monitor_market_task_continues_owned_stock_when_watchlist_fails(monkeypatch):
     """관심 종목 조회 실패가 보유 종목 모니터링까지 막지 않습니다."""
-    from ..scheduler import SignalSource, monitor_market_task
+    from backend.scheduler import SignalSource, monitor_market_task
 
     state = RedisSchedulerState(FakeRedis())
 
@@ -942,7 +942,7 @@ async def test_monitor_market_task_continues_owned_stock_when_watchlist_fails(mo
 @pytest.mark.asyncio
 async def test_monitor_market_task_deduplicates_watchlist_and_owned_stocks(monkeypatch):
     """보유 종목과 관심 종목이 겹쳐도 중복 모니터링하지 않습니다."""
-    from ..scheduler import SignalSource, monitor_market_task
+    from backend.scheduler import SignalSource, monitor_market_task
 
     state = RedisSchedulerState(FakeRedis())
 
@@ -978,7 +978,7 @@ async def test_monitor_market_task_deduplicates_watchlist_and_owned_stocks(monke
 @pytest.mark.asyncio
 async def test_monitor_market_task_uses_default_stocks_only_when_both_empty(monkeypatch):
     """보유 종목도 관심 종목도 없을 때만 기본 종목으로 fallback합니다."""
-    from ..scheduler import DEFAULT_MONITOR_STOCKS, SignalSource, monitor_market_task
+    from backend.scheduler import DEFAULT_MONITOR_STOCKS, SignalSource, monitor_market_task
 
     state = RedisSchedulerState(FakeRedis())
 
@@ -1014,7 +1014,7 @@ async def test_monitor_market_task_uses_default_stocks_only_when_both_empty(monk
 @pytest.mark.asyncio
 async def test_monitor_market_task_watchlist_alone_skips_default_fallback(monkeypatch):
     """보유 종목은 없어도 관심 종목이 있으면 기본 종목을 사용하지 않습니다."""
-    from ..scheduler import DEFAULT_MONITOR_STOCKS, SignalSource, monitor_market_task
+    from backend.scheduler import DEFAULT_MONITOR_STOCKS, SignalSource, monitor_market_task
 
     state = RedisSchedulerState(FakeRedis())
 
@@ -1052,7 +1052,7 @@ async def test_monitor_market_task_watchlist_alone_skips_default_fallback(monkey
 @pytest.mark.asyncio
 async def test_catalyst_calendar_task_collects_disclosure_events_for_watchlist(monkeypatch):
     """관심 종목의 DART signal을 촉매 이벤트로 저장합니다."""
-    from ..scheduler import catalyst_calendar_task
+    from backend.scheduler import catalyst_calendar_task
 
     repo = FakeCatalystRepo()
     notifier = FakeCatalystNotifier()
@@ -1090,7 +1090,7 @@ async def test_catalyst_calendar_task_collects_disclosure_events_for_watchlist(m
 @pytest.mark.asyncio
 async def test_catalyst_calendar_task_sends_and_marks_d1_d0_alerts(monkeypatch):
     """D-1/D-0 촉매 이벤트 알림을 보내고 성공한 알림만 발송 처리합니다."""
-    from ..scheduler import catalyst_calendar_task
+    from backend.scheduler import catalyst_calendar_task
 
     repo = FakeCatalystRepo(
         [
@@ -1139,7 +1139,7 @@ async def test_catalyst_calendar_task_sends_and_marks_d1_d0_alerts(monkeypatch):
 @pytest.mark.asyncio
 async def test_catalyst_calendar_task_does_not_mark_failed_telegram_alert(monkeypatch):
     """Telegram 전송 실패 시 같은 촉매 이벤트를 재시도할 수 있게 남깁니다."""
-    from ..scheduler import catalyst_calendar_task
+    from backend.scheduler import catalyst_calendar_task
 
     repo = FakeCatalystRepo(
         [
@@ -1171,7 +1171,7 @@ async def test_catalyst_calendar_task_does_not_mark_failed_telegram_alert(monkey
 
 
 def test_start_scheduler_registers_catalyst_calendar_job(monkeypatch):
-    from .. import scheduler as scheduler_module
+    from backend import scheduler as scheduler_module
 
     added_jobs = []
 
@@ -1214,8 +1214,8 @@ async def test_monitor_market_task_logs_warning_when_balance_truncated(monkeypat
     변경. origin/main에는 이 경고 자체가 없으므로 origin/main 기준으로는 반드시 실패한다.
     """
     import logging
-    from .. import scheduler as scheduler_module
-    from ..scheduler import SignalSource, monitor_market_task
+    from backend import scheduler as scheduler_module
+    from backend.scheduler import SignalSource, monitor_market_task
 
     state = RedisSchedulerState(FakeRedis())
 
@@ -1254,8 +1254,8 @@ async def test_monitor_market_task_no_warning_when_balance_not_truncated(monkeyp
     logger.warning()이 조건 없이 항상 호출되는 회귀("늑대가 왔다" 오탐/알림 피로).
     """
     import logging
-    from .. import scheduler as scheduler_module
-    from ..scheduler import SignalSource, monitor_market_task
+    from backend import scheduler as scheduler_module
+    from backend.scheduler import SignalSource, monitor_market_task
 
     state = RedisSchedulerState(FakeRedis())
 
@@ -1298,7 +1298,7 @@ async def test_monitor_market_task_still_watches_stocks_returned_despite_truncat
     수용 기준을 고정한다. 이 테스트가 잡는 mutation: 잘림 감지 시 owned_stocks를
     비우거나 stocks_to_monitor 조립을 통째로 건너뛰는 회귀.
     """
-    from ..scheduler import SignalSource, monitor_market_task
+    from backend.scheduler import SignalSource, monitor_market_task
 
     state = RedisSchedulerState(FakeRedis())
 
@@ -1362,7 +1362,7 @@ def _make_balance_failure_mocks(monkeypatch, mock_run_mcp_tool_fn):
     이 PR(#185)에서 추가한 잔고 조회 실패 관련 테스트에서 반복되는 셋업 4종을 공통화한다.
     mock_run_mcp_tool_fn만 테스트별로 달라지므로 매개변수로 받는다.
     """
-    from ..scheduler import SignalSource
+    from backend.scheduler import SignalSource
 
     state = RedisSchedulerState(FakeRedis())
 
@@ -1403,7 +1403,7 @@ async def test_monitor_market_task_still_monitors_watchlist_when_balance_raises(
     감싸는 자체 try/except를 제거해 예외가 태스크 전체 except로 튀는 회귀(그러면
     _monitor_signal이 한 번도 불리지 않아 monitored_stocks가 비게 된다).
     """
-    from ..scheduler import monitor_market_task
+    from backend.scheduler import monitor_market_task
 
     monitored_stocks = []
 
@@ -1428,7 +1428,7 @@ async def test_monitor_market_task_skips_when_balance_fails_and_no_watchlist(mon
     사용자와 무관한 종목의 알림이 나갈 수 있다. 이 테스트가 잡는 mutation: balance_ok
     체크를 제거해 장애 중에도 DEFAULT_MONITOR_STOCKS 폴백이 걸리는 회귀.
     """
-    from ..scheduler import monitor_market_task
+    from backend.scheduler import monitor_market_task
 
     monitored_stocks = []
 
@@ -1455,8 +1455,8 @@ async def test_monitor_market_task_logs_balance_failure_once_per_outage(monkeypa
     실패가 error로 보고되지 않는 회귀.
     """
     import logging
-    from .. import scheduler as scheduler_module
-    from ..scheduler import monitor_market_task
+    from backend import scheduler as scheduler_module
+    from backend.scheduler import monitor_market_task
 
     balance_should_fail = True
 
@@ -1507,8 +1507,8 @@ async def test_monitor_market_task_logs_error_when_failure_cause_changes(monkeyp
     조건을 제거해 원인이 바뀌어도 debug만 남기는 회귀.
     """
     import logging
-    from .. import scheduler as scheduler_module
-    from ..scheduler import monitor_market_task
+    from backend import scheduler as scheduler_module
+    from backend.scheduler import monitor_market_task
 
     call_count = [0]
 
@@ -1541,8 +1541,8 @@ async def test_monitor_market_task_reescalates_error_after_six_cycles(monkeypatc
     완전히 사라지는 회귀.
     """
     import logging
-    from .. import scheduler as scheduler_module
-    from ..scheduler import monitor_market_task
+    from backend import scheduler as scheduler_module
+    from backend.scheduler import monitor_market_task
 
     async def mock_run_mcp_tool(params, name, args):
         if name == "get_balance":
@@ -1615,7 +1615,7 @@ def test_parse_balance_holdings_extracts_name_code_qty_avg():
     이 테스트가 잡는 mutation: _QTY_RE 또는 _AVG_PRICE_RE를 제거해
     quantity=0 또는 avg_price=0.0만 반환하는 회귀.
     """
-    from ..scheduler import _parse_balance_holdings
+    from backend.scheduler import _parse_balance_holdings
 
     text = _make_balance_text(
         ("삼성전자", "005930", 10, 70000),
@@ -1636,7 +1636,7 @@ def test_parse_balance_holdings_extracts_name_code_qty_avg():
 
 def test_parse_balance_holdings_with_real_fixture():
     """REAL_BALANCE_TEXT(balance.js 실제 출력 픽스처)에서 올바르게 파싱됩니다."""
-    from ..scheduler import _parse_balance_holdings
+    from backend.scheduler import _parse_balance_holdings
     # 크로스모듈 import 이유: test_balance_parser 가 공유 픽스처를 로드하는 유일한
     # 진입점임을 명시해, 양쪽 모듈이 같은 expected_text 를 사용함을 보장합니다.
     # 수량·평단가 커버리지는 test_balance_parser.TestSharedFixture.
@@ -1657,7 +1657,7 @@ def test_parse_balance_holdings_with_real_fixture():
 
 
 def test_parse_balance_holdings_empty_returns_empty_list():
-    from ..scheduler import _parse_balance_holdings
+    from backend.scheduler import _parse_balance_holdings
 
     assert _parse_balance_holdings("보유 종목이 없습니다.") == []
     assert _parse_balance_holdings(_make_balance_text()) == []
@@ -1674,8 +1674,8 @@ def test_sync_portfolio_writes_holdings(portfolio_session):
     이 assert로 잡힌다.
     """
     from sqlmodel import select
-    from ..models import Portfolio
-    from ..scheduler import _sync_portfolio_from_balance
+    from backend.core.models import Portfolio
+    from backend.scheduler import _sync_portfolio_from_balance
 
     text = _make_balance_text(("삼성전자", "005930", 10, 70000))
     result = _sync_portfolio_from_balance(text, portfolio_session)
@@ -1698,8 +1698,8 @@ def test_sync_portfolio_removes_stale_holdings(portfolio_session):
     남아 assert len==1이 실패한다.
     """
     from sqlmodel import select
-    from ..models import Portfolio
-    from ..scheduler import _sync_portfolio_from_balance
+    from backend.core.models import Portfolio
+    from backend.scheduler import _sync_portfolio_from_balance
 
     # 초기: 삼성전자 + SK하이닉스
     portfolio_session.add(Portfolio(stock_code="005930", stock_name="삼성전자", quantity=10, avg_price=70000))
@@ -1731,8 +1731,8 @@ def test_sync_portfolio_upserts_instead_of_replacing_rows(portfolio_session):
     주기 끊긴다"를 그대로 고정하는 단언이기도 하다.)
     """
     from sqlmodel import select
-    from ..models import Portfolio
-    from ..scheduler import _sync_portfolio_from_balance
+    from backend.core.models import Portfolio
+    from backend.scheduler import _sync_portfolio_from_balance
 
     portfolio_session.add(Portfolio(
         id=42, stock_code="005930", stock_name="삼성전자", quantity=10, avg_price=70000
@@ -1767,8 +1767,8 @@ def test_sync_portfolio_preserves_fields_absent_from_balance(portfolio_session):
     DB에 직접 써서 재현한다.
     """
     from sqlmodel import select
-    from ..models import Portfolio
-    from ..scheduler import _sync_portfolio_from_balance
+    from backend.core.models import Portfolio
+    from backend.scheduler import _sync_portfolio_from_balance
 
     text = _make_balance_text(("삼성전자", "005930", 10, 70000))
     _sync_portfolio_from_balance(text, portfolio_session)
@@ -1796,8 +1796,8 @@ def test_sync_portfolio_preserves_price_only_for_still_held_stocks(portfolio_ses
     회귀를 잡는다.
     """
     from sqlmodel import select
-    from ..models import Portfolio
-    from ..scheduler import _sync_portfolio_from_balance
+    from backend.core.models import Portfolio
+    from backend.scheduler import _sync_portfolio_from_balance
 
     portfolio_session.add(Portfolio(
         stock_code="005930", stock_name="삼성전자", quantity=10, avg_price=70000, current_price=75000.0
@@ -1828,8 +1828,8 @@ def test_sync_portfolio_collapses_duplicate_stock_code_rows(portfolio_session):
     지우도록 되돌리는 회귀 → 중복 행이 남아 len(rows) == 1이 실패한다.
     """
     from sqlmodel import select
-    from ..models import Portfolio
-    from ..scheduler import _sync_portfolio_from_balance
+    from backend.core.models import Portfolio
+    from backend.scheduler import _sync_portfolio_from_balance
 
     portfolio_session.add(Portfolio(stock_code="005930", stock_name="삼성전자", quantity=10, avg_price=70000))
     portfolio_session.add(Portfolio(stock_code="005930", stock_name="삼성전자", quantity=99, avg_price=1))
@@ -1859,8 +1859,8 @@ def test_sync_portfolio_collapses_duplicate_codes_within_one_response(portfolio_
     회귀는 quantity·avg_price 단언이 잡는다(마지막 항목의 값으로 수렴해야 한다).
     """
     from sqlmodel import select
-    from ..models import Portfolio
-    from ..scheduler import _sync_portfolio_from_balance
+    from backend.core.models import Portfolio
+    from backend.scheduler import _sync_portfolio_from_balance
 
     text = _make_balance_text(
         ("삼성전자", "005930", 10, 70000),
@@ -1884,8 +1884,8 @@ def test_sync_portfolio_skips_when_balance_truncated(portfolio_session):
     전량 교체가 일어나 기존 종목이 사라져 assert len==2가 실패한다.
     """
     from sqlmodel import select
-    from ..models import Portfolio
-    from ..scheduler import _sync_portfolio_from_balance
+    from backend.core.models import Portfolio
+    from backend.scheduler import _sync_portfolio_from_balance
     from .test_balance_parser import TRUNCATION_NOTES_BY_REASON
 
     # 기존 데이터: 삼성전자 + SK하이닉스
@@ -1912,7 +1912,7 @@ async def test_monitor_market_task_syncs_portfolio_when_balance_succeeds(monkeyp
     이 테스트가 잡는 mutation: _monitor_market_task에서 _sync_portfolio_from_balance
     호출을 제거하는 회귀 → sync_calls가 비어 assert len==1이 실패한다.
     """
-    from ..scheduler import SignalSource, monitor_market_task
+    from backend.scheduler import SignalSource, monitor_market_task
 
     state = RedisSchedulerState(FakeRedis())
     sync_calls = []
@@ -1955,7 +1955,7 @@ async def test_monitor_market_task_does_not_sync_when_balance_fails(monkeypatch)
     _sync_portfolio_from_balance가 호출되는 회귀 → sync_calls가 비어야 하는데
     1개가 들어가 assert sync_calls==[] 가 실패한다.
     """
-    from ..scheduler import SignalSource, monitor_market_task
+    from backend.scheduler import SignalSource, monitor_market_task
 
     state = RedisSchedulerState(FakeRedis())
     sync_calls = []
@@ -2006,7 +2006,7 @@ async def test_monitor_market_task_broadcasts_portfolio_update_on_sync_success(m
     이 테스트가 잡는 mutation: 호출처가 PORTFOLIO_UPDATE 브로드캐스트를 하지 않거나
     holdings_count/broadcast_at 형태를 잘못 실으면 아래 단언이 실패한다.
     """
-    from ..scheduler import SignalSource, monitor_market_task
+    from backend.scheduler import SignalSource, monitor_market_task
 
     @asynccontextmanager
     async def unavailable_redis_state():
@@ -2061,7 +2061,7 @@ async def test_monitor_market_task_broadcasts_portfolio_update_when_holdings_bec
     회귀다. 이 테스트가 잡는 mutation: 호출처의 None 판단을 truthy 판단으로 바꾸면
     mock_broadcast.assert_called_once()가 실패한다.
     """
-    from ..scheduler import SignalSource, monitor_market_task
+    from backend.scheduler import SignalSource, monitor_market_task
 
     @asynccontextmanager
     async def unavailable_redis_state():
@@ -2110,7 +2110,7 @@ async def test_monitor_market_task_no_portfolio_broadcast_when_balance_truncated
     이 테스트가 잡는 mutation: 호출처가 sync_result 값과 무관하게 항상 브로드캐스트하면
     잘린 잔고에서도 PORTFOLIO_UPDATE가 나가 아래 단언이 실패한다.
     """
-    from ..scheduler import SignalSource, monitor_market_task
+    from backend.scheduler import SignalSource, monitor_market_task
 
     @asynccontextmanager
     async def unavailable_redis_state():
@@ -2155,7 +2155,7 @@ async def test_monitor_market_task_no_portfolio_broadcast_when_marker_absent(mon
     이 테스트가 잡는 mutation: 마커 부재 가드를 우회해 브로드캐스트하면
     아래 단언이 실패한다.
     """
-    from ..scheduler import SignalSource, monitor_market_task
+    from backend.scheduler import SignalSource, monitor_market_task
 
     @asynccontextmanager
     async def unavailable_redis_state():
@@ -2202,7 +2202,7 @@ async def test_monitor_market_task_survives_portfolio_broadcast_failure(monkeypa
     코드가 지키는 계약을 문서화하는 성격이며, ws_manager의 예외 처리가 바뀌면
     (예: 커넥션이 아니라 broadcast 자체가 실패를 전파하도록 바뀌면) 실효를 갖는다.
     """
-    from ..scheduler import SignalSource, monitor_market_task
+    from backend.scheduler import SignalSource, monitor_market_task
 
     @asynccontextmanager
     async def unavailable_redis_state():
@@ -2249,7 +2249,7 @@ def test_parse_balance_holdings_accepts_fractional_avg_price():
     이 테스트가 잡는 mutation: _AVG_PRICE_RE를 원래 r"평단가\\s+([\\d,]+)원"으로
     되돌리면 "66,666"까지 먹고 다음 글자가 "."라 매치 실패 → avg_price=0.0으로 red.
     """
-    from ..scheduler import _parse_balance_holdings
+    from backend.scheduler import _parse_balance_holdings
 
     text = (
         "[보유 종목 리스트]\n"
@@ -2271,7 +2271,7 @@ def test_make_balance_text_fixture_passes_fractional_avg_price():
     로 되돌리면 "66,666.67" 대신 "66,666"이 생성 → 파싱값이 66666.0 ≠ approx(66666.67)
     으로 red.
     """
-    from ..scheduler import _parse_balance_holdings
+    from backend.scheduler import _parse_balance_holdings
 
     text = _make_balance_text(("삼성전자", "005930", 3, 66666.67))
     assert "66,666.67원" in text, f"픽스처에 소수 평단가가 없습니다: {text!r}"
@@ -2291,8 +2291,8 @@ def test_sync_portfolio_skips_when_marker_absent(portfolio_session):
     전량 교체가 일어나 기존 1개 행이 사라져 assert len==1이 실패한다.
     """
     from sqlmodel import select
-    from ..models import Portfolio
-    from ..scheduler import _sync_portfolio_from_balance
+    from backend.core.models import Portfolio
+    from backend.scheduler import _sync_portfolio_from_balance
 
     portfolio_session.add(Portfolio(stock_code="005930", stock_name="삼성전자", quantity=10, avg_price=70000))
     portfolio_session.commit()
@@ -2313,8 +2313,8 @@ def test_sync_portfolio_skips_empty_balance_text(portfolio_session):
     응답으로 처리해 전량 교체 → 기존 데이터 소실 → assert len==1이 실패한다.
     """
     from sqlmodel import select
-    from ..models import Portfolio
-    from ..scheduler import _sync_portfolio_from_balance
+    from backend.core.models import Portfolio
+    from backend.scheduler import _sync_portfolio_from_balance
 
     portfolio_session.add(Portfolio(stock_code="005930", stock_name="삼성전자", quantity=10, avg_price=70000))
     portfolio_session.commit()
@@ -2334,8 +2334,8 @@ def test_sync_portfolio_allows_genuinely_empty_holdings(portfolio_session):
     보유 0건으로 갱신됐다는 PORTFOLIO_UPDATE를 브로드캐스트하지 않게 된다.
     """
     from sqlmodel import select
-    from ..models import Portfolio
-    from ..scheduler import _sync_portfolio_from_balance
+    from backend.core.models import Portfolio
+    from backend.scheduler import _sync_portfolio_from_balance
 
     portfolio_session.add(Portfolio(stock_code="005930", stock_name="삼성전자", quantity=10, avg_price=70000))
     portfolio_session.commit()
@@ -2366,8 +2366,8 @@ def test_portfolio_endpoint_includes_price_known_flag(client):
     응답에 없어 assert "price_known" in holding이 실패한다.
     """
     from sqlmodel import Session, select
-    from ..database import engine
-    from ..models import Portfolio
+    from backend.core.database import engine
+    from backend.core.models import Portfolio
     from datetime import datetime, timezone
 
     with Session(engine) as session:
@@ -2416,8 +2416,8 @@ async def test_monitor_signal_passes_signal_score_to_analysis(monkeypatch):
     DB·알림에서 사라진다. 여기서는 필터를 monkeypatch하지 않고 llm_chat만
     갈아끼워 실제 채점 경로를 태운다.
     """
-    from backend import services
-    from ..scheduler import SignalSource, monitor_market_task
+    from backend.ai import services
+    from backend.scheduler import SignalSource, monitor_market_task
 
     state = RedisSchedulerState(FakeRedis())
 
@@ -2470,8 +2470,8 @@ async def test_monitor_signal_passes_none_when_scoring_fails_open(monkeypatch):
 
     실패를 0점으로 넘기면 "모델이 중립이라고 판단함"이라는 없던 사실이 DB에 남는다.
     """
-    from backend import services
-    from ..scheduler import SignalSource, monitor_market_task
+    from backend.ai import services
+    from backend.scheduler import SignalSource, monitor_market_task
 
     state = RedisSchedulerState(FakeRedis())
 
@@ -2556,8 +2556,8 @@ async def test_monitor_signal_records_filtered_score(monkeypatch):
 
     이 값이 로그에만 남으면 grep은 되지만 집계가 안 돼 임계값을 조정할 근거가 없다.
     """
-    from ..config import SIGNAL_SCORE_THRESHOLD
-    from ..scheduler import SignalSource, monitor_market_task
+    from backend.core.config import SIGNAL_SCORE_THRESHOLD
+    from backend.scheduler import SignalSource, monitor_market_task
 
     state = RedisSchedulerState(FakeRedis())
 
@@ -2609,7 +2609,7 @@ async def test_monitor_signal_records_filtered_score(monkeypatch):
 @pytest.mark.asyncio
 async def test_monitor_signal_does_not_record_passing_score(monkeypatch):
     """통과한 신호는 이 테이블이 아니라 AgentReport에 남는다 — 두 번 세면 안 된다."""
-    from ..scheduler import SignalSource, monitor_market_task
+    from backend.scheduler import SignalSource, monitor_market_task
 
     state = RedisSchedulerState(FakeRedis())
 
@@ -2658,7 +2658,7 @@ async def test_monitor_signal_does_not_record_unscored_signal(monkeypatch):
     점수 없는 행은 분포에 보탤 정보가 없는데, 감시 루프가 10분마다 도는 탓에
     그런 행만으로 테이블이 가득 찬다.
     """
-    from ..scheduler import SignalSource, monitor_market_task
+    from backend.scheduler import SignalSource, monitor_market_task
 
     state = RedisSchedulerState(FakeRedis())
 
@@ -2702,8 +2702,8 @@ async def test_monitor_signal_continues_when_recording_fails(monkeypatch):
     이 값은 사후 분석용이다. 여기서 예외가 올라오면 DB 문제 하나가 그 주기의 감시를
     통째로 멈춘다 — 놓침 방지(REQ-04)와 정면으로 충돌한다.
     """
-    from .. import scheduler as scheduler_module
-    from ..scheduler import SignalSource, monitor_market_task
+    from backend import scheduler as scheduler_module
+    from backend.scheduler import SignalSource, monitor_market_task
 
     # 이 테스트는 기록을 실패시키므로 연속 실패 카운터를 올린다. monkeypatch로 깔아 두면
     # 종료 시 원래 값으로 되돌아가, 뒤에 도는 억제·복구 테스트가 이 테스트의 잔재를
@@ -2751,8 +2751,8 @@ async def test_monitor_signal_continues_when_recording_fails(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_purge_filtered_signals_task_deletes_expired_rows():
-    from ..config import FILTERED_SIGNAL_RETENTION_DAYS
-    from ..scheduler import purge_filtered_signals_task
+    from backend.core.config import FILTERED_SIGNAL_RETENTION_DAYS
+    from backend.scheduler import purge_filtered_signals_task
 
     repo = FakeFilteredSignalRepo()
 
@@ -2764,7 +2764,7 @@ async def test_purge_filtered_signals_task_deletes_expired_rows():
 @pytest.mark.asyncio
 async def test_purge_filtered_signals_task_swallows_failure():
     """정리 실패가 스케줄러 잡을 죽이지 않는다 — 다음 주기에 같은 조건으로 다시 지운다."""
-    from ..scheduler import purge_filtered_signals_task
+    from backend.scheduler import purge_filtered_signals_task
 
     await purge_filtered_signals_task(
         filtered_signal_repo=FakeFilteredSignalRepo(fail=True)
@@ -2773,7 +2773,7 @@ async def test_purge_filtered_signals_task_swallows_failure():
 
 def test_start_scheduler_registers_purge_job(monkeypatch):
     """정리 잡이 등록되지 않으면 보존 정책이 조용히 사라진다."""
-    from .. import scheduler as scheduler_module
+    from backend import scheduler as scheduler_module
 
     registered = []
 
@@ -2804,10 +2804,10 @@ async def test_monitor_signal_records_through_real_repo(monkeypatch):
     from sqlmodel import SQLModel, Session, create_engine, select
     from sqlmodel.pool import StaticPool
 
-    from ..config import SIGNAL_SCORE_THRESHOLD
-    from ..filtered_signal_repo import SqliteFilteredSignalRepo
-    from ..models import FilteredSignal
-    from ..scheduler import SignalSource, monitor_market_task
+    from backend.core.config import SIGNAL_SCORE_THRESHOLD
+    from backend.repositories.filtered_signal import SqliteFilteredSignalRepo
+    from backend.core.models import FilteredSignal
+    from backend.scheduler import SignalSource, monitor_market_task
 
     engine = create_engine(
         "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
@@ -2867,8 +2867,8 @@ async def test_repeated_recording_failures_are_logged_once_per_period(monkeypatc
     """
     import logging
 
-    from .. import scheduler as scheduler_module
-    from ..scheduler import _record_filtered_signal
+    from backend import scheduler as scheduler_module
+    from backend.scheduler import _record_filtered_signal
 
     monkeypatch.setattr(scheduler_module, "_filtered_signal_failure_streak", 0)
     monkeypatch.setattr(scheduler_module, "_last_filtered_signal_error", None)
@@ -2897,8 +2897,8 @@ async def test_recording_recovery_reports_missed_count(monkeypatch, caplog):
     """
     import logging
 
-    from .. import scheduler as scheduler_module
-    from ..scheduler import _record_filtered_signal
+    from backend import scheduler as scheduler_module
+    from backend.scheduler import _record_filtered_signal
 
     monkeypatch.setattr(scheduler_module, "_filtered_signal_failure_streak", 0)
     monkeypatch.setattr(scheduler_module, "_last_filtered_signal_error", None)
@@ -2958,7 +2958,7 @@ def test_paper_fallback_marker_matches_shared_contract():
     이 테스트가 잡는 mutation: _RLZ_PL_PAPER_FALLBACK_MARKER 문구를 다듬는 회귀. 전에는 양쪽
     리터럴을 함께 고정하는 테스트가 없어 감지가 조용히 꺼질 수 있었다(#371).
     """
-    from ..scheduler import _RLZ_PL_PAPER_FALLBACK_MARKER
+    from backend.scheduler import _RLZ_PL_PAPER_FALLBACK_MARKER
 
     assert _RLZ_PL_PAPER_FALLBACK_MARKER == _PAPER_FALLBACK_CONTRACT["marker"]
     assert _RLZ_PL_PAPER_FALLBACK_MARKER in _PAPER_FALLBACK_CONTRACT["note"]
@@ -2974,7 +2974,7 @@ def test_parse_rlz_pl_quotes_reads_price_per_code():
     _RLZ_PL_PRICE_RE를 매입가/평가금액 줄까지 훑도록 넓히는 회귀(그러면 삼성전자
     현재가가 70,000이나 712,000으로 잡힌다).
     """
-    from ..scheduler import _parse_rlz_pl_quotes
+    from backend.scheduler import _parse_rlz_pl_quotes
 
     quotes = _parse_rlz_pl_quotes(_rlz_pl_text("normal"))
 
@@ -3000,7 +3000,7 @@ def test_parse_rlz_pl_quotes_omits_holdings_without_price():
     들어온다), 그리고 `if price <= 0` 가드 제거(123456이 0.0으로 들어온다). 둘 다
     딕셔너리 비교가 실패한다.
     """
-    from ..scheduler import _parse_rlz_pl_quotes
+    from backend.scheduler import _parse_rlz_pl_quotes
 
     quotes = _parse_rlz_pl_quotes(_rlz_pl_text("no_price"))
 
@@ -3022,7 +3022,7 @@ def test_parse_rlz_pl_quotes_does_not_name_stock_that_later_row_priced(caplog):
     """
     import logging
 
-    from ..scheduler import _parse_rlz_pl_quotes
+    from backend.scheduler import _parse_rlz_pl_quotes
 
     text = (
         "[보유 종목]\n"
@@ -3058,7 +3058,7 @@ def test_parse_rlz_pl_quotes_warns_when_duplicate_rows_disagree(caplog):
     """
     import logging
 
-    from ..scheduler import _parse_rlz_pl_quotes
+    from backend.scheduler import _parse_rlz_pl_quotes
 
     with caplog.at_level(logging.WARNING, logger="backend.scheduler"):
         quotes = _parse_rlz_pl_quotes(_rlz_pl_text("divergent_price"))
@@ -3084,8 +3084,8 @@ def test_parse_rlz_pl_quotes_separates_missing_code_from_malformed(caplog, monke
     """
     import logging
 
-    from .. import scheduler as scheduler_module
-    from ..scheduler import _parse_rlz_pl_quotes
+    from backend import scheduler as scheduler_module
+    from backend.scheduler import _parse_rlz_pl_quotes
 
     # 이 경고는 연속 횟수로 억제되므로 앞선 테스트가 남긴 카운터에 기대지 않는다.
     monkeypatch.setattr(scheduler_module, "_codeless_streak", 0)
@@ -3117,8 +3117,8 @@ def test_parse_rlz_pl_quotes_suppresses_repeated_priceless_warning(caplog, monke
     """
     import logging
 
-    from .. import scheduler as scheduler_module
-    from ..scheduler import _parse_rlz_pl_quotes
+    from backend import scheduler as scheduler_module
+    from backend.scheduler import _parse_rlz_pl_quotes
 
     monkeypatch.setattr(scheduler_module, "_priceless_streak", 0)
 
@@ -3162,8 +3162,8 @@ def test_parse_rlz_pl_quotes_suppresses_repeated_codeless_warning(caplog, monkey
     """
     import logging
 
-    from .. import scheduler as scheduler_module
-    from ..scheduler import _parse_rlz_pl_quotes
+    from backend import scheduler as scheduler_module
+    from backend.scheduler import _parse_rlz_pl_quotes
 
     monkeypatch.setattr(scheduler_module, "_codeless_streak", 0)
 
@@ -3192,8 +3192,8 @@ def test_parse_rlz_pl_quotes_does_not_suppress_divergent_warning(caplog, monkeyp
     """
     import logging
 
-    from .. import scheduler as scheduler_module
-    from ..scheduler import _parse_rlz_pl_quotes
+    from backend import scheduler as scheduler_module
+    from backend.scheduler import _parse_rlz_pl_quotes
 
     monkeypatch.setattr(scheduler_module, "_priceless_streak", 0)
     monkeypatch.setattr(scheduler_module, "_codeless_streak", 0)
@@ -3223,8 +3223,8 @@ def test_sync_portfolio_prices_updates_every_duplicate_row(portfolio_session):
     """
     from sqlmodel import select
 
-    from ..models import Portfolio
-    from ..scheduler import _sync_portfolio_prices_from_rlz_pl
+    from backend.core.models import Portfolio
+    from backend.scheduler import _sync_portfolio_prices_from_rlz_pl
 
     for _ in range(2):
         portfolio_session.add(
@@ -3261,8 +3261,8 @@ def test_sync_portfolio_prices_leftover_log_excludes_matched_codes(portfolio_ses
     """
     import logging
 
-    from ..models import Portfolio
-    from ..scheduler import _sync_portfolio_prices_from_rlz_pl
+    from backend.core.models import Portfolio
+    from backend.scheduler import _sync_portfolio_prices_from_rlz_pl
 
     portfolio_session.add(
         Portfolio(stock_code="005930", stock_name="삼성전자", quantity=10, avg_price=70000)
@@ -3287,8 +3287,8 @@ def test_sync_portfolio_prices_writes_price_and_stamp(portfolio_session):
     또는 반환값을 갱신 행 수 대신 상수로 바꾸는 회귀.
     """
     from sqlmodel import select
-    from ..models import Portfolio
-    from ..scheduler import _sync_portfolio_prices_from_rlz_pl
+    from backend.core.models import Portfolio
+    from backend.scheduler import _sync_portfolio_prices_from_rlz_pl
 
     before = datetime.now(timezone.utc)
     portfolio_session.add(
@@ -3324,8 +3324,8 @@ def test_sync_portfolio_prices_leaves_unquoted_rows_untouched(portfolio_session)
     또는 모든 행에 price_updated_at을 찍는 회귀.
     """
     from sqlmodel import select
-    from ..models import Portfolio
-    from ..scheduler import _sync_portfolio_prices_from_rlz_pl
+    from backend.core.models import Portfolio
+    from backend.scheduler import _sync_portfolio_prices_from_rlz_pl
 
     old_stamp = datetime(2026, 1, 1, tzinfo=timezone.utc)
     portfolio_session.add(
@@ -3372,8 +3372,8 @@ def test_sync_portfolio_prices_guards_from_fixture(portfolio_session, case, expe
     보유 0건을 None으로 처리하는 회귀.
     """
     from sqlmodel import select
-    from ..models import Portfolio
-    from ..scheduler import _sync_portfolio_prices_from_rlz_pl
+    from backend.core.models import Portfolio
+    from backend.scheduler import _sync_portfolio_prices_from_rlz_pl
 
     old_stamp = datetime(2026, 1, 1, tzinfo=timezone.utc)
     portfolio_session.add(
@@ -3405,8 +3405,8 @@ def test_sync_portfolio_prices_skips_when_marker_absent(portfolio_session, caplo
     """
     import logging
     from sqlmodel import select
-    from ..models import Portfolio
-    from ..scheduler import _sync_portfolio_prices_from_rlz_pl
+    from backend.core.models import Portfolio
+    from backend.scheduler import _sync_portfolio_prices_from_rlz_pl
 
     portfolio_session.add(
         Portfolio(
@@ -3441,8 +3441,8 @@ def test_sync_portfolio_prices_treats_paper_fallback_as_no_quote(portfolio_sessi
     """
     import logging
     from sqlmodel import select
-    from ..models import Portfolio
-    from ..scheduler import _sync_portfolio_prices_from_rlz_pl
+    from backend.core.models import Portfolio
+    from backend.scheduler import _sync_portfolio_prices_from_rlz_pl
 
     portfolio_session.add(
         Portfolio(
@@ -3488,8 +3488,8 @@ def test_sync_portfolio_prices_suppresses_repeated_paper_fallback_info(
     """
     import logging
 
-    from .. import scheduler as scheduler_module
-    from ..scheduler import _sync_portfolio_prices_from_rlz_pl
+    from backend import scheduler as scheduler_module
+    from backend.scheduler import _sync_portfolio_prices_from_rlz_pl
 
     monkeypatch.setattr(scheduler_module, "_paper_fallback_streak", 0)
 
@@ -3524,7 +3524,7 @@ async def test_refresh_portfolio_prices_skips_calls_after_paper_fallback(monkeyp
     이 테스트가 잡는 mutation: 건너뛰기 분기 제거(7주기 중 7회 호출), 스킵 카운터를
     세우지 않는 회귀(마찬가지로 7회), 카운터를 줄이지 않아 영구히 끊기는 회귀(1회).
     """
-    from ..scheduler import _refresh_portfolio_prices
+    from backend.scheduler import _refresh_portfolio_prices
 
     calls: list[str] = []
     paper_text = (
@@ -3549,7 +3549,7 @@ async def test_refresh_portfolio_prices_skips_calls_after_paper_fallback(monkeyp
 async def test_refresh_portfolio_prices_passes_time_budget_within_call_timeout(monkeypatch):
     """시세 갱신은 도구 기본 예산(90초)이 아니라 30초 호출 타임아웃 안의 예산을 넘긴다 (#369).
 
-    run_mcp_tool은 30초에서 끊는다(backend/services.py). 인자를 빼면 도구가 NAT 기준
+    run_mcp_tool은 30초에서 끊는다(backend/ai/services.py). 인자를 빼면 도구가 NAT 기준
     90초 예산으로 돌아, 연속조회가 30초를 넘는 계좌는 잘림 안내 대신 504 타임아웃으로
     빠진다. 값의 근거(18 + 8 + 2 = 28초)는 _RLZ_PL_TIME_BUDGET_MS 주석에 있다.
 
@@ -3559,7 +3559,7 @@ async def test_refresh_portfolio_prices_passes_time_budget_within_call_timeout(m
     이 테스트가 잡는 mutation: 인자 없이 {}로 부르는 회귀(#369 이전), 인자 이름을
     바꾸는 회귀(도구 스키마가 모르는 키는 버려져 90초 예산으로 돈다), 값을 바꾸는 회귀.
     """
-    from ..scheduler import _refresh_portfolio_prices
+    from backend.scheduler import _refresh_portfolio_prices
 
     calls: list[tuple[str, dict]] = []
 
@@ -3581,7 +3581,7 @@ def test_rlz_pl_time_budget_fits_inside_mcp_call_timeout():
     """시세 갱신 예산 + 진행 중 요청 1회 + 기동이 run_mcp_tool 호출 타임아웃보다 짧다 (#369).
 
     이 관계를 벗어나면 연속조회가 긴 계좌는 잘림 안내 대신 504로 빠진다. 값만 고정한 위
-    테스트는 호출 타임아웃(services.py)이나 kisAxios 타임아웃(index.js)이 바뀌어도 초록이라
+    테스트는 호출 타임아웃(ai/services.py)이나 kisAxios 타임아웃(index.js)이 바뀌어도 초록이라
     (PR #378 리뷰), 세 값을 각자의 출처에서 읽어 부등식을 단언한다.
 
     kisAxios 타임아웃은 index.js 소스에서 읽는다 — index.js는 import 시점에 stdio 서버를
@@ -3594,8 +3594,8 @@ def test_rlz_pl_time_budget_fits_inside_mcp_call_timeout():
     import re
     from pathlib import Path
 
-    from ..scheduler import _RLZ_PL_TIME_BUDGET_MS
-    from ..services import MCP_TOOL_TIMEOUT_SECONDS
+    from backend.scheduler import _RLZ_PL_TIME_BUDGET_MS
+    from backend.ai.services import MCP_TOOL_TIMEOUT_SECONDS
 
     index_js = (Path(__file__).resolve().parents[2] / "mcp" / "trading" / "index.js").read_text(
         encoding="utf-8"
@@ -3633,7 +3633,7 @@ def test_sync_portfolio_prices_truncation_warning_carries_reason(
     """
     import logging
 
-    from ..scheduler import _sync_portfolio_prices_from_rlz_pl
+    from backend.scheduler import _sync_portfolio_prices_from_rlz_pl
 
     report_text = _rlz_pl_text("truncated").replace("페이지 상한(20회)에 도달하여", reason_text)
     assert reason_text in report_text
@@ -3657,8 +3657,8 @@ def test_sync_portfolio_prices_suppresses_repeated_truncation_warning(portfolio_
     """
     import logging
 
-    from .. import scheduler as scheduler_module
-    from ..scheduler import _sync_portfolio_prices_from_rlz_pl
+    from backend import scheduler as scheduler_module
+    from backend.scheduler import _sync_portfolio_prices_from_rlz_pl
 
     truncated_text = _rlz_pl_text("truncated")
 
@@ -3700,7 +3700,7 @@ def test_sync_portfolio_prices_warns_immediately_when_truncation_reason_changes(
     """
     import logging
 
-    from ..scheduler import _sync_portfolio_prices_from_rlz_pl
+    from backend.scheduler import _sync_portfolio_prices_from_rlz_pl
 
     fixture_text = _rlz_pl_text("truncated")
     fixture_reason = "페이지 상한(20회)에 도달하여"
@@ -3741,7 +3741,7 @@ def test_sync_portfolio_prices_does_not_repeat_empty_warning_for_priceless(
     """
     import logging
 
-    from ..scheduler import _sync_portfolio_prices_from_rlz_pl
+    from backend.scheduler import _sync_portfolio_prices_from_rlz_pl
 
     priceless_text = (
         "[보유 종목]\n"
@@ -3788,8 +3788,8 @@ def test_sync_portfolio_from_balance_preserves_price_columns(portfolio_session):
     price_updated_at에 대입하는 회귀(신규 행 경로·기존 행 경로 어느 쪽이든).
     """
     from sqlmodel import select
-    from ..models import Portfolio
-    from ..scheduler import _sync_portfolio_from_balance
+    from backend.core.models import Portfolio
+    from backend.scheduler import _sync_portfolio_from_balance
 
     stamp = datetime(2026, 9, 3, tzinfo=timezone.utc)
     portfolio_session.add(
@@ -3830,7 +3830,7 @@ async def test_monitor_market_task_refreshes_prices_after_balance_sync(monkeypat
     이 테스트가 잡는 mutation: _refresh_portfolio_prices 호출 제거, 또는 잔고 동기화
     앞으로 옮기는 회귀(call_order가 뒤집혀 실패한다).
     """
-    from ..scheduler import SignalSource, monitor_market_task
+    from backend.scheduler import SignalSource, monitor_market_task
 
     call_order: list[str] = []
 
@@ -3889,7 +3889,7 @@ async def test_monitor_market_task_keeps_balance_sync_when_quote_tool_fails(monk
     잔고 동기화 앞·같은 try 안으로 옮기는 회귀.
     """
     import logging
-    from ..scheduler import SignalSource, monitor_market_task
+    from backend.scheduler import SignalSource, monitor_market_task
 
     sync_calls: list[str] = []
     # 도구 호출 순서를 그대로 남긴다. "감시가 계속 돌았다"를 score_signal 호출로 재면

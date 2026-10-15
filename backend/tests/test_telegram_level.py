@@ -9,19 +9,19 @@ from types import SimpleNamespace
 
 import pytest
 
-import backend.telegram_commands as telegram_commands
-from backend.presentation import (
+import backend.telegram.commands as telegram_commands
+from backend.telegram.presentation import (
     LEVEL_BEGINNER,
     LEVEL_INTERMEDIATE,
     REASONING_FOOTNOTE_SEPARATOR,
     TERM_FOOTNOTE_MARK,
 )
-from backend.telegram_commands import (
+from backend.telegram.commands import (
     LEVEL_COMMAND_HELP,
     LEVEL_ONBOARDING_QUESTION,
     TelegramCommandHandler,
 )
-from backend.services import NatAnswer, NatToolUse
+from backend.ai.services import NatAnswer, NatToolUse
 
 
 @pytest.fixture(autouse=True)

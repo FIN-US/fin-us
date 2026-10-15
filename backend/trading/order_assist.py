@@ -44,7 +44,7 @@ from typing import Any, Awaitable, Callable, Literal, Protocol
 import httpx
 from sqlmodel import Session
 
-from .config import (
+from backend.core.config import (
     NAT_BASE_URL,
     ORDER_BLACKLIST,
     ORDER_MAX_DAILY_AMOUNT,
@@ -62,21 +62,21 @@ from .config import (
 # services는 order_assist를 import하지 않으므로 순환하지 않는다. run_mcp_tool은
 # 호출 시점에 늦게 가져오지만(테스트가 주입하는 것이 기본 경로다) short_error는
 # 순수 포매터라 여기서 바로 묶는다.
-from .services import short_error
-from .pii_egress import prepare_egress
-from .pii_mask import unmask_pii
+from backend.ai.services import short_error
+from backend.pii.egress import prepare_egress
+from backend.pii.mask import unmask_pii
 # presentation은 의존이 없는 리프 모듈이라 여기서 바로 가져와도 순환하지 않는다.
 # /advise 승인 메시지에는 제안자·검증자가 쓴 문장이 실린다 — 이 봇은 parse_mode를
 # 쓰지 않으므로 마크다운 표기가 남으면 화면에 그대로 별표로 보인다 (#297).
-from .presentation import sanitize_markdown
-from .stock_code import (
+from backend.telegram.presentation import sanitize_markdown
+from backend.trading.stock_code import (
     _is_unresolved_echo,
     _STOCK_CODE_EXTRACT_RE,
     extract_stock_name,
     is_orderable_stock_code_strict,
 )
-from .timeutil import KST
-from .trading_orders import (
+from backend.core.timeutil import KST
+from backend.trading.orders import (
     DEFAULT_ORDER_ORIGIN,
     ORDER_EXPIRES_AFTER,
     PENDING_ORDER_NEXT_STEP_TEXT,
@@ -129,7 +129,7 @@ class ProposalTrigger:
     ``trigger_signal``에는 **수치를 넣지 않는다**. ``build_proposal_prompt``가 이 값을 프롬프트
     본문에 싣는데, ``/v1/propose-order``는 프롬프트 하나가 곧 transcript 전체라 본문에 실린
     수치가 환각 게이트(``fe_branch``)의 화이트리스트가 된다. 넣을 것은 "무엇을 확인하라"는
-    지시 문구다 (``backend/order_rules.py`` 모듈 docstring 3번).
+    지시 문구다 (``backend/trading/order_rules.py`` 모듈 docstring 3번).
 
     ``stock``은 사용자가 친 문자열 그대로다 — 종목명일 수도 코드일 수도 있다. 냉각 키와
     한도 판정에 쓰는 정본 식별자는 :func:`run_order_assist`가 MCP로 확정한 종목코드다.
@@ -180,7 +180,7 @@ class DailyUsage:
 
 @dataclass(frozen=True)
 class OrderLimits:
-    """하드 한도 묶음. 기본값은 ``backend.config``의 env 로드 결과다."""
+    """하드 한도 묶음. 기본값은 ``backend.core.config``의 env 로드 결과다."""
 
     max_order_amount: int = ORDER_MAX_ORDER_AMOUNT
     max_position_ratio: float = ORDER_MAX_POSITION_RATIO
@@ -335,7 +335,7 @@ def parse_proposal(raw: str) -> tuple[OrderProposal | None, str]:
     실패 시 ``(None, 사유)``를 돌려준다 — 사유는 사용자에게 그대로 보여도 되는 문장이다.
     성공 시에도 ``stock_code``는 아직 신뢰하지 않는다. 호출부가 MCP로 다시 확인한다.
     """
-    from .services import _json_objects_from_text
+    from backend.ai.services import _json_objects_from_text
 
     text = (raw or "").strip()
     if not text:
@@ -477,7 +477,7 @@ def parse_snapshot(
     보유량만 예외다. 잔고 섹션 마커가 있는데 해당 종목 줄이 없으면 그것은 관측된
     0주다. 마커 자체가 없으면 응답을 읽지 못한 것이므로 실패로 본다.
     """
-    from .scheduler import _BALANCE_HOLDINGS_MARKER, _parse_balance_holdings, is_balance_truncated
+    from backend.scheduler import _BALANCE_HOLDINGS_MARKER, _parse_balance_holdings, is_balance_truncated
 
     current_price = parse_current_price(quote_text)
     if current_price is None:
@@ -680,7 +680,7 @@ def _kst_day_start_utc(now: datetime) -> datetime:
 
 def load_daily_usage(session_factory: Callable[[], Any], now: datetime) -> DailyUsage:
     """오늘(KST) 체결 이력에서 주문 횟수와 거래대금을 집계한다."""
-    from .models import TradeHistory
+    from backend.core.models import TradeHistory
 
     session = session_factory()
     try:
@@ -760,13 +760,13 @@ class ProposalCooldown:
     def _factory(self) -> Callable[[], Any]:
         if self._client_factory is not None:
             return self._client_factory
-        from .redis_state import create_redis_client
+        from backend.core.redis_state import create_redis_client
 
         return create_redis_client
 
     @staticmethod
     def key(stock_code: str, rule_id: str | None) -> str:
-        from .redis_state import RedisKeys
+        from backend.core.redis_state import RedisKeys
 
         return RedisKeys().order_proposal_cooldown(stock_code, rule_id)
 
@@ -1102,9 +1102,9 @@ async def run_order_assist(
     이 함수는 주문을 **내지 않는다**.
     """
     if mcp_runner is None:
-        from .services import run_mcp_tool as mcp_runner  # type: ignore[assignment]
+        from backend.ai.services import run_mcp_tool as mcp_runner  # type: ignore[assignment]
     if session_factory is None:
-        from .database import engine
+        from backend.core.database import engine
 
         # 파라미터와 같은 이름으로 def를 쓰면 선언이 가려져(체커가 잡는다) 어느 쪽이
         # 유효한지 읽는 사람도 헷갈린다. 다른 이름으로 만들고 대입한다.

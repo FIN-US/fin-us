@@ -7,12 +7,12 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from sqlmodel import Session, select
-from .catalyst_repo import (
+from backend.repositories.catalyst import (
     CatalystEventInput,
     CatalystNotificationRepo,
     SqliteCatalystEventRepo,
 )
-from .filtered_signal_repo import (
+from backend.repositories.filtered_signal import (
     FilteredSignalRecorder,
     SqliteFilteredSignalRepo,
     # SQLite에서 읽은 naive UTC와 tz-aware now를 같은 축으로 맞추는 보정(#196).
@@ -20,22 +20,22 @@ from .filtered_signal_repo import (
     # 모듈 밖에서 쓰므로 밑줄 없는 공개 이름이다(PR #367 리뷰).
     as_utc_naive,
 )
-from .ws_manager import manager
-from .database import engine
-from .delivery_alarm import (
+from backend.core.ws_manager import manager
+from backend.core.database import engine
+from backend.telegram.delivery_alarm import (
     StallCandidate,
     StallEvent,
     delivery_metrics,
     trade_outbox_stall,
 )
-from .config import (
+from backend.core.config import (
     NEWS_MCP_PARAMS,
     TRADING_MCP_PARAMS,
     DART_MCP_PARAMS,
     FILTERED_SIGNAL_RETENTION_DAYS,
     SIGNAL_SCORE_THRESHOLD,
 )
-from .redis_state import (
+from backend.core.redis_state import (
     PendingOrderStore,
     RedisPendingOrderStore,
     RedisSchedulerState,
@@ -43,8 +43,8 @@ from .redis_state import (
     signal_hash,
     redis_state,
 )
-from .order_assist import OrderAssistResult, ProposalTrigger, run_order_assist
-from .order_rules import (
+from backend.trading.order_assist import OrderAssistResult, ProposalTrigger, run_order_assist
+from backend.trading.order_rules import (
     OrderAssistRule,
     RuleMatch,
     build_trigger_signal,
@@ -56,13 +56,13 @@ from .order_rules import (
     should_report_rejection,
     should_run,
 )
-from .trade_notification_repo import (
+from backend.repositories.trade_notification import (
     PendingTradeNotification,
     SqliteTradeNotificationRepo,
     TradeNotificationRepo,
 )
-from .trading_orders import is_korean_market_open, send_order_prompt
-from .services import (
+from backend.trading.orders import is_korean_market_open, send_order_prompt
+from backend.ai.services import (
     ReportSession,
     SignalScore,
     perform_stock_analysis,
@@ -70,18 +70,18 @@ from .services import (
     score_signal,
     generate_morning_briefing,
 )
-from .models import Portfolio
-from .pii_egress import personal, public
-from .timeutil import KST
-from .watchlist_repo import SqliteWatchlistRepo, WatchlistReader
-from .presentation import (
+from backend.core.models import Portfolio
+from backend.pii.egress import personal, public
+from backend.core.timeutil import KST
+from backend.repositories.watchlist import SqliteWatchlistRepo, WatchlistReader
+from backend.telegram.presentation import (
     DEFAULT_TELEGRAM_USER_LEVEL,
     KIND_ALERT,
     KIND_BRIEFING,
     render,
 )
-from .telegram_notifier import telegram_notifier
-from .telegram_notifier import (
+from backend.telegram.notifier import telegram_notifier
+from backend.telegram.notifier import (
     TelegramTextSender,
     should_send_telegram_alert,
 )
@@ -116,7 +116,7 @@ class SignalSource:
     # 이 소스의 원문이 뉴스·공시처럼 누구나 같은 값을 조회하는 공개 데이터인가 (#395).
     # True면 채점·분석 프롬프트에서 원문 속 금액을 마스킹하지 않는다. 기본값이 False인 것이
     # fail-safe의 자리다 — 계좌 데이터를 읽는 소스가 표시 없이 추가돼도 마스킹된다.
-    # 판정 기준은 backend/pii_egress.py 모듈 docstring.
+    # 판정 기준은 backend/pii/egress.py 모듈 docstring.
     public_data: bool = False
 
 
@@ -263,7 +263,7 @@ _BALANCE_TRUNCATION_MARKER = "조회가 중단되어"
 # balance.js formatBalanceReport()가 보유 종목 섹션을 구분하는 헤더 리터럴.
 # 이 함수는 보유 종목이 0건이어도 이 마커와 "보유 종목이 없습니다."를
 # 항상 출력한다. 따라서 이 마커가 없다는 것은 "보유 0건"이 아니라 "응답을 읽지 못함"이다.
-# run_mcp_tool은 MCP content가 비면 예외 대신 빈 문자열을 반환하므로(services.py),
+# run_mcp_tool은 MCP content가 비면 예외 대신 빈 문자열을 반환하므로(ai/services.py),
 # 이 경로는 실재한다. _sync_portfolio_from_balance가 이 마커 부재를 계약 위반으로
 # 처리해, 보유 0건으로 오인한 전 종목 삭제를 막는다.
 _BALANCE_HOLDINGS_MARKER = "[보유 종목 리스트]"
@@ -392,7 +392,7 @@ _RLZ_PL_PRICE_RE = re.compile(r"현재가\s+([\d,]+(?:\.\d+)?)원")
 #
 # 도구의 기본 예산은 NAT의 120초 호출자를 기준으로 잡은 90초다(mcp/trading/index.js의
 # BALANCE_RLZ_PL_TIME_BUDGET_MS). 이 호출은 run_mcp_tool이 MCP_TOOL_TIMEOUT_SECONDS(30초,
-# backend/services.py)에서 끊으므로, 기본 예산으로 부르면 연속조회가 30초를 넘는 계좌는 JS가
+# backend/ai/services.py)에서 끊으므로, 기본 예산으로 부르면 연속조회가 30초를 넘는 계좌는 JS가
 # 잘림 안내를 내기 전에 서브프로세스째 끊겨 504 실패로 빠진다. 예산을 30초 안으로 낮추면 그
 # 계좌는 예산에서 멈춰 잘림 안내를 받고, _sync_portfolio_prices_from_rlz_pl의 잘림 경고가
 # 사유("조회 시간 예산을 초과하여")를 그대로 싣는다. 시세를 못 얻는 결과는 504 때와 같다 —
@@ -617,7 +617,7 @@ def _sync_portfolio_from_balance(
     # 마커가 없으면 "보유 0건"이 아니라 "응답을 읽지 못함"이다.
     # balance.js는 보유 종목이 없어도 마커와 "보유 종목이 없습니다."를 항상 출력한다
     # (balance.js formatBalanceReport()). run_mcp_tool은 MCP content가 비면 예외 대신 ""를
-    # 반환하므로(services.py) 이 경로는 실재한다. upsert로 바뀐 뒤에도 "잔고에 없는
+    # 반환하므로(ai/services.py) 이 경로는 실재한다. upsert로 바뀐 뒤에도 "잔고에 없는
     # 종목은 삭제"는 그대로라 빈 응답으로 동기화하면 전 종목이 지워지고 되돌릴 수
     # 없다. 기존 데이터를 보존하고 error 로그로 운영자에게 알린다.
     if _BALANCE_HOLDINGS_MARKER not in balance_text:

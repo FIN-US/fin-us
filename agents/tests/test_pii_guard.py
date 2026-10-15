@@ -52,7 +52,7 @@ from nat_finus_nat.pii_mask import _PLACEHOLDER_RE, mask_pii
 
 _REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 _FINUS_API_PATH = _REPO_ROOT / "agents" / "src" / "nat_finus_nat" / "finus_api.py"
-_BACKEND_PII_MASK = _REPO_ROOT / "backend" / "pii_mask.py"
+_BACKEND_PII_MASK = _REPO_ROOT / "backend" / "pii" / "mask.py"
 _NAT_PII_MASK = _REPO_ROOT / "agents" / "src" / "nat_finus_nat" / "pii_mask.py"
 _BALANCE_FIXTURE = _REPO_ROOT / "mcp" / "trading" / "tests" / "fixtures" / "balance_report.json"
 
@@ -757,7 +757,7 @@ class TestSaveDiaryRejectsUnrestorable:
     #339 시점에는 이것도 함께 거부했다 — ``POST /api/v1/db/diary``가 저장만 하고
     ``unmask_pii``를 타지 않아 결과가 같았기 때문이다. #354가 그 전제를 바꿨다:
     backend가 ``llm_chat``의 매핑을 요청 범위로 들고 있다가 저장 직전에 되돌린다
-    (``backend/pii_registry.py``). 여기서 거부하면 그 복구를 NAT이 막는 셈이므로,
+    (``backend/pii/registry.py``). 여기서 거부하면 그 복구를 NAT이 막는 셈이므로,
     낯선 scope는 통과시켜 backend가 판정하게 둔다. 되돌리지 못하는 낯선 scope는
     backend가 422로 거부한다 — 그쪽 경계는 ``backend/tests/test_pii_registry.py``가
     고정한다.
@@ -1020,8 +1020,8 @@ class TestVendoredCopy:
         자리표시자 규약이 갈린다.
         """
         assert _NAT_PII_MASK.read_bytes() == _BACKEND_PII_MASK.read_bytes(), (
-            "backend/pii_mask.py 와 agents/src/nat_finus_nat/pii_mask.py 가 다릅니다. "
-            "한쪽을 고쳤다면 `cp backend/pii_mask.py agents/src/nat_finus_nat/pii_mask.py` 로 "
+            "backend/pii/mask.py 와 agents/src/nat_finus_nat/pii_mask.py 가 다릅니다. "
+            "한쪽을 고쳤다면 `cp backend/pii/mask.py agents/src/nat_finus_nat/pii_mask.py` 로 "
             "사본을 맞추세요."
         )
 

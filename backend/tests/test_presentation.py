@@ -12,8 +12,8 @@ import json
 
 import pytest
 
-from backend import presentation
-from backend.presentation import (
+from backend.telegram import presentation
+from backend.telegram.presentation import (
     DEFAULT_TELEGRAM_USER_LEVEL,
     KIND_ALERT,
     KIND_ALERT_URGENT,

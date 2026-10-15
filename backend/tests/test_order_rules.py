@@ -6,7 +6,7 @@ test_scheduler.py의 run_rule_triggered_proposal 테스트가 본다.
 
 import pytest
 
-from ..order_rules import (
+from backend.trading.order_rules import (
     RULE_ID,
     OrderAssistRule,
     RuleMatch,

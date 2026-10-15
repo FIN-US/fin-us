@@ -11,12 +11,12 @@ from datetime import datetime
 
 import pytest
 
-from ..order_assist import OrderAssistResult
-from ..order_rules import RULE_ID, OrderAssistRule, RuleMatch
-from ..redis_state import InMemoryPendingOrderStore, RedisSchedulerState
-from ..telegram_notifier import SETTLED_SEND_RETRY_BACKOFF_SECONDS, SendReceipt
-from ..timeutil import KST
-from ..trading_orders import ORDER_CONFIRM_CALLBACK, PendingOrder
+from backend.trading.order_assist import OrderAssistResult
+from backend.trading.order_rules import RULE_ID, OrderAssistRule, RuleMatch
+from backend.core.redis_state import InMemoryPendingOrderStore, RedisSchedulerState
+from backend.telegram.notifier import SETTLED_SEND_RETRY_BACKOFF_SECONDS, SendReceipt
+from backend.core.timeutil import KST
+from backend.trading.orders import ORDER_CONFIRM_CALLBACK, PendingOrder
 from .test_scheduler import (
     FakeRedis,
     FakeWatchlistRepo,
@@ -120,7 +120,7 @@ _MATCH = RuleMatch(rule_id=RULE_ID, stock="삼성전자", source="disclosure", u
 
 @pytest.mark.asyncio
 async def test_no_match_runs_nothing():
-    from ..scheduler import run_rule_triggered_proposal
+    from backend.scheduler import run_rule_triggered_proposal
 
     calls: list = []
     result = await run_rule_triggered_proposal(
@@ -142,7 +142,7 @@ async def test_alerts_off_never_creates_a_proposal(caplog):
     두 요구가 양립하지 않으므로 제안 자체를 만들지 않는다. 조용히 대기 주문 슬롯만
     잡히면 사용자가 직접 친 /buy가 영문 모를 충돌로 막힌다.
     """
-    from ..scheduler import run_rule_triggered_proposal
+    from backend.scheduler import run_rule_triggered_proposal
 
     calls: list = []
     with caplog.at_level(logging.INFO, logger="backend.scheduler"):
@@ -161,7 +161,7 @@ async def test_alerts_off_never_creates_a_proposal(caplog):
 @pytest.mark.asyncio
 async def test_market_closed_skips_silently():
     """감시는 24시간 돈다. 장 밖의 거부를 매번 알리면 밤새 '거부했습니다'가 쌓인다."""
-    from ..scheduler import run_rule_triggered_proposal
+    from backend.scheduler import run_rule_triggered_proposal
 
     calls: list = []
     notifier = FakeNotifier()
@@ -186,7 +186,7 @@ async def test_market_closed_skips_silently():
 )
 async def test_no_delivery_path_means_no_proposal(notifier):
     """보낼 수 없는 대기 주문을 저장하면 슬롯만 잡고 사용자는 그 존재를 모른다."""
-    from ..scheduler import run_rule_triggered_proposal
+    from backend.scheduler import run_rule_triggered_proposal
 
     calls: list = []
     result = await run_rule_triggered_proposal(
@@ -204,7 +204,7 @@ async def test_no_delivery_path_means_no_proposal(notifier):
 @pytest.mark.asyncio
 async def test_unreadable_alert_mode_blocks_the_trigger():
     """확인하지 못한 상태를 '허용'으로 읽지 않는다 — #299의 fail-closed와 같은 선이다."""
-    from ..scheduler import run_rule_triggered_proposal
+    from backend.scheduler import run_rule_triggered_proposal
 
     class BrokenState:
         async def get_telegram_alert_mode(self):
@@ -231,7 +231,7 @@ async def test_unreadable_alert_mode_blocks_the_trigger():
 @pytest.mark.asyncio
 async def test_trigger_identifies_itself_as_a_scheduler_rule():
     """source·rule_id가 갈려야 수동 /advise와 자동 제안이 서로의 냉각을 잡아먹지 않는다."""
-    from ..scheduler import run_rule_triggered_proposal
+    from backend.scheduler import run_rule_triggered_proposal
 
     calls: list = []
     store = RecordingPendingOrderStore()
@@ -261,7 +261,7 @@ async def test_trigger_signal_carries_no_numbers():
     order_rules 쪽에도 같은 검사가 있지만, 여기서 한 번 더 보는 것은 배선이 어긋나
     신호 본문이 그대로 실려 나가는 경우를 잡기 위해서다.
     """
-    from ..scheduler import run_rule_triggered_proposal
+    from backend.scheduler import run_rule_triggered_proposal
 
     calls: list = []
     await run_rule_triggered_proposal(
@@ -283,7 +283,7 @@ async def test_trigger_signal_carries_no_numbers():
 @pytest.mark.asyncio
 async def test_only_one_proposal_per_cycle_and_it_is_the_most_urgent():
     """대기 주문 슬롯이 하나라 두 번째부터는 conflict로 끝난다 — 왕복만 버린다."""
-    from ..scheduler import run_rule_triggered_proposal
+    from backend.scheduler import run_rule_triggered_proposal
 
     calls: list = []
     await run_rule_triggered_proposal(
@@ -312,7 +312,7 @@ async def test_only_one_proposal_per_cycle_and_it_is_the_most_urgent():
 @pytest.mark.asyncio
 async def test_approved_proposal_gets_the_existing_confirm_buttons():
     """자동 트리거라도 확정 버튼 없이는 주문이 나가지 않는다 — #299의 세 번째 원칙."""
-    from ..scheduler import run_rule_triggered_proposal
+    from backend.scheduler import run_rule_triggered_proposal
 
     order = _order()
     notifier = FakeNotifier()
@@ -339,7 +339,7 @@ async def test_approved_proposal_gets_the_existing_confirm_buttons():
 @pytest.mark.asyncio
 async def test_approval_is_sent_even_in_urgent_mode():
     """승인은 알림 모드로 걸러지지 않는다 — 이 시점엔 이미 대기 주문 슬롯이 잡혀 있다."""
-    from ..scheduler import run_rule_triggered_proposal
+    from backend.scheduler import run_rule_triggered_proposal
 
     notifier = FakeNotifier()
     await run_rule_triggered_proposal(
@@ -364,7 +364,7 @@ async def test_approval_send_retries_before_giving_up():
     기본 60분 동안 다시 시도되지도 않는다. /advise가 쓰는 재시도를 그대로 쓴다.
     이 테스트가 잡는 mutation: send_text_settled를 notifier.send_text 단발로 되돌리는 회귀.
     """
-    from ..scheduler import run_rule_triggered_proposal
+    from backend.scheduler import run_rule_triggered_proposal
 
     store = RecordingPendingOrderStore()
     notifier = FakeNotifier(results=[False, False, True])
@@ -394,7 +394,7 @@ async def test_approval_prompt_message_id_is_recorded_on_the_pending_order():
     이 테스트가 잡는 mutation: 스케줄러가 send_order_prompt 대신 send_text_settled(id 없음)로
     되돌아감, send_order_prompt가 id 기록을 빠뜨림.
     """
-    from ..scheduler import run_rule_triggered_proposal
+    from backend.scheduler import run_rule_triggered_proposal
 
     class ReceiptNotifier(FakeNotifier):
         async def send_text_receipt(self, text, *, reply_markup=None):
@@ -425,7 +425,7 @@ async def test_approval_prompt_message_id_is_recorded_on_the_pending_order():
 @pytest.mark.asyncio
 async def test_undelivered_prompt_clears_the_pending_order():
     """/advise와 같은 처리다 (#247). 프롬프트가 안 나갔으면 사용자는 슬롯의 존재를 모른다."""
-    from ..scheduler import run_rule_triggered_proposal
+    from backend.scheduler import run_rule_triggered_proposal
 
     store = RecordingPendingOrderStore()
     notifier = FakeNotifier(ok=False)
@@ -447,7 +447,7 @@ async def test_undelivered_prompt_clears_the_pending_order():
 @pytest.mark.asyncio
 async def test_rejection_notice_does_not_spend_the_retry_budget():
     """거부·충돌 통지는 부수효과가 남지 않는다. 못 보내면 로그로 남는 것이 전부다."""
-    from ..scheduler import run_rule_triggered_proposal
+    from backend.scheduler import run_rule_triggered_proposal
 
     notifier = FakeNotifier(ok=False)
     await run_rule_triggered_proposal(
@@ -466,7 +466,7 @@ async def test_rejection_notice_does_not_spend_the_retry_budget():
 @pytest.mark.parametrize("status", ["rejected", "conflict"])
 async def test_rejection_stays_in_the_log_in_urgent_mode(status):
     """사용자가 존재조차 모르는 시도의 결과다. 10분 주기로 보내면 소음이 된다."""
-    from ..scheduler import run_rule_triggered_proposal
+    from backend.scheduler import run_rule_triggered_proposal
 
     notifier = FakeNotifier()
     await run_rule_triggered_proposal(
@@ -484,7 +484,7 @@ async def test_rejection_stays_in_the_log_in_urgent_mode(status):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status", ["rejected", "conflict"])
 async def test_rejection_reaches_the_user_in_all_mode(status):
-    from ..scheduler import run_rule_triggered_proposal
+    from backend.scheduler import run_rule_triggered_proposal
 
     notifier = FakeNotifier()
     await run_rule_triggered_proposal(
@@ -504,7 +504,7 @@ async def test_rejection_reaches_the_user_in_all_mode(status):
 
 @pytest.mark.asyncio
 async def test_assist_failure_does_not_break_the_monitoring_cycle(caplog):
-    from ..scheduler import run_rule_triggered_proposal
+    from backend.scheduler import run_rule_triggered_proposal
 
     notifier = FakeNotifier()
     with caplog.at_level(logging.ERROR, logger="backend.scheduler"):
@@ -551,7 +551,7 @@ def _monitor_patches(monkeypatch, urgency: str):
 
 @pytest.mark.asyncio
 async def test_monitor_signal_reports_a_rule_match(monkeypatch):
-    from ..scheduler import SignalSource, _monitor_signal
+    from backend.scheduler import SignalSource, _monitor_signal
 
     _monitor_patches(monkeypatch, "critical")
     source = SignalSource(name="news", mcp_params=object(), tool_name="get_market_news")
@@ -569,7 +569,7 @@ async def test_monitor_signal_reports_a_rule_match(monkeypatch):
 @pytest.mark.asyncio
 async def test_monitor_signal_reports_nothing_without_a_rule(monkeypatch):
     """룰이 꺼져 있거나 이 종목이 대상 밖이면 호출부가 rule=None을 넘긴다."""
-    from ..scheduler import SignalSource, _monitor_signal
+    from backend.scheduler import SignalSource, _monitor_signal
 
     _monitor_patches(monkeypatch, "critical")
     source = SignalSource(name="news", mcp_params=object(), tool_name="get_market_news")
@@ -590,7 +590,7 @@ def _market_task_patches(monkeypatch, balance_text: str) -> list[RuleMatch]:
     """감시 주기 한 번을 태우고, 룰 대상으로 수집된 신호를 돌려준다."""
     from contextlib import asynccontextmanager
 
-    from ..scheduler import SignalSource
+    from backend.scheduler import SignalSource
 
     state = RedisSchedulerState(FakeRedis())
 
@@ -641,7 +641,7 @@ def _market_task_patches(monkeypatch, balance_text: str) -> list[RuleMatch]:
 
 @pytest.mark.asyncio
 async def test_rule_covers_owned_and_watchlist_stocks(monkeypatch):
-    from ..scheduler import monitor_market_task
+    from backend.scheduler import monitor_market_task
 
     collected = _market_task_patches(
         monkeypatch, "[보유 종목 리스트]\n- 삼성전자 (005930) · 10주"
@@ -661,7 +661,7 @@ async def test_default_monitor_stocks_never_trigger_the_rule(monkeypatch):
     종류의 사고다. 이 테스트가 잡는 mutation: build_rule_scope 검사를 빼고 감시 대상 전체에
     룰을 거는 회귀.
     """
-    from ..scheduler import monitor_market_task
+    from backend.scheduler import monitor_market_task
 
     collected = _market_task_patches(monkeypatch, "[보유 종목 리스트]\n")
 

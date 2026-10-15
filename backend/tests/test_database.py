@@ -5,9 +5,9 @@ from fastapi.testclient import TestClient
 from sqlmodel import Session, SQLModel, create_engine
 from sqlmodel.pool import StaticPool
 
-from ..main import app, get_session
-from ..models import Diary, AgentReport, Portfolio, CatalystEvent
-from ..scheduler import PRICE_FRESHNESS_TTL
+from backend.main import app, get_session
+from backend.core.models import Diary, AgentReport, Portfolio, CatalystEvent
+from backend.scheduler import PRICE_FRESHNESS_TTL
 
 # 이슈 #196: current_price는 값과 **나이**가 함께 있어야 "안다"가 된다. 아래 테스트들이
 # 검증하려는 것은 신선도 게이트가 아니라 매핑·집계이므로, 나이는 확실히 신선한 고정
@@ -313,7 +313,7 @@ def test_get_visualization_portfolio_price_known_honours_freshness_ttl(
     - main이 price_known을 다시 `current_price is not None`으로 되돌리면 세 행이
       모두 True가 된다.
     """
-    from ..scheduler import is_price_fresh
+    from backend.scheduler import is_price_fresh
 
     # 상수 자체를 고정한다. 아래 경계 단언은 PRICE_FRESHNESS_TTL을 기호로 쓰므로
     # 상수를 넓혀도 함께 움직여 통과해 버린다 — 값과 그 근거(주기의 3배)를 여기서
@@ -889,8 +889,8 @@ async def test_analyze_stock_saves_report(client: TestClient, session: Session, 
     async def mock_run_mcp_tool(*args, **kwargs):
         return "삼성전자 (005930, KOSPI)"
 
-    monkeypatch.setattr("backend.services.llm_chat", mock_llm_chat)
-    monkeypatch.setattr("backend.services.run_mcp_tool", mock_run_mcp_tool)
+    monkeypatch.setattr("backend.ai.services.llm_chat", mock_llm_chat)
+    monkeypatch.setattr("backend.ai.services.run_mcp_tool", mock_run_mcp_tool)
 
     # API Call
     response = client.get("/api/v1/analyze?stock=삼성전자")
@@ -943,9 +943,9 @@ async def test_analyze_stock_via_nat_marks_report_tool_supporting(client: TestCl
     async def mock_run_mcp_tool(*args, **kwargs):
         return "삼성전자 (005930, KOSPI)"
 
-    monkeypatch.setattr("backend.services.llm_chat", mock_llm_chat)
-    monkeypatch.setattr("backend.services.analysis_from_nat_text", mock_analysis_from_nat_text)
-    monkeypatch.setattr("backend.services.run_mcp_tool", mock_run_mcp_tool)
+    monkeypatch.setattr("backend.ai.services.llm_chat", mock_llm_chat)
+    monkeypatch.setattr("backend.ai.services.analysis_from_nat_text", mock_analysis_from_nat_text)
+    monkeypatch.setattr("backend.ai.services.run_mcp_tool", mock_run_mcp_tool)
 
     response = client.get("/api/v1/analyze?stock=삼성전자&provider=nat")
     assert response.status_code == 200
@@ -981,9 +981,9 @@ async def test_db_reports_round_trips_provider_supports_tools_field(client: Test
     async def mock_run_mcp_tool(*args, **kwargs):
         return "삼성전자 (005930, KOSPI)"
 
-    monkeypatch.setattr("backend.services.llm_chat", mock_llm_chat)
-    monkeypatch.setattr("backend.services.analysis_from_nat_text", mock_analysis_from_nat_text)
-    monkeypatch.setattr("backend.services.run_mcp_tool", mock_run_mcp_tool)
+    monkeypatch.setattr("backend.ai.services.llm_chat", mock_llm_chat)
+    monkeypatch.setattr("backend.ai.services.analysis_from_nat_text", mock_analysis_from_nat_text)
+    monkeypatch.setattr("backend.ai.services.run_mcp_tool", mock_run_mcp_tool)
 
     # openai(기본값, 도구 미지원)와 nat(도구 경로) 둘 다 저장
     assert client.get("/api/v1/analyze?stock=삼성전자").status_code == 200

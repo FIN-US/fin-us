@@ -160,7 +160,7 @@ const tokenCache = new KisTokenCache({ filePath: TOKEN_CACHE_PATH });
 // 10초)을 그대로 쓰면 상위 시간 예산을 넘긴다 — place_order는 토큰 확보 뒤에도
 // hashkey POST와 주문 POST를 각각 치므로(kis-client.js의 kisOrderPost) kisAxios
 // 타임아웃 8초짜리 요청이 조회 경로보다 하나 더 붙는다. run_mcp_tool의 상한 30초
-// (backend/services.py)에서 기동 ~2초와 그 두 요청 16초를 빼면 토큰 확보에 남는 몫은
+// (backend/ai/services.py)에서 기동 ~2초와 그 두 요청 16초를 빼면 토큰 확보에 남는 몫은
 // 12초이고, 대기 뒤 자기 발급(최대 8초)까지 감안하면 대기는 4초 이하여야 한다.
 // 1초 여유를 더 두어 3초로 잡는다.
 //

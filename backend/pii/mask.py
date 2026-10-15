@@ -1,6 +1,6 @@
 """외부 LLM 호출 직전 PII 마스킹 계층 (#230, F-17 / NFR-05).
 
-`backend/services.py`의 `llm_chat()`이 4개 provider 경로(OpenAI/Anthropic/Ollama/NAT)의
+`backend/ai/services.py`의 `llm_chat()`이 4개 provider 경로(OpenAI/Anthropic/Ollama/NAT)의
 단일 진입점이므로, 마스킹은 거기서 이 모듈의 `mask_pii`/`unmask_pii`를 호출하는
 방식으로 끼운다. 이 모듈 자체는 provider를 모르고 순수 텍스트 변환만 담당한다.
 
@@ -27,8 +27,8 @@ test_unit_and_bare_won_amounts_coexist_losslessly에 있다.
 
 대상 3종(한국 계좌번호/원화 금액/보유 수량)은 모두 정규식으로 충분히 식별 가능한
 구조화된 패턴이다. 이 계층에는 자유 입력 경로가 실제로 존재한다 —
-`backend/telegram_commands.py`의 `_handle_chat_fallback`은 텔레그램 사용자
-원문을 가공 없이 `llm_chat`으로 넘기고, `backend/services.py`의
+`backend/telegram/commands.py`의 `_handle_chat_fallback`은 텔레그램 사용자
+원문을 가공 없이 `llm_chat`으로 넘기고, `backend/ai/services.py`의
 `check_signal_significance`는 외부 뉴스 원문 1000자를 프롬프트에 넣는다. 다만 F-17이
 정의한 대상 3종은 그 자유 입력 안에서도 정규식으로 충분히 식별되며, 한국어 인명·연락처
 등 NER이 필요한 대상은 이번 이슈(#230) 범위 밖이다. presidio-analyzer는 spaCy NER 모델
@@ -55,7 +55,7 @@ backend를 COPY하지 않으므로(`agents/Dockerfile`) import로 공유할 수 
   `nat_finus_nat/pii_guard.py`가 같은 일을 한다 (#231).
 - Telegram 경로 중 **LLM을 아예 거치지 않고 원값을 그대로 사용자에게 표시하는** 것들
   (예: `/balance`)은 이 계층이 손댈 지점이 없다 (#232에서 다룬다). 반대로
-  `telegram_commands.py`의 `_handle_chat_fallback`과 `/earnings`(`_handle_earnings`)는
+  `telegram/commands.py`의 `_handle_chat_fallback`과 `/earnings`(`_handle_earnings`)는
   둘 다 `llm_runner("nat", ...)`를 부르고, `llm_runner`의 기본값이 `services.llm_chat`
   이므로(`TelegramCommandHandler.__init__`의 기본 인자) 이 계층을 탄다 —
   "Telegram 명령은 이 경로를 타지 않는다"는 진술은 사실이 아니다.

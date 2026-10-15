@@ -11,9 +11,9 @@ from uuid import uuid4
 if TYPE_CHECKING:
     # 런타임 import는 _deserialize 안에 그대로 둔다. 여기서 끌어오는 것은 타입뿐이라
     # import 시점을 바꾸지 않는다.
-    from .trading_orders import PendingOrder
+    from backend.trading.orders import PendingOrder
 
-from .presentation import (
+from backend.telegram.presentation import (
     DEFAULT_TELEGRAM_USER_LEVEL,
     TELEGRAM_USER_LEVELS,
     normalize_level,
@@ -778,7 +778,7 @@ class RedisPendingOrderStore:
         값은 ``auto_proposal``로 접는다 — 출처를 모르는 주문은 자동 제안으로 간주해 텍스트
         /confirm을 막는다(fail-closed). 저장값은 코드보다 오래 사므로 읽는 쪽이 방어한다.
         """
-        from .trading_orders import DEFAULT_ORDER_ORIGIN, ORDER_ORIGINS, PendingOrder
+        from backend.trading.orders import DEFAULT_ORDER_ORIGIN, ORDER_ORIGINS, PendingOrder
 
         data: dict[str, Any] = json.loads(raw if isinstance(raw, str) else raw.decode())
         data["created_at"] = datetime.fromisoformat(data["created_at"])
@@ -970,7 +970,7 @@ def create_redis_client() -> Any:
     """
     from redis.asyncio import Redis
 
-    from .config import REDIS_URL
+    from backend.core.config import REDIS_URL
 
     return Redis.from_url(
         REDIS_URL,
