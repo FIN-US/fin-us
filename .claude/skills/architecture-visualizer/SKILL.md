@@ -31,7 +31,7 @@ description: >
 - 아래 관계를 우선 매핑한다.
   - UI(Unity WebGL `frontend`) → API(`backend`) 호출
   - API(`backend`) → MCP 서버(`mcp-news`, `mcp-trading`, `mcp-dart`) 호출
-  - NAT(`finus_nat`) ↔ MCP 서버 연결 및 라우팅
+  - NAT(`agents`) ↔ MCP 서버 연결 및 라우팅
   - `scripts`가 어떤 실행 경로를 묶는지
 
 ### 3. 생성

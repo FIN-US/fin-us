@@ -1,23 +1,23 @@
-"""TOOL_LABELS/AGENT_LABELS와 finus_nat 식별자의 드리프트 검사 (#282).
+"""TOOL_LABELS/AGENT_LABELS와 agents 식별자의 드리프트 검사 (#282).
 
-`backend/telegram_commands.py`의 두 라벨 맵은 **다른 서비스(finus_nat)의 식별자**를
+`backend/telegram_commands.py`의 두 라벨 맵은 **다른 서비스(agents)의 식별자**를
 키로 쓴다 — `TOOL_LABELS`는 도구 강제 원장에 기록되는 내부 도구명,
-`AGENT_LABELS`는 supervisor 브랜치명이다. finus_nat이 도구를 리네임하면 backend에는
+`AGENT_LABELS`는 supervisor 브랜치명이다. agents이 도구를 리네임하면 backend에는
 아무 신호도 가지 않고, 각주에 한국어 라벨 대신 내부 이름이 그대로 노출된다.
 열화가 graceful해서(#260) 장애로 드러나지 않으므로 아무도 모른 채 오래간다.
 
-**검사 방향**: finus_nat에 있는데 backend에 없는 키만 실패시킨다. backend에 남는 키(더
+**검사 방향**: agents에 있는데 backend에 없는 키만 실패시킨다. backend에 남는 키(더
 이상 존재하지 않는 도구·브랜치)는 각주 품질을 해치지 않으므로 실패시키지 않는다.
-반대 방향까지 걸면 finus_nat 쪽 도구를 지우는 PR이 backend 수정을 강제로 끌고 들어온다.
+반대 방향까지 걸면 agents 쪽 도구를 지우는 PR이 backend 수정을 강제로 끌고 들어온다.
 
-**왜 backend 테스트인가**: 제약의 소유자가 backend이기 때문이다. "finus_nat의 식별자를
+**왜 backend 테스트인가**: 제약의 소유자가 backend이기 때문이다. "agents의 식별자를
 전부 덮어야 한다"는 요구는 backend 라벨 맵의 요구이고, 깨졌을 때 고칠 파일도 backend에
-있다. finus_nat 쪽 잡에 두면 finus_nat만 건드린 PR이 backend 파일 때문에 빨간불이 되어
+있다. agents 쪽 잡에 두면 agents만 건드린 PR이 backend 파일 때문에 빨간불이 되어
 실패 지점과 수정 지점이 어긋난다. CI는 레포 전체를 체크아웃하므로 backend 잡에서
-finus_nat 소스를 읽을 수 있고, 이미 같은 방식으로 서비스 경계를 넘는 테스트가 있다
+agents 소스를 읽을 수 있고, 이미 같은 방식으로 서비스 경계를 넘는 테스트가 있다
 (`test_stock_code.py`가 mcp-trading의 종목마스터를 읽는다). 새 잡을 만들 이유는 없다.
 
-finus_nat 소스는 **정적으로만** 읽는다(ast/yaml). backend 잡에는 nvidia-nat 의존성이
+agents 소스는 **정적으로만** 읽는다(ast/yaml). backend 잡에는 nvidia-nat 의존성이
 없으므로 import는 불가능하고, 필요하지도 않다.
 """
 
@@ -30,7 +30,7 @@ import yaml
 from backend.presentation import AGENT_LABELS, TOOL_LABELS
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_FINUS_NAT_ROOT = _REPO_ROOT / "finus_nat"
+_FINUS_NAT_ROOT = _REPO_ROOT / "agents"
 _SRC_ROOT = _FINUS_NAT_ROOT / "src"
 _CONFIGS_ROOT = _FINUS_NAT_ROOT / "configs"
 
@@ -104,7 +104,7 @@ def _ledger_tool_name_exprs(tree: ast.Module) -> list[ast.expr]:
 
 
 def _extract_ledger_tool_names() -> tuple[set[str], list[str]]:
-    """finus_nat/src 전체를 훑어 (도구명 집합, 정적으로 해석하지 못한 표현식 목록)을 낸다.
+    """agents/src 전체를 훑어 (도구명 집합, 정적으로 해석하지 못한 표현식 목록)을 낸다.
 
     상수는 파일별로 계산한다 — 모듈이 갈라져도 각자의 최상위 상수로 해석되고, 다른
     모듈의 동명 상수가 끼어들지 않는다. 남의 모듈에서 import해 온 이름은 미해석으로
@@ -141,7 +141,7 @@ def _config_chain(path: Path) -> list[Path]:
     seen: set[Path] = set()
     current: Path | None = path.resolve()
     while current is not None and current not in seen:
-        assert current.exists(), f"finus_nat config가 없습니다: {current}"
+        assert current.exists(), f"agents config가 없습니다: {current}"
         seen.add(current)
         chain.append(current)
         document = yaml.safe_load(current.read_text(encoding="utf-8")) or {}
@@ -184,7 +184,7 @@ def test_scan_inputs_are_discovered():
     router config 목록은 특히 조용하다 — 비면 parametrize가 빈 파라미터 집합이 되어
     커버리지 테스트가 실패가 아니라 skip으로 사라진다.
     """
-    assert _SOURCE_FILES, f"finus_nat 소스를 하나도 찾지 못했습니다: {_SRC_ROOT}"
+    assert _SOURCE_FILES, f"agents 소스를 하나도 찾지 못했습니다: {_SRC_ROOT}"
     assert _ROUTER_CONFIGS, f"router*.yml을 하나도 찾지 못했습니다: {_CONFIGS_ROOT}"
 
 
@@ -192,7 +192,7 @@ def test_every_ledger_tool_name_is_statically_resolvable():
     """도구명을 하나라도 정적으로 못 읽으면 아래 커버리지 검사가 공허해지므로 먼저 막는다."""
     names, unresolved = _extract_ledger_tool_names()
     assert unresolved == [], (
-        "finus_nat 소스의 도구 원장 기록에서 도구명을 정적으로 해석하지 못했습니다. "
+        "agents 소스의 도구 원장 기록에서 도구명을 정적으로 해석하지 못했습니다. "
         "리터럴이나 모듈 상수로 되돌리거나, 이 파일의 추출 규칙을 함께 넓히세요 "
         f"(그대로 두면 #282 드리프트 검사가 조용히 비어 갑니다): {unresolved}"
     )
@@ -203,11 +203,11 @@ def test_every_ledger_tool_name_is_statically_resolvable():
 
 
 def test_ledger_tool_names_are_covered_by_tool_labels():
-    """finus_nat이 원장에 기록하는 도구는 전부 TOOL_LABELS에 한국어 라벨이 있어야 한다."""
+    """agents이 원장에 기록하는 도구는 전부 TOOL_LABELS에 한국어 라벨이 있어야 한다."""
     names, _ = _extract_ledger_tool_names()
     missing = sorted(names - TOOL_LABELS.keys())
     assert missing == [], (
-        "finus_nat이 원장에 기록하는 다음 도구가 backend TOOL_LABELS에 없습니다. "
+        "agents이 원장에 기록하는 다음 도구가 backend TOOL_LABELS에 없습니다. "
         "각주에 한국어 라벨 대신 내부 이름이 노출됩니다 — "
         f"backend/presentation.py의 TOOL_LABELS에 추가하세요: {missing}"
     )

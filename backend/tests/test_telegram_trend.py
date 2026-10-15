@@ -19,7 +19,7 @@ from backend.telegram_commands import (
     _parse_investor_flows,
 )
 
-# mcp-trading/index.js의 getInvestorTrading이 실제로 만드는 모양. 이 문자열이 곧 우리가
+# mcp/trading/index.js의 getInvestorTrading이 실제로 만드는 모양. 이 문자열이 곧 우리가
 # 기대는 계약이라, 저쪽 형식이 바뀌면 여기서 먼저 빨갛게 깨져야 한다.
 MCP_TREND_RESPONSE = "\n".join(
     [

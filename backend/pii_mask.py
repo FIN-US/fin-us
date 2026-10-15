@@ -35,13 +35,13 @@ test_unit_and_bare_won_amounts_coexist_losslessly에 있다.
 다운로드가 Docker 이미지·CI 시간에 얹히는 비용이 있어, 이 범위에서는 이점 없이 비용만
 발생한다.
 
-## 이 파일은 finus_nat에도 그대로 복제돼 있다 (#231)
+## 이 파일은 agents에도 그대로 복제돼 있다 (#231)
 
-`finus_nat/src/nat_finus_nat/pii_mask.py`가 이 파일의 **바이트 단위 사본**이다.
-NAT은 backend를 의존성으로 갖지 않고(`finus_nat/pyproject.toml`), NAT 이미지도
-backend를 COPY하지 않으므로(`finus_nat/Dockerfile`) import로 공유할 수 없다.
+`agents/src/nat_finus_nat/pii_mask.py`가 이 파일의 **바이트 단위 사본**이다.
+NAT은 backend를 의존성으로 갖지 않고(`agents/pyproject.toml`), NAT 이미지도
+backend를 COPY하지 않으므로(`agents/Dockerfile`) import로 공유할 수 없다.
 그래서 복제하고, 두 파일이 어긋나면
-`finus_nat/tests/test_pii_guard.py::TestVendoredCopy`가 CI에서 실패한다.
+`agents/tests/test_pii_guard.py::TestVendoredCopy`가 CI에서 실패한다.
 
 **둘 중 하나만 고치지 말 것.** 한쪽만 고치면 같은 잔고 텍스트가 backend 경로와 NAT
 경로에서 서로 다르게 마스킹돼, 한 대화 안에서 자리표시자 규약이 갈린다.
@@ -61,8 +61,8 @@ backend를 COPY하지 않으므로(`finus_nat/Dockerfile`) import로 공유할 �
   "Telegram 명령은 이 경로를 타지 않는다"는 진술은 사실이 아니다.
 - 정규식 기반이므로 위 3종 패턴에서 벗어난 표기(예: 계좌번호를 자릿수가 다른 증권사
   형식으로 표기)는 놓칠 수 있다. `_ACCOUNT_RE`는 KIS_ACCOUNT_NO 형식(CANO 8자리 +
-  상품코드 2자리, 총 10자리, 하이픈 유무 무관)만 다룬다(mcp-trading/index.js의
-  KIS_ACCOUNT_NO 검증, mcp-trading/balance.js의 buildBalanceParams() 기준).
+  상품코드 2자리, 총 10자리, 하이픈 유무 무관)만 다룬다(mcp/trading/index.js의
+  KIS_ACCOUNT_NO 검증, mcp/trading/balance.js의 buildBalanceParams() 기준).
 """
 from __future__ import annotations
 
@@ -364,7 +364,7 @@ _LABELED_AMOUNT_RE = re.compile(
     r"(?:\d{1,3}(?:,\d{3})+|\d{4,})(?!\d)(?!-\d{2}(?!\d)))"
 )
 
-# 보유 수량 — 잔고 리포트의 "{qty}주" 표기(mcp-trading/balance.js formatQuantity 결과).
+# 보유 수량 — 잔고 리포트의 "{qty}주" 표기(mcp/trading/balance.js formatQuantity 결과).
 # 자리표시자는 숫자만 대체하고 "주"는 원문 그대로 남긴다 — 이 모듈의 다른
 # recognizer(금액)와 달리 단위 문자를 프롬프트에 남겨 LLM이 "이 값은 수량"이라는
 # 문맥을 잃지 않게 한다.
@@ -373,7 +373,7 @@ _LABELED_AMOUNT_RE = re.compile(
 # - (?<![\d,]) : 콤마 중간에서 매치가 시작되지 않게 한다. 이게 없으면 "12,345주"에서
 #                "345"부터 매치가 시작돼 앞자리 "12,"가 마스킹되지 않고 새어 나간다.
 # - \d(?:[\d,]*\d)? : formatQuantity()가 toLocaleString("ko-KR")을 쓰므로 1,000주
-#                이상은 콤마가 들어간다(mcp-trading/balance.js의 formatQuantity()).
+#                이상은 콤마가 들어간다(mcp/trading/balance.js의 formatQuantity()).
 #                같은 사실을 이미 반영한 선례가 backend/scheduler.py의 _QTY_RE
 #                (r"\)\s*·\s*([\d,]+)주")다.
 #                끝을 숫자로 강제해 "1,234," 같은 후행 콤마를 삼키지 않는다.
@@ -482,12 +482,12 @@ class _Counter:
 
     - backend/services.py의 _llm_nat_chat() — backend는 messages에 현재 메시지 1건만
       보내고, conversation-id 헤더로 세션을 식별한다.
-    - finus_nat/src/nat_finus_nat/agents.py의 `_load_history()` — SQLite
+    - agents/src/nat_finus_nat/agents.py의 `_load_history()` — SQLite
       chat_messages에서 `WHERE conversation_id = ?`로 과거 메시지를 로드한다.
-    - finus_nat/src/nat_finus_nat/agents.py의 `finus_sqlite_transcript_agent()` — 그 안
+    - agents/src/nat_finus_nat/agents.py의 `finus_sqlite_transcript_agent()` — 그 안
       `_response_fn`이 `forward_messages = history + chat_request.messages`로 과거 턴과
       현재 턴을 합쳐 내부 라우터에 넘긴다.
-    - finus_nat/configs/router.yml의 `transcript_router_agent`에
+    - agents/configs/router.yml의 `transcript_router_agent`에
       `max_history_messages: 30`으로 실제 배선됨(같은 파일 `router_supervisor_agent`
       쪽의 6과 다른 값이라 키 이름만으로는 구분되지 않는다).
     - conversation_id는 호출 간 재사용된다: backend/services.py의

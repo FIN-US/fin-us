@@ -239,7 +239,7 @@ def extract_stocks_from_balance(balance_text: str) -> list[str]:
     return [h.name for h in _parse_balance_holdings(balance_text)]
 
 
-# mcp-trading/balance.js의 formatTruncationNote()가 잘림 시 항상 덧붙이는 문구 중,
+# mcp/trading/balance.js의 formatTruncationNote()가 잘림 시 항상 덧붙이는 문구 중,
 # truncated 사유(max_pages/time_budget/no_cursor/repeated_cursor/error, 그리고
 # 목록에 없는 사유의 fallback "연속조회가 완료되지 않아")에 관계없이 고정으로 남는
 # 부분만 매칭한다:
@@ -248,15 +248,15 @@ def extract_stocks_from_balance(balance_text: str) -> list[str]:
 # 상한")를 매칭 대상에 넣지 않아도 모든 현재·미래 사유를 잡는다. 사유별 문구까지
 # 매칭하면 새 사유가 추가될 때마다 이 목록도 함께 고쳐야 해서 더 잘 깨진다.
 #
-# 판별은 "조회가 중단되어" 하나로만 한다. "[안내]"는 mcp-trading/index.js formatPaginationTruncationNote()의
+# 판별은 "조회가 중단되어" 하나로만 한다. "[안내]"는 mcp/trading/index.js formatPaginationTruncationNote()의
 # 모의투자 실현손익 안내와도 공유하는 표지라 get_balance 밖에서도 등장할 수 있어
 # 판별력이 없고, 실제 discriminator는 잘림 문구에만 존재하는 이 접미사다. 고정할
 # 리터럴이 하나로 줄어 아래 결합 테스트도 이 한 줄만 지키면 된다.
 #
 # get_balance는 MCP 텍스트 응답만 backend로 넘어오고 truncated 값 자체(구조화된
 # 필드)는 MCP 경계를 넘어오지 않으므로, 이 함수는 문자열 매칭에 의존할 수밖에
-# 없다. mcp-trading/balance.js의 리터럴이 바뀌면 이 매칭도 함께 깨진다 — 그
-# 결합을 mcp-trading/tests/balance.test.js의 잘림 노트 테스트가 `조회가 중단되어`를
+# 없다. mcp/trading/balance.js의 리터럴이 바뀌면 이 매칭도 함께 깨진다 — 그
+# 결합을 mcp/trading/tests/balance.test.js의 잘림 노트 테스트가 `조회가 중단되어`를
 # 직접 단언해 고정하고, backend/tests/test_balance_parser.py가 픽스처로 재현한다.
 _BALANCE_TRUNCATION_MARKER = "조회가 중단되어"
 
@@ -270,7 +270,7 @@ _BALANCE_HOLDINGS_MARKER = "[보유 종목 리스트]"
 
 
 def is_balance_truncated(balance_text: str) -> bool:
-    """get_balance 응답에 mcp-trading/balance.js의 잘림 안내 문구가 포함되어 있는지 확인합니다.
+    """get_balance 응답에 mcp/trading/balance.js의 잘림 안내 문구가 포함되어 있는지 확인합니다.
 
     extract_stocks_from_balance()는 이 문구를 의도적으로 무시하므로(안내 문구가
     종목명으로 오인식되지 않도록), 잘림 여부는 이 함수로 별도 확인해야 한다.
@@ -306,7 +306,7 @@ _QTY_RE = re.compile(r"\)\s*·\s*([\d,]+)주")
 # 평단가(pchs_avg_pric): "  평단가 67,000원 → ..." 줄.
 # formatAmount가 toLocaleString("ko-KR")로 쉼표를 삽입하고 "원"을 붙인다.
 # 평단가는 매수 단가의 가중평균이라 정수가 아닌 것이 정상이다(예: "66,666.67원").
-# mcp-trading/tests/balance.test.js가 "평단가 66,666.67원"을 리터럴로 단언하므로
+# mcp/trading/tests/balance.test.js가 "평단가 66,666.67원"을 리터럴로 단언하므로
 # 소수점 허용은 가정이 아니라 계약이다. (?:\.\d+)?로 정수·소수 양쪽을 잡는다.
 # "-원" 형태(parseNumber가 null을 반환하는 경우)는 [\d,]+에 매치되지 않아
 # 기본값 0.0이 사용된다.
@@ -325,7 +325,7 @@ _AVG_PRICE_RE = re.compile(r"평단가\s+([\d,]+(?:\.\d+)?)원")
 # get_stock_quote, 호출당 1.1초 대기)는 유지보수자가 거부했다.
 #
 # 이미 등록된 도구를 텍스트로 읽는 대가는 명확하다 — 포맷이 바뀌면 조용히 0건이
-# 된다. 그래서 마커·정규식은 공유 픽스처(mcp-trading/tests/fixtures/
+# 된다. 그래서 마커·정규식은 공유 픽스처(mcp/trading/tests/fixtures/
 # balance_rlz_pl_report.json)로 고정하고, 파싱 실패는 "쓰지 않음"으로 처리한다.
 
 # 실현손익 리포트의 보유 종목 섹션 헤더.
@@ -341,7 +341,7 @@ _RLZ_PL_HOLDINGS_MARKER = "[보유 종목]"
 _RLZ_PL_EMPTY_MARKER = "보유 종목이 없습니다"
 
 # 모의투자 계좌 대체 응답의 표지. get_balance_rlz_pl은 실전 계좌 전용이라
-# (mcp-trading/index.js의 get_balance_rlz_pl registerTool 설명) 모의투자(openapivts)
+# (mcp/trading/index.js의 get_balance_rlz_pl registerTool 설명) 모의투자(openapivts)
 # 에서는 index.js가 TR을 호출하지 않고 get_balance 요약을 대신 돌려주면서 이 문구를
 # 덧붙인다(index.js의 getBalanceRlzPl 첫 분기).
 #
@@ -353,10 +353,10 @@ _RLZ_PL_EMPTY_MARKER = "보유 종목이 없습니다"
 # 시세를 못 얻는다는 결론은 같지만, 로그 수준과 운영자가 읽을 원인이 다르다.
 #
 # ⚠️ **JS 리터럴과의 결합**: 아래 문자열은 index.js의 getBalanceRlzPl가 붙이는 안내 문구
-# (balance-rlz-pl-report.js의 PAPER_RLZ_PL_FALLBACK_NOTE)의 부분 문자열이다. finus_nat의
+# (balance-rlz-pl-report.js의 PAPER_RLZ_PL_FALLBACK_NOTE)의 부분 문자열이다. agents의
 # 매매일지 조회 묶음도 같은 문자열(finus_api._PAPER_RLZ_PL_FALLBACK_MARKER)로 이 응답을 가려내
 # 잔고를 재사용한다(#408). 세 곳의 일치는 공유 계약 픽스처
-# mcp-trading/tests/fixtures/paper_rlz_pl_fallback.json을 JS·backend·NAT 스위트가 함께 읽어
+# mcp/trading/tests/fixtures/paper_rlz_pl_fallback.json을 JS·backend·NAT 스위트가 함께 읽어
 # 고정한다(backend는 test_scheduler.py의 test_paper_fallback_marker_matches_shared_contract).
 #
 # 무력화되면 어떻게 되는가: 모의투자 응답이 이 검사를 통과해 마커 부재 가드까지
@@ -390,7 +390,7 @@ _RLZ_PL_PRICE_RE = re.compile(r"현재가\s+([\d,]+(?:\.\d+)?)원")
 
 # get_balance_rlz_pl에 도구 인자 time_budget_ms로 넘기는 연속조회 시간 예산(ms) — #369.
 #
-# 도구의 기본 예산은 NAT의 120초 호출자를 기준으로 잡은 90초다(mcp-trading/index.js의
+# 도구의 기본 예산은 NAT의 120초 호출자를 기준으로 잡은 90초다(mcp/trading/index.js의
 # BALANCE_RLZ_PL_TIME_BUDGET_MS). 이 호출은 run_mcp_tool이 MCP_TOOL_TIMEOUT_SECONDS(30초,
 # backend/services.py)에서 끊으므로, 기본 예산으로 부르면 연속조회가 30초를 넘는 계좌는 JS가
 # 잘림 안내를 내기 전에 서브프로세스째 끊겨 504 실패로 빠진다. 예산을 30초 안으로 낮추면 그
@@ -412,7 +412,7 @@ _RLZ_PL_PRICE_RE = re.compile(r"현재가\s+([\d,]+(?:\.\d+)?)원")
 # BALANCE_TIME_BUDGET_MS, 15초)보다 여유를 더 써서 18초로 잡은 것은 이 구간을 좁히기 위해서다.
 #
 # 제외한 경우: 토큰이 판정 경계에서 만료되면 kisApiGet이 GET 앞에 토큰 발급(최대 8초)을
-# 붙이고, 발급 락 경합이면 DEFAULT_LOCK_WAIT_MS(10초, mcp-trading/token-cache.js)가 더 붙어
+# 붙이고, 발급 락 경합이면 DEFAULT_LOCK_WAIT_MS(10초, mcp/trading/token-cache.js)가 더 붙어
 # 30초를 넘을 수 있다. 드물고, balance.js의 15초 산정도 같은 전제를 둔다.
 #
 # 페이지 간 지연(KIS_BALANCE_RLZ_PL_PAGE_DELAY_MS)이 있으면 최악은 18초 + max(8초, 지연) +
@@ -482,7 +482,7 @@ class _BalanceHolding:
 def _parse_balance_holdings(balance_text: str) -> list[_BalanceHolding]:
     """get_balance 텍스트에서 보유 종목의 코드·이름·수량·평단가를 파싱합니다.
 
-    mcp-trading/balance.js의 formatBalanceReport()가 생성하는 3줄 블록 형식에
+    mcp/trading/balance.js의 formatBalanceReport()가 생성하는 3줄 블록 형식에
     의존합니다:
       줄1: "- {prdt_name} ({pdno}) · {hldg_qty}주"
       줄2: "  평단가 {pchs_avg_pric}원 → 평가금액 {evlu_amt}원"
@@ -698,7 +698,7 @@ def _sync_portfolio_from_balance(
 def _parse_rlz_pl_quotes(report_text: str) -> dict[str, float]:
     """get_balance_rlz_pl 텍스트에서 종목코드 → 현재가를 파싱합니다 (#196).
 
-    mcp-trading/balance-rlz-pl-report.js의 formatBalanceRlzPlReport()가 만드는 4줄
+    mcp/trading/balance-rlz-pl-report.js의 formatBalanceRlzPlReport()가 만드는 4줄
     블록 형식에 의존합니다:
       줄1: "{n}. {prdt_name} ({pdno}) · {trad_dvsn_name}"
       줄2: "   보유 {hldg_qty}주 | 현재가 {prpr}원 | 평가 {evlu_amt}원"
@@ -1045,7 +1045,7 @@ async def _refresh_portfolio_prices() -> int | None:
     is_price_fresh가 알아서 "모름"으로 내립니다.
 
     실패 로그를 억제하는 이유는 get_balance(_balance_failure_streak)와 같지만 사정이
-    더 무겁습니다. 이 도구는 **실전 계좌 전용**(mcp-trading/index.js의
+    더 무겁습니다. 이 도구는 **실전 계좌 전용**(mcp/trading/index.js의
     get_balance_rlz_pl registerTool 설명)이라
     모의투자 배포에서는 매 주기 대체 응답이 오고, 권한이 없는 실전 계좌에서는 매 주기
     실패합니다. 그런 배포에서 10분마다 error를 쌓으면 로그가 신호를 잃습니다. 수준도

@@ -28,12 +28,12 @@ from backend.stock_code import (
 
 # 종목마스터 실제 데이터(4,401종 전수) — 판정 함수가 이름·별칭을 코드로 오인하지
 # 않는지 검증하는 데 쓴다. 이 파일은 레포에 커밋돼 있어야 한다.
-_STOCKS_JSON_PATH = Path(__file__).resolve().parents[2] / "mcp-trading" / "data" / "stocks.json"
+_STOCKS_JSON_PATH = Path(__file__).resolve().parents[2] / "mcp" / "trading" / "data" / "stocks.json"
 
 # --------------------------------------------------------------------------
 # 주문 가능 코드 정책 공유 판정표 (#138)
 # --------------------------------------------------------------------------
-# mcp-trading/tests/order.test.js와 같은 파일을 읽는다. 정책이 JS·Python 두 곳에
+# mcp/trading/tests/order.test.js와 같은 파일을 읽는다. 정책이 JS·Python 두 곳에
 # 복제돼 있으므로(order.js의 buildCashOrderBody 가드 / 이 모듈의 주문 가능 판정),
 # 표를 공유하지 않으면 한쪽만 넓혀도 아무 테스트도 red가 되지 않는다
 # (docs/alnum-stock-code.md 6.2). 경로는 __file__ 기준 절대 경로라
@@ -44,7 +44,7 @@ _STOCKS_JSON_PATH = Path(__file__).resolve().parents[2] / "mcp-trading" / "data"
 # 따라서 Python 쪽은 "pass인가"만 본다 — 거절 사유 구분은 JS 스위트가 맡는다.
 _POLICY_FIXTURE_PATH = (
     Path(__file__).resolve().parents[2]
-    / "mcp-trading" / "tests" / "fixtures" / "orderable_code_policy.json"
+    / "mcp" / "trading" / "tests" / "fixtures" / "orderable_code_policy.json"
 )
 _POLICY_FIXTURE = json.loads(_POLICY_FIXTURE_PATH.read_text(encoding="utf-8"))
 _POLICY_CASES = _POLICY_FIXTURE["cases"]
@@ -60,7 +60,7 @@ def _take_cases(predicate) -> list[dict]:
     return [case for case in _POLICY_CASES if predicate(case)]
 
 
-# mcp-trading/tests/order.test.js와 같은 구획 모양을 쓴다. 백엔드 판정은 bool 하나라
+# mcp/trading/tests/order.test.js와 같은 구획 모양을 쓴다. 백엔드 판정은 bool 하나라
 # 거절 사유로 나눈 두 구획이 검사 내용상 같지만, 모양을 맞춰 두 계층 어느 쪽에서
 # 구획 필터가 행을 빠뜨려도 같은 메타 테스트가 같은 방식으로 red가 되게 한다.
 # 표 전체를 도는 목록을 _POLICY_CASES에서 직접 만들면 안 된다 — 그러면 소비 기록이
@@ -217,7 +217,7 @@ class TestLooksLikeStockCode:
         assert not _looks_like_stock_code("F701000260")  # 10자
 
     def test_rejects_eight_char(self):
-        """8자는 종목마스터 4,401종 전수(mcp-trading/data/stocks.json)에 0건이라 거절한다.
+        """8자는 종목마스터 4,401종 전수(mcp/trading/data/stocks.json)에 0건이라 거절한다.
 
         뮤테이션 ①: _STOCK_CODE_RE를 {6,9} 단순 상한 확대로 되돌리면 이 케이스가
         red가 된다. 실재하지 않는 8자 입력이 코드 형태로 통과하면 MCP 존재 검증을
@@ -232,7 +232,7 @@ class TestLooksLikeStockCode:
 
 # ──────────────────────────────────────────────────────────────────────────
 # _ORDERABLE_STOCK_CODE_RE — 주문 가능 코드 판정
-# mcp-trading/order.js buildCashOrderBody()의 두 가드 정책의 백엔드 복제본
+# mcp/trading/order.js buildCashOrderBody()의 두 가드 정책의 백엔드 복제본
 # ──────────────────────────────────────────────────────────────────────────
 
 class TestOrderableStockCodeRe:
@@ -244,7 +244,7 @@ class TestOrderableStockCodeRe:
     def test_matches_shared_policy_table(self, code, expected_orderable, note):
         """공유 판정표의 flag_off 열 = #73 기본 정책(숫자 6~7자).
 
-        표의 같은 행을 mcp-trading/tests/order.test.js도 검사하므로, order.js의
+        표의 같은 행을 mcp/trading/tests/order.test.js도 검사하므로, order.js의
         기본 분기와 이 상수 중 한쪽만 바뀌면 그 계층의 스위트가 red가 된다.
         상수와 공개 진입점(is_orderable_stock_code_strict)이 갈리지 않는 것도 같은
         자리에서 고정한다 — 갈리면 order_assist의 제안 경로만 조용히 달라진다.
@@ -269,7 +269,7 @@ class TestOrderableStockCodeRe:
 # ──────────────────────────────────────────────────────────────────────────
 # is_orderable_stock_code — KIS_ALNUM_STOCK_ORDER_ENABLED 플래그 분기 (#138)
 # 미설정(기본값)은 _ORDERABLE_STOCK_CODE_RE와 동일해야 하고, "true"일 때만
-# mcp-trading/order.js의 확장 가드(영숫자 6~7자·9자)와 같은 범위를 허용해야 한다.
+# mcp/trading/order.js의 확장 가드(영숫자 6~7자·9자)와 같은 범위를 허용해야 한다.
 # ──────────────────────────────────────────────────────────────────────────
 
 class TestIsOrderableStockCode:
@@ -304,7 +304,7 @@ class TestIsOrderableStockCode:
         assert not is_orderable_stock_code("12345678")
 
     def test_flag_value_must_match_exactly(self, monkeypatch):
-        """대소문자·공백을 관용하면 mcp-trading/order.js(`=== "true"`)와 판정이
+        """대소문자·공백을 관용하면 mcp/trading/order.js(`=== "true"`)와 판정이
         갈릴 수 있다 — 정확히 "true"만 인정한다."""
         monkeypatch.setenv("KIS_ALNUM_STOCK_ORDER_ENABLED", "True")
         assert not is_orderable_stock_code("0001A0")
@@ -318,7 +318,7 @@ def test_policy_fixture_rows_are_all_exercised():
     """판정표에 행을 추가했는데 이 파일이 조용히 무시하는 것을 막는다.
 
     파일을 다시 읽어 비교하므로, _policy_params()가 어떤 행을 빠뜨리면 여기서 잡힌다.
-    같은 성격의 메타 테스트가 mcp-trading/tests/order.test.js에도 있다 — 두 계층 중
+    같은 성격의 메타 테스트가 mcp/trading/tests/order.test.js에도 있다 — 두 계층 중
     한쪽만 새 행을 집어 가는 상황을 양쪽에서 막아야 표가 실제로 결합을 강제한다.
     """
     fresh = json.loads(_POLICY_FIXTURE_PATH.read_text(encoding="utf-8"))
@@ -342,7 +342,7 @@ def test_policy_fixture_rows_are_all_exercised():
         assert case.get("note"), f"{case['code']!r} 행에 note가 없다 — 표는 정책을 설명해야 한다"
 
 
-# mcp-trading/order.js의 실제 가드를 node로 돌려 판정표와 대조한다. 표를 양쪽이 "각자
+# mcp/trading/order.js의 실제 가드를 node로 돌려 판정표와 대조한다. 표를 양쪽이 "각자
 # 읽는" 것만으로는 JS만 바뀐 변경이 Python 스위트에서 잡히지 않는다 — 이 테스트가 그
 # 방향의 결합을 만든다(order.js의 정책 정규식만 손대도 여기서 red가 된다).
 # order.js 소스를 정규식으로 긁지 않는다 — 리터럴 표기가 조금만 달라져도 조용히
@@ -402,7 +402,7 @@ def test_order_js_guard_agrees_with_shared_policy_table(tmp_path):
     """order.js의 buildCashOrderBody()가 판정표와 같은 판정을 내는지 직접 확인한다.
 
     로컬에서 node가 없으면 skip한다 — 그 경우에도 정책 자체의 커버리지는 잃지 않는다.
-    같은 표를 mcp-trading/tests/order.test.js가 검사하기 때문이다. 여기서 잃는 것은
+    같은 표를 mcp/trading/tests/order.test.js가 검사하기 때문이다. 여기서 잃는 것은
     "JS만 바꿨을 때 Python 스위트도 red가 된다"는 교차 확인뿐이다.
 
     CI에서는 fail-closed다. 그 교차 확인이 이 스위트가 주장하는 보장이므로, 러너에
@@ -426,7 +426,7 @@ def test_order_js_guard_agrees_with_shared_policy_table(tmp_path):
 
     script = tmp_path / "orderable_code_parity.mjs"
     script.write_text(_NODE_PARITY_SCRIPT, encoding="utf-8")
-    order_js = Path(__file__).resolve().parents[2] / "mcp-trading" / "order.js"
+    order_js = Path(__file__).resolve().parents[2] / "mcp" / "trading" / "order.js"
 
     child_env = {
         key: value
@@ -602,10 +602,10 @@ def test_master_stocks_path_follows_trading_mcp_dir(tmp_path):
     뮤테이션: _master_stocks_path가 mcp_dir 인자를 무시하고 하드코딩 경로를
     반환하면 이 테스트가 red가 된다.
     """
-    mcp_dir = tmp_path / "opt" / "mcp-trading"
+    mcp_dir = tmp_path / "opt" / "mcp" / "trading"
     assert _master_stocks_path(mcp_dir) == mcp_dir / "data" / "stocks.json"
 
-    other_dir = tmp_path / "another" / "mcp-trading"
+    other_dir = tmp_path / "another" / "mcp" / "trading"
     assert _master_stocks_path(other_dir) == other_dir / "data" / "stocks.json"
 
 
@@ -627,7 +627,7 @@ def test_master_path_wiring_follows_trading_mcp_dir_without_reload(tmp_path, mon
     모듈 전역이라 몽키패치가 다음 호출에 곧바로 반영된다.
 
     뮤테이션: _load_master_codes 안의 `_master_stocks_path(_TRADING_MCP_DIR)`를
-    `_master_stocks_path(Path(__file__).resolve().parents[1] / "mcp-trading")`처럼
+    `_master_stocks_path(Path(__file__).resolve().parents[1] / "mcp" / "trading")`처럼
     하드코딩으로 되돌리면, 아래 두 단정 모두 실제 마스터(4,401종)를 읽게 되어 red가
     된다 — "111111"은 실제 마스터에 없고 "005930"은 실제 마스터에 있으므로.
     """
@@ -644,7 +644,7 @@ def test_master_path_wiring_follows_trading_mcp_dir_without_reload(tmp_path, mon
 
     # 커스텀 경로의 마스터에만 있는 코드는 알려진 코드로 판정된다.
     assert _is_known_master_code("111111") is True
-    # 실제 마스터(mcp-trading/data/stocks.json)에만 있는 코드는 이 커스텀 경로에
+    # 실제 마스터(mcp/trading/data/stocks.json)에만 있는 코드는 이 커스텀 경로에
     # 없으므로 알려지지 않은 코드로 판정된다 — 하드코딩 경로로 되돌아가면 이 코드가
     # 실제 마스터에서 발견돼 True가 되어 버린다.
     assert _is_known_master_code("005930") is False
@@ -733,7 +733,7 @@ def test_no_master_name_is_shadowed_by_looks_like_stock_code():
     오인하면 MCP 조회를 건너뛰어 마스터의 *다른* 종목을 가린다(#151).
     #140이 판정 범위를 9자까지 넓혔으므로 이 불변식도 9자를 포함해야 한다 —
     mcp-trading의 CODE_SHAPE_PATTERN은 `/^[A-Z0-9]{6,7}$/i`라 9자를 검사하지 못하므로
-    (mcp-trading/tests/stock-master.test.js의 "exactly 3 master stock names..." 테스트는
+    (mcp/trading/tests/stock-master.test.js의 "exactly 3 master stock names..." 테스트는
     부분적인 신호일 뿐이다), 6·7·9자 전 범위를 덮는 신호는 이 테스트다.
 
     뮤테이션 ③: _looks_like_stock_code가 항상 True를 반환하도록 무력화하면 이

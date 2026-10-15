@@ -40,7 +40,7 @@ jobs:
 
       # 백엔드 스위트는 파이썬만 쓰지 않는다. backend/tests/test_stock_code.py의
       # test_order_js_guard_agrees_with_shared_policy_table이 node로
-      # mcp-trading/order.js의 buildCashOrderBody()를 실제 호출해 공유 판정표와
+      # mcp/trading/order.js의 buildCashOrderBody()를 실제 호출해 공유 판정표와
       # 대조한다 — "JS 쪽만 바꾼 변경도 백엔드 스위트에서 red가 된다"는 보장이
       # 이 한 테스트에 달려 있다(docs/alnum-stock-code.md 6.2).
       # 러너 이미지에 node가 있다는 사실에 기대면 이미지가 바뀌는 날 그 보장이
@@ -101,7 +101,7 @@ jobs:
         run: uv run --project backend pyright --project backend
 
   nat-test:
-    name: finus_nat pytest
+    name: agents pytest
     runs-on: ubuntu-latest
     # 아래 "벤더 패치 적용 검증" 스텝이 uv sync가 만든 실제 venv를 patch_vendor.py로 직접
     # 쓴다. uv 기본 link mode(hardlink)면 site-packages 파일이 ~/.cache/uv/archive-v0/...와
@@ -122,11 +122,11 @@ jobs:
       - name: Python 3.13 설치
         run: uv python install 3.13
 
-      - name: finus_nat 의존성 동기화
-        run: uv sync --project finus_nat
+      - name: agents 의존성 동기화
+        run: uv sync --project agents
 
-      - name: finus_nat 테스트 실행
-        run: uv run --project finus_nat pytest finus_nat/tests/
+      - name: agents 테스트 실행
+        run: uv run --project agents pytest agents/tests/
 
       # 벤더 패치는 NAT·mem0 상류 소스와 바이트 단위로 맞물려 있다. 상류가 바뀌면
       # 패치가 조용히 안 붙는데, 위 pytest는 임시 디렉터리의 가짜 트리만 검증하므로
@@ -137,8 +137,8 @@ jobs:
       # 지점이었지만, Dockerfile도 네 개 전부를 강제하게 되면서 두 집합은 같아졌다.
       - name: 벤더 패치 적용 검증 (NAT 상류 drift 사전 감지)
         run: |
-          uv run --project finus_nat python finus_nat/scripts/patch_vendor.py \
-            --venv finus_nat/.venv \
+          uv run --project agents python agents/scripts/patch_vendor.py \
+            --venv agents/.venv \
             --require nat/plugins/mem0ai/memory.py \
             --require mem0/client/main.py \
             --require nat/plugins/mem0ai/mem0_editor.py \
@@ -149,7 +149,7 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: mcp-trading
+        working-directory: mcp/trading
     steps:
       - uses: actions/checkout@v4
 
@@ -158,7 +158,7 @@ jobs:
         with:
           node-version: '24'
           cache: 'npm'
-          cache-dependency-path: mcp-trading/package-lock.json
+          cache-dependency-path: mcp/trading/package-lock.json
 
       - name: npm 의존성 설치
         run: npm ci
@@ -197,7 +197,7 @@ jobs:
         run: uv python install 3.13
 
       - name: mcp-trading 스크립트 테스트 실행
-        run: uv run --no-project --python 3.13 --with pytest==9.0.3 pytest mcp-trading/tests/
+        run: uv run --no-project --python 3.13 --with pytest==9.0.3 pytest mcp/trading/tests/
 
   # mcp-news는 tests/와 npm test를 갖고 있으면서도 잡이 없어 CI에서 한 번도 돌지
   # 않았다(hadolint 매트릭스에만 들어 있었다). mcp-trading·mcp-dart와 같은 구성이다.
@@ -206,7 +206,7 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: mcp-news
+        working-directory: mcp/news
     steps:
       - uses: actions/checkout@v4
 
@@ -215,7 +215,7 @@ jobs:
         with:
           node-version: '24'
           cache: 'npm'
-          cache-dependency-path: mcp-news/package-lock.json
+          cache-dependency-path: mcp/news/package-lock.json
 
       - name: npm 의존성 설치
         run: npm ci
@@ -228,7 +228,7 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: mcp-dart
+        working-directory: mcp/dart
     steps:
       - uses: actions/checkout@v4
 
@@ -237,7 +237,7 @@ jobs:
         with:
           node-version: '24'
           cache: 'npm'
-          cache-dependency-path: mcp-dart/package-lock.json
+          cache-dependency-path: mcp/dart/package-lock.json
 
       - name: npm 의존성 설치
         run: npm ci
@@ -312,7 +312,7 @@ jobs:
       matrix:
         dockerfile:
           - backend/Dockerfile
-          - finus_nat/Dockerfile
+          - agents/Dockerfile
     steps:
       - uses: actions/checkout@v4
 

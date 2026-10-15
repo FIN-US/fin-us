@@ -1,6 +1,6 @@
 """지정가 괴리 공유 판정표 — backend 쪽 소비자 (#365).
 
-``finus_nat/tests/test_order_price_guard.py``가 같은 표로 NAT의 pass-through 주문 가드
+``agents/tests/test_order_price_guard.py``가 같은 표로 NAT의 pass-through 주문 가드
 (``order_price_guard.price_gap_exceeds``)를 돌린다. 판정이 두 계층에 복제돼 있으므로, 표를
 공유하지 않으면 한쪽만 바꿔도 아무 테스트도 red가 되지 않는다 — #138의
 ``orderable_code_policy.json``과 같은 방식이다.

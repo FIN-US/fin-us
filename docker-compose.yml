@@ -62,9 +62,9 @@ services:
       - "host.docker.internal:host-gateway"
     environment:
       NAT_BASE_URL: http://finus-nat:8000
-      NEWS_MCP_DIR: /opt/mcp-news
-      TRADING_MCP_DIR: /opt/mcp-trading
-      DART_MCP_DIR: /opt/mcp-dart
+      NEWS_MCP_DIR: /opt/mcp/news
+      TRADING_MCP_DIR: /opt/mcp/trading
+      DART_MCP_DIR: /opt/mcp/dart
       REDIS_URL: redis://redis:6379/0
       # 주문 멱등 원장(#124). `.:/app` bind mount 덕분에 호스트 ./.state/ 에 영속된다.
       # 소스를 bind mount하지 않는 배포용 compose를 도입하면 named volume으로 전환할 것.
@@ -86,7 +86,7 @@ services:
   finus-nat:
     build:
       context: .
-      dockerfile: finus_nat/Dockerfile
+      dockerfile: agents/Dockerfile
     ports:
       # 무인증 `/v1/chat/completions`를 그대로 받는 LLM 호출 경로라 127.0.0.1에만
       # 바인딩한다(#285). 전 인터페이스에 열어 두면 `/api/v1/analyze`의 레이트리밋
@@ -99,10 +99,10 @@ services:
     volumes:
       - .:/workspace
       # 이미지 빌드 시 설치한 node_modules·venv가 bind mount에 가려지지 않도록 보존
-      - /workspace/finus_nat/.venv
-      - /workspace/mcp-news/node_modules
-      - /workspace/mcp-trading/node_modules
-      - /workspace/mcp-dart/node_modules
+      - /workspace/agents/.venv
+      - /workspace/mcp/news/node_modules
+      - /workspace/mcp/trading/node_modules
+      - /workspace/mcp/dart/node_modules
     env_file:
       - ./.env
     environment:

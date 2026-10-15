@@ -583,7 +583,7 @@ REASONING_FOOTNOTE_SEPARATOR = "─────"
 REASONING_FOOTNOTE_MAX_CHARS = 300
 
 # NAT supervisor 브랜치명 → 사용자에게 보여줄 한국어 라벨.
-# 키는 finus_nat/configs/router*.yml의 branches[].name과 같아야 한다 —
+# 키는 agents/configs/router*.yml의 branches[].name과 같아야 한다 —
 # 누락은 backend/tests/test_label_drift.py가 CI에서 잡는다 (#282).
 AGENT_LABELS: dict[str, str] = {
     "trading_agent": "트레이딩 에이전트",
@@ -594,7 +594,7 @@ AGENT_LABELS: dict[str, str] = {
     "diary_agent": "매매일지 에이전트",
 }
 
-# 도구 강제 원장(finus_nat/src/nat_finus_nat/finus_api.py의 _record_to_ledger 호출부)에
+# 도구 강제 원장(agents/src/nat_finus_nat/finus_api.py의 _record_to_ledger 호출부)에
 # 기록되는 내부 도구명 → 사용자에게 보여줄 한국어 라벨.
 # 매핑에 없는 도구는 내부 이름을 그대로 노출한다 — 조용히 감추면 각주가 "확인한 자료"를
 # 실제보다 적게 보여주게 되어, 근거를 보여준다는 목적 자체가 무너진다. 그렇게 열화가
@@ -807,7 +807,7 @@ def reasoning_footnote(routed_agent: Any, tools_used: Any) -> str:
     "실제로 호출한 도구"가 아니라 "모델이 호출했다고 주장하는 도구"가 되어, 근거로
     보여주는 각주가 오히려 환각을 사실처럼 전달하는 표면이 된다.
 
-    두 값이 모두 없으면(구버전 finus_nat 등) 각주를 조용히 생략한다. 라우팅은 됐는데
+    두 값이 모두 없으면(구버전 agents 등) 각주를 조용히 생략한다. 라우팅은 됐는데
     도구가 하나도 실행되지 않은 경우는 "없음"으로 드러낸다 — 도구 없이 나온 답변이라는
     사실 자체가 사용자가 알아야 할 근거다.
 

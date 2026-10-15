@@ -45,9 +45,9 @@ def _get_ollama_base_url() -> str:
 OLLAMA_BASE_URL = _get_ollama_base_url()
 
 
-_NEWS_MCP_DIR = Path(os.environ.get("NEWS_MCP_DIR", _FIN_US_ROOT / "mcp-news")).resolve()
-_TRADING_MCP_DIR = Path(os.environ.get("TRADING_MCP_DIR", _FIN_US_ROOT / "mcp-trading")).resolve()
-_DART_MCP_DIR = Path(os.environ.get("DART_MCP_DIR", _FIN_US_ROOT / "mcp-dart")).resolve()
+_NEWS_MCP_DIR = Path(os.environ.get("NEWS_MCP_DIR", _FIN_US_ROOT / "mcp" / "news")).resolve()
+_TRADING_MCP_DIR = Path(os.environ.get("TRADING_MCP_DIR", _FIN_US_ROOT / "mcp" / "trading")).resolve()
+_DART_MCP_DIR = Path(os.environ.get("DART_MCP_DIR", _FIN_US_ROOT / "mcp" / "dart")).resolve()
 _MCP_ENV_ALLOWED_KEYS = {
     "PATH",
     "NODE_ENV",
@@ -75,10 +75,10 @@ _MCP_ENV_ALLOWED_KEYS = {
 #       (FINUS_BACKEND_URL 등 — backend/NAT 전용)는 차단된다.
 #
 # KIS_REAL_ORDER_ENABLED도 함께 통과한다(#129, 의도한 동작). 미설정 시
-# 키 자체가 자식에 전달되지 않으므로 mcp-trading/order.js의
+# 키 자체가 자식에 전달되지 않으므로 mcp/trading/order.js의
 # validateRealOrderGuard는 fail-closed를 유지한다.
 #
-# finus_nat/src/nat_finus_nat/finus_api.py에 동일 목적의 화이트리스트가
+# agents/src/nat_finus_nat/finus_api.py에 동일 목적의 화이트리스트가
 # 별도 존재한다(NAT 자식 프로세스 경로) — 접두사를 바꿀 때 함께 갱신할 것.
 _MCP_ENV_ALLOWED_PREFIXES = ("FIN_US_", "FINUS_KIS_", "KIS_")
 
@@ -207,7 +207,7 @@ VISUALIZATION_URL = os.getenv("VISUALIZATION_URL", "").strip()
 KIS_ORDER_ENV = os.environ.get("KIS_ORDER_ENV", "demo").strip().lower()
 
 def _is_truthy_flag(value: str) -> bool:
-    # mcp-trading/index.js는 KIS_REAL_ORDER_ENABLED를 `=== "true"`로 비교한다 —
+    # mcp/trading/index.js는 KIS_REAL_ORDER_ENABLED를 `=== "true"`로 비교한다 —
     # 대소문자·다른 철자(1/yes/y/TRUE 등)를 인정하지 않는다. backend가 여기서
     # 더 관대하게 받으면 backend 게이트는 통과하고 자식에서만 막히는 진단
     # 트랩이 된다(#129와 같은 증상이 철자 차이로 재발). 그래서 자식과 정확히

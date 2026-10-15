@@ -24,7 +24,7 @@
 - `generate_morning_briefing`이 조립하는 모닝 브리핑 프롬프트 — KIS 잔고 리포트
   텍스트(`get_balance` 결과)를 backend가 직접 프롬프트에 넣는 유일한 경로이며,
   이 계층 신설 전에는 계좌 평가금액·수익률·보유수량이 마스킹 없이 나갔다
-  (`mcp-trading/tests/fixtures/balance_report.json` 픽스처로 실측·회귀 테스트함)
+  (`mcp/trading/tests/fixtures/balance_report.json` 픽스처로 실측·회귀 테스트함)
 - `check_signal_significance`(뉴스/시그널 유의미성 판정) 경로
 
 새 호출 경로가 provider별 구현(`_llm_openai_chat` 등)을 `llm_chat()` 밖에서 직접 부르면
@@ -208,7 +208,7 @@ LLM이 판단할 수 있어 유지되지만, **절대 금액 기반 판단**("�
 ## 정규식 채택 근거 (Presidio 미도입)
 
 착수 시 실제 프롬프트 샘플(`_build_toolless_prompt`, `_build_nat_prompt`,
-`generate_morning_briefing`이 조립하는 프롬프트, `mcp-trading/tests/fixtures/balance_report.json`
+`generate_morning_briefing`이 조립하는 프롬프트, `mcp/trading/tests/fixtures/balance_report.json`
 공유 픽스처)을 확인한 결과:
 
 - 대상 3종은 모두 구조화된 표기 패턴이라 정규식으로 충분히 식별된다.
@@ -568,7 +568,7 @@ LLM이 판단할 수 있어 유지되지만, **절대 금액 기반 판단**("�
   **의도된 적용 대상**이지 "훼손"이 아니다.
 - 리뷰어가 우려한 손실(잔고 컨텍스트 상실)은 실제로는 NAT **서브에이전트가 자체
   조회한** 잔고에서 발생하는데, 그 경로는 `user_msg`와 무관하게 NAT 프로세스 내부에서
-  OpenAI로 나간다(`finus_nat/configs/agents/trading_agent.yml`의
+  OpenAI로 나간다(`agents/configs/agents/trading_agent.yml`의
   `functions.trading_agent_react.tool_names`에 있는 `kis-trading-mcp-tool`(#380 이후
   조회 전용 `kis-trading-mcp-tool-readonly`) → 같은
   함수의 `llm_name`인 `trading_openai_llm`). 즉 backend의 마스킹을 끄든 켜든 그
@@ -609,7 +609,7 @@ backend → NAT ("내 잔고 어때?" — 마스킹해도 걸릴 게 없다)
 이슈가 제시한 세 안 중 A를 택했다.
 
 - **옵션 B(LLM 호출 경계 훅)를 택하지 않은 이유**: NAT이 그 훅을 제공하지 않으므로
-  `finus_nat/scripts/patch_vendor.py` 계열의 벤더 패치가 된다. 그 패치는 상류 소스와
+  `agents/scripts/patch_vendor.py` 계열의 벤더 패치가 된다. 그 패치는 상류 소스와
   바이트 단위로 맞물려 있어 NAT 업그레이드마다 깨지고, `ci.yml`의 "벤더 패치 적용 검증"
   스텝이 이미 그 부채를 감시하고 있다. 부채를 한 건 더 얹는 선택이다.
 - **옵션 C(계좌 취급 에이전트만 `ollama_llm`)를 택하지 않은 이유**: 에이전트별 LLM 분리는
@@ -623,7 +623,7 @@ backend → NAT ("내 잔고 어때?" — 마스킹해도 걸릴 게 없다)
 
 ### 배선 — 세 지점
 
-`finus_nat/src/nat_finus_nat/pii_guard.py`가 소유한다.
+`agents/src/nat_finus_nat/pii_guard.py`가 소유한다.
 
 1. **박스 심기** — `agents.finus_reasoning_trace_agent`가 요청마다 `PII_MAPPING`
    ContextVar에 빈 dict를 심는다. 두 라우터 config(`router.yml`, `router_nomemory.yml`)가
@@ -851,7 +851,7 @@ backend는 단일 uvicorn 프로세스로 뜨므로(`backend/Dockerfile`의 CMD�
 
 > **#397 갱신.** 아래 판정은 `router.yml`이 vendor `auto_memory_agent`를 쓰던 시점 기준이다.
 > #397부터 `router.yml`은 그 래퍼를 쓰지 않고, mem0를 NAT 프로세스 안의 로컬 모드로 띄워
-> 허용목록 값(투자 성향 열거형)만 저장한다(`finus_nat/src/nat_finus_nat/user_memory.py`).
+> 허용목록 값(투자 성향 열거형)만 저장한다(`agents/src/nat_finus_nat/user_memory.py`).
 > 대화 본문은 마스킹 여부와 무관하게 메모리에 들어갈 자리가 없다. `finus_sqlite_transcript_agent`의
 > 히스토리에 관한 아래 서술은 그대로 유효하다.
 
@@ -876,9 +876,9 @@ backend는 단일 uvicorn 프로세스로 뜨므로(`backend/Dockerfile`의 CMD�
 
 ### 마스킹 엔진 공유 — 바이트 사본
 
-`finus_nat`은 `backend`를 의존성으로 갖지 않고(`finus_nat/pyproject.toml`), NAT 이미지도
-`backend`를 COPY하지 않는다(`finus_nat/Dockerfile`). import로 공유할 수 없으므로
-`backend/pii_mask.py`를 `finus_nat/src/nat_finus_nat/pii_mask.py`로 **바이트 단위 복제**했다.
+`agents`은 `backend`를 의존성으로 갖지 않고(`agents/pyproject.toml`), NAT 이미지도
+`backend`를 COPY하지 않는다(`agents/Dockerfile`). import로 공유할 수 없으므로
+`backend/pii_mask.py`를 `agents/src/nat_finus_nat/pii_mask.py`로 **바이트 단위 복제**했다.
 
 한쪽만 고치면 같은 잔고 텍스트가 두 경로에서 다르게 마스킹돼 한 대화 안에서 자리표시자
 규약이 갈린다. `test_pii_guard.py::TestVendoredCopy`가 두 파일의 바이트 동일성과
@@ -965,7 +965,7 @@ MCP 검증이 거부하므로 **잘못된 주문이 체결되지는 않았다** 
    맞바꿈이라 해석하지 않는다.
 
 `CANO`·`ACNT_PRDT_CD`는 2번에서 걸린다. mcp-trading이 `KIS_ACCOUNT_NO` env로 채우는
-값이라(`mcp-trading/balance.js`의 `buildBalanceParams()`) LLM 인자로 올 이유가 없고,
+값이라(`mcp/trading/balance.js`의 `buildBalanceParams()`) LLM 인자로 올 이유가 없고,
 `ACCOUNT` 원값은 하이픈 유무가 원문 표기를 따라가므로 두 필드 분리와 어긋날 수 있다.
 
 #### 필드 목록을 하드코딩하지 않은 이유
@@ -1003,7 +1003,7 @@ pass-through 주문에는 rationale이 없어 "rationale이 비어 있으면 REJ
 걸릴 공산이 크다.
 
 **결정 — backend와 같은 괴리 판정을 NAT가 코드로 한다**
-(`finus_nat/src/nat_finus_nat/order_price_guard.py`). `finus_api._call_kis_mcp_and_record`
+(`agents/src/nat_finus_nat/order_price_guard.py`). `finus_api._call_kis_mcp_and_record`
 (KIS로 나가는 모든 호출이 지나는 자리)에서 보내기 직전에 판정한다.
 
 - **대상 api_type** — 읽기 전용 allowlist(`inquire_*`·`search_*`, 정확 값 `find_api_detail`·
@@ -1032,7 +1032,7 @@ pass-through 주문에는 rationale이 없어 "rationale이 비어 있으면 REJ
 - **식** — `abs(단가 - 현재가) / 현재가 > 임계값`이면 거부. 양방향이고 경계는 통과한다.
 - **임계값** — backend와 **같은 env 이름** `ORDER_MAX_PRICE_GAP_RATIO`를 NAT가 직접 읽는다.
   compose에서는 두 서비스가 같은 `./.env`를 싣고, 호스트에서 NAT를 따로 띄우면
-  `finus_nat/.env`를 읽으므로 거기에도 같은 값을 둔다. 기본값 0.03과 해석 규칙(빈 값·해석
+  `agents/.env`를 읽으므로 거기에도 같은 값을 둔다. 기본값 0.03과 해석 규칙(빈 값·해석
   불가·비유한·음수는 기본값)도 `backend/config.py`의 `_float_env`와 같다. 기본값은
   `test_order_price_guard.py`가 backend 소스를 정적으로 읽어 대조하고, 판정 의미는 판정표
   `backend/tests/fixtures/price_gap_policy.json`을 두 스위트가 함께 읽어 고정한다(#138 방식).
@@ -1155,7 +1155,7 @@ LLM에게 남은 일은 두 가지뿐이고 둘 다 비율이면 충분하다:
 알면 주문가능현금의 범위가 나온다. 이 역산 통로가 "비율로 바꾸면 안전하다"는 순진한
 구현이 실제로 남기는 구멍이고, 여기서 막는 대상이다.
 
-`derive_ratio_view()`가 만드는 것(`finus_nat/src/nat_finus_nat/verifier.py`):
+`derive_ratio_view()`가 만드는 것(`agents/src/nat_finus_nat/verifier.py`):
 
 | 키 | 뜻 |
 | --- | --- |
@@ -1252,7 +1252,7 @@ backend 드리프트를 전제하므로 여기서도 기대지 않는다.
 
 | 경로 | 나가는 값 | 조립 지점 |
 | --- | --- | --- |
-| `/balance` (와 `balance:refresh` 버튼) | 보유 종목명·종목코드·보유수량·평균매입가·평가금액·평가손익·수익률 | `telegram_commands.py` `_handle_balance` → `mcp-trading/balance.js` `formatBalanceReport()` |
+| `/balance` (와 `balance:refresh` 버튼) | 보유 종목명·종목코드·보유수량·평균매입가·평가금액·평가손익·수익률 | `telegram_commands.py` `_handle_balance` → `mcp/trading/balance.js` `formatBalanceReport()` |
 | 수동 주문 확인 메시지 (`/buy`·`/sell`) | 예상 주문금액·현재가·**예수금** | `telegram_commands.py` `_format_order_prompt` — `get_balance` 응답에서 예수금 줄을 골라 접두사만 떼고 그대로 붙인다 |
 | 자율 제안 승인 메시지 | 예상 주문금액·현재가·**주문가능금액**·보유수량 | `order_assist.py` `format_approval_message` (`snapshot`은 `get_stock_quote`/`get_balance`/`get_orderable_cash` 병렬 조회에서 온다) |
 | 모닝 브리핑 | LLM이 잔고를 근거로 쓴 문장 속 금액 | `scheduler.py` `morning_briefing_task` → `format_morning_briefing` |
@@ -1340,18 +1340,18 @@ backend 드리프트를 전제하므로 여기서도 기대지 않는다.
 
 ## 구현
 
-- `finus_nat/src/nat_finus_nat/pii_guard.py` — NAT 내부 도구 결과 마스킹(#231):
+- `agents/src/nat_finus_nat/pii_guard.py` — NAT 내부 도구 결과 마스킹(#231):
   `PII_MAPPING` 박스, `mask_tool_result()`/`unmask_response()`/`restore_for_internal()`,
   마스킹 대상 도구 목록.
-- `finus_nat/src/nat_finus_nat/pii_mask.py` — `backend/pii_mask.py`의 바이트 사본.
-- `finus_nat/src/nat_finus_nat/verifier.py` — 주문 검증자의 (b) 비율·구간 변환(#336):
+- `agents/src/nat_finus_nat/pii_mask.py` — `backend/pii_mask.py`의 바이트 사본.
+- `agents/src/nat_finus_nat/verifier.py` — 주문 검증자의 (b) 비율·구간 변환(#336):
   `_ratio_band()`/`_gap_band()`/`derive_ratio_view()`, 필드를 골라 싣는
   `build_user_prompt()`, 구간의 뜻을 설명하는 `_SYSTEM_PROMPT`.
-  테스트: `finus_nat/tests/test_order_verifier.py`("스냅샷 마스킹" 절 — 원값 유출 회귀
+  테스트: `agents/tests/test_order_verifier.py`("스냅샷 마스킹" 절 — 원값 유출 회귀
   가드, 구간 경계 고정, 변환 후 정상 주문 승인, 변환이 예외를 던지지 않음).
-- `finus_nat/src/nat_finus_nat/finus_api.py:_record_and_mask()` — 도구 결과의 단일 반환 지점.
-- `finus_nat/src/nat_finus_nat/agents.py:finus_reasoning_trace_agent()` — 박스 심기 + 역치환.
-- 테스트: `finus_nat/tests/test_pii_guard.py`(도구별 마스킹 대상 판정, 경계 왕복,
+- `agents/src/nat_finus_nat/finus_api.py:_record_and_mask()` — 도구 결과의 단일 반환 지점.
+- `agents/src/nat_finus_nat/agents.py:finus_reasoning_trace_agent()` — 박스 심기 + 역치환.
+- 테스트: `agents/tests/test_pii_guard.py`(도구별 마스킹 대상 판정, 경계 왕복,
   두 계층 간섭 없음, 일지 저장 역치환, `_record_and_mask` 우회 AST 가드, 사본 드리프트).
 - `backend/pii_mask.py` — recognizer 3종, `mask_pii()`/`unmask_pii()`. services.py에
   인라인하지 않고 별도 모듈로 분리했다(#140에서 `stock_code.py`로 공용화한 선례를 따름).

@@ -14,7 +14,7 @@
 | 항목 | 상태 |
 |---|---|
 | KIS 유량 제한 오류코드가 존재한다 (`EGW00201` "초당 거래건수 초과") | **공식 문서로 확인** (koreainvestment/open-trading-api README) |
-| 모의투자 계좌의 호출 제한이 실전보다 낮다 | **공식 문서로 확인 — 단, 정성적 서술뿐** (`mcp-trading/index.js` 상단 조사 주석) |
+| 모의투자 계좌의 호출 제한이 실전보다 낮다 | **공식 문서로 확인 — 단, 정성적 서술뿐** (`mcp/trading/index.js` 상단 조사 주석) |
 | 실전 "표준 20 TPS" | **반공식** — 언론 보도에서만 확인, 원문 미인용 |
 | 실제 임계치(초당 몇 회) | **미확인. 실계좌 없이 확인 불가** |
 | 페이지당 지연(ms) | **미확인** |
@@ -33,7 +33,7 @@
 
 - KIS는 유량 제한 수치를 공개하지 않는다. 임계치는 실제로 쳐 보고 `EGW00201`이 돌아오는
   지점을 찾는 수밖에 없다.
-- 모의투자 계좌로 재면 **숫자가 이전되지 않는다**. `mcp-trading/index.js` 상단 조사 주석이
+- 모의투자 계좌로 재면 **숫자가 이전되지 않는다**. `mcp/trading/index.js` 상단 조사 주석이
   기록하듯 공식 README가 "모의투자 계좌는 REST API 호출 제한이 낮으니 연속 호출이 많으면
   실전투자 계좌를 권장"한다고 명시한다. 모의에서 나온 임계치를 실전 기본값으로 넣으면
   불필요하게 느려지고, 반대 방향의 오해도 만든다(3장 참조).
@@ -61,7 +61,7 @@ docker compose up -d backend finus-nat    # restart가 아니라 up -d — 아�
 2. mcp-trading은 그 환경을 물려받는다 — `backend/config.py`와 `finus_api.py`의
    `_MCP_ENV_ALLOWED_PREFIXES`가 둘 다 `KIS_`를 자식에게 넘긴다.
 3. `.env` 파일 자체는 bind mount라 컨테이너 안에서도 새 내용이 보이지만, 그것을 읽는
-   `backend/config.py`의 `load_dotenv`도 `mcp-trading/index.js`의 `dotenv.config`도
+   `backend/config.py`의 `load_dotenv`도 `mcp/trading/index.js`의 `dotenv.config`도
    `override`를 하지 않는다. 이미 물려받은 옛 값이 이긴다.
 
 값을 바꿀 때마다(5.1의 대기값 스윕 포함) 같은 명령으로 재생성한다. 재생성하면 컨테이너가
@@ -70,7 +70,7 @@ docker compose up -d backend finus-nat    # restart가 아니라 up -d — 아�
 `load_dotenv`가 프로세스 시작 시점에 한 번 읽기 때문이다.
 
 - 별칭 `FINUS_KIS_REQUEST_LOG`도 같다. `KIS_` 쪽을 먼저 읽는다
-  (`mcp-trading/balance.js`의 `readPageDelayMsEnv`와 같은 관례).
+  (`mcp/trading/balance.js`의 `readPageDelayMsEnv`와 같은 관례).
 - `1`/`true`/`yes`/`on`이면 켜짐, `0`/`false`/`no`/`off`면 꺼짐. 그 밖의 값은 stderr에
   경고를 남기고 기본값(off)으로 돌아간다.
 - **끄더라도 유량 제한 판정 줄(`class=rate_limit`)은 항상 나간다.** 게이트가 막는 것은
@@ -119,13 +119,13 @@ KIS 요청 1건마다 stderr에 정확히 한 줄이 나간다.
 - 토큰 발급 **실패** 바디의 모양은 **미확인이다.** OAuth 형식이라 `msg_cd`/`msg1`이 아니라
   `error_code`/`error_description`으로 온다(`{"error_code":"EGW00133", ...}`)는 서술을 이
   저장소는 확인한 적이 없다. 5.2가 이 경로의 줄을 그대로 보여 주므로 거기서 확인한다.
-  **오히려 저장소의 증거는 반대쪽을 가리킨다** — `mcp-trading/tests/kis-client.test.js`의
+  **오히려 저장소의 증거는 반대쪽을 가리킨다** — `mcp/trading/tests/kis-client.test.js`의
   "pre-flight failure" 테스트 픽스처가 이 경로의 오류를 `"Access Token 발급 실패: EGW00133 초당 거래건수를
   초과하였습니다."`로 쓰는데, `getAccessToken`이 그 문자열을 만드는 자리는
   `error.response?.data?.msg1`이라 **`msg1`이 채워져 있어야만** 나올 수 있는 모양이다
   (뒤에 붙은 `|| error.message` 폴백은 axios가 만드는 영어 문구라 이 모양이 아니다).
   그래서 포맷터는 두 모양을 모두 읽고(`msg_cd ?? error_code`, `msg1 ?? error_description` —
-  `mcp-trading/kis-rate-limit.js`), 어느 쪽으로 오든 줄에는 조회와 똑같이
+  `mcp/trading/kis-rate-limit.js`), 어느 쪽으로 오든 줄에는 조회와 똑같이
   `msg_cd=EGW00133 class=rate_limit`으로 나온다. **실측 전에 `??`를 한쪽 필드로 되돌리지
   말 것** — 두 모양 중 무엇이 참인지 아직 모른다. OAuth 갈래를 안 보면 게이트가 꺼진
   기본 설정에서 **줄이 아예 안 나가므로**, 이 절 앞머리의 약속(게이트를 꺼도
@@ -134,7 +134,7 @@ KIS 요청 1건마다 stderr에 정확히 한 줄이 나간다.
   프로세스라(3장), 캐시가 비었거나 만료된 순간 동시에 뜬 프로세스들이 전부 `tokenP`로
   몰린다. 이것이 5.3이 보려는 프로세스 간 버스트 그 자체다. `EGW00133`이 실제로 관측될
   가능성이 있는 곳도 사실상 이 경로다.
-- **주문 경로(`place_order`)의 KIS 요청 2건은 로그에 없다.** `mcp-trading/kis-client.js`가
+- **주문 경로(`place_order`)의 KIS 요청 2건은 로그에 없다.** `mcp/trading/kis-client.js`가
   이 PR의 범위 밖이라 계측하지 않았다. 4장이 "주문 API로 유량 제한을 때리지 말 것"이라
   측정 대상도 아니지만, 초당 요청 수를 셀 때 **주문이 섞인 구간은 실제보다 2건 적게
   집계된다**는 것을 알고 세야 한다. 측정 중에는 주문을 넣지 않는 편이 낫다.
@@ -143,7 +143,7 @@ KIS 요청 1건마다 stderr에 정확히 한 줄이 나간다.
 
 `appkey`, `appsecret`, `authorization: Bearer <토큰>`, `CANO`(계좌번호), 요청 URL·params.
 포맷터는 axios 에러의 `config`/`request`/`headers`/`params`/`message`를 아예 읽지 않는다
-(`mcp-trading/kis-rate-limit.js`, 회귀 테스트는 `mcp-trading/tests/kis-rate-limit.test.js`의
+(`mcp/trading/kis-rate-limit.js`, 회귀 테스트는 `mcp/trading/tests/kis-rate-limit.test.js`의
 "로그 줄에는 appkey·appsecret·Bearer 토큰·계좌번호가 절대 실리지 않는다").
 `msg1`은 KIS 서버가 준 문자열이라 계좌번호가 되울려 올 수 있어 8자리 이상 숫자를 가린다.
 
@@ -171,7 +171,7 @@ CANO가 그대로 새는다. 날짜를 확인해야 하면 그 도구 호출에 
 여기가 가장 틀리기 쉬운 지점이다.
 
 mcp-trading은 백엔드가 **도구 호출 1건마다 새로 띄우는 단명 자식 프로세스**다
-(`backend/services.py`의 `run_mcp_tool`, `finus_nat/src/nat_finus_nat/finus_api.py`가
+(`backend/services.py`의 `run_mcp_tool`, `agents/src/nat_finus_nat/finus_api.py`가
 호출마다 `stdio_client`를 새로 연다). MCP Python SDK의 `stdio_client`는 자식의 stderr를
 `errlog=sys.stderr`로 잇는 것이 기본이고, 두 호출부 모두 이 인자를 넘기지 않는다 — 즉
 자식의 stderr는 **부모 프로세스의 stderr 파일 디스크립터로 그대로 흘러간다.**
@@ -182,18 +182,18 @@ mcp-trading은 백엔드가 **도구 호출 1건마다 새로 띄우는 단명 �
 > `async def stdio_client(server: StdioServerParameters, errlog: TextIO = sys.stderr):`이다.
 > 그 값은 `:128`의 `errlog=errlog` → `:239`의 `errlog: TextIO = sys.stderr` → `:254`의
 > `stderr=errlog`로 흘러 자식 프로세스의 `stderr=`가 된다. 두 호출부
-> (`backend/services.py`의 `run_mcp_tool`, `finus_nat/src/nat_finus_nat/finus_api.py`의
+> (`backend/services.py`의 `run_mcp_tool`, `agents/src/nat_finus_nat/finus_api.py`의
 > `_mcp_call_tool` — 둘 다 안쪽 `async with stdio_client(...)`) 중 어느 쪽도
 > `errlog`를 넘기지 않는다. 윈도우 spawn 갈래
 > (`mcp/os/win32/utilities.py:140,176,187,199,213`)도 기본값이 같으므로 로컬 윈도우에서
-> 재도 결과가 같다. `finus_nat`이 따로 잠근 `1.27.0`(`finus_nat/uv.lock:1486`)은 한 패치
+> 재도 결과가 같다. `agents`이 따로 잠근 `1.27.0`(`agents/uv.lock:1486`)은 한 패치
 > 낮지만 같은 시그니처 계열이다.
 >
 > **그래도 SDK 기본값에 기대는 주장이라 버전을 올릴 때 같이 확인해야 한다** — 기본값이
 > 뒤집히면 이 절의 결론이 통째로 바뀐다. 재확인 방법:
 > ```bash
 > python -c "import inspect, mcp.client.stdio as m; print(inspect.signature(m.stdio_client))"
-> grep -rn "errlog" backend finus_nat --include=*.py   # 호출부의 재정의 여부. 비어 있어야 한다
+> grep -rn "errlog" backend agents --include=*.py   # 호출부의 재정의 여부. 비어 있어야 한다
 > ```
 
 따라서:
@@ -202,7 +202,7 @@ mcp-trading은 백엔드가 **도구 호출 1건마다 새로 띄우는 단명 �
 - ❌ 백엔드의 Python `logging`을 거치지 않는다. 로그 레벨을 올려도 안 나오고, 애플리케이션
   로그 파일이나 구조화 로그 싱크에도 안 들어온다.
 - ❌ MCP 도구 응답(JSON-RPC stdout)에도 안 들어온다. stdout은 프로토콜 채널이라
-  `mcp-trading/index.js`가 `console.log`를 `console.error`로 돌려 두었다.
+  `mcp/trading/index.js`가 `console.log`를 `console.error`로 돌려 두었다.
 
 수집 명령:
 
@@ -228,7 +228,7 @@ journalctl -u <서비스명> -f | grep -o '\[kis-req\].*' | tee kis-req.log
 **실전투자 계좌(`https://openapi.koreainvestment.com:9443`)에서 잰다.**
 
 - 모의투자(`openapivts`)는 공식 문서가 호출 제한이 **더 낮다**고 밝힌 별개 등급이다
-  (`mcp-trading/index.js` 상단 조사 주석). 모의에서 나온 숫자를 실전 기본값으로 넣으면
+  (`mcp/trading/index.js` 상단 조사 주석). 모의에서 나온 숫자를 실전 기본값으로 넣으면
   실전에서 불필요하게 느려진다. 반대로 "모의에서 안 걸렸으니 실전도 괜찮다"는 추론도
   성립하지 않는다 — 두 등급의 관계는 부등호 방향만 알고 비율은 모른다.
 - 모의에서 먼저 도는지 확인하는 리허설은 해도 좋다. 다만 **리허설에서 나온 수치는 기록만
@@ -447,7 +447,7 @@ grep '^\[kis-req\]' kis-req.log | sort -t= -k2 \
 | 관측된 `msg_cd` 값 | `EGW00201`, `EGW00133`(픽스처 문구로만) | `EGW00201` 14건("초당 거래건수를 초과하였습니다."), `EGW00215` 2건("원장에서 허용 가능한 초당 거래건수를 초과하였습니다.") — 둘 다 HTTP 500 + `rt_cd=1`. `EGW00215`를 목록에 추가했다(PR #412) | |
 
 마지막 행이 중요하다. 목록(`EGW00201`/`EGW00133`/`EGW00215`) 밖의 유량 제한 코드가 관측되면
-`mcp-trading/kis-rate-limit.js`의 `KIS_RATE_LIMIT_MSG_CODES`에 추가한다. 그 목록이 완전하다는
+`mcp/trading/kis-rate-limit.js`의 `KIS_RATE_LIMIT_MSG_CODES`에 추가한다. 그 목록이 완전하다는
 보장이 없어서(공식 `msg_cd` FAQ 접근 실패 — `docs/alnum-stock-code.md` 4.3절)
 `msg1`의 "초당 거래건수" 문구를 두 번째 판정 경로로 함께 두었다. 실측에서 나온 코드는
 그 목록을 실제 관측으로 채우는 값이다.

@@ -12,7 +12,7 @@ from backend.pii_mask import _AMOUNT_UNIT_RE, mask_pii, unmask_pii
 
 _FIXTURE_PATH = (
     pathlib.Path(__file__).parent.parent.parent
-    / "mcp-trading" / "tests" / "fixtures" / "balance_report.json"
+    / "mcp" / "trading" / "tests" / "fixtures" / "balance_report.json"
 )
 
 # 자리표시자는 <KIND_{scope}_{n}> 형태이고 scope는 mask_pii 호출마다 새로 뽑는 6자리
@@ -820,7 +820,7 @@ class TestQuantityRecognizer:
     def test_masks_comma_grouped_quantity_entirely(self):
         """콤마가 들어간 보유 수량은 앞자리까지 통째로 마스킹돼야 한다.
 
-        mcp-trading/balance.js의 formatQuantity()가 toLocaleString("ko-KR")을
+        mcp/trading/balance.js의 formatQuantity()가 toLocaleString("ko-KR")을
         쓰므로 1,000주 이상은 "1,234주"처럼 콤마가 들어간다. 콤마를 처리하지 못하면
         "1,"이 마스킹되지 않고 남아 **보유 수량의 앞자리가 그대로 외부 LLM으로 나간다**
         — F-17이 막으려던 바로 그 유출이다. 같은 사실을 이미 반영한 선례가
@@ -829,7 +829,7 @@ class TestQuantityRecognizer:
         이 테스트가 잡는 mutation: _QTY_RE에서 콤마 지원 제거
         (r"(?<![\\d,])\\d(?:[\\d,]*\\d)?" -> r"(?<!\\d)\\d+").
 
-        공유 픽스처(mcp-trading/tests/fixtures/balance_report.json)의 hldg_qty는
+        공유 픽스처(mcp/trading/tests/fixtures/balance_report.json)의 hldg_qty는
         "3"/"1"뿐이라 이 케이스를 덮지 못한다 — 그래서 별도로 고정한다.
         """
         text = "- 삼성전자 (005930) · 1,234주"
@@ -878,7 +878,7 @@ class TestQuantityRecognizer:
 
         '52주 신고가'는 주식 뉴스에서 가장 흔한 관용구인데,
         backend/services.py의 check_signal_significance()가 외부 뉴스 원문
-        1000자를 그대로 프롬프트에 넣으므로(mcp-news/index.js의 네이버 뉴스 검색
+        1000자를 그대로 프롬프트에 넣으므로(mcp/news/index.js의 네이버 뉴스 검색
         title/description, 필터링 없음) 과탐이 곧바로 판정 품질을 떨어뜨린다.
 
         이 테스트가 잡는 mutation: _QTY_RE의 `(?!일|째|차|간|년|기|당)` 또는
@@ -1008,7 +1008,7 @@ class TestCompositeAndRoundTrip:
         assert unmask_pii(masked, mapping) == text
 
     def test_round_trip_is_lossless_for_real_kis_balance_report(self):
-        """mcp-trading/balance.js formatBalanceReport()의 실제 출력 형식(#137 공유 픽스처)에
+        """mcp/trading/balance.js formatBalanceReport()의 실제 출력 형식(#137 공유 픽스처)에
         대해 왕복 무손실을 확인한다. 이 텍스트는 generate_morning_briefing()이 조립하는
         프롬프트에 그대로 들어가 llm_chat()을 통과한다.
         """

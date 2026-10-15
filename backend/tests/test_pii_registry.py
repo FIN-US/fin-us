@@ -343,7 +343,7 @@ class TestPlaceholderContract:
         """등록소 정규식이 `pii_mask`의 것과 갈리면 조회가 조용히 빗나간다.
 
         여기는 scope를 캡처하려고 별도 정규식을 두므로, 두 벌이 **같은 것을 매치한다**는
-        사실을 사람이 눈으로 맞춰 두는 대신 고정한다. `finus_nat/tests/test_pii_guard.py`가
+        사실을 사람이 눈으로 맞춰 두는 대신 고정한다. `agents/tests/test_pii_guard.py`가
         NAT 사본에 대해 같은 검사를 한다.
         """
         _, mapping = mask_pii("계좌 12345678-01, 평가금액 1,234원, 삼성전자 3주")

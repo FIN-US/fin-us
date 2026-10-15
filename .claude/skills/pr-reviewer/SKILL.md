@@ -101,7 +101,7 @@ git -C "<REPO>" log --oneline -10          # 최근 커밋 이력
 ### 2. 프리플라이트 체크
 
 새 worktree에는 gitignore 대상인 의존성 디렉토리가 없다. 이 레포의 해당 디렉토리는
-`backend/.venv`, `finus_nat/.venv`, 그리고 `mcp-dart`·`mcp-news`·`mcp-trading` 각각의
+`backend/.venv`, `agents/.venv`, 그리고 `mcp-dart`·`mcp-news`·`mcp-trading` 각각의
 `node_modules`다.
 
 **이 목록은 `.github/workflows/ci.yml`의 잡과 맞춰 둔다.** 좁게 적어두면 CI가 검증하는 영역을
@@ -112,14 +112,14 @@ git -C "<REPO>" log --oneline -10          # 최근 커밋 이력
 - `npm install`, `pip install` — 느리고 병렬 실행 시 캐시 경합
 - **`uv sync`, `--no-sync` 없는 `uv run`** — 아래 이유로 가장 위험하다
 
-#### 파이썬 영역(`backend`, `finus_nat`)은 기본적으로 건너뛴다
+#### 파이썬 영역(`backend`, `agents`)은 기본적으로 건너뛴다
 
 `.venv`를 링크한 뒤 `uv run`을 돌리면 **개발자의 메인 트리 venv를 직접 mutate한다**
 (`uv run`이 프로젝트 환경을 자동 동기화하며 링크를 따라간다). 결과는 둘 — 병렬 리뷰가 같은
-venv를 동시에 건드리고, `finus_nat/.venv`의 `patch_vendor.py` 벤더 패치가 재설치로
+venv를 동시에 건드리고, `agents/.venv`의 `patch_vendor.py` 벤더 패치가 재설치로
 **조용히 벗겨진다.**
 
-패치 적용 여부는 `finus_nat/.venv/Lib/site-packages/.finus_vendor_patch.json` 마커로 확인한다.
+패치 적용 여부는 `agents/.venv/Lib/site-packages/.finus_vendor_patch.json` 마커로 확인한다.
 **확인만 하고 `patch_vendor.py`를 실행하지 않는다** — 이 스크립트는 점검이 아니라 적용이라,
 돌리는 순간 venv를 바꾼다(실측: 미적용 상태에서 돌렸더니 3개 파일에 패치가 적용됐다).
 
@@ -161,7 +161,7 @@ ln -s "<REPO>/<PKG>/node_modules" "<WT_PATH>/<PKG>/node_modules"
 > 번들(`frontend/Build/`)과 소스가 어긋나지 않았는지다(`frontend/README.md` 재빌드 규칙).
 
 > ⚠️ **링크를 걸었으면 6단계 전에 반드시 직접 끊는다.** `git worktree remove --force`는
-> junction을 **따라 들어가 원본을 지운다.** 실측했다 — `mcp-dart/node_modules`의 파일 98개가
+> junction을 **따라 들어가 원본을 지운다.** 실측했다 — `mcp/dart/node_modules`의 파일 98개가
 > 0개가 됐고 `npm ci`로 복구해야 했다. 이 스킬에 오래 "링크 자체만 제거한다"고 적혀 있었으나
 > 거짓이다.
 >

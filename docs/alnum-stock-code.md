@@ -4,7 +4,7 @@
 > 기준 커밋: `8c2acd5` (origin/main)
 > 조사일: 2026-08-15
 > **이 문서는 조사·설계만 담는다. 주문 가드는 변경하지 않았다.**
-> **이 문서의 모든 `파일:줄` 참조는 `8c2acd5` 고정이다.** 그 뒤 `telegram_commands.py`·`stock_code.py`·`scheduler.py`·`tests/test_telegram_commands.py`·`mcp-trading/index.js` 다섯 파일이 이동했다 — **5.1의 대조표로 다시 찾을 것.** 나머지 참조 파일은 변경이 없어 그대로 유효하다.
+> **이 문서의 모든 `파일:줄` 참조는 `8c2acd5` 고정이다.** 그 뒤 `telegram_commands.py`·`stock_code.py`·`scheduler.py`·`tests/test_telegram_commands.py`·`mcp/trading/index.js` 다섯 파일이 이동했다 — **5.1의 대조표로 다시 찾을 것.** 나머지 참조 파일은 변경이 없어 그대로 유효하다.
 
 ---
 
@@ -34,10 +34,10 @@
 
 ## 1. 조사 방법
 
-종목마스터 `mcp-trading/data/stocks.json`은 **저장소에 커밋되어 있다**(`mcp-trading/stock-master.js:8`의 `DEFAULT_STOCKS_PATH`가 이 파일을 가리킨다). 런타임에 KIS에서 받아오는 구조가 아니므로 전수 대조가 가능했다.
+종목마스터 `mcp/trading/data/stocks.json`은 **저장소에 커밋되어 있다**(`mcp/trading/stock-master.js:8`의 `DEFAULT_STOCKS_PATH`가 이 파일을 가리킨다). 런타임에 KIS에서 받아오는 구조가 아니므로 전수 대조가 가능했다.
 
-- 파일: `mcp-trading/data/stocks.json` (조사 시점 4,353건, `[{code, name, market, aliases}]` 배열) *(2026-10-14 재생성 후 4,401건이고 분류 필드 3개가 늘어 `[{code, name, market, aliases, scrt_grp_cls_code, etpr_undt_objt_co_yn, prst_cls_code}]`이다 — 5.1 참조)*
-- 갱신 경로: `mcp-trading/scripts/update_stock_master.py` — KRX/KIS 배포 마스터(`kospi_code.mst`, `kosdaq_code.mst`)를 내려받아 재생성
+- 파일: `mcp/trading/data/stocks.json` (조사 시점 4,353건, `[{code, name, market, aliases}]` 배열) *(2026-10-14 재생성 후 4,401건이고 분류 필드 3개가 늘어 `[{code, name, market, aliases, scrt_grp_cls_code, etpr_undt_objt_co_yn, prst_cls_code}]`이다 — 5.1 참조)*
+- 갱신 경로: `mcp/trading/scripts/update_stock_master.py` — KRX/KIS 배포 마스터(`kospi_code.mst`, `kosdaq_code.mst`)를 내려받아 재생성
 - 대조 방법: 임시 Node 스크립트로 전수 분류 + **실제 `resolveStock()`·`buildCashOrderBody()`를 776건에 직접 호출**해 통과/거절을 실측 (스크립트는 스크래치패드에 두고 커밋하지 않음)
 
 ---
@@ -46,7 +46,7 @@
 
 ### 2.1 전수 분류 (확인된 사실)
 
-`mcp-trading/data/stocks.json` 4,353건 전수 대조 결과:
+`mcp/trading/data/stocks.json` 4,353건 전수 대조 결과:
 
 | 분류 | 종목 수 | 비율 |
 |---|---:|---:|
@@ -96,8 +96,8 @@
 
 | 함수 | 결과 |
 |---|---|
-| `mcp-trading/stock-master.js`의 `resolveStock(code)` | **776/776 정상 해석** (마스터의 실제 이름·시장 반환, `UNKNOWN` 에코 0건) |
-| `mcp-trading/order.js`의 `buildCashOrderBody({stockCode: code, …})` | **776/776 거절**. 701건은 `order.js:78`의 전용 메시지, 75건은 `order.js:85`의 일반 메시지 |
+| `mcp/trading/stock-master.js`의 `resolveStock(code)` | **776/776 정상 해석** (마스터의 실제 이름·시장 반환, `UNKNOWN` 에코 0건) |
+| `mcp/trading/order.js`의 `buildCashOrderBody({stockCode: code, …})` | **776/776 거절**. 701건은 `order.js:78`의 전용 메시지, 75건은 `order.js:85`의 일반 메시지 |
 
 이슈가 주장한 "조회는 되는데 주문이 안 된다"가 코드 실행으로 확인됐다. 701/75 분해도 이슈와 일치한다.
 
@@ -111,8 +111,8 @@
 
 | # | 위치 | 코드 | 차단 대상 | 동작 |
 |---|---|---|---|---|
-| G1 | `mcp-trading/order.js:77` | `/^[0-9A-Z]{6,7}$/i.test(code) && !/^\d{6,7}$/.test(code)` | 영숫자 6~7자 **701건** | `이 종목은 현재 주문을 지원하지 않습니다.` (전용 메시지) |
-| G2 | `mcp-trading/order.js:84` | `!/^\d{6,7}$/.test(code)` | 9자 **75건** (G1에 매치조차 안 됨) | `stock_code는 6자리 또는 7자리 종목코드여야 합니다.` |
+| G1 | `mcp/trading/order.js:77` | `/^[0-9A-Z]{6,7}$/i.test(code) && !/^\d{6,7}$/.test(code)` | 영숫자 6~7자 **701건** | `이 종목은 현재 주문을 지원하지 않습니다.` (전용 메시지) |
+| G2 | `mcp/trading/order.js:84` | `!/^\d{6,7}$/.test(code)` | 9자 **75건** (G1에 매치조차 안 됨) | `stock_code는 6자리 또는 7자리 종목코드여야 합니다.` |
 | G3 | `backend/stock_code.py:59` | `_ORDERABLE_STOCK_CODE_RE = re.compile(r"\A[0-9]{6,7}\Z")` | **776건 전부** | `backend/telegram_commands.py:785`에서 판정 → `:790-791` 거절 메시지 |
 
 **G3가 가장 앞선 차단선이다.** Telegram 주문 경로에서는 `resolve_stock_code` 직후, 시세·잔고 조회(`telegram_commands.py:794-801`)와 60초 pending 슬롯을 쓰기 전에 끊는다. 따라서 **G1·G2만 열면 Telegram 경로는 아무것도 달라지지 않는다.** `backend/stock_code.py:50-55`의 주석이 이 결합을 이미 명시하고 있다.
@@ -125,13 +125,13 @@ G1과 G2의 관계: `order.js:73-76` 주석대로 둘이 합쳐 "숫자 6~7자�
 
 | 위치 | 패턴/동작 | 776건 처리 |
 |---|---|---|
-| `mcp-trading/stock-master.js:50` `resolveStock` Step 1 | 코드 완전일치, **길이 무관**(`#174`에서 도입) | 전부 통과 (2.3 실측) |
-| `mcp-trading/stock-master.js:32` `CODE_SHAPE_PATTERN` | `/^[A-Z0-9]{6,7}$/i` | 차단용이 아님. Step 2의 대소문자 무시 이름매칭 스위치 + Step 3 에코 판정에만 쓰인다. 9자는 이 패턴에 안 걸리지만 Step 1에서 이미 해결되므로 무해 |
-| `mcp-trading/index.js:218,240` `getStockQuote`/`getInvestorTrading` | `resolveStock() → FID_INPUT_ISCD(224,246)`, 길이 검증 없음 | 그대로 KIS에 전달 |
-| `mcp-trading/index.js:557` `resolve_stock_code` 툴 | `resolveStock` 결과를 `"이름 (코드, 시장)"`으로 포맷 | 전부 통과 |
-| `mcp-trading/index.js:542` `placeOrderSchema` | `stock_code: z.string()` — 형태 제약 없음 | 통과 (실제 차단은 G1/G2) |
-| `mcp-trading/order-dedup.js:72` | `String(stockCode ?? "").trim()` | 검증 없음 |
-| `mcp-trading/order-submit.js`, `kis-client.js` | 종목코드 검증 없음 | 통과 |
+| `mcp/trading/stock-master.js:50` `resolveStock` Step 1 | 코드 완전일치, **길이 무관**(`#174`에서 도입) | 전부 통과 (2.3 실측) |
+| `mcp/trading/stock-master.js:32` `CODE_SHAPE_PATTERN` | `/^[A-Z0-9]{6,7}$/i` | 차단용이 아님. Step 2의 대소문자 무시 이름매칭 스위치 + Step 3 에코 판정에만 쓰인다. 9자는 이 패턴에 안 걸리지만 Step 1에서 이미 해결되므로 무해 |
+| `mcp/trading/index.js:218,240` `getStockQuote`/`getInvestorTrading` | `resolveStock() → FID_INPUT_ISCD(224,246)`, 길이 검증 없음 | 그대로 KIS에 전달 |
+| `mcp/trading/index.js:557` `resolve_stock_code` 툴 | `resolveStock` 결과를 `"이름 (코드, 시장)"`으로 포맷 | 전부 통과 |
+| `mcp/trading/index.js:542` `placeOrderSchema` | `stock_code: z.string()` — 형태 제약 없음 | 통과 (실제 차단은 G1/G2) |
+| `mcp/trading/order-dedup.js:72` | `String(stockCode ?? "").trim()` | 검증 없음 |
+| `mcp/trading/order-submit.js`, `kis-client.js` | 종목코드 검증 없음 | 통과 |
 | `backend/stock_code.py:23` `_STOCK_CODE_EXTRACT_RE` | `\(([0-9A-Z]{6,}),` — 상한 없음 | 전부 추출 성공 (#135에서 고쳐진 부분) |
 | `backend/stock_code.py:40` `_STOCK_CODE_RE` | `\A(?:[0-9A-Z]{6,7}\|[0-9A-Z]{9})\Z` (#140) | 전부 "코드 형태"로 인정 |
 | `backend/telegram_commands.py:994` `_extract_stock_code` | 위 추출 정규식 위임 | 전부 통과 |
@@ -143,7 +143,7 @@ G1과 G2의 관계: `order.js:73-76` 주석대로 둘이 합쳐 "숫자 6~7자�
 
 | 위치 | 내용 |
 |---|---|
-| `mcp-trading/tests/order.test.js:112-123` | `buildCashOrderBody`가 `0001A0`을 전용 메시지로 거절 |
+| `mcp/trading/tests/order.test.js:112-123` | `buildCashOrderBody`가 `0001A0`을 전용 메시지로 거절 |
 | `backend/tests/test_stock_code.py:163-200` `TestOrderableStockCodeRe` | `0001A0`·`F70100026` 거절, 숫자 6·7자 허용, 전각 숫자 거절 |
 | `backend/tests/test_telegram_commands.py:1213` `test_order_command_rejects_unorderable_stock_code_before_quote_and_balance` | 시세·잔고 호출 **전에** 끊는다는 것과 메시지 문구까지 고정 |
 
@@ -153,7 +153,7 @@ G1과 G2의 관계: `order.js:73-76` 주석대로 둘이 합쳐 "숫자 6~7자�
 
 ### 4.1 저장소가 알려주는 것 (확인된 사실)
 
-`mcp-trading/scripts/update_stock_master.py:56`:
+`mcp/trading/scripts/update_stock_master.py:56`:
 
 ```python
 code = header[:9].strip()
@@ -194,7 +194,7 @@ code = header[:9].strip()
 >
 > *(참고: 이름 절단 자체는 이 PR이 도입한 문제가 아니라 기존 버그이며, 별도 이슈로 분리하는 것이 맞다.)*
 >
-> **실측 결과(2026-10-14)**: `data_width = tail_width - 1`로 고쳐 마스터를 재생성하니 예고한 9건이 **9/9 전부** 닫는 괄호를 되찾았다. 수정 후 모든 행의 꼬리 길이가 정확히 227자(KOSPI)/221자(KOSDAQ)로 떨어진다. 회귀 가드는 `mcp-trading/tests/test_update_stock_master.py`의 `test_data_width_matches_official_parser_field_specs`·`test_parse_master_rows_keeps_the_last_header_character`이며, 두 테스트는 폭을 228/222로 되돌리면 red가 된다(뮤테이션 확인).
+> **실측 결과(2026-10-14)**: `data_width = tail_width - 1`로 고쳐 마스터를 재생성하니 예고한 9건이 **9/9 전부** 닫는 괄호를 되찾았다. 수정 후 모든 행의 꼬리 길이가 정확히 227자(KOSPI)/221자(KOSDAQ)로 떨어진다. 회귀 가드는 `mcp/trading/tests/test_update_stock_master.py`의 `test_data_width_matches_official_parser_field_specs`·`test_parse_master_rows_keeps_the_last_header_character`이며, 두 테스트는 폭을 228/222로 되돌리면 red가 된다(뮤테이션 확인).
 >
 > 이름 절단에는 예고되지 않은 2차 증상도 있었다. 잘린 이름이 다른 종목의 이름과 같아지면 `deduplicate_stocks`의 `(market, name)` 키가 충돌해 **종목이 통째로 사라진다**. 재생성 결과가 4,353종 → 4,401종으로 늘어난 데에는 마스터 자체의 변동과 함께 이 충돌 해소가 섞여 있다.
 
@@ -210,7 +210,7 @@ KIS 공식 저장소 `koreainvestment/open-trading-api`의 원문을 확인했�
 pdno (str): [필수] 상품번호 (종목코드(6자리) , ETN의 경우 7자리 입력)
 ```
 
-같은 파일에서 TR ID가 `TTTC0012U`/`TTTC0011U`(실전), `VTTC0012U`/`VTTC0011U`(모의)로 확인되며, `mcp-trading/order.js:33-40`이 쓰는 값과 일치한다. **ETN 전용 주문 TR은 없고, `order-cash`에 7자리를 넣으라고 안내한다.**
+같은 파일에서 TR ID가 `TTTC0012U`/`TTTC0011U`(실전), `VTTC0012U`/`VTTC0011U`(모의)로 확인되며, `mcp/trading/order.js:33-40`이 쓰는 값과 일치한다. **ETN 전용 주문 TR은 없고, `order-cash`에 7자리를 넣으라고 안내한다.**
 
 두 가지가 중요하다.
 
@@ -296,8 +296,8 @@ pdno (str): [필수] 상품번호 (종목코드(6자리) , ETN의 경우 7자리
 
 | 이슈 서술 | 실제 (커밋 `8c2acd5`) |
 |---|---|
-| `mcp-trading/order.js:73-78` 가드 | **`order.js:77`, `order.js:84`** (사이에 주석 블록이 들어와 이동) |
-| `mcp-trading/tests/order.test.js:309` 회귀 테스트 | **`tests/order.test.js:112-123`** (파일 전체가 198줄뿐이라 309줄은 존재하지 않는다) |
+| `mcp/trading/order.js:73-78` 가드 | **`order.js:77`, `order.js:84`** (사이에 주석 블록이 들어와 이동) |
+| `mcp/trading/tests/order.test.js:309` 회귀 테스트 | **`tests/order.test.js:112-123`** (파일 전체가 198줄뿐이라 309줄은 존재하지 않는다) |
 | `backend/telegram_commands.py`의 `_ORDERABLE_STOCK_CODE_RE` | **`backend/stock_code.py:59`** (#140에서 공용 모듈로 이동. `telegram_commands.py:46`은 import만) |
 
 추가로 이슈의 "4. 회귀 테스트 반전"이 언급하지 않은 테스트가 있다: `backend/tests/test_stock_code.py`의 `TestOrderableStockCodeRe`(:163-200). 여기도 함께 다뤄야 한다.
@@ -318,13 +318,13 @@ pdno (str): [필수] 상품번호 (종목코드(6자리) , ETN의 경우 7자리
 | `backend/telegram_commands.py:994` | `_extract_stock_code` | `:1604` |
 | `backend/scheduler.py:113` | `STOCK_LINE_RE` | `:191` |
 | `backend/tests/test_telegram_commands.py:1213` | 주문 거절 회귀 테스트 | `:1399` |
-| `mcp-trading/index.js:218·223-224` | `getStockQuote` 진입·조회 파라미터 | `:221·226-227` |
-| `mcp-trading/index.js:245-246` | 두 번째 조회 파라미터 | `:248-249` |
-| `mcp-trading/index.js:441` | `getTodayDailyOrders` | `:483` |
-| `mcp-trading/index.js:536·542·557` | `order_stock` 툴 스키마·`resolveStock` | `:579·590·605` |
-| `mcp-trading/order.js:77` | **G1** 전용 메시지 가드 | `buildCashOrderBody()` 안 — **줄 번호로 가리키지 않는다** |
-| `mcp-trading/order.js:84` | **G2** 형태 가드 | 〃 (`ORDERABLE_STOCK_CODE_RE` 검사) |
-| `mcp-trading/tests/order.test.js:112-123` | `0001A0` 단일 회귀 테스트 | 공유 판정표를 읽는 테스트로 대체(6.4-1) |
+| `mcp/trading/index.js:218·223-224` | `getStockQuote` 진입·조회 파라미터 | `:221·226-227` |
+| `mcp/trading/index.js:245-246` | 두 번째 조회 파라미터 | `:248-249` |
+| `mcp/trading/index.js:441` | `getTodayDailyOrders` | `:483` |
+| `mcp/trading/index.js:536·542·557` | `order_stock` 툴 스키마·`resolveStock` | `:579·590·605` |
+| `mcp/trading/order.js:77` | **G1** 전용 메시지 가드 | `buildCashOrderBody()` 안 — **줄 번호로 가리키지 않는다** |
+| `mcp/trading/order.js:84` | **G2** 형태 가드 | 〃 (`ORDERABLE_STOCK_CODE_RE` 검사) |
+| `mcp/trading/tests/order.test.js:112-123` | `0001A0` 단일 회귀 테스트 | 공유 판정표를 읽는 테스트로 대체(6.4-1) |
 | `backend/tests/test_stock_code.py:163-200` | `TestOrderableStockCodeRe` | 같은 판정표를 함께 읽도록 확장(6.4-3) |
 
 **변경 없음(`93e9e82` 시점)** — `data/stocks.json`, `scripts/update_stock_master.py`, `stock-master.js`, `order-dedup.js`. 즉 4.1의 off-by-one, 776건 수치, 4.2 라의 오프셋은 그 시점까지 그대로 유효했다.
@@ -401,8 +401,8 @@ G1·G2·G3의 정규식을 형식별로 넓힌다. 이슈가 제안한 방식이
 
 **처리 결과 (Stage 0)**: 두 계층이 같은 정의에서 나오는지 강제하는 공유 판정표를 넣었다.
 
-- `mcp-trading/tests/fixtures/orderable_code_policy.json` — 형식별 대표 코드(2.2) × 플래그 on/off × 3값 판정(`pass` / `reject_unsupported` / `reject_shape`). 행마다 그 행이 표에 있는 이유를 `note`로 적어, 표가 정책을 인코딩만 하는 것이 아니라 설명하도록 했다. 이슈 #137의 `balance_report.json`이 만든 공유 픽스처 선례를 그대로 따른다.
-- `mcp-trading/tests/order.test.js`와 `backend/tests/test_stock_code.py`가 같은 파일을 읽어 각자 판정을 대조한다. 양쪽에 "표의 모든 행이 소비됐는가" 메타 테스트를 둬, 행을 추가했을 때 한쪽이 조용히 무시하지 못하게 했다.
+- `mcp/trading/tests/fixtures/orderable_code_policy.json` — 형식별 대표 코드(2.2) × 플래그 on/off × 3값 판정(`pass` / `reject_unsupported` / `reject_shape`). 행마다 그 행이 표에 있는 이유를 `note`로 적어, 표가 정책을 인코딩만 하는 것이 아니라 설명하도록 했다. 이슈 #137의 `balance_report.json`이 만든 공유 픽스처 선례를 그대로 따른다.
+- `mcp/trading/tests/order.test.js`와 `backend/tests/test_stock_code.py`가 같은 파일을 읽어 각자 판정을 대조한다. 양쪽에 "표의 모든 행이 소비됐는가" 메타 테스트를 둬, 행을 추가했을 때 한쪽이 조용히 무시하지 못하게 했다.
 - `order.js`의 정책 정규식 두 개는 `ORDERABLE_STOCK_CODE_RE` / `ORDERABLE_STOCK_CODE_ALNUM_RE`로 이름을 붙여 모듈 상수로 올렸다(내보내지는 않는다). 백엔드에는 플래그를 보지 않는 진입점 `is_orderable_stock_code_strict()`를 두어 `_ORDERABLE_STOCK_CODE_RE`가 모듈 밖으로 새지 않게 했다. 양쪽 다 정책 상수를 모듈 안에 두고, 일치 확인은 상수를 읽는 대신 가드 함수를 실제로 호출해 표와 대조하는 방식으로 한다.
 - `backend/tests/test_stock_code.py`가 node로 `order.js`의 `buildCashOrderBody()`를 실제 호출해 표와 대조한다. **CI에서는 JS 쪽만 바꾼 변경도 백엔드 스위트에서 red가 된다** — `.github/workflows/ci.yml`의 `backend-test` 잡이 `setup-node`로 Node 24를 못 박고, node가 없으면 그 잡이 skip이 아니라 fail한다(`CI` 환경변수 기준). node가 없는 로컬에서는 이 교차 확인만 skip되고 정책 커버리지 자체는 `mcp-trading` 스위트가 유지한다. `order.js` 소스를 정규식으로 긁는 방식은 쓰지 않았다 — 리터럴 표기가 조금만 달라져도 조용히 어긋난다.
 
@@ -438,7 +438,7 @@ TR은 `order.js:33-40`의 `selectCashOrderTrId`가 `demo`/`real` × `BUY`/`SELL`
 
 ### 6.4 회귀 테스트 처리 — 삭제 금지, 조건부화
 
-`mcp-trading/tests/order.test.js:112-123`을 **지우면 안 된다.** 지우면 "어떤 코드가 왜 막히는가"에 대한 명세가 사라져, 이후 가드가 잘못 넓어져도 아무것도 잡히지 않는다.
+`mcp/trading/tests/order.test.js:112-123`을 **지우면 안 된다.** 지우면 "어떤 코드가 왜 막히는가"에 대한 명세가 사라져, 이후 가드가 잘못 넓어져도 아무것도 잡히지 않는다.
 
 권장 처리:
 
@@ -464,7 +464,7 @@ TR은 `order.js:33-40`의 `selectCashOrderTrId`가 `demo`/`real` × `BUY`/`SELL`
 
 단계 1~3은 길이 상한(`{6,7}`)을 건드리지 않으므로 `backend/stock_code.py:40`의 `_STOCK_CODE_RE`나 8자 배제 로직에 영향이 없다. 단계 4부터 9자를 주문 범위에 넣으므로 **이때 처음으로 길이 상한이 바뀐다** — 이슈가 제안한 `/^[0-9A-Z]{6,9}$/`를 한 번에 적용하면 8자(마스터 0건)까지 열리므로, `(?:[0-9A-Z]{6,7}|[0-9A-Z]{9})` 형태를 써야 한다(`backend/stock_code.py:35-38`이 같은 이유로 이미 그렇게 돼 있다).
 
-각 단계에서 `mcp-trading/index.js:536,541`의 스키마 설명 문구("6자리 종목코드")도 함께 갱신해야 한다. *(단 이 조사 시점에 `index.js`는 다른 작업이 진행 중이므로 본 문서에서는 변경하지 않았다.)*
+각 단계에서 `mcp/trading/index.js:536,541`의 스키마 설명 문구("6자리 종목코드")도 함께 갱신해야 한다. *(단 이 조사 시점에 `index.js`는 다른 작업이 진행 중이므로 본 문서에서는 변경하지 않았다.)*
 
 ### 6.6 실패 시 대안
 

@@ -97,7 +97,7 @@ app = FastAPI(
 # is_authorized_api_call 하나가 판정한다.
 
 # 비브라우저 클라이언트가 키를 싣는 헤더 이름. NAT의 매매일지 도구
-# (finus_nat/src/nat_finus_nat/finus_api.py)와 curl·wscat이 이 경로를 쓴다.
+# (agents/src/nat_finus_nat/finus_api.py)와 curl·wscat이 이 경로를 쓴다.
 API_KEY_HEADER = "X-API-Key"
 # 브라우저가 키를 싣는 쿠키 이름 (#266 3단계). nginx가 문서 응답에 Set-Cookie로 내려
 # 주고(frontend/nginx.conf.template), 브라우저는 이후 same-origin 요청에 이 쿠키를

@@ -12,24 +12,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certifi
 
 COPY --from=ghcr.io/astral-sh/uv:0.9.28 /uv /uvx /bin/
 
-WORKDIR /opt/mcp-news
-COPY mcp-news/package*.json ./
+WORKDIR /opt/mcp/news
+COPY mcp/news/package*.json ./
 RUN npm ci --omit=dev
-COPY mcp-news ./
+COPY mcp/news ./
 
-WORKDIR /opt/mcp-trading
-COPY mcp-trading/package*.json ./
+WORKDIR /opt/mcp/trading
+COPY mcp/trading/package*.json ./
 RUN npm ci --omit=dev
-COPY mcp-trading ./
+COPY mcp/trading ./
 
-WORKDIR /opt/mcp-dart
-COPY mcp-dart/package*.json ./
+WORKDIR /opt/mcp/dart
+COPY mcp/dart/package*.json ./
 RUN npm ci --omit=dev
-COPY mcp-dart ./
+COPY mcp/dart ./
 
-ENV NEWS_MCP_DIR=/opt/mcp-news \
-    TRADING_MCP_DIR=/opt/mcp-trading \
-    DART_MCP_DIR=/opt/mcp-dart
+ENV NEWS_MCP_DIR=/opt/mcp/news \
+    TRADING_MCP_DIR=/opt/mcp/trading \
+    DART_MCP_DIR=/opt/mcp/dart
 
 WORKDIR /app
 
