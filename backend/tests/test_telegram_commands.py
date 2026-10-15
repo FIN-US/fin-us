@@ -45,7 +45,7 @@ from backend.telegram.handlers.texts import (
     UNRESOLVED_STOCK_WARNING,
 )
 from backend.telegram.poller import TelegramCommandPoller
-# 길이 상한과 말줄임 규칙은 출력 계층이 정의한다. telegram_commands는 더 이상 그것을
+# 길이 상한과 말줄임 규칙은 출력 계층이 정의한다. 핸들러 모듈은 더 이상 그것을
 # 다시 내보내지 않는다 — 재수출만 남은 임포트는 이름이 두 곳에 있다는 착시를 만든다.
 from backend.telegram.presentation import (
     REASONING_FOOTNOTE_MAX_CHARS,
@@ -1855,7 +1855,7 @@ def test_format_order_prompt_warns_when_name_equals_code():
     도달하지 않는다(#151) — 그래도 마스터에 name == code인 항목이 생기는 경우를 대비한
     방어선이라면 실제로 경고를 붙이는지 확인할 수 있어야 한다.
 
-    뮤테이션: telegram_commands._format_order_prompt의
+    뮤테이션: handlers/orders.py _format_order_prompt의
     `if order.stock_name == order.stock_code:` 분기를 제거하면 이 단정이 red가 된다.
     """
     notifier = FakeNotifier()
@@ -2693,7 +2693,7 @@ def test_poller_default_handler_uses_order_gateway_and_trade_recorder_factories(
     recorder = object()
     notifier = FakeNotifier()
 
-    monkeypatch.setattr("backend.telegram.poller._create_order_gateway", lambda: gateway)
+    monkeypatch.setattr("backend.telegram.handlers.base._create_order_gateway", lambda: gateway)
     monkeypatch.setattr("backend.telegram.handlers.base._create_trade_recorder", lambda: recorder)
 
     poller = TelegramCommandPoller(notifier=notifier)
@@ -2709,7 +2709,7 @@ def test_poller_explicit_handler_does_not_call_dependency_factories(monkeypatch)
     def fail_factory():
         raise AssertionError("factory must not be called for explicit handler")
 
-    monkeypatch.setattr("backend.telegram.poller._create_order_gateway", fail_factory)
+    monkeypatch.setattr("backend.telegram.handlers.base._create_order_gateway", fail_factory)
     monkeypatch.setattr("backend.telegram.handlers.base._create_trade_recorder", fail_factory)
 
     poller = _make_poller(notifier, handler=handler)
@@ -5067,8 +5067,8 @@ async def test_settled_send_gives_up_at_the_wall_clock_bound(monkeypatch, caplog
 
     notifier = HangingNotifier()
     handler = TelegramCommandHandler(notifier=notifier)
-    # 상한을 읽는 곳은 telegram_notifier다 (PR #327 리뷰). telegram_commands는 그 이름을
-    # 다시 내보내기만 하므로, 여기를 패치하면 상한은 실제 20초로 남고 테스트는 통과한 채
+    # 상한을 읽는 곳은 telegram_notifier다 (PR #327 리뷰). 핸들러 모듈이 그 이름을
+    # 다시 내보내던 시절에는 거기를 패치하면 상한은 실제 20초로 남고 테스트는 통과한 채
     # 20초를 벽시계로 문다 — 아래 elapsed 단언이 그 어긋남을 실패로 만든다.
     monkeypatch.setattr(telegram_notifier_module, "SETTLED_SEND_TIMEOUT_SECONDS", 0.05)
 
@@ -5859,7 +5859,7 @@ class _FillSendBlocker(FakeNotifier):
 async def test_confirmed_order_is_not_reexecuted_when_restart_lands_in_the_fill_send(monkeypatch):
     """체결 성공 후 결과 전송 도중 취소돼도 재시작 뒤 같은 update가 재실행되지 않는다 (#269).
 
-    창의 정체: place_order 성공(telegram_commands.py의 _handle_confirm)과 offset 영속화
+    창의 정체: place_order 성공(handlers/orders.py의 _handle_confirm)과 offset 영속화
     사이에 결과 전송이 들어앉아 있었다. 그 사이 SIGTERM이 오면 offset이 전진하지 못한 채
     죽고, Telegram이 같은 update를 재배달하며, claim(GETDEL)이 이미 주문을 소비했으므로
     재실행은 "확정할 대기 주문이 없습니다"로 끝났다 — 체결된 주문을 미체결로 오표시했다.

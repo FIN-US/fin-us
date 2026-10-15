@@ -122,7 +122,7 @@ _GENERIC_VERDICT_REASON = "검증자가 추가 사유를 남기지 않았습니�
 class ProposalTrigger:
     """제안을 요청한 계기.
 
-    두 호출부가 같은 함수로 들어온다 — 텔레그램 수동 요청(``telegram_commands._handle_advise``)과
+    두 호출부가 같은 함수로 들어온다 — 텔레그램 수동 요청(``telegram.handlers.orders._handle_advise``)과
     스케줄러 룰 트리거(``scheduler.monitor.run_rule_triggered_proposal``, #314)다. 냉각 키가
     종목코드+룰 단위라, 룰이 없는 수동 요청과 룰 기반 자동 제안이 서로의 냉각을 잡아먹지 않는다.
 
@@ -702,7 +702,7 @@ def load_daily_usage(session_factory: Callable[[], Any], now: datetime) -> Daily
     #     ODNO·ORD_TMD뿐이라(mcp/trading/order.js formatOrderResult) "체결가를 되받는"
     #     경로 자체가 존재하지 않는다.
     #   - 그래서 두 주문 경로 모두 시장가에 **주문 시점 현재가**를 기록용 참고단가로
-    #     싣는다(telegram_commands._handle_order_command, run_order_assist).
+    #     싣는다(telegram.handlers.orders._handle_order_command, run_order_assist).
     #   - 그 현재가마저 읽지 못하면 참고단가 없이 주문이 나가고 여기에 0이 남는다.
     #     그때는 이 가드가 그대로 작동해 /advise가 usage_failed로 막힌다. 한도가
     #     조용히 넓어지는 것보다 /advise가 막히는 쪽이 낫다는 판단이다(#309).
@@ -1036,7 +1036,7 @@ def format_rejection_message(
 async def _drop_expired_pending_order(pending_orders: Any, chat_id: str, now: datetime) -> None:
     """앱 레벨 만료(``ORDER_EXPIRES_AFTER``)가 지난 대기 주문을 지운다.
 
-    telegram_commands의 동명 메서드와 같은 판정이다. 두 곳이 같은 규칙을 쓰는 것이
+    telegram.handlers.orders의 동명 메서드와 같은 판정이다. 두 곳이 같은 규칙을 쓰는 것이
     핵심이라 만료 창(ORDER_EXPIRES_AFTER)은 공유 상수 하나에서 읽고, tz 없는 값의
     해석도 양쪽 모두 KST로 맞춘다.
 

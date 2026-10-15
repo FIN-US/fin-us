@@ -136,7 +136,7 @@ _FILTERED_SIGNAL_ERROR_LOG_PERIOD = 20
 # _handle_confirm이 그대로 소비한다 — 확정 버튼 경로가 수동 /advise와 완전히 같다.
 #
 # 프로세스당 하나만 만든다. RedisPendingOrderStore는 클라이언트 하나를 쥐고 그 커넥션
-# 풀을 재사용하는데, 트리거마다 새로 만들면 풀이 쌓인다(telegram_commands의
+# 풀을 재사용하는데, 트리거마다 새로 만들면 풀이 쌓인다(telegram.handlers.base의
 # _create_pending_order_store가 핸들러당 한 번만 불리는 것과 같은 이유다).
 _rule_pending_order_store: PendingOrderStore | None = None
 
@@ -151,7 +151,7 @@ def _default_pending_order_store() -> PendingOrderStore:
 async def _sleep(seconds: float) -> None:
     """테스트가 전역 ``asyncio.sleep`` 대신 이 모듈의 이름만 대체할 수 있게 하는 간접층.
 
-    telegram_commands._sleep과 같은 이유다 — 확정 전송의 재시도 백오프(최대 13초)를
+    telegram.handlers.base._sleep과 같은 이유다 — 확정 전송의 재시도 백오프(최대 13초)를
     실제로 기다리는 테스트는 그 시간을 그대로 벽시계로 문다.
     """
     await asyncio.sleep(seconds)
@@ -609,7 +609,7 @@ async def run_rule_triggered_proposal(
     """룰을 만족한 신호 중 한 건으로 주문 제안을 만든다 (#314).
 
     이 함수가 하는 일은 문턱 검사, 호출, 결과 전달이 전부다. 제안·한도 판정·검증·대기 주문
-    저장은 전부 order_assist.run_order_assist 안에 있다 — telegram_commands._handle_advise가
+    저장은 전부 order_assist.run_order_assist 안에 있다 — telegram.handlers.orders._handle_advise가
     같은 이유로 그렇게 쓴다. 규칙이 두 파일에 나뉘면 "어느 쪽이 최종 판정인가"가 흐려진다.
 
     **주문은 나가지 않는다.** 승인 결과로 만들어지는 것은 60초 확정 버튼이 달린 대기 주문

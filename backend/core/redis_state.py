@@ -83,7 +83,7 @@ _CONDITIONAL_WRITE_ATTEMPTS = 3
 # redis와 무관한 명령까지 무응답이 된다. #251은 폴러 상태 저장소 호출만 asyncio.wait_for로
 # 좁게 감쌌고, 여기는 클라이언트 레벨이라 그 밖의 모든 redis 호출을 함께 덮는다.
 #
-# 값은 telegram_commands.STATE_STORE_TIMEOUT_SECONDS(3.0)에 맞췄고 근거도 같다: 정상 redis는
+# 값은 telegram.poller.STATE_STORE_TIMEOUT_SECONDS(3.0)에 맞췄고 근거도 같다: 정상 redis는
 # 1ms 수준이라 3초에 닿는 것 자체가 이미 비정상이고, docker-compose에서 가장 흔한 장애인
 # 컨테이너 다운은 즉시 ECONNREFUSED를 내므로 이 경로를 타지 않는다.
 #
@@ -298,10 +298,10 @@ class TelegramPollerFailure:
     """poison 하나의 재시도 예산 중 재시작을 넘겨야 하는 부분 (#350).
 
     ``first_wall_at``은 **벽시계**(time.time())다. 폴러가 예산 경과를 재는 시계는 monotonic인데
-    (telegram_commands._now), monotonic의 원점은 프로세스마다 다르므로 그 값을 그대로
+    (telegram.poller의 TelegramCommandPoller._now), monotonic의 원점은 프로세스마다 다르므로 그 값을 그대로
     저장하면 재시작 뒤 비교 자체가 무의미하다. 재시작을 넘길 수 있는 시간 좌표는 벽시계뿐이라
     영속화 경계에서만 벽시계를 쓰고, 복원 시 다시 monotonic 기준으로 환산한다
-    (telegram_commands.TelegramCommandPoller._restore_state).
+    (telegram.poller.TelegramCommandPoller._restore_state).
 
     그 대가는 벽시계의 점프다. 뒤로 뛰면 복원 측이 경과를 0으로 접으며 앵커를 다시 찍고
     (= 예산이 한 번 더 지급, #350 이전 동작), 앞으로 뛰면 그만큼 일찍 폐기된다. 예산 창이
@@ -398,7 +398,7 @@ class RedisTelegramPollerStore:
     RedisPendingOrderStore의 fail-closed와 갈리는 근거는 "redis가 죽었을 때 무엇이 중복될 수
     있는가"다. 답은 **아무것도 없다**: /confirm의 claim과 /buy의 set_if_absent가 그 상태에서는
     보호하는 게 아니라 예외를 던지고, 호출부가 그것을 "주문 저장소 오류"로 사용자에게 돌려주며
-    끝낸다(telegram_commands.py의 _handle_confirm·_handle_buy). 즉 redis 장애 중에는 주문이
+    끝낸다(telegram/handlers/orders.py의 _handle_confirm·_handle_order_command). 즉 redis 장애 중에는 주문이
     생성되지도 체결되지도 못하므로 중복될 금전 부수효과 자체가 존재하지 않고, 남는 중복 위험은
     LLM 재호출과 중복 메시지뿐이다. 반면 여기서 fail-closed를 택하면 redis 장애가 곧 텔레그램
     명령 전면 중단이 된다.

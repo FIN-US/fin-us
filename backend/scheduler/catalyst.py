@@ -124,7 +124,7 @@ async def _telegram_user_level(state: Any = None) -> str:
 
     ``state``가 있으면 그걸 쓰고(이미 열린 연결을 한 번 더 열 이유가 없다) 없으면 직접
     연다. 실패는 삼킨다 — 수준은 다른 메시지의 곁다리 정보이고, 못 읽었다고 브리핑 자체를
-    거르면 부가 기능이 본 기능을 잡아먹는다 (telegram_commands._current_level과 같은 판단).
+    거르면 부가 기능이 본 기능을 잡아먹는다 (telegram.handlers.base._current_level과 같은 판단).
     """
     try:
         if state is not None:

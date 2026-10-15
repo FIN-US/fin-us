@@ -51,6 +51,21 @@ from backend.trading.orders import McpTradingOrderGateway, OrderType, TradeLedge
 
 logger = logging.getLogger(__name__)
 
+# 확정 전송의 재시도 상수(SETTLED_SEND_*)와 루프(send_text_settled)는 telegram_notifier로
+# 옮겼다 (PR #327 리뷰). 스케줄러의 자동 제안(#314)이 같은 재시도를 써야 하는데, 핸들러
+# 메서드로 두면 그쪽에서 부를 수 없어 한쪽만 단발 전송이 되고 같은 429에 한쪽 메시지만
+# 조용히 버려진다.
+#
+# 핸들러 모듈은 SETTLED_SEND_*를 다시 내보내지 않는다. 값을 읽는 것은 telegram_notifier
+# 안이므로 테스트가 상한을 줄이려면 telegram_notifier 쪽을 패치해야 하며, 잘못된 대상을
+# 잡으면 test_settled_send_gives_up_at_the_wall_clock_bound의 elapsed 단언이 잡는다.
+
+# 각주 상수(REASONING_FOOTNOTE_*)와 라벨 표(AGENT_LABELS·TOOL_LABELS), 각주 조립 자체는
+# #297에서 presentation으로 옮겼다. 동작은 그대로다 — 옮긴 이유는 나가는 문장을 조립하는
+# 지점이 하나여야 용어 각주와의 순서·길이 예산을 한 곳에서 정할 수 있기 때문이다.
+# 핸들러 모듈은 그 이름들을 다시 내보내지 않는다. 재수출만 남은 임포트는 정의가 두 곳에 있다는
+# 착시를 만들고, 정적 검사에는 미사용 임포트로 보인다 (#297 자가리뷰).
+
 
 class TelegramSendError(RuntimeError):
     """텔레그램 전송 실패. handle_update가 던지는 예외 중 유일하게 update와 무관하다.

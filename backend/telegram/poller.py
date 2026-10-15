@@ -10,13 +10,7 @@ from typing import Any, Callable
 from backend.core.redis_state import TelegramPollerFailure, TelegramPollerState, TelegramPollerStore
 from backend.telegram.commands import TelegramCommandHandler
 from backend.telegram.handlers import base as handler_base
-from backend.telegram.handlers.base import (
-    _create_order_gateway,
-    _create_pending_order_store,
-    _create_poller_state_store,
-    _update_settled_hook,
-    TelegramSendError,
-)
+from backend.telegram.handlers.base import _update_settled_hook, TelegramSendError
 from backend.telegram.handlers.texts import TELEGRAM_BOT_COMMANDS
 from backend.telegram.notifier import fetch_telegram_api, telegram_notifier, TelegramPollerNotifier
 
@@ -84,16 +78,6 @@ UPDATE_LABEL_LIMIT = 40
 STATE_STORE_TIMEOUT_SECONDS = 3.0
 
 
-# 확정 전송의 재시도 상수(SETTLED_SEND_*)와 루프(send_text_settled)는 telegram_notifier로
-# 옮겼다 (PR #327 리뷰). 스케줄러의 자동 제안(#314)이 같은 재시도를 써야 하는데, 핸들러
-# 메서드로 두면 그쪽에서 부를 수 없어 한쪽만 단발 전송이 되고 같은 429에 한쪽 메시지만
-# 조용히 버려진다. 이름은 위 import로 여기서 계속 읽을 수 있다.
-#
-# 다만 **여기 있는 이름을 monkeypatch해도 상한은 바뀌지 않는다** — 값을 읽는 것은
-# telegram_notifier 안이고 이쪽은 임포트 시점에 묶인 별개 바인딩이다. 테스트가 상한을
-# 줄이려면 telegram_notifier 쪽을 패치해야 하며, 잘못된 대상을 잡으면
-# test_settled_send_gives_up_at_the_wall_clock_bound의 elapsed 단언이 잡는다.
-
 # getUpdates 배치 크기. 명시하지 않으면 Telegram 기본값이 100이라, 배치 전체가 settled
 # 전송에 닿으면 한 루프의 점유가 100 × SETTLED_SEND_TIMEOUT_SECONDS까지 늘어나 사실상
 # 상한이 없어진다. 배치를 작게 끊으면 최악이 유계가 된다 (PR #253 2차 리뷰).
@@ -102,12 +86,6 @@ STATE_STORE_TIMEOUT_SECONDS = 3.0
 # 성공 경로는 더 이상 settled 전송을 쓰지 않는다. 남은 settled 경로(/buy 프롬프트,
 # /cancel, /confirm 403·불명확, /earnings·자연어)는 그대로라 이 상한은 계속 필요하다.
 GET_UPDATES_LIMIT = 10
-
-# 각주 상수(REASONING_FOOTNOTE_*)와 라벨 표(AGENT_LABELS·TOOL_LABELS), 각주 조립 자체는
-# #297에서 presentation으로 옮겼다. 동작은 그대로다 — 옮긴 이유는 나가는 문장을 조립하는
-# 지점이 하나여야 용어 각주와의 순서·길이 예산을 한 곳에서 정할 수 있기 때문이다.
-# 이 모듈은 그 이름들을 다시 내보내지 않는다. 재수출만 남은 임포트는 정의가 두 곳에 있다는
-# 착시를 만들고, 정적 검사에는 미사용 임포트로 보인다 (#297 자가리뷰).
 
 _telegram_command_task: asyncio.Task | None = None
 
@@ -203,9 +181,9 @@ class TelegramCommandPoller:
         if handler is None:
             handler = TelegramCommandHandler(
                 notifier=notifier,
-                order_gateway=_create_order_gateway(),
+                order_gateway=handler_base._create_order_gateway(),
                 trade_recorder=handler_base._create_trade_recorder(),
-                pending_order_store=_create_pending_order_store(),
+                pending_order_store=handler_base._create_pending_order_store(),
             )
         self.handler = handler
         # offset은 redis에 영속화된다 (#248). 인메모리였을 때는 재시작이 offset을 처음으로
@@ -217,7 +195,7 @@ class TelegramCommandPoller:
         # 실행이 없어졌다. 남는 창은 handle_update 한 번의 실행 시간뿐이라 offset만 저장한다
         # (#270 → #259).
         self.state_store: TelegramPollerStore = (
-            state_store if state_store is not None else _create_poller_state_store()
+            state_store if state_store is not None else handler_base._create_poller_state_store()
         )
         self.offset: int | None = None
         # update_id -> 재시도 예산. offset과 함께 영속화된다 (#350).

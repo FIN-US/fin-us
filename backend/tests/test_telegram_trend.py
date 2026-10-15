@@ -14,17 +14,11 @@ from backend.telegram.commands import TelegramCommandHandler
 from backend.telegram.handlers.texts import MARKET_TREND_DETAIL_CALLBACK
 
 from backend.telegram.handlers.trend import (
-
     _flow_streak,
-
     _format_trend_detail,
-
     _format_trend_summary,
-
     _parse_investor_flows,
-
     trend_detail_button_text,
-
 )
 
 # mcp/trading/index.js의 getInvestorTrading이 실제로 만드는 모양. 이 문자열이 곧 우리가

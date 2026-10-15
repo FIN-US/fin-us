@@ -55,7 +55,7 @@ backend를 COPY하지 않으므로(`agents/Dockerfile`) import로 공유할 수 
   `finus_agents/pii_guard.py`가 같은 일을 한다 (#231).
 - Telegram 경로 중 **LLM을 아예 거치지 않고 원값을 그대로 사용자에게 표시하는** 것들
   (예: `/balance`)은 이 계층이 손댈 지점이 없다 (#232에서 다룬다). 반대로
-  `telegram/commands.py`의 `_handle_chat_fallback`과 `/earnings`(`_handle_earnings`)는
+  `telegram/commands.py`의 `_handle_chat_fallback`과 `telegram/handlers/lookup.py`의 `/earnings`(`_handle_earnings`)는
   둘 다 `llm_runner("nat", ...)`를 부르고, `llm_runner`의 기본값이 `services.llm_chat`
   이므로(`TelegramCommandHandler.__init__`의 기본 인자) 이 계층을 탄다 —
   "Telegram 명령은 이 경로를 타지 않는다"는 진술은 사실이 아니다.
@@ -422,7 +422,7 @@ _LABELED_AMOUNT_RE = re.compile(
 #
 # 리뷰에서 제안된 "잔고 리포트의 '· ' 앵커링"(즉 "\)\s*·\s*[\d,]+주"만 마스킹)은
 # 채택하지 않았다. 보유 수량이 프롬프트에 들어가는 경로가 잔고 리포트 하나가 아니기
-# 때문이다 — backend/telegram_commands.py의 _handle_chat_fallback은 텔레그램
+# 때문이다 — backend/telegram/commands.py의 _handle_chat_fallback은 텔레그램
 # 사용자 원문("삼성전자 3주 보유중인데 팔아야 할까요?")을 가공 없이 llm_chat으로 보내며,
 # 앵커링은 이 경로의 실제 보유 수량을 통째로 놓친다. F-17의 취지상 유출을 만드는
 # 과소탐보다 품질 문제에 그치는 과탐을 택한다.
@@ -492,7 +492,7 @@ class _Counter:
       쪽의 6과 다른 값이라 키 이름만으로는 구분되지 않는다).
     - conversation_id는 호출 간 재사용된다: backend/services.py의
       `_nat_conversation_id`는 "{trigger_source}:{stock}:{today}"(하루에 같은 종목을
-      여러 번 분석하면 동일), backend/telegram_commands.py의 `_handle_chat_fallback`은
+      여러 번 분석하면 동일), backend/telegram/commands.py의 `_handle_chat_fallback`은
       f"telegram:{chat_id}"(그 사용자의 모든 메시지가 영구히 같은 스레드).
 
     따라서 nonce가 없으면 다음이 성립한다:

@@ -87,7 +87,7 @@ const DAILY_CCLD_TIME_BUDGET_MS = 90_000;
 //   인용하지 못했다 — 반공식, 페이지 간 대기 기본값을 바꿀 근거로 쓰기엔 부족하다고 판단.
 // - 모의투자의 구체적 TPS 수치, 제한 단위(계좌/앱키/TR ID 중 무엇인지)는 공식 문서에서
 //   끝내 확인하지 못했다 — 미확인.
-// backend/telegram_commands.py의 `/watch list`가 종목당 1.1초를 쓰지만 git blame(742fa8a,
+// backend/telegram/handlers/lookup.py의 `/watch list`가 종목당 1.1초를 쓰지만 git blame(742fa8a,
 // 커밋 메시지·코드 모두)에도 그 값의 산출 근거가 없어 그대로 가져다 쓸 근거가 못 된다
 // (다른 TR이기도 하다) — 이 값도 미확인으로 남긴다.
 //
