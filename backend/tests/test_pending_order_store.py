@@ -28,10 +28,10 @@ from backend.core.redis_state import (
     RedisPendingOrderStore,
 )
 from backend.trading.orders import OrderExecutionResult, PendingOrder
-from backend.telegram.commands import (
+from backend.telegram.commands import TelegramCommandHandler
+from backend.telegram.handlers.texts import (
     CONFIRM_AUTO_PROPOSAL_BUTTON_ONLY_TEXT,
     CONFIRM_BEFORE_PROMPT_TEXT,
-    TelegramCommandHandler,
 )
 
 KST = ZoneInfo("Asia/Seoul")
@@ -485,7 +485,7 @@ async def test_cancel_after_ttl_expiry_gives_explicit_error():
 @pytest.mark.asyncio
 async def test_confirm_button_after_ttl_expiry_gives_stale_callback_text():
     """인라인 버튼 클릭 시 TTL 만료(키 없음)이면 ORDER_STALE_CALLBACK_TEXT 응답."""
-    from backend.telegram.commands import ORDER_STALE_CALLBACK_TEXT
+    from backend.telegram.handlers.texts import ORDER_STALE_CALLBACK_TEXT
 
     redis = FakeRedis()
     store = RedisPendingOrderStore(redis)

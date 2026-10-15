@@ -40,7 +40,8 @@ from backend.trading.order_assist import (
     run_order_assist,
 )
 from backend.core.redis_state import InMemoryPendingOrderStore, RedisKeys
-from backend.telegram.commands import ADVISE_COMMAND_HELP, TelegramCommandHandler
+from backend.telegram.commands import TelegramCommandHandler
+from backend.telegram.handlers.texts import ADVISE_COMMAND_HELP
 from backend.trading.orders import ORDER_EXPIRES_AFTER
 
 KST = ZoneInfo("Asia/Seoul")
@@ -1312,7 +1313,7 @@ def _advise_handler(monkeypatch, result, *, captured=None):
             captured.append((trigger, kwargs))
         return result
 
-    monkeypatch.setattr("backend.telegram.commands.run_order_assist", fake_run)
+    monkeypatch.setattr("backend.telegram.handlers.orders.run_order_assist", fake_run)
 
     async def no_progress(text):
         return None
@@ -1408,7 +1409,7 @@ async def test_advise_failure_is_reported_not_swallowed(monkeypatch):
     async def boom(trigger, **kwargs):
         raise RuntimeError("NAT 연결 실패")
 
-    monkeypatch.setattr("backend.telegram.commands.run_order_assist", boom)
+    monkeypatch.setattr("backend.telegram.handlers.orders.run_order_assist", boom)
 
     await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/advise 삼성전자"}})
 

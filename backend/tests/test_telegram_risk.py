@@ -11,11 +11,11 @@ import pytest
 
 import backend.ai.services as services
 import backend.ai.user_preferences as user_preferences
-from backend.telegram.commands import (
+from backend.telegram.commands import TelegramCommandHandler
+from backend.telegram.handlers.texts import (
     RISK_COMMAND_HELP,
     RISK_MEMORY_DISABLED_TEXT,
     RISK_ONBOARDING_QUESTION,
-    TelegramCommandHandler,
 )
 from backend.tests.test_telegram_level import FakeNotifier, FakeState, _press, _send
 from backend.ai.user_preferences import (

@@ -27,13 +27,18 @@ from typing import Any
 
 import pytest
 
-from backend.telegram.commands import (
+from backend.telegram.commands import TelegramCommandHandler
+
+from backend.telegram.handlers.base import OrderReading, _telegram_command_parts
+
+from backend.telegram.handlers.texts import (
+
     ADVISE_COMMAND_HELP,
+
     BUY_COMMAND_HELP,
+
     SELL_COMMAND_HELP,
-    OrderReading,
-    TelegramCommandHandler,
-    _telegram_command_parts,
+
 )
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]

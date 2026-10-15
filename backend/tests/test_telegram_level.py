@@ -9,18 +9,15 @@ from types import SimpleNamespace
 
 import pytest
 
-import backend.telegram.commands as telegram_commands
+import backend.telegram.handlers.base as tg_base
 from backend.telegram.presentation import (
     LEVEL_BEGINNER,
     LEVEL_INTERMEDIATE,
     REASONING_FOOTNOTE_SEPARATOR,
     TERM_FOOTNOTE_MARK,
 )
-from backend.telegram.commands import (
-    LEVEL_COMMAND_HELP,
-    LEVEL_ONBOARDING_QUESTION,
-    TelegramCommandHandler,
-)
+from backend.telegram.commands import TelegramCommandHandler
+from backend.telegram.handlers.texts import LEVEL_COMMAND_HELP, LEVEL_ONBOARDING_QUESTION
 from backend.ai.services import NatAnswer, NatToolUse
 
 
@@ -28,9 +25,9 @@ from backend.ai.services import NatAnswer, NatToolUse
 def _clear_level_cache():
     # 수준 캐시는 모듈 수준이다. 비우지 않으면 앞 테스트가 저장한 값이 다음 테스트의
     # 저장소를 덮어써, 통과 여부가 실행 순서에 달리게 된다.
-    telegram_commands.reset_level_cache()
+    tg_base.reset_level_cache()
     yield
-    telegram_commands.reset_level_cache()
+    tg_base.reset_level_cache()
 
 
 class FakeNotifier:
