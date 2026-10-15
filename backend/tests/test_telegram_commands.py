@@ -6268,7 +6268,7 @@ async def test_late_text_confirm_does_not_execute_a_pending_order_created_after_
     사용자 주문으로 본다(test_text_confirm_not_after_the_prompt_is_refused_and_keeps_the_order,
     test_late_text_confirm_with_redis_store_keeps_the_newer_order).
     """
-    from backend.scheduler import run_rule_triggered_proposal
+    from backend.scheduler.monitor import run_rule_triggered_proposal
 
     clock = [_ORDER_TIME]
     notifier = FakeNotifier()
@@ -6454,7 +6454,7 @@ async def test_text_confirm_in_the_window_before_the_prompt_id_is_recorded_is_no
     사용자 주문의 fail-closed는 test_text_confirm_does_not_execute_an_order_whose_prompt_id_is_unknown이
     본다.
     """
-    from backend.scheduler import run_rule_triggered_proposal
+    from backend.scheduler.monitor import run_rule_triggered_proposal
 
     notifier = _BlockingPromptNotifier()
     gateway = FakeOrderGateway()
@@ -6510,7 +6510,7 @@ async def test_text_confirm_released_from_the_offline_queue_does_not_execute_an_
     이 테스트가 잡는 mutation: confirmable_by_text에서 출처 조건 제거(prompted_before만 남김),
     _auto_proposal_creating이 쓰는 order_origin_for를 상수 user_command로 고정.
     """
-    from backend.scheduler import run_rule_triggered_proposal
+    from backend.scheduler.monitor import run_rule_triggered_proposal
 
     clock = [_ORDER_TIME]
     notifier = FakeNotifier()

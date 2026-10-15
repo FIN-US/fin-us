@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from sqlmodel import Session, SQLModel, create_engine
 
-from backend import scheduler as scheduler_module
+from backend.scheduler import trade_notification as scheduler_trade_notification
 from backend.telegram.delivery_alarm import delivery_metrics
 from backend.core.models import TradeHistory
 from backend.telegram.presentation import split_for_telegram
@@ -220,7 +220,7 @@ def _pending(trade_id, *, price=75000):
 
 
 async def _run_task(repo, notifier):
-    await scheduler_module.trade_notification_task(
+    await scheduler_trade_notification.trade_notification_task(
         repo=repo,
         notifier=notifier,
         now_factory=lambda: NOW,
@@ -301,8 +301,8 @@ async def test_batch_is_capped_so_one_cycle_cannot_flood_the_chat():
 
     await _run_task(repo, notifier)
 
-    assert repo.limits == [scheduler_module.TRADE_NOTIFY_BATCH_LIMIT]
-    assert len(notifier.messages) == scheduler_module.TRADE_NOTIFY_BATCH_LIMIT
+    assert repo.limits == [scheduler_trade_notification.TRADE_NOTIFY_BATCH_LIMIT]
+    assert len(notifier.messages) == scheduler_trade_notification.TRADE_NOTIFY_BATCH_LIMIT
 
 
 @pytest.mark.asyncio
@@ -350,7 +350,7 @@ def fake_redis_state(monkeypatch):
         async def _factory():
             yield state
 
-        monkeypatch.setattr(scheduler_module, "redis_state", _factory)
+        monkeypatch.setattr("backend.scheduler.deps.redis_state", _factory)
         return state
 
     return _install
@@ -368,14 +368,14 @@ async def test_task_takes_a_short_lived_lock_and_releases_it(fake_redis_state):
     repo = FakeRepo([_pending(7)])
     notifier = FakeNotifier()
 
-    await scheduler_module.trade_notification_task(
+    await scheduler_trade_notification.trade_notification_task(
         repo=repo, notifier=notifier, now_factory=lambda: NOW
     )
 
     assert state.acquired == [
-        ("trade_notification", scheduler_module.TRADE_NOTIFY_LOCK_TTL_SECONDS)
+        ("trade_notification", scheduler_trade_notification.TRADE_NOTIFY_LOCK_TTL_SECONDS)
     ]
-    assert scheduler_module.TRADE_NOTIFY_LOCK_TTL_SECONDS < SCHEDULER_LOCK_TTL_SEC
+    assert scheduler_trade_notification.TRADE_NOTIFY_LOCK_TTL_SECONDS < SCHEDULER_LOCK_TTL_SEC
     # 잡을 실제로 돌았고, 끝나면 락을 놓는다.
     assert repo.marked == [7]
     assert state.released == [(RedisKeys().scheduler_lock("trade_notification"), "token")]
@@ -388,7 +388,7 @@ async def test_task_skips_when_another_worker_holds_the_lock(fake_redis_state):
     repo = FakeRepo([_pending(7)])
     notifier = FakeNotifier()
 
-    await scheduler_module.trade_notification_task(
+    await scheduler_trade_notification.trade_notification_task(
         repo=repo, notifier=notifier, now_factory=lambda: NOW
     )
 
@@ -441,7 +441,7 @@ class RedeliveryBlockedNotifier(FakeNotifier):
 
 
 async def _run_task_at(repo, notifier, at):
-    await scheduler_module.trade_notification_task(
+    await scheduler_trade_notification.trade_notification_task(
         repo=repo,
         notifier=notifier,
         now_factory=lambda: NOW + at,
@@ -464,7 +464,7 @@ async def test_task_alarms_once_when_the_head_keeps_failing(caplog):
             await _run_task_at(repo, notifier, timedelta(minutes=minutes))
         assert _alarms(notifier) == []
 
-        await _run_task_at(repo, notifier, scheduler_module.TRADE_NOTIFY_STALL_ALARM_AFTER)
+        await _run_task_at(repo, notifier, scheduler_trade_notification.TRADE_NOTIFY_STALL_ALARM_AFTER)
         await _run_task_at(repo, notifier, timedelta(minutes=11))
         await _run_task_at(repo, notifier, timedelta(minutes=30))
 
@@ -505,7 +505,7 @@ async def test_task_tells_the_user_when_a_stalled_trade_is_given_up():
 
     # 체결(NOW - 10분) 후 24시간이 지나 목록에서 빠졌다.
     repo.pending = []
-    await _run_task_at(repo, notifier, scheduler_module.TRADE_NOTIFY_MAX_AGE)
+    await _run_task_at(repo, notifier, scheduler_trade_notification.TRADE_NOTIFY_MAX_AGE)
 
     alarms = _alarms(notifier)
     assert len(alarms) == 2

@@ -7,7 +7,7 @@ mcp/trading/data/stocks.json`으로 직접 확인할 수 있다.
 import json
 import pathlib
 import unittest
-from backend.scheduler import extract_stocks_from_balance, is_balance_truncated
+from backend.scheduler.portfolio import extract_stocks_from_balance, is_balance_truncated
 
 # 이슈 #137: mcp-trading·backend 공유 픽스처.
 # formatBalanceReport() 출력 계약을 한 파일로 고정해, JS 쪽만 갱신하고 Python 픽스처가
@@ -351,7 +351,7 @@ class TestSharedFixture(unittest.TestCase):
         크로스모듈 import 가 제거되거나 test_parse_balance_holdings_with_real_fixture 가
         삭제되더라도, 이 테스트가 avg_price=0.0 회귀를 잡습니다.
         """
-        from backend.scheduler import _parse_balance_holdings
+        from backend.scheduler.portfolio import _parse_balance_holdings
 
         case = _FIXTURE["normal"]
         holdings = _parse_balance_holdings(case["expected_text"])

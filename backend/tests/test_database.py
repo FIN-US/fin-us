@@ -7,7 +7,7 @@ from sqlmodel.pool import StaticPool
 
 from backend.main import app, get_session
 from backend.core.models import Diary, AgentReport, Portfolio, CatalystEvent
-from backend.scheduler import PRICE_FRESHNESS_TTL
+from backend.scheduler.portfolio import PRICE_FRESHNESS_TTL
 
 # 이슈 #196: current_price는 값과 **나이**가 함께 있어야 "안다"가 된다. 아래 테스트들이
 # 검증하려는 것은 신선도 게이트가 아니라 매핑·집계이므로, 나이는 확실히 신선한 고정
@@ -313,7 +313,7 @@ def test_get_visualization_portfolio_price_known_honours_freshness_ttl(
     - main이 price_known을 다시 `current_price is not None`으로 되돌리면 세 행이
       모두 True가 된다.
     """
-    from backend.scheduler import is_price_fresh
+    from backend.scheduler.portfolio import is_price_fresh
 
     # 상수 자체를 고정한다. 아래 경계 단언은 PRICE_FRESHNESS_TTL을 기호로 쓰므로
     # 상수를 넓혀도 함께 움직여 통과해 버린다 — 값과 그 근거(주기의 3배)를 여기서

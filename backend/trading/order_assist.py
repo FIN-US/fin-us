@@ -477,7 +477,7 @@ def parse_snapshot(
     보유량만 예외다. 잔고 섹션 마커가 있는데 해당 종목 줄이 없으면 그것은 관측된
     0주다. 마커 자체가 없으면 응답을 읽지 못한 것이므로 실패로 본다.
     """
-    from backend.scheduler import _BALANCE_HOLDINGS_MARKER, _parse_balance_holdings, is_balance_truncated
+    from backend.scheduler.portfolio import _BALANCE_HOLDINGS_MARKER, _parse_balance_holdings, is_balance_truncated
 
     current_price = parse_current_price(quote_text)
     if current_price is None:
