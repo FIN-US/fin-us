@@ -67,7 +67,7 @@ AGENTS.md
 .state/
 CLAUDE.md
 
-mcp-dart/data/corp-codes.json
+mcp/dart/data/corp-codes.json
 
 .superpowers/
 docs/code-review/

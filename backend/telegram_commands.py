@@ -140,7 +140,7 @@ CATALYST_COMMAND_HELP = "사용법: /catalysts <종목명>"
 ADVISE_COMMAND_HELP = "사용법: /advise <종목명>"
 EARNINGS_COMMAND_HELP = "사용법: /earnings <종목명> [기간]  예: /earnings 삼성전자 2025Q1"
 NATURAL_ORDER_HELP = "자연어 주문을 해석할 수 없습니다. /buy 또는 /sell 형식으로 입력하세요."
-# 미등록 코드는 mcp-trading/stock-master.js가 {code: X, name: X, market: "UNKNOWN"}을
+# 미등록 코드는 mcp/trading/stock-master.js가 {code: X, name: X, market: "UNKNOWN"}을
 # echo하므로 종목명 == 종목코드가 곧 미해석 신호다.
 UNRESOLVED_STOCK_WARNING = (
     "⚠️ 종목명을 확인하지 못했습니다. 입력한 코드가 맞는지 다시 확인하세요."
@@ -429,7 +429,7 @@ def _nat_answer_message(
 # 않는 이유는 목적지 화면이 없기도 하지만, 이 봇의 값이 "텔레그램 안에서 끝난다"는 데
 # 있기 때문이다.
 #
-# mcp-trading/index.js의 getInvestorTrading이 만드는 행을 읽는다. 다른 서비스의 출력
+# mcp/trading/index.js의 getInvestorTrading이 만드는 행을 읽는다. 다른 서비스의 출력
 # 형식에 기대는 파싱이라 깨질 수 있으므로, 한 행도 못 읽으면 원문을 그대로 내보낸다
 # (_format_investor_flow의 None 반환). 형식이 바뀌면 요약이 사라질 뿐 조회는 계속 된다.
 _INVESTOR_ROW_RE = re.compile(
@@ -658,7 +658,7 @@ class OrderReading:
     order_type: OrderType
 
 
-# mcp-trading/stock-master.js resolveStock이 "마스터에 그런 이름이 없다"로 끝날 때 오류 문구의
+# mcp/trading/stock-master.js resolveStock이 "마스터에 그런 이름이 없다"로 끝날 때 오류 문구의
 # 고정 부분 (#387). run_mcp_tool은 도구 오류와 연결 실패를 같은 HTTPException으로 올리므로
 # "종목 없음"을 가를 근거가 이 문구뿐이다. 문구가 바뀌어 여기서 못 알아보면 그 해석은 "확인
 # 실패"로 읽혀 주문을 진행하지 않는 쪽으로 틀린다. test_telegram_commands가 JS 원문과 대조한다.
@@ -1611,10 +1611,10 @@ class TelegramCommandHandler:
             if _is_unresolved_echo(str(resolved)):
                 await self._send_text_or_raise(
                     f"주문 불가: {stock_name}({stock_code}) — 종목마스터에 없는 종목입니다. "
-                    "종목코드를 확인하거나 mcp-trading/data/stocks.json을 갱신하세요."
+                    "종목코드를 확인하거나 mcp/trading/data/stocks.json을 갱신하세요."
                 )
                 return
-            # 추출 성공 != 주문 가능. mcp-trading/order.js의 buildCashOrderBody()가
+            # 추출 성공 != 주문 가능. mcp/trading/order.js의 buildCashOrderBody()가
             # 기본값으로는 숫자 코드만 주문을 받으므로(#73에서 확정된 정책, #138에서
             # KIS_ALNUM_STOCK_ORDER_ENABLED 플래그로 완화 가능해짐), 시세·잔고 조회와
             # 60초 대기 슬롯을 쓰기 전에 여기서 끊는다. 이 검사가 없으면 /confirm
@@ -1626,7 +1626,7 @@ class TelegramCommandHandler:
                 # 상품군을 단정하지 않는다(#138). 이전 문구는 특정 상품군(ETN, 펀드)을
                 # 예로 들었는데 두 번 부정확했다 — 차단되는 776종목의 상당수는 그 상품군이
                 # 아니라 보통주·우선주이고, 하필 ETN은 KIS order-cash 스펙이 PDNO 대상으로
-                # 명시한 상품이다(docs/alnum-stock-code.md 2.2·4.2 가·6.6).
+                # 명시한 상품이다.
                 # 막는 근거는 상품 종류가 아니라 코드 형태이므로 그것만 말한다.
                 # 허용 형태 문장은 판정 함수와 같은 모듈에서 받아 온다 — 여기 리터럴로
                 # 두면 위 가드는 플래그를 보는데 안내만 보지 않아, 플래그를 켠 프로세스가
@@ -2052,7 +2052,7 @@ class TelegramCommandHandler:
                 # _looks_like_stock_code는 숫자가 든 6·7·9자만 코드로 보므로 KIWOOM·HANARO 같은
                 # 영문 이름은 여기 걸리지 않는다. 마스터에 "코드 형태 + 숫자" 이름이 없다는 전제는
                 # 커밋된 stocks.json을 test_no_master_name_is_a_stock_code_followed_by_a_number가,
-                # 운영자의 직접 갱신을 mcp-trading/scripts/update_stock_master.py의 쓰기 전 검사가
+                # 운영자의 직접 갱신을 mcp/trading/scripts/update_stock_master.py의 쓰기 전 검사가
                 # 막는다. 이 분기를 바꾸면 공유 판정표 unreadable_numeric_name_policy.json을 함께 고친다.
                 return readings
         readings.append(
@@ -2466,7 +2466,7 @@ class TelegramCommandHandler:
 
         balance = self._first_line_containing(
             str(balance_result),
-            # get_balance가 실제로 내는 라벨은 "예수금"이다(mcp-trading/balance.js).
+            # get_balance가 실제로 내는 라벨은 "예수금"이다(mcp/trading/balance.js).
             # 나머지는 다른 잔고 응답이 섞여 들어올 때를 위한 방어선이다 — 이 프롬프트가
             # 보여주는 것은 주문가능금액이 아니라 예수금이라는 점을 유의한다(#310).
             ("주문가능", "예수금", "총자산", "balance"),

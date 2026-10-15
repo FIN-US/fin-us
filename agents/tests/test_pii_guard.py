@@ -1,0 +1,1041 @@
+"""NAT 내부 도구 결과 마스킹 회귀 테스트 (#231, F-17 / NFR-05).
+
+이슈의 완료 조건 "도구 결과가 마스킹 없이 LLM 컨텍스트에 들어가면 실패"를 고정한다.
+세 축이다:
+
+1. **경계 왕복** — 최상위 에이전트가 심은 박스 안에서, 도구가 낸 잔고 원문은
+   에이전트에게 마스킹된 채 전달되고 최종 응답에서 원값으로 돌아온다.
+2. **우회 차단** — ``finus_api.py``의 도구가 결과를 돌려주면서 ``_record_and_mask``를
+   거치지 않는 경로가 생기면 AST 가드가 실패한다.
+3. **계층 간섭 없음** — backend(``llm_chat``)가 만든 자리표시자를 NAT 경계가
+   건드리지 않는다. 건드리면 backend의 왕복이 깨진다.
+
+실 KIS·OpenAI 연결 없이 동작한다.
+"""
+
+import ast
+import json
+import logging
+import pathlib
+import re
+from contextlib import asynccontextmanager
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+from nat.data_models.api_server import (
+    ChatRequestOrMessage,
+    ChatResponse,
+    Usage,
+)
+
+from nat_finus_nat.agents import (
+    FinusReasoningTraceAgentConfig,
+    chat_response_plain_text,
+    chat_response_with_text,
+    finus_reasoning_trace_agent,
+)
+from nat_finus_nat import finus_api
+from nat_finus_nat.finus_api import DATA_TOOL_LEDGER, DataToolLedger, _record_and_mask
+from nat_finus_nat.pii_guard import (
+    MASKED_TOOLS,
+    PII_MAPPING,
+    _SCOPED_PLACEHOLDER_RE,
+    install_mapping_box,
+    mask_tool_result,
+    restore_for_internal,
+    restore_params_for_kis,
+    unmask_response,
+    unrestorable_placeholders,
+)
+from nat_finus_nat.pii_mask import _PLACEHOLDER_RE, mask_pii
+
+_REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
+_FINUS_API_PATH = _REPO_ROOT / "agents" / "src" / "nat_finus_nat" / "finus_api.py"
+_BACKEND_PII_MASK = _REPO_ROOT / "backend" / "pii_mask.py"
+_NAT_PII_MASK = _REPO_ROOT / "agents" / "src" / "nat_finus_nat" / "pii_mask.py"
+_BALANCE_FIXTURE = _REPO_ROOT / "mcp" / "trading" / "tests" / "fixtures" / "balance_report.json"
+
+
+def _is_call_to(node: ast.AST, name: str) -> bool:
+    """*node*가 ``name(...)`` 형태의 호출인가."""
+    return isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == name
+
+
+def _module_str_constants(tree: ast.Module) -> dict[str, str]:
+    """모듈 최상위의 ``NAME = "문자열"`` 상수 — ``_KIS_BALANCE_LEDGER_NAME`` 같은 것."""
+    consts: dict[str, str] = {}
+    for node in tree.body:
+        targets = (
+            [node.target] if isinstance(node, ast.AnnAssign) else
+            list(node.targets) if isinstance(node, ast.Assign) else []
+        )
+        value = getattr(node, "value", None)
+        if not isinstance(value, ast.Constant) or not isinstance(value.value, str):
+            continue
+        for target in targets:
+            if isinstance(target, ast.Name):
+                consts[target.id] = value.value
+    return consts
+
+
+# 래퍼가 "자기 파라미터를 그대로 전달"하는 자리의 이름. 실제 값은 그 래퍼의 호출부
+# (``ledger_tool_name=`` 리터럴)에서 수집되므로 미해석으로 세지 않는다. 형제 가드
+# ``backend/tests/test_label_drift.py``의 ``_FORWARDED_PARAM_NAMES``와 같은 규약이다 —
+# ``_record_to_ledger``의 docstring이 "리터럴이나 모듈 상수로 유지하라"를 계약으로
+# 못박아 뒀고, 전달 자리는 그 계약의 유일한 예외다.
+_LEDGER_KWARG = "ledger_tool_name"
+_FORWARDED_PARAM_NAMES = frozenset({_LEDGER_KWARG})
+
+
+def _tool_name_exprs(tree: ast.Module) -> list[ast.expr]:
+    """도구명이 담기는 표현식을 전부 모은다 — ``_record_and_mask`` 첫 인자 + ``ledger_tool_name=``.
+
+    호출부의 ``ledger_tool_name=``까지 같이 걷어야 파라미터로 전달되는 래퍼
+    (``_mcp_news_stock_function_info``)의 **실제 이름**이 집합에 들어온다.
+    """
+    exprs: list[ast.expr] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if _is_call_to(node, "_record_and_mask"):
+            # 첫 인자를 키워드로 넘긴 형태는 아래 keywords 루프에도 걸리지 않아 조용히
+            # 사라진다. 호출 노드 자체를 넣어 미해석으로 드러나게 한다.
+            by_kw = [kw.value for kw in node.keywords if kw.arg == "tool_name"]
+            exprs.append(node.args[0] if node.args else (by_kw[0] if by_kw else node))
+        exprs.extend(kw.value for kw in node.keywords if kw.arg == _LEDGER_KWARG)
+    return exprs
+
+
+def _recorded_tool_names() -> tuple[set[str], list[str]]:
+    """``finus_api.py``가 원장·마스킹에 넘기는 (도구 이름 집합, 정적으로 해석 못 한 표현식).
+
+    첫 인자가 문자열 리터럴이면 그대로, 모듈 상수 이름이면 그 값으로 해석한다
+    (``_record_and_mask(_KIS_BALANCE_LEDGER_NAME, ...)`` 경로).
+
+    **미해석을 조용히 버리지 않고 돌려준다** (PR #335 리뷰). 버리면 새 계좌 도구가
+    도구명을 파라미터로 넘기는 순간 아래 역방향 가드를 그대로 빠져나간다 — 방금 고친
+    ``async def`` 사각지대와 같은 종류다.
+    """
+    tree = ast.parse(_FINUS_API_PATH.read_text(encoding="utf-8"))
+    consts = _module_str_constants(tree)
+    names: set[str] = set()
+    unresolved: list[str] = []
+    for expr in _tool_name_exprs(tree):
+        if isinstance(expr, ast.Constant) and isinstance(expr.value, str):
+            names.add(expr.value)
+        elif isinstance(expr, ast.Name) and expr.id in consts:
+            names.add(consts[expr.id])
+        elif isinstance(expr, ast.Name) and expr.id in _FORWARDED_PARAM_NAMES:
+            continue
+        else:
+            unresolved.append(f"{_FINUS_API_PATH.name}:{expr.lineno}: {ast.unparse(expr)}")
+    return names, unresolved
+
+
+def _request(text: str) -> ChatRequestOrMessage:
+    return ChatRequestOrMessage(messages=[{"role": "user", "content": text}])
+
+
+def _balance_report_text() -> str:
+    """#137 공유 픽스처 — ``formatBalanceReport()``의 실제 출력 계약.
+
+    ``finus_mcp_trading_get_balance``가 ReAct 컨텍스트에 그대로 넣는 텍스트다.
+    """
+    return json.loads(_BALANCE_FIXTURE.read_text(encoding="utf-8"))["normal"]["expected_text"]
+
+
+@pytest.fixture
+def mapping_box():
+    """최상위 에이전트가 하는 일(박스 심기)을 테스트 안에서 재현한다."""
+    box = install_mapping_box()
+    token = PII_MAPPING.set(box)
+    try:
+        yield box
+    finally:
+        PII_MAPPING.reset(token)
+
+
+@pytest.fixture
+def ledger():
+    """``_record_and_mask``가 원장에 기록할 수 있게 박스를 심는다(#152 경로)."""
+    led = DataToolLedger()
+    token = DATA_TOOL_LEDGER.set(led)
+    try:
+        yield led
+    finally:
+        DATA_TOOL_LEDGER.reset(token)
+
+
+# ---------------------------------------------------------------------------
+# 1. 마스킹 대상 판정
+# ---------------------------------------------------------------------------
+
+class TestMaskToolResult:
+    def test_balance_report_leaves_no_plaintext_amount_or_quantity(self, mapping_box):
+        """잔고 리포트의 금액·수량이 LLM 컨텍스트로 평문 전달되지 않는다 — 이슈의 본문."""
+        text = _balance_report_text()
+        masked = mask_tool_result("finus_mcp_trading_get_balance", text)
+
+        assert "1,210,000원" not in masked
+        assert "67,000원" not in masked
+        assert "· 3주" not in masked
+        # 마스킹 자체는 pii_mask가 하므로 여기서는 "무엇 하나 남지 않았는가"만 본다.
+        assert not re.search(r"[\d,]+원", masked)
+
+        # 상대 비교에 쓰이는 수익률(%)과 종목코드는 그대로 남는다(#230 범위 밖).
+        assert "+4.48%" in masked
+        assert "005930" in masked
+
+        # 매핑이 박스에 누적되어 역치환할 수 있어야 한다.
+        assert mapping_box
+        assert unmask_response(masked) == text
+
+    def test_public_information_tools_are_not_masked(self, mapping_box):
+        """뉴스·공시·실적은 공개 정보다 — 마스킹하면 얻는 것 없이 분석만 망가진다."""
+        text = "삼성전자 3분기 영업이익 9,000,000원 기록, 목표주가 95,000원 상향"
+        assert mask_tool_result("finus_market_news", text) == text
+        assert mask_tool_result("finus_disclosure_signal", text) == text
+        assert mask_tool_result("finus_earnings_report", text) == text
+        assert mapping_box == {}
+
+    def test_masked_tool_names_still_exist_in_source(self):
+        """``MASKED_TOOLS``의 이름이 ``finus_api.py``에 없으면 실패한다.
+
+        도구 이름이 바뀌면 목록의 문자열이 조용히 죽어 마스킹이 통째로 빠진다. 이름은
+        원장 키에서 그대로 읽으므로 실제 소스와 대조해 고정한다.
+        """
+        recorded, _ = _recorded_tool_names()
+        assert MASKED_TOOLS <= recorded, (
+            f"MASKED_TOOLS의 {sorted(MASKED_TOOLS - recorded)}가 finus_api.py의 "
+            "_record_and_mask 호출에 없습니다. 도구 이름이 바뀌었다면 "
+            "pii_guard.MASKED_TOOLS도 함께 고쳐야 마스킹이 계속 걸립니다."
+        )
+
+    def test_every_tool_name_is_statically_resolvable(self):
+        """도구명을 하나라도 정적으로 못 읽으면 아래 역방향 가드가 공허해지므로 먼저 막는다.
+
+        미해석을 조용히 건너뛰면, 새 계좌 도구가 도구명을 파라미터로 넘기는 순간
+        ``test_new_account_tools_are_masked_by_default``를 그대로 빠져나간다 — 방금 고친
+        ``async def`` 사각지대와 같은 종류다 (PR #335 리뷰).
+
+        형제 가드 ``backend/tests/test_label_drift.py::``
+        ``test_every_ledger_tool_name_is_statically_resolvable``과 같은 규약이다.
+        """
+        _, unresolved = _recorded_tool_names()
+        assert unresolved == [], (
+            "finus_api.py의 도구 결과 반환에서 도구명을 정적으로 해석하지 못했습니다. "
+            "리터럴이나 모듈 상수로 되돌리거나, 파라미터로 전달한다면 호출부가 "
+            f"{_LEDGER_KWARG}= 리터럴로 넘기고 _FORWARDED_PARAM_NAMES에 추가하세요 "
+            f"(그대로 두면 마스킹 커버리지 검사가 조용히 비어 갑니다): {unresolved}"
+        )
+
+    def test_new_account_tools_are_masked_by_default(self):
+        """새 계좌 도구가 ``MASKED_TOOLS``에서 빠지면 실패한다 — fail-closed의 유일한 가드.
+
+        위 테스트는 ``MASKED_TOOLS ⊆ 소스`` 방향이라 **목록에서 빠진 도구**를 잡지 못한다
+        (PR #335 리뷰). 이쪽이 반대 방향이다: ``finus_api.py``가 결과를 돌려주는 도구
+        가운데 계좌 계열 접두사를 가진 것은 전부 목록에 있어야 한다. 새 계좌 도구를
+        추가하면서 목록을 잊으면 여기서 걸린다.
+
+        접두사 판정 근거: ``finus_mcp_trading_*``는 KIS 잔고·손익·주문 조회 계열이고,
+        ``finus_account_*``는 Kis Trading MCP pass-through 래퍼다. 둘 다 계좌 자격증명
+        채널이므로 예외 없이 마스킹 대상이다. 정말 마스킹하지 않아야 할 계좌 계열 도구가
+        생긴다면, 목록이 아니라 이 테스트에 근거를 적고 면제해야 한다.
+        """
+        account_prefixes = ("finus_mcp_trading_", "finus_account_")
+        recorded, _ = _recorded_tool_names()
+        account_tools = {name for name in recorded if name.startswith(account_prefixes)}
+        assert account_tools, "계좌 계열 도구를 하나도 찾지 못했습니다 — 접두사 규칙을 확인하세요."
+        assert account_tools <= MASKED_TOOLS, (
+            f"계좌 계열 도구 {sorted(account_tools - MASKED_TOOLS)}가 "
+            "pii_guard.MASKED_TOOLS에 없습니다. 계좌 자격증명으로 조회한 결과가 마스킹 없이 "
+            "외부 LLM 컨텍스트로 나갑니다(#231)."
+        )
+
+    def test_masks_even_without_a_box_and_logs(self, caplog):
+        """박스가 없어도 마스킹은 한다(fail-closed) — 유출보다 품질 저하를 택한다."""
+        assert PII_MAPPING.get() is None
+        with caplog.at_level(logging.ERROR, logger="nat_finus_nat.pii_guard"):
+            masked = mask_tool_result("finus_mcp_trading_get_balance", "예수금 1,000,000원")
+        assert "1,000,000원" not in masked
+        assert "PII_MAPPING box not set" in caplog.text
+
+    def test_masking_failure_returns_an_error_instead_of_the_raw_result(
+        self, mapping_box, monkeypatch, caplog
+    ):
+        """마스킹이 예외로 실패해도 원문이 Observation으로 나가지 않는다 (#395)."""
+        from nat_finus_nat import pii_guard
+
+        def broken_mask(text):
+            raise RuntimeError("정규식 회귀")
+
+        monkeypatch.setattr(pii_guard, "mask_pii", broken_mask)
+
+        with caplog.at_level(logging.ERROR, logger="nat_finus_nat.pii_guard"):
+            observation = mask_tool_result("finus_mcp_trading_get_balance", "예수금 1,000,000원")
+
+        assert "1,000,000" not in observation
+        assert json.loads(observation)["error"] == "pii_masking_failed"
+        assert mapping_box == {}
+        assert "도구 결과 마스킹 실패" in caplog.text
+
+    def test_debug_log_compares_the_result_before_and_after(self, mapping_box, caplog, monkeypatch):
+        from nat_finus_nat import pii_guard
+
+        monkeypatch.setattr(pii_guard, "_DEBUG_LOG_ENABLED", True)
+        with caplog.at_level(logging.DEBUG, logger="nat_finus_nat.pii_guard"):
+            masked = mask_tool_result("finus_mcp_trading_get_balance", "예수금 1,000,000원")
+
+        messages = [record.getMessage() for record in caplog.records]
+        assert any("전:" in m and "예수금 1,000,000원" in m for m in messages)
+        assert any("후:" in m and masked in m and "1,000,000원" not in m for m in messages)
+
+    def test_debug_level_alone_does_not_log_plaintext_without_the_flag(
+        self, mapping_box, caplog, monkeypatch
+    ):
+        """NAT CLI ``--log-level debug``처럼 루트만 DEBUG여도 평문이 남지 않는다 (PR #404 리뷰)."""
+        from nat_finus_nat import pii_guard
+
+        monkeypatch.setattr(pii_guard, "_DEBUG_LOG_ENABLED", False)
+        with caplog.at_level(logging.DEBUG), caplog.at_level(
+            logging.DEBUG, logger="nat_finus_nat.pii_guard"
+        ):
+            mask_tool_result("finus_mcp_trading_get_balance", "예수금 1,000,000원")
+
+        assert "1,000,000원" not in caplog.text
+
+    def test_ledger_verdict_survives_masking(self, mapping_box, ledger):
+        """마스킹을 끼운 뒤에도 빈 결과·데이터 있음 판정(#209)이 그대로여야 한다."""
+        empty_report = "보유 종목이 없습니다."
+        returned = _record_and_mask("finus_mcp_trading_balance_rlz_pl", empty_report)
+        assert returned == empty_report  # 마스킹할 값이 없는 텍스트
+        assert ledger.records[-1].empty is True
+
+        returned = _record_and_mask("finus_mcp_trading_get_balance", _balance_report_text())
+        assert "1,210,000원" not in returned
+        assert ledger.records[-1].produced_rows is True
+
+    def test_empty_result_literals_survive_masking(self):
+        """빈 결과 리터럴(#209)이 마스킹 정규식에 걸리기 시작하면 실패한다.
+
+        ``_record_and_mask``는 원장에 원문을 넣고 에이전트에게 마스킹본을 준다. 오늘
+        두 텍스트의 판정이 같은 것은 아래 리터럴 중 마스킹 대상 패턴(금액·수량·10자리
+        숫자)을 가진 것이 하나도 없기 때문이다. 리터럴에 "…원"이나 "N주"가 들어오면
+        그 전제가 깨진다 — 그때는 리터럴을 고치거나 판정 순서를 다시 봐야 한다.
+        """
+        literals = [*finus_api._EMPTY_RESULT_LITERALS.values(), "보유 종목이 없습니다.", "[계좌 집계]"]
+        for literal in literals:
+            masked, mapping = mask_pii(literal)
+            assert mapping == {} and masked == literal, (
+                f"빈 결과 리터럴 {literal!r}이 마스킹 대상 패턴을 갖게 되었습니다 "
+                f"(마스킹 결과: {masked!r}). 원장(_has_empty_result)은 원문을 보고 "
+                "에이전트는 마스킹본을 보므로, 이대로면 두 판정이 갈립니다."
+            )
+
+
+# ---------------------------------------------------------------------------
+# 2. 경계 역치환
+# ---------------------------------------------------------------------------
+
+class TestUnmaskResponse:
+    def test_restores_values_this_request_masked(self, mapping_box):
+        masked = mask_tool_result("finus_mcp_trading_get_balance", "예수금 1,234,000원 보유 5주")
+        answer = f"현재 {masked} 입니다."
+        assert unmask_response(answer) == "현재 예수금 1,234,000원 보유 5주 입니다."
+
+    def test_leaves_foreign_scope_placeholders_untouched(self, mapping_box):
+        """backend가 만든 자리표시자를 건드리면 backend의 왕복이 깨진다.
+
+        backend ``llm_chat``은 NAT을 부르기 전에 ``user_msg``를 자기 매핑으로 마스킹하고
+        응답을 받은 뒤 자기 매핑으로 역치환한다. NAT이 이것을 중립 문구로 바꿔 버리면
+        사용자는 자기가 방금 쓴 금액 대신 "(이전 금액 1)"을 보게 된다.
+        """
+        _, backend_mapping = mask_pii("제 예수금 9,876,000원이면 어떨까요?")
+        backend_placeholder = next(iter(backend_mapping))
+
+        answer = f"말씀하신 {backend_placeholder} 기준으로는 충분합니다."
+        assert unmask_response(answer) == answer
+
+    def test_neutralizes_hallucinated_placeholders_of_this_request(self, mapping_box, caplog):
+        """LLM이 이 요청의 scope로 없는 번호를 지어내면 내부 토큰을 노출하지 않는다."""
+        mask_tool_result("finus_mcp_trading_get_balance", "예수금 1,234,000원")
+        scope = next(iter(mapping_box)).rsplit("_", 2)[-2]
+        invented = f"<AMOUNT_{scope}_99>"
+
+        with caplog.at_level(logging.WARNING, logger="nat_finus_nat.pii_guard"):
+            restored = unmask_response(f"총 {invented} 입니다.")
+        assert invented not in restored
+        assert restored == "총 (이전 금액 1) 입니다."
+        assert "중립 문구로 치환" in caplog.text
+
+    def test_no_box_means_no_rewrite(self):
+        """박스가 없으면(요청 밖) 응답을 손대지 않는다."""
+        assert PII_MAPPING.get() is None
+        text = "<AMOUNT_abc123_1> 입니다."
+        assert unmask_response(text) == text
+
+    def test_scoped_regex_matches_the_same_placeholders_as_pii_mask(self):
+        """pii_guard의 정규식과 pii_mask의 정규식이 같은 것을 매치해야 한다.
+
+        한쪽만 종류가 늘면 마스킹은 되는데 역치환이 안 되는(또는 그 반대인) 상태가 된다.
+        """
+        sample = "<ACCOUNT_9f2a1c_1> <AMOUNT_9f2a1c_2> <QTY_9f2a1c_3> <AMOUNT_1> <AMOUNTX_9f2a1c_1>"
+        assert [m.group(0) for m in _SCOPED_PLACEHOLDER_RE.finditer(sample)] == [
+            m.group(0) for m in _PLACEHOLDER_RE.finditer(sample)
+        ]
+
+
+# ---------------------------------------------------------------------------
+# 3. 우리 저장소로 나가는 방향 — 매매일지
+# ---------------------------------------------------------------------------
+
+class TestRestoreForInternal:
+    def test_diary_content_is_stored_with_real_values(self, mapping_box):
+        """일지 본문에 자리표시자가 그대로 저장되면 요청 종료 후 복구할 수 없다."""
+        masked = mask_tool_result("finus_mcp_trading_get_balance", "삼성전자 3주 평가금액 210,000원")
+        drafted_by_llm = f"오늘 {masked} 상태로 마감. 다음 주 재평가."
+
+        stored = restore_for_internal(drafted_by_llm)
+        assert "<AMOUNT" not in stored and "<QTY" not in stored
+        assert stored == "오늘 삼성전자 3주 평가금액 210,000원 상태로 마감. 다음 주 재평가."
+
+    def test_foreign_placeholders_are_left_for_backend(self, mapping_box):
+        _, backend_mapping = mask_pii("100,000원 넣었어요")
+        backend_placeholder = next(iter(backend_mapping))
+        text = f"사용자 입금 {backend_placeholder}"
+        assert restore_for_internal(text) == text
+
+    async def test_save_diary_posts_unmasked_content_to_backend(self, mock_backend, mapping_box, ledger):
+        """``finus_save_diary``가 실제로 역치환한 값을 backend에 POST하는지 배선을 확인한다.
+
+        단위 함수만 테스트하면 도구가 그 함수를 부르지 않게 되는 회귀를 놓친다.
+        """
+        backend = mock_backend({"status": "success", "data": {"id": 1}})
+
+        # 에이전트는 마스킹된 잔고를 보고 일지를 쓴다.
+        masked = mask_tool_result("finus_mcp_trading_get_balance", "삼성전자 3주 210,000원")
+        config = finus_api.FinusSaveDiaryConfig(backend_url="http://test-backend:8000")
+        async with finus_api.finus_save_diary(config, None) as info:
+            await info.single_fn(
+                finus_api.FinusSaveDiaryInput(title="매매일지", content=f"오늘 {masked}")
+            )
+
+        assert backend.json_body == {"title": "매매일지", "content": "오늘 삼성전자 3주 210,000원"}
+
+    async def test_save_diary_response_does_not_echo_plaintext_back_to_llm(
+        self, mock_backend, mapping_box, ledger
+    ):
+        """저장 응답이 방금 역치환한 본문을 Observation으로 되비추면 실패한다 (PR #335 리뷰).
+
+        backend ``POST /api/v1/db/diary``는 ``{"status": "success", "data": <Diary 전체>}``를
+        돌려주고 그 ``data``에는 평문 ``title``·``content``가 들어 있다. 그대로 반환하면
+        이 이슈가 막은 평문이 **같은 요청 안에서** 컨텍스트에 재유입돼 다음 턴에 외부
+        LLM으로 나간다 — 도구 결과 마스킹 전체가 무의미해지는 경로다.
+        """
+        plaintext_title = "매매일지 2026-05-24"
+        plaintext_content = "삼성전자 3주 210,000원 매수"
+
+        # backend/main.py::create_db_diary의 실제 응답 모양 — data에 평문이 들어 있다.
+        mock_backend(
+            {
+                "status": "success",
+                "data": {
+                    "id": 7,
+                    "title": plaintext_title,
+                    "content": plaintext_content,
+                    "created_at": "2026-05-24T09:00:00+00:00",
+                },
+            }
+        )
+
+        masked = mask_tool_result("finus_mcp_trading_get_balance", plaintext_content)
+        config = finus_api.FinusSaveDiaryConfig(backend_url="http://test-backend:8000")
+        async with finus_api.finus_save_diary(config, None) as info:
+            observation = await info.single_fn(
+                finus_api.FinusSaveDiaryInput(title=plaintext_title, content=masked)
+            )
+
+        # (1) 금액·수량이 평문으로 LLM에게 돌아가지 않는다.
+        assert "210,000원" not in observation
+        assert "3주" not in observation
+        # (2) 저장 확인에 필요한 메타데이터는 남는다.
+        assert json.loads(observation) == {"id": 7, "created_at": "2026-05-24T09:00:00+00:00"}
+        # (3) 원장에는 남는다 — 마스킹은 LLM 컨텍스트로 나가는 값에만 필요하다(#209).
+        assert ledger.records[-1].tool_name == "finus_save_diary"
+
+    async def test_save_diary_error_detail_is_masked(self, mock_backend, mapping_box, ledger):
+        """저장 실패 응답이 요청 본문을 되비춰도 평문이 나가지 않는다 (PR #335 리뷰).
+
+        성공 경로는 반환값을 메타데이터로 좁혀 되비춤을 없앴지만, 오류 경로는 그럴 수
+        없다 — backend의 422 응답 ``detail``에는 방금 역치환한 본문이 그대로 실린다.
+        ``finus_save_diary``가 ``MASKED_TOOLS``에 있어야 이 경로가 덮인다.
+        """
+        # FastAPI 검증 오류는 입력을 그대로 되비춘다. 422를 진짜 응답으로 돌려주면
+        # ``raise_for_status``도 진짜 ``HTTPStatusError``를 던진다 — 예외를 손으로
+        # 조립하지 않으므로 프로덕션이 읽는 필드가 실제 것과 어긋날 여지가 없다.
+        mock_backend(
+            status_code=422,
+            text='{"detail":[{"loc":["body","content"],"input":"삼성전자 3주 210,000원 매수"}]}',
+        )
+
+        config = finus_api.FinusSaveDiaryConfig(backend_url="http://test-backend:8000")
+        async with finus_api.finus_save_diary(config, None) as info:
+            observation = await info.single_fn(
+                finus_api.FinusSaveDiaryInput(title="매매일지", content="삼성전자 3주 210,000원 매수")
+            )
+
+        assert "diary_api_http_error" in observation
+        assert "210,000원" not in observation
+        assert "3주" not in observation
+
+
+class TestRestoreParamsForKis:
+    """도구 **인자** 방향 역치환 + 종류 검사 (#338, 후보 1).
+
+    마스킹은 도구 결과에만 걸려 있었고 인자 방향에는 역치환이 없었다. 그래서 에이전트는
+    자기가 방금 본 잔고 수량으로 주문을 낼 수 없었다 — "보유 전량 매도"가 깨지는 자리다.
+
+    되돌리는 것만으로는 안 된다. 무조건 되돌리면 종류가 어긋난 자리표시자까지 숫자가
+    되어 **의미가 어긋난 주문이 조용히** 나갈 수 있다. 이 클래스는 두 방향을 함께
+    고정한다 — 맞는 종류는 통하고, 어긋난 종류는 여전히 시끄럽게 실패한다.
+    """
+
+    _BALANCE = "삼성전자 (005930) · 1,234주 · 평가금액 12,345,000원"
+
+    def _restore(self, params: dict):
+        """``tool_name``·``api_type``은 거부 로그용이라 이 클래스에서는 고정값을 쓴다."""
+        return restore_params_for_kis(params, tool_name="domestic_stock", api_type="order_cash")
+
+    def _masked_placeholders(self) -> tuple[str, str]:
+        """잔고를 마스킹하고 (QTY, AMOUNT) 자리표시자를 돌려준다."""
+        mask_tool_result("finus_mcp_trading_get_balance", self._BALANCE)
+        box = PII_MAPPING.get()
+        qty = next(ph for ph in box if ph.startswith("<QTY_"))
+        amount = next(ph for ph in box if ph.startswith("<AMOUNT_"))
+        return qty, amount
+
+    def test_masked_quantity_becomes_a_kis_order_argument(self, mapping_box):
+        """이슈 본문의 흐름 — 마스킹된 잔고를 본 에이전트가 그 수량으로 주문을 낼 수 있다."""
+        qty, amount = self._masked_placeholders()
+
+        restored, rejections = self._restore(
+            {"PDNO": "005930", "ORD_QTY": qty, "ORD_UNPR": amount}
+        )
+
+        assert rejections == []
+        # 콤마와 "원"을 벗긴 순수 숫자여야 한다. 원값("1,234"·"12,345,000원")을 그대로
+        # 넣으면 KIS가 거부하므로, 역치환만으로는 이 이슈가 닫히지 않는다.
+        assert restored == {"PDNO": "005930", "ORD_QTY": "1234", "ORD_UNPR": "12345000"}
+
+    def test_amount_placeholder_in_a_quantity_field_is_rejected(self, mapping_box):
+        """이 이슈가 걱정한 위험의 본체 — 종류 검사가 없으면 여기서 오주문이 나간다."""
+        _, amount = self._masked_placeholders()
+
+        restored, rejections = self._restore({"ORD_QTY": amount})
+
+        assert [r.field for r in rejections] == ["ORD_QTY"]
+        assert rejections[0].reason == "expected_QTY_placeholder_got_AMOUNT"
+        # 거부한 필드는 복원하지 않는다 — 숫자가 되면 그것이 곧 조용한 오주문이다.
+        assert restored["ORD_QTY"] == amount
+
+    def test_quantity_placeholder_in_a_price_field_is_rejected(self, mapping_box):
+        """반대 방향도 같다. 단가 자리에 수량이 실리면 12,345,000원짜리가 1,234원이 된다."""
+        qty, _ = self._masked_placeholders()
+
+        _, rejections = self._restore({"ORD_UNPR": qty})
+
+        assert rejections[0].reason == "expected_AMOUNT_placeholder_got_QTY"
+
+    @pytest.mark.parametrize("field", ["CANO", "ACNT_PRDT_CD", "ORD_DVSN", "PDNO"])
+    def test_fields_outside_the_naming_convention_reject_placeholders(self, mapping_box, field):
+        """접미 마디로 종류를 판정할 수 없는 필드는 fail-closed로 거부한다.
+
+        계좌 필드가 여기 걸리는 것이 특히 중요하다 — mcp-trading이 ``KIS_ACCOUNT_NO``
+        env로 채우는 값이라 LLM 인자로 올 이유가 없고, ``ACCOUNT`` 원값은 하이픈 유무가
+        원문 표기를 따라가므로 ``CANO``/``ACNT_PRDT_CD`` 분리와 어긋날 수 있다.
+        """
+        qty, _ = self._masked_placeholders()
+
+        _, rejections = self._restore({field: qty})
+
+        assert [r.reason for r in rejections] == ["field_does_not_accept_placeholders"]
+
+    def test_new_quantity_field_names_are_covered_by_the_convention(self, mapping_box):
+        """필드 이름 목록이 아니라 KIS의 마디 규약을 보므로 새 필드도 자동으로 덮인다.
+
+        목록을 하드코딩했다면 KIS가 필드를 늘릴 때 조용히 새는 쪽으로 무너진다 —
+        이슈가 명시적으로 경계한 지점이다.
+        """
+        qty, amount = self._masked_placeholders()
+
+        restored, rejections = self._restore({"CNCL_QTY": qty, "TOT_EVLU_AMT": amount})
+
+        assert rejections == []
+        assert restored == {"CNCL_QTY": "1234", "TOT_EVLU_AMT": "12345000"}
+
+    def test_partial_placeholder_value_is_rejected(self, mapping_box):
+        """자리표시자가 값의 일부면 어디까지가 값인지 판정할 근거가 없다."""
+        qty, _ = self._masked_placeholders()
+
+        _, rejections = self._restore({"ORD_QTY": f"{qty}주"})
+
+        assert [r.reason for r in rejections] == ["placeholder_is_not_the_whole_value"]
+
+    def test_foreign_scope_placeholder_is_rejected(self, mapping_box):
+        """backend가 사용자 발화를 마스킹한 자리표시자는 원값이 이 프로세스에 없다.
+
+        ``restore_for_internal``이 저장 경로에서 통과시키는 것과 같은 종류인데, 주문
+        경로에서는 통과시킬 곳이 없다 — KIS로 그대로 나가면 거부되고, 그 실패는
+        사용자에게 "주문이 안 된다"로만 보인다.
+        """
+        _, backend_mapping = mask_pii("300만원에 사줘")
+        foreign = next(iter(backend_mapping))
+
+        _, rejections = self._restore({"ORD_UNPR": foreign})
+
+        assert [r.reason for r in rejections] == ["no_mapping_in_this_request"]
+
+    def test_hallucinated_placeholder_of_this_request_is_rejected(self, mapping_box):
+        """LLM이 지어낸 이 요청 scope 번호도 원값이 없기는 마찬가지다."""
+        qty, _ = self._masked_placeholders()
+        invented = f"<QTY_{qty.rsplit('_', 2)[-2]}_9>"
+
+        _, rejections = self._restore({"ORD_QTY": invented})
+
+        assert [r.reason for r in rejections] == ["no_mapping_in_this_request"]
+
+    def test_korean_numeral_amount_is_not_guessed_into_a_number(self, mapping_box):
+        """수사 표기는 해석하지 않고 거부한다 — 파서가 한 자리 틀리면 조용한 오주문이다.
+
+        ``_AMOUNT_UNIT_RE``가 만드는 매핑이고, ``finus_list_diaries``가 돌려주는 일지
+        본문에 실제로 들어 있다.
+        """
+        mask_tool_result("finus_list_diaries", "삼성전자를 3천만원어치 샀다")
+        placeholder = next(iter(PII_MAPPING.get()))
+
+        _, rejections = self._restore({"ORD_UNPR": placeholder})
+
+        assert [r.reason for r in rejections] == ["restored_value_is_not_a_number"]
+
+    def test_values_without_placeholders_pass_through_untouched(self, mapping_box):
+        """정상 경로 — 에이전트가 종목코드·구분값을 직접 적는 호출은 그대로 통과한다."""
+        params = {"PDNO": "005930", "ORD_DVSN": "00", "ORD_QTY": "10"}
+
+        assert self._restore(params) == (params, [])
+
+    def test_placeholder_hidden_in_a_nested_value_is_rejected(self, mapping_box):
+        """중첩 값 안의 자리표시자는 적용할 필드 이름이 없으므로 복원하지 않는다."""
+        qty, _ = self._masked_placeholders()
+
+        _, rejections = self._restore({"ORD": {"ORD_QTY": qty}})
+
+        assert [r.reason for r in rejections] == ["placeholder_inside_a_non_string_value"]
+
+    def test_rejection_logs_the_placeholder_but_the_caller_does_not_echo_it(
+        self, mapping_box, caplog
+    ):
+        """자리표시자 원문은 로그에만 남긴다 — 오류 JSON은 LLM 컨텍스트로 재유입된다."""
+        _, amount = self._masked_placeholders()
+
+        with caplog.at_level(logging.WARNING, logger="nat_finus_nat.pii_guard"):
+            self._restore({"ORD_QTY": amount})
+
+        assert amount in caplog.text
+        # 한 요청에서 KIS 호출이 여러 번 나가면 어느 호출이 막혔는지 짚을 수 있어야 한다
+        # (PR #364 리뷰). Observation 쪽 JSON에는 이미 실려 있다.
+        assert "domestic_stock" in caplog.text
+        assert "order_cash" in caplog.text
+
+
+class TestKisToolRestoresParams:
+    """``finus_account_balance``가 실제로 위 규칙을 태우는지 배선을 확인한다 (#338).
+
+    단위 함수만 테스트하면 도구가 그 함수를 부르지 않게 되는 회귀를 놓친다. 두 래퍼
+    (전체 권한·readonly)가 모두 ``_prepare_kis_trading_mcp_call``을 거치므로 여기 한
+    지점이 양쪽을 덮는다.
+    """
+
+    _BALANCE = "삼성전자 (005930) · 1,234주 · 평가금액 12,345,000원"
+
+    @pytest.fixture
+    def remote_mcp(self, monkeypatch):
+        """원격 KIS MCP 대역 — 도구가 실제로 넘긴 arguments를 관측한다."""
+        calls: list[dict] = []
+
+        async def _fake_remote(**kwargs):
+            calls.append(kwargs)
+            return '{"output": [{"odno": "0000117057"}]}'
+
+        monkeypatch.setattr(finus_api, "_mcp_call_tool_remote", _fake_remote)
+        # description 조립이 실제 MCP에 list_tools를 걸지 않게 한다.
+        monkeypatch.setenv("FINUS_SKIP_MCP_LIST_TOOLS", "1")
+        return calls
+
+    async def _order(self, params: dict) -> str:
+        config = finus_api.FinusAccountBalanceConfig(trading_tool_name="domestic_stock")
+        async with finus_api.finus_account_balance(config, None) as info:
+            return await info.single_fn(
+                finus_api.KisTradingMcpCallInput(api_type="order_cash", params=params)
+            )
+
+    async def test_agent_can_order_with_the_quantity_it_just_saw(
+        self, remote_mcp, mapping_box, ledger
+    ):
+        """이슈의 재현 경로 — 잔고 조회 → 그 수량으로 매도 주문이 KIS까지 숫자로 도착한다."""
+        mask_tool_result("finus_mcp_trading_get_balance", self._BALANCE)
+        qty = next(ph for ph in mapping_box if ph.startswith("<QTY_"))
+
+        await self._order({"PDNO": "005930", "ORD_DVSN": "01", "ORD_QTY": qty})
+
+        assert len(remote_mcp) == 1
+        assert remote_mcp[0]["arguments"]["params"]["ORD_QTY"] == "1234"
+
+    async def test_amount_in_the_quantity_slot_never_reaches_kis(
+        self, remote_mcp, mapping_box, ledger
+    ):
+        """종류가 어긋나면 호출 **자체가** 일어나지 않는다 — 시끄러운 실패를 유지한다."""
+        mask_tool_result("finus_mcp_trading_get_balance", self._BALANCE)
+        amount = next(ph for ph in mapping_box if ph.startswith("<AMOUNT_"))
+
+        observation = await self._order({"PDNO": "005930", "ORD_QTY": amount})
+
+        assert remote_mcp == []
+        payload = json.loads(observation)
+        assert payload["error"] == "kis_param_placeholder_rejected"
+        assert payload["rejected"] == [
+            {"field": "ORD_QTY", "reason": "expected_QTY_placeholder_got_AMOUNT"}
+        ]
+        # 에이전트가 같은 호출을 반복하지 않도록 무엇이 잘못됐는지 알려 준다.
+        assert "hint" in payload
+        # 내부 토큰은 Observation으로 돌려주지 않는다 — 되돌려주면 에이전트가 그것을
+        # 답변에 옮겨 적을 여지를 준다(finus_save_diary 거부 가드와 같은 판단).
+        assert amount not in observation
+
+    async def test_one_bad_field_aborts_the_whole_call(self, remote_mcp, mapping_box, ledger):
+        """통과한 것만 복원해 보내면 반쯤 맞는 주문이 KIS까지 간다."""
+        mask_tool_result("finus_mcp_trading_get_balance", self._BALANCE)
+        qty = next(ph for ph in mapping_box if ph.startswith("<QTY_"))
+        amount = next(ph for ph in mapping_box if ph.startswith("<AMOUNT_"))
+
+        await self._order({"ORD_QTY": qty, "CANO": amount})
+
+        assert remote_mcp == []
+
+    async def test_readonly_wrapper_shares_the_same_rule(self, remote_mcp, mapping_box, ledger):
+        """조회 전용 래퍼도 같은 지점을 거친다 — 규칙이 갈리면 한쪽만 고쳐진다.
+
+        실재하는 조회 payload를 쓴다(``inquire_balance`` + ``CANO``). 조회 TR에는 수량·
+        단가를 **입력으로** 받는 필드가 없어서, 이 래퍼에서 자리표시자가 실릴 현실적인
+        자리는 계좌 필드다 — 그리고 그것은 거부돼야 한다. 복원 쪽 계약은 두 래퍼가
+        공유하는 ``_prepare_kis_trading_mcp_call``에서 이미 위 테스트들이 고정한다.
+        """
+        mask_tool_result("finus_mcp_trading_get_balance", self._BALANCE)
+        qty = next(ph for ph in mapping_box if ph.startswith("<QTY_"))
+
+        config = finus_api.FinusAccountBalanceReadonlyConfig(trading_tool_name="domestic_stock")
+        async with finus_api.finus_account_balance_readonly(config, None) as info:
+            observation = await info.single_fn(
+                finus_api.KisTradingMcpCallInput(
+                    api_type="inquire_balance", params={"CANO": qty}
+                )
+            )
+
+        assert remote_mcp == []
+        assert json.loads(observation)["error"] == "kis_param_placeholder_rejected"
+
+
+class TestSaveDiaryRejectsUnrestorable:
+    """되돌리지 못한 자리표시자가 남으면 저장하지 않는다 (#339 방향 3, #354로 경계 조정).
+
+    가드가 세는 것은 **이 요청이 발급한 scope**의 자리표시자뿐이다. 원값이 이 프로세스
+    어디에도 없으므로(LLM이 번호를 지어냈거나 박스가 유실됐다) 그대로 POST하면
+    ``Diary.content``에 내부 토큰이 영구히 박힌다. 조용한 원본 소실 대신 시끄러운
+    실패를 택했고, 이 클래스가 그 선택을 고정한다.
+
+    #230이 backend에서 마스킹한 사용자 발화("300만원")는 NAT 입장에서 낯선 scope다.
+    #339 시점에는 이것도 함께 거부했다 — ``POST /api/v1/db/diary``가 저장만 하고
+    ``unmask_pii``를 타지 않아 결과가 같았기 때문이다. #354가 그 전제를 바꿨다:
+    backend가 ``llm_chat``의 매핑을 요청 범위로 들고 있다가 저장 직전에 되돌린다
+    (``backend/pii_registry.py``). 여기서 거부하면 그 복구를 NAT이 막는 셈이므로,
+    낯선 scope는 통과시켜 backend가 판정하게 둔다. 되돌리지 못하는 낯선 scope는
+    backend가 422로 거부한다 — 그쪽 경계는 ``backend/tests/test_pii_registry.py``가
+    고정한다.
+    """
+
+    # 이 클래스의 단언은 대체로 "POST가 아예 일어나지 않았다"이므로 응답 본문은
+    # 저장 성공 모양이면 족하다. 요청을 받는 쪽이 ``MockTransport``라서 프로덕션이
+    # backend 호출 인자를 바꿔도(예: #266 2단계가 들여온 `X-API-Key`) 여기는
+    # 손대지 않는다. 헤더 값 자체의 계약은 test_finus_api.py의
+    # *_sends_the_api_key_header가 고정한다.
+    _SAVED = {"status": "success", "data": {"id": 1, "created_at": "2026-09-03T00:00:00Z"}}
+
+    def test_foreign_scope_placeholders_are_left_to_backend(self, mapping_box):
+        """backend가 만든 자리표시자는 여기서 거부하지 않는다 (#354).
+
+        되돌릴 값을 가진 쪽이 backend이므로 판정도 backend가 한다. 이 목록에 넣으면
+        backend가 되살릴 수 있는 금액까지 NAT이 미리 죽인다 — #354가 회복하려는
+        기능이 바로 그것이다.
+        """
+        _, backend_mapping = mask_pii("300만원 벌었어")
+        backend_placeholder = next(iter(backend_mapping))
+        text = f"오늘 {backend_placeholder} 수익."
+
+        assert restore_for_internal(text) == text  # 손대지 않고 통과한다 (#231 규칙)
+        assert unrestorable_placeholders(text) == []
+
+    def test_reports_hallucinated_placeholders_of_this_request(self, mapping_box):
+        """LLM이 지어낸 이 요청 scope 번호도 원값이 없기는 마찬가지다."""
+        masked = mask_tool_result("finus_mcp_trading_get_balance", "평가금액 210,000원")
+        scope = next(iter(mapping_box)).rsplit("_", 2)[-2]
+        invented = f"<AMOUNT_{scope}_9>"
+
+        assert unrestorable_placeholders(restore_for_internal(masked)) == []
+        assert unrestorable_placeholders(invented) == [invented]
+
+    def test_restorable_content_reports_nothing(self, mapping_box):
+        masked = mask_tool_result("finus_mcp_trading_get_balance", "삼성전자 3주 210,000원")
+        assert unrestorable_placeholders(restore_for_internal(masked)) == []
+
+    async def test_save_diary_forwards_user_placeholder_for_backend_to_restore(
+        self, mock_backend, mapping_box, ledger
+    ):
+        """이슈 본문의 경로 — "300만원 벌었어, 일지 써줘"가 backend까지 도달한다 (#354).
+
+        backend 자리표시자를 그대로 실어 POST하는 것이 이 경로의 **정상 동작**이다.
+        backend `create_db_diary`가 요청 범위 등록소로 원값을 되돌려 저장한다. 여기서
+        거부하면 사용자 발화의 금액은 영원히 일지에 남길 수 없다 — #339가 남긴 숙제가
+        바로 그것이었다.
+        """
+        _, backend_mapping = mask_pii("300만원 벌었어")
+        backend_placeholder = next(iter(backend_mapping))
+
+        backend = mock_backend(self._SAVED)
+
+        config = finus_api.FinusSaveDiaryConfig(backend_url="http://test-backend:8000")
+        async with finus_api.finus_save_diary(config, None) as info:
+            observation = await info.single_fn(
+                finus_api.FinusSaveDiaryInput(
+                    title="매매일지 2026-09-03",
+                    content=f"오늘 {backend_placeholder} 벌었다.",
+                )
+            )
+
+        assert backend.json_body == {
+            "title": "매매일지 2026-09-03",
+            "content": f"오늘 {backend_placeholder} 벌었다.",
+        }
+        assert json.loads(observation) == {"id": 1, "created_at": "2026-09-03T00:00:00Z"}
+        # 거부든 저장이든 도구 호출은 원장에 남는다.
+        assert ledger.records[-1].tool_name == "finus_save_diary"
+
+    async def test_save_diary_checks_the_title_too(self, mock_backend, mapping_box, ledger):
+        """본문만 검사하면 제목 경로로 같은 손상이 새어 들어간다."""
+        mask_tool_result("finus_mcp_trading_get_balance", "평가금액 210,000원")
+        scope = next(iter(mapping_box)).rsplit("_", 2)[-2]
+        invented = f"<AMOUNT_{scope}_9>"  # 이 요청 scope인데 박스에 없다 = 원값이 없다
+
+        backend = mock_backend(self._SAVED)
+
+        config = finus_api.FinusSaveDiaryConfig(backend_url="http://test-backend:8000")
+        async with finus_api.finus_save_diary(config, None) as info:
+            observation = await info.single_fn(
+                finus_api.FinusSaveDiaryInput(
+                    title=f"{invented} 수익 기록", content="오늘은 잘 됐다."
+                )
+            )
+
+        assert not backend.called
+        payload = json.loads(observation)
+        assert payload["error"] == "diary_unrestorable_placeholder"
+        assert payload["kinds"] == ["AMOUNT"]
+        # 자리표시자 원문은 Observation으로 되돌아가지 않는다 — 에이전트가 답변에 옮겨
+        # 적으면 지금 막으려는 것과 같은 종류의 오염이 된다.
+        assert invented not in observation
+        # 재질의를 권하지 않는 것은 그대로다. 이 종류의 잔여 토큰은 사용자가 무엇을
+        # 다시 말하든 되살아나지 않는다 — 조회 도구를 다시 부르는 것이 유일한 회복이다.
+        assert "다시 묻지 말고" in payload["hint"]
+
+    async def test_save_diary_still_stores_content_this_request_can_restore(
+        self, mock_backend, mapping_box, ledger
+    ):
+        """가드가 정상 경로를 막지 않는다 — 되돌릴 수 있는 본문은 그대로 저장된다."""
+        backend = mock_backend(self._SAVED)
+
+        masked = mask_tool_result("finus_mcp_trading_get_balance", "삼성전자 3주 210,000원")
+        config = finus_api.FinusSaveDiaryConfig(backend_url="http://test-backend:8000")
+        async with finus_api.finus_save_diary(config, None) as info:
+            await info.single_fn(
+                finus_api.FinusSaveDiaryInput(title="매매일지", content=f"오늘 {masked}")
+            )
+
+        assert backend.json_body == {"title": "매매일지", "content": "오늘 삼성전자 3주 210,000원"}
+
+    async def test_save_diary_refuses_when_the_mapping_box_was_never_installed(
+        self, mock_backend, ledger
+    ):
+        """박스를 물려받지 못한 실행 경로에서도 손상된 본문이 DB에 들어가지 않는다.
+
+        ``mask_tool_result``는 박스가 없어도 **마스킹은 그대로 하고**(fail-closed) 매핑만
+        버린 뒤 ERROR를 남긴다. 그 요청의 일지 본문은 되돌릴 수 없는 토큰만 남으므로
+        저장도 함께 막혀야 짝이 맞는다. ``mapping_box`` 픽스처를 일부러 쓰지 않는다.
+        """
+        assert PII_MAPPING.get() is None
+
+        backend = mock_backend(self._SAVED)
+
+        masked = mask_tool_result("finus_mcp_trading_get_balance", "삼성전자 3주 210,000원")
+        assert "<QTY" in masked  # 마스킹 자체는 박스 없이도 걸린다
+
+        config = finus_api.FinusSaveDiaryConfig(backend_url="http://test-backend:8000")
+        async with finus_api.finus_save_diary(config, None) as info:
+            observation = await info.single_fn(
+                finus_api.FinusSaveDiaryInput(title="매매일지", content=f"오늘 {masked}")
+            )
+
+        assert not backend.called
+        assert json.loads(observation)["error"] == "diary_unrestorable_placeholder"
+
+
+# ---------------------------------------------------------------------------
+# 4. 최상위 에이전트 배선 — 마스킹과 역치환이 한 쌍으로 맞물리는가
+# ---------------------------------------------------------------------------
+
+class _FakeInnerAgent:
+    """도구를 한 번 부르고 그 결과를 그대로 답변에 싣는 안쪽 에이전트."""
+
+    def __init__(self, tool_name: str, tool_result: str) -> None:
+        self._tool_name = tool_name
+        self._tool_result = tool_result
+        self.seen_by_llm: str | None = None
+
+    async def ainvoke(self, _request):
+        # 실제 도구가 하는 일 그대로 — 원장 기록 + 마스킹.
+        observation = _record_and_mask(self._tool_name, self._tool_result)
+        # ReAct 컨텍스트에 들어가는 Observation이 곧 LLM이 보는 것이다.
+        self.seen_by_llm = observation
+        return ChatResponse.from_string(f"확인했습니다.\n{observation}", usage=Usage())
+
+
+@asynccontextmanager
+async def _trace_agent_response_fn(inner):
+    """등록 함수에서 ``_response_fn``을 꺼낸다 — test_reasoning_trace.py와 같은 방식."""
+    builder = MagicMock()
+    builder.get_function = AsyncMock(return_value=inner)
+    config = FinusReasoningTraceAgentConfig(inner_agent_name="inner")
+    async with finus_reasoning_trace_agent(config, builder) as info:
+        yield info.single_fn
+
+
+class TestReasoningTraceAgentWiring:
+    """``finus_reasoning_trace_agent``의 ``_response_fn``을 실제로 통과시킨다."""
+
+    async def test_tool_output_is_masked_inward_and_restored_outward(self, ledger):
+        text = _balance_report_text()
+        inner = _FakeInnerAgent("finus_mcp_trading_get_balance", text)
+
+        async with _trace_agent_response_fn(inner) as fn:
+            result = await fn(_request("내 잔고 어때?"))
+
+        # (1) LLM이 본 것에는 평문 금액·수량이 없다 — 이 이슈가 막으려던 것.
+        assert inner.seen_by_llm is not None
+        assert "1,210,000원" not in inner.seen_by_llm
+        assert "· 3주" not in inner.seen_by_llm
+
+        # (2) 사용자에게 돌아가는 응답에는 원값이 그대로 있다 — 왕복 무손실.
+        body = chat_response_plain_text(result)
+        assert "1,210,000원" in body
+        assert "· 3주" in body
+        assert "<AMOUNT" not in body and "<QTY" not in body
+
+    async def test_box_does_not_leak_between_requests(self, ledger):
+        """요청이 끝나면 박스가 원상복구된다 — 다음 요청이 남의 매핑을 보면 안 된다."""
+        inner = _FakeInnerAgent("finus_mcp_trading_get_balance", "예수금 1,111,000원")
+        async with _trace_agent_response_fn(inner) as fn:
+            await fn(_request("잔고"))
+        assert PII_MAPPING.get() is None
+
+
+class TestChatResponseWithText:
+    def test_replaces_body_and_keeps_extra_fields(self):
+        """``routed_agent``/``tools_used``(#260)를 잃지 않아야 backend가 각주를 그린다."""
+        response = ChatResponse.from_string("원문", usage=Usage()).model_copy(
+            update={"routed_agent": "trading_agent", "tools_used": [{"name": "t", "ok": True}]}
+        )
+        replaced = chat_response_with_text(response, "바뀐 본문")
+
+        assert chat_response_plain_text(replaced) == "바뀐 본문"
+        dumped = replaced.model_dump()
+        assert dumped["routed_agent"] == "trading_agent"
+        assert dumped["tools_used"] == [{"name": "t", "ok": True}]
+        # 원본은 건드리지 않는다(model_copy).
+        assert chat_response_plain_text(response) == "원문"
+
+
+# ---------------------------------------------------------------------------
+# 5. 우회 차단 · 사본 드리프트
+# ---------------------------------------------------------------------------
+
+class TestNoBypass:
+    def test_ledger_is_only_recorded_through_record_and_mask(self):
+        """``_record_to_ledger``를 직접 부르고 결과를 돌려주는 도구가 다시 생기면 실패한다.
+
+        도구가 결과를 반환하는 자리는 예외 없이 ``_record_and_mask``를 지나야 마스킹이
+        걸린다. ``_record_to_ledger``를 직접 부르는 새 경로는 그 계약을 우회하는
+        경로이므로 — 정의 그 자체와 ``_record_and_mask`` 안의 호출만 허용한다.
+        """
+        tree = ast.parse(_FINUS_API_PATH.read_text(encoding="utf-8"))
+
+        # 도구는 전부 ``async def``다. 함수를 훑어 들어가는 대신 **호출 전부를 모으고
+        # 허용된 자리(_record_and_mask 정의 안)만 뺀다** — 이렇게 하면 def 종류
+        # (FunctionDef/AsyncFunctionDef)나 중첩 깊이, 모듈 최상위 호출까지 한 번에
+        # 덮인다. 이전 판은 ``ast.FunctionDef``만 봐서 async 도구 전부가 사각지대였다
+        # (PR #335 리뷰, 실측: 사정권에 든 것은 sync 함수 하나뿐이었다).
+        allowed = {
+            inner.lineno
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == "_record_and_mask"
+            for inner in ast.walk(node)
+            if _is_call_to(inner, "_record_to_ledger")
+        }
+        offenders = sorted(
+            {node.lineno for node in ast.walk(tree) if _is_call_to(node, "_record_to_ledger")}
+            - allowed
+        )
+
+        assert offenders == [], (
+            f"finus_api.py:{offenders} 가 _record_to_ledger를 직접 호출합니다. "
+            "도구 결과를 돌려주는 자리는 _record_and_mask를 거쳐야 마스킹(#231)이 걸립니다."
+        )
+
+
+class TestVendoredCopy:
+    def test_nat_copy_is_byte_identical_to_backend(self):
+        """``pii_mask.py``의 두 사본이 어긋나면 실패한다.
+
+        NAT은 backend를 의존성으로 갖지 않고 NAT 이미지도 backend를 COPY하지 않으므로
+        (``agents/Dockerfile``) import로 공유할 수 없어 복제했다. 한쪽만 고치면 같은
+        잔고 텍스트가 backend 경로와 NAT 경로에서 다르게 마스킹돼, 한 대화 안에서
+        자리표시자 규약이 갈린다.
+        """
+        assert _NAT_PII_MASK.read_bytes() == _BACKEND_PII_MASK.read_bytes(), (
+            "backend/pii_mask.py 와 agents/src/nat_finus_nat/pii_mask.py 가 다릅니다. "
+            "한쪽을 고쳤다면 `cp backend/pii_mask.py agents/src/nat_finus_nat/pii_mask.py` 로 "
+            "사본을 맞추세요."
+        )
+
+    def test_vendored_copy_uses_only_the_standard_library(self):
+        """복제가 성립하는 전제 — 새 의존성이 들어오면 NAT 이미지에서 import가 깨진다."""
+        tree = ast.parse(_NAT_PII_MASK.read_text(encoding="utf-8"))
+        roots: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                roots.update(alias.name.split(".")[0] for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                roots.add(node.module.split(".")[0])
+
+        assert roots <= {"__future__", "logging", "re", "secrets", "typing"}, (
+            f"pii_mask.py가 stdlib 밖의 모듈을 import합니다: {sorted(roots)}. "
+            "이 모듈은 agents으로 그대로 복제되므로 stdlib만 써야 합니다."
+        )

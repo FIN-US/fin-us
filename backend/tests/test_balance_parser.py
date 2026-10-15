@@ -1,7 +1,7 @@
-"""이슈 #153 관련 테스트들의 픽스처는 mcp-trading/data/stocks.json 마스터의 실제
+"""이슈 #153 관련 테스트들의 픽스처는 mcp/trading/data/stocks.json 마스터의 실제
 종목 행을 사용한다(예: 종목코드 00104K, F70102B96). 특정 종목코드나 종목명이
 마스터에 있는지는 이 저장소에서 `git grep '"code": "<코드>"'
-mcp-trading/data/stocks.json`으로 직접 확인할 수 있다.
+mcp/trading/data/stocks.json`으로 직접 확인할 수 있다.
 """
 
 import json
@@ -15,7 +15,7 @@ from backend.scheduler import extract_stocks_from_balance, is_balance_truncated
 # 양쪽에서 동일하게 해석됩니다.
 _FIXTURE_PATH = (
     pathlib.Path(__file__).parent.parent.parent
-    / "mcp-trading" / "tests" / "fixtures" / "balance_report.json"
+    / "mcp" / "trading" / "tests" / "fixtures" / "balance_report.json"
 )
 _FIXTURE = json.loads(_FIXTURE_PATH.read_text(encoding="utf-8"))
 
@@ -53,7 +53,7 @@ class TestBalanceExtraction(unittest.TestCase):
         주의: 이 테스트는 파서 쪽 계약만 고정합니다. 포매터 쪽에는 "[보유 종목 리스트]"
         구간 안에서 종목 줄이 아닌 어떤 줄도 "- " 로 시작해서는 안 된다는 불변식이
         있어야 하며, 그 가드는 mcp-trading 쪽 테스트 스위트에 있어야 합니다.
-        mcp-trading/tests/balance.test.js 에서, "- " 로 시작하는 종목 줄만 걸러냈을 때
+        mcp/trading/tests/balance.test.js 에서, "- " 로 시작하는 종목 줄만 걸러냈을 때
         페이지 상한 안내 문구("[안내]", "상한")가 섞여 들어오지 않는지 확인하는 테스트를
         찾아 확인하세요 — 정확한 테스트 이름 대신 이 동작을 기준으로 찾아야 테스트명이
         브랜치마다 바뀌어도 근거가 깨지지 않습니다.
@@ -65,7 +65,7 @@ class TestBalanceExtraction(unittest.TestCase):
         self.assertEqual(result, [])
 
     def test_extract_stocks_skips_empty_name(self):
-        """mcp-trading/balance.js의 종목 줄 템플릿
+        """mcp/trading/balance.js의 종목 줄 템플릿
         (`- ${h.prdt_name} (${h.pdno}) · ${formatQuantity(h.hldg_qty)}주\\n`)은
         prdt_name이 빈 문자열이면 "-  (035420) · 1주"처럼 대시-공백 접두사 뒤에
         공백이 하나 더 남는 줄을 만듭니다("(" 앞의 고정 공백 때문). 이 줄은
@@ -248,12 +248,12 @@ class TestBalanceExtraction(unittest.TestCase):
         result = extract_stocks_from_balance(balance_text)
         self.assertEqual(result, ["삼성전자"])
 
-# 아래 픽스처는 mcp-trading/balance.js의 formatTruncationNote()가 실제로 만드는 문구를
+# 아래 픽스처는 mcp/trading/balance.js의 formatTruncationNote()가 실제로 만드는 문구를
 # 그대로 재현한 것입니다(이슈 #136). 근거:
-#   - 생성부: mcp-trading/balance.js 의 formatTruncationNote() — 사유별 reasons 맵과
+#   - 생성부: mcp/trading/balance.js 의 formatTruncationNote() — 사유별 reasons 맵과
 #     고정 접두/접미 리터럴("[안내] " / " 조회가 중단되어 일부 보유 종목이 위 목록에서
 #     누락되었을 수 있습니다. 실제 잔고는 별도로 확인하세요.")
-#   - 결합 고정부: mcp-trading/tests/balance.test.js 의 잘림 노트 테스트가
+#   - 결합 고정부: mcp/trading/tests/balance.test.js 의 잘림 노트 테스트가
 #     `assert.match(text, /조회가 중단되어/)`로 이 리터럴을 직접 단언한다. 이 픽스처는
 #     JS 출력을 손으로 베낀 사본이라 그 자체로는 드리프트를 못 잡지만(JS가 바뀌어도
 #     통과), JS 쪽 단언이 리터럴을 고정하므로 결합이 실제로 깨진다.
@@ -321,7 +321,7 @@ class TestBalanceTruncationDetection(unittest.TestCase):
 
 
 class TestSharedFixture(unittest.TestCase):
-    """이슈 #137: mcp-trading/tests/fixtures/balance_report.json 공유 픽스처를 사용해
+    """이슈 #137: mcp/trading/tests/fixtures/balance_report.json 공유 픽스처를 사용해
     formatBalanceReport() 출력과 파서 입력이 한 파일로 고정되는지 검증합니다.
 
     픽스처의 expected_text 는 JS 테스트(balance.test.js)가 formatBalanceReport(input)

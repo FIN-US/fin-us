@@ -33,7 +33,7 @@ fi
 if [[ ! -d "${FINUS_NAT_DIR}" ]]; then
   die_msg "missing ${FINUS_NAT_DIR}"
 else
-  echo "  ✓ finus_nat present"
+  echo "  ✓ agents present"
 fi
 
 if [[ ! -d "${FIN_BACKEND}" ]]; then
@@ -72,7 +72,7 @@ else
   echo "  ✓ docker-compose.yml present"
 fi
 
-echo "  · Ollama: optional. NAT defaults to OpenAI; for local Ollama see finus_nat/configs/common.yml (ollama_llm)."
+echo "  · Ollama: optional. NAT defaults to OpenAI; for local Ollama see agents/configs/common.yml (ollama_llm)."
 if command -v ollama >/dev/null 2>&1; then
   echo "    - ollama CLI present"
 fi

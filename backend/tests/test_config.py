@@ -78,7 +78,7 @@ def test_mcp_stdio_params_pass_kis_token_cache_and_tr_id_overrides(monkeypatch):
 
 
 def test_mcp_stdio_params_pass_real_order_enabled_and_fail_closed_when_unset(monkeypatch):
-    # #129 — mcp-trading/index.js와 order.js의 validateRealOrderGuard는 자식
+    # #129 — mcp/trading/index.js와 order.js의 validateRealOrderGuard는 자식
     # 프로세스의 process.env.KIS_REAL_ORDER_ENABLED를 직접 읽는다. 설정
     # 시에는 반드시 통과해야 하고(그렇지 않으면 .env=true여도 Docker에서 항상
     # 차단된다), 미설정 시에는 os.environ에 키 자체가 없으므로 자식에도
@@ -94,7 +94,7 @@ def test_mcp_stdio_params_pass_real_order_enabled_and_fail_closed_when_unset(mon
 
 def test_mcp_stdio_params_pass_finus_kis_tr_id_overrides_but_not_other_finus_vars(monkeypatch):
     # #130 — backend/config.py의 접두사는 기존 FIN_US_(밑줄 포함)와 겹치지
-    # 않는 FINUS_KIS_TR_ID_* 오버라이드(mcp-trading/index.js)를 놓치고
+    # 않는 FINUS_KIS_TR_ID_* 오버라이드(mcp/trading/index.js)를 놓치고
     # 있었다. FINUS_KIS_ 접두사로 이 변수들만 통과시키고, KIS_와 무관한 다른
     # FINUS_* 변수(backend/NAT 전용, mcp-trading이 읽지 않음)는 여전히
     # 차단되어야 접두사 경계가 필요 이상으로 넓어지지 않는다.
@@ -140,7 +140,7 @@ def test_mcp_stdio_params_forward_any_kis_prefixed_variable_by_mechanism(monkeyp
     ],
 )
 def test_is_truthy_flag_requires_exact_lowercase_true(raw_value, expected):
-    # HIGH2 재발 방지 — mcp-trading/index.js는 KIS_REAL_ORDER_ENABLED를
+    # HIGH2 재발 방지 — mcp/trading/index.js는 KIS_REAL_ORDER_ENABLED를
     # `=== "true"`로만 비교한다(대소문자·다른 철자 불허). backend가 여기서
     # 조금이라도 더 관대하면(예: "TRUE"·"1"·"yes"도 인정) backend 게이트는
     # 통과하고 자식은 거부하는 진단 트랩이 재발한다(#129 최초 증상이 정규화로

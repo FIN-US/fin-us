@@ -1030,7 +1030,7 @@ async def test_llm_nat_chat_result_is_a_plain_string_for_existing_callers(monkey
 
 @pytest.mark.asyncio
 async def test_llm_nat_chat_without_metadata_yields_empty_trace(monkeypatch):
-    """두 필드를 싣지 않는 구버전 finus_nat 응답도 그대로 처리된다."""
+    """두 필드를 싣지 않는 구버전 agents 응답도 그대로 처리된다."""
     response = httpx.Response(200, json={"choices": [{"message": {"content": "답변"}}]})
     monkeypatch.setattr(services.httpx, "AsyncClient", mock_async_client_factory(response))
 
@@ -1116,7 +1116,7 @@ def test_nat_reasoning_trace_reads_the_empty_result_flag():
     assert tools_used == (
         services.NatToolUse("finus_market_news", ok=True, empty=True),
         services.NatToolUse("finus_earnings_report", ok=True, empty=False),
-        # empty를 싣지 않는 구버전 finus_nat — '빈 결과라는 관측이 없음'으로 읽는다.
+        # empty를 싣지 않는 구버전 agents — '빈 결과라는 관측이 없음'으로 읽는다.
         services.NatToolUse("finus_account_balance", ok=True, empty=False),
     )
 
@@ -1886,10 +1886,10 @@ async def test_placeholders_do_not_collide_across_calls_in_same_conversation(mon
 
     NAT 경로는 마스킹 매핑과 달리 대화 히스토리를 **호출을 넘어 서버 쪽에 유지**한다:
     backend/services.py의 _llm_nat_chat이 messages에 현재 메시지 1건만 보내고
-    conversation-id 헤더로 세션을 식별하면, finus_nat/src/nat_finus_nat/agents.py의
+    conversation-id 헤더로 세션을 식별하면, agents/src/nat_finus_nat/agents.py의
     _load_history()가 SQLite chat_messages에서 과거 턴을 읽어 오고 같은 파일의
     finus_sqlite_transcript_agent가 `history + chat_request.messages`로 합쳐
-    라우터에 넘긴다(finus_nat/configs/router.yml의 max_history_messages: 30).
+    라우터에 넘긴다(agents/configs/router.yml의 max_history_messages: 30).
     conversation_id는 호출 간 재사용된다(backend/telegram_commands.py의
     f"telegram:{chat_id}"는 그 사용자의 모든 메시지가 같은 스레드).
 
@@ -2023,7 +2023,7 @@ def test_no_bypass_of_llm_chat_masking_layer():
     단언해, 규칙이 망가지거나 새 디렉터리가 조용히 배제되면 red가 되게 한다.
 
     넓힌 뒤에도 남는 사각지대(이 테스트가 잡지 못하는 것):
-    - backend/ 밖(예: mcp-trading/)에서의 참조
+    - backend/ 밖(예: mcp/trading/)에서의 참조
     - import 시 이름을 바꾸는 경우: `from openai import AsyncOpenAI as _OAI`
     - SDK를 쓰지 않고 httpx 등으로 provider HTTP API를 직접 때리는 코드
       (감시 대상 이름이 소스에 나타나지 않는다)

@@ -56,11 +56,11 @@ def mock_httpx(monkeypatch):
     손으로 흉내 낸 ``async def post(self, url, *, json)`` 대역은 프로덕션의 **호출
     시그니처를 복제**한다. 인자가 하나 붙으면 대역이 ``TypeError``를 던지는데, 텔레그램
     관문의 넓은 ``except Exception``이 그걸 전송 실패로 접는다 — 성공 경로 테스트는
-    엉뚱한 단언에서 깨지고, 실패 경로 테스트는 틀린 이유로 초록인 채 남는다. finus_nat이
+    엉뚱한 단언에서 깨지고, 실패 경로 테스트는 틀린 이유로 초록인 채 남는다. agents이
     #357에서 겪은 사고와 같은 양상이다. ``MockTransport``는 조립이 끝난
     ``httpx.Request``를 받으므로 호출 시그니처와 무관하다.
 
-    뼈대는 finus_nat/tests/conftest.py의 ``mock_backend``와 같지만 응답 지정은 다시 썼다.
+    뼈대는 agents/tests/conftest.py의 ``mock_backend``와 같지만 응답 지정은 다시 썼다.
     backend 쪽은 분할 전송(#313)처럼 한 테스트가 요청을 여러 번 태우고 "n번째에서 실패"를
     세워야 해서, 고정 응답 하나가 아니라 응답 순서를 받는다.
 

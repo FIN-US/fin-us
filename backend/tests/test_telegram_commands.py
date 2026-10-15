@@ -291,14 +291,14 @@ class FakeTradeRecorder:
 def _stock_not_found(stock_name: str) -> HTTPException:
     """resolve_stock_code가 마스터에 없는 이름으로 실패할 때 run_mcp_tool이 올리는 예외 (#387).
 
-    문구는 mcp-trading/stock-master.js의 미발견 오류 그대로다
+    문구는 mcp/trading/stock-master.js의 미발견 오류 그대로다
     (test_stock_not_found_marker_matches_the_stock_master_error가 원문과 대조한다).
     """
     return HTTPException(
         status_code=500,
         detail=(
             f"'{stock_name}'의 종목 코드를 찾을 수 없습니다. "
-            "6·7·9자리 종목코드로 직접 입력하거나 mcp-trading/data/stocks.json을 갱신하세요."
+            "6·7·9자리 종목코드로 직접 입력하거나 mcp/trading/data/stocks.json을 갱신하세요."
         ),
     )
 
@@ -664,7 +664,7 @@ async def test_balance_ignores_updates_from_other_chats():
     """다른 채팅의 /balance는 KIS 조회까지 가지 않는다 (#232, NFR-05).
 
     잔고를 비식별화하지 않고 원값 그대로 Telegram에 보내도 된다는 근거는 "수신자가
-    계좌 소유자 본인 하나"라는 것 하나뿐이다(docs/pii-masking.md). 그 전제는
+    계좌 소유자 본인 하나"라는 것 하나뿐이다. 그 전제는
     handle_update / _handle_callback_query의 chat_id 비교 두 줄에만 걸려 있어, 한쪽이
     사라져도 정상 경로 테스트는 전부 통과한다. 문서가 아니라 여기서 지킨다.
     """
@@ -1564,7 +1564,7 @@ async def test_order_command_rejects_unorderable_stock_code_before_quote_and_bal
 ):
     """주문 미지원 코드는 시세·잔고 조회 전에 끊고 사유를 정확히 알린다.
 
-    코드 추출은 성공하지만 mcp-trading/order.js의 buildCashOrderBody()가 숫자
+    코드 추출은 성공하지만 mcp/trading/order.js의 buildCashOrderBody()가 숫자
     코드만 받는다(#73). 가드가 없으면 /confirm 이후에야 실패하면서 60초 대기
     슬롯까지 점유한다.
 
@@ -1629,7 +1629,7 @@ async def test_order_command_allows_alnum_stock_code_when_flag_enabled(
     #138: KIS Open API의 실제 PDNO 수용 여부가 실계좌 없이는 확정되지 않아(#265),
     기본값은 위 test_order_command_rejects_unorderable_stock_code_before_quote_and_balance가
     고정하는 거절을 유지하고, 이 플래그를 켰을 때만 조회까지 통과함을 별도로 고정한다.
-    실제 주문 수용 여부는 mcp-trading/order.js의 buildCashOrderBody()·KIS 응답이
+    실제 주문 수용 여부는 mcp/trading/order.js의 buildCashOrderBody()·KIS 응답이
     결정하므로 여기서는 백엔드가 더 이상 조기 차단하지 않는다는 것만 확인한다.
     """
     monkeypatch.setenv("KIS_ALNUM_STOCK_ORDER_ENABLED", "true")
@@ -4784,7 +4784,7 @@ def test_failure_marker_wins_over_empty_marker():
 
 
 def test_footnote_tolerates_tools_without_the_empty_attribute():
-    """empty를 싣지 않는 구버전 finus_nat 값도 각주를 만든다 (getattr 기본값 경로)."""
+    """empty를 싣지 않는 구버전 agents 값도 각주를 만든다 (getattr 기본값 경로)."""
 
     class LegacyToolUse(NamedTuple):
         name: str
@@ -4797,7 +4797,7 @@ def test_footnote_tolerates_tools_without_the_empty_attribute():
 
 @pytest.mark.asyncio
 async def test_footnote_is_omitted_when_response_has_no_metadata():
-    """구버전 finus_nat 응답(메타데이터 없음)에서는 각주를 조용히 생략한다."""
+    """구버전 agents 응답(메타데이터 없음)에서는 각주를 조용히 생략한다."""
     notifier = ProgressFakeNotifier()
     handler = TelegramCommandHandler(
         notifier=notifier,
@@ -6676,13 +6676,13 @@ async def test_new_order_blocked_by_an_auto_proposal_is_told_to_use_the_button()
 # 숫자로 끝나는 종목명의 해석 (#387)
 # ---------------------------------------------------------------------------
 
-_STOCK_MASTER_PATH = Path(__file__).resolve().parents[2] / "mcp-trading" / "data" / "stocks.json"
-_STOCK_MASTER_JS_PATH = Path(__file__).resolve().parents[2] / "mcp-trading" / "stock-master.js"
+_STOCK_MASTER_PATH = Path(__file__).resolve().parents[2] / "mcp" / "trading" / "data" / "stocks.json"
+_STOCK_MASTER_JS_PATH = Path(__file__).resolve().parents[2] / "mcp" / "trading" / "stock-master.js"
 _CODE_SHAPE_RE = re.compile(r"^[A-Z0-9]{6,7}$", re.IGNORECASE)
 
 
 def _master_resolver(stocks: list[dict]):
-    """resolve_stock_code 대역. mcp-trading/stock-master.js resolveStock의 규칙을 그대로 따른다.
+    """resolve_stock_code 대역. mcp/trading/stock-master.js resolveStock의 규칙을 그대로 따른다.
 
     코드 완전 일치 → 이름·별칭 완전 일치(코드 형태 입력은 대소문자 무시) → 여럿이면 모호 오류 →
     코드 형태면 UNKNOWN 에코 → 아니면 미발견 오류. 응답·오류 문구도 원문 형식이다.
@@ -6771,7 +6771,7 @@ def test_resolve_stock_code_tool_error_carries_the_stock_master_message():
     """resolveStock의 오류 문구가 MCP 도구 오류 텍스트까지 실려 온다 (PR #392 리뷰).
 
     run_mcp_tool은 도구 오류 텍스트를 HTTPException.detail로 올리고 판정은 그 detail에서 문구를 찾는다.
-    문구를 detail까지 옮기는 것은 mcp-trading/index.js callTradingTool의 catch
+    문구를 detail까지 옮기는 것은 mcp/trading/index.js callTradingTool의 catch
     (``${prefix} 에러 발생: ${error.message}``)다. 거기서 error.message가 빠지면 파이썬 대역은 detail을
     직접 만들어 다른 테스트가 모두 통과하는데, 운영에서는 숫자로 끝나는 종목명 주문이 모두 "주문 준비
     실패"로 끝난다(주문이 잘못 나가지는 않는다). 그 연결을 원문에서 확인한다.
@@ -6975,7 +6975,7 @@ async def test_unregistered_stock_code_in_limit_form_keeps_the_stock_master_mess
     assert _orders(handler) == {}
     assert notifier.messages[-1] == (
         f"주문 불가: {code}({code}) — 종목마스터에 없는 종목입니다. "
-        "종목코드를 확인하거나 mcp-trading/data/stocks.json을 갱신하세요."
+        "종목코드를 확인하거나 mcp/trading/data/stocks.json을 갱신하세요."
     )
     assert calls == [("resolve_stock_code", {"stock_name": code})]
 

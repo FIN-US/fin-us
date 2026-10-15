@@ -101,7 +101,7 @@ def _normalize_stock_input(stock: str) -> str:
 async def _resolve_stock_code(stock: str) -> str:
     """종목명(또는 이미 종목코드인 값)을 종목코드로 변환합니다.
 
-    이미 종목코드 형태이면서 종목마스터(mcp-trading/data/stocks.json)에 실재하면
+    이미 종목코드 형태이면서 종목마스터(mcp/trading/data/stocks.json)에 실재하면
     MCP 호출 없이 그대로 사용합니다(#151). 코드 형태이지만 마스터에 없으면
     지름길을 포기하고 아래 MCP 경로로 흘려보내 이름·별칭 매칭을 시도합니다.
     조회 실패/예외 시 리포트 저장을 막지 않도록 빈 문자열로 폴백합니다.
@@ -905,7 +905,7 @@ async def _llm_ollama_chat(user_msg: str) -> str:
 class NatToolUse(NamedTuple):
     """각주에 실을 도구 한 건 — 도구명과 결과 상태 (#260).
 
-    finus_nat이 도구 강제 원장에서 만들어 보내는
+    agents이 도구 강제 원장에서 만들어 보내는
     ``{"name": ..., "ok": ..., "empty": ...}``에 대응한다.
 
     ``ok=False``는 도구를 호출했지만 오류 응답을 받았다는 뜻이고,
@@ -913,7 +913,7 @@ class NatToolUse(NamedTuple):
     셋 다 각주에서 구분해 표시해야 한다 — 실패나 빈 결과를 그냥 "확인한 자료"로
     보여주면 사용자는 답변이 그 데이터에 근거했다고 읽지만 실제로는 아니다.
 
-    ``empty``에 기본값이 있는 이유: 이 필드를 싣지 않는 구버전 finus_nat과 섞일 수
+    ``empty``에 기본값이 있는 이유: 이 필드를 싣지 않는 구버전 agents과 섞일 수
     있다. 기본값 ``False``는 "빈 결과라는 관측이 없음"이지 "데이터가 있었음"이 아니다.
     """
 
@@ -977,13 +977,13 @@ def _nat_reasoning_trace_from_payload(
 ) -> tuple[str | None, tuple[NatToolUse, ...]]:
     """NAT 응답 최상위의 ``routed_agent``/``tools_used``를 읽는다 (#260).
 
-    두 필드는 finus_nat이 supervisor의 라우팅 결과와 도구 강제 원장에서 만들어
+    두 필드는 agents이 supervisor의 라우팅 결과와 도구 강제 원장에서 만들어
     실어 보내는 값이다. 여기서는 **읽기만** 한다 — 답변 텍스트를 뒤져서 도구명이나
     에이전트명을 추측하지 않는다.
 
     ``tools_used``는 ``[{"name": str, "ok": bool, "empty": bool}]`` 형태다
-    (``empty``는 구버전 finus_nat에는 없다). 필드가 없거나 타입이
-    어긋나면 조용히 비운다. 두 필드를 싣지 않는 구버전 finus_nat과 혼용될 수 있고,
+    (``empty``는 구버전 agents에는 없다). 필드가 없거나 타입이
+    어긋나면 조용히 비운다. 두 필드를 싣지 않는 구버전 agents과 혼용될 수 있고,
     각주는 답변에 덧붙는 부가 정보이므로 없다고 해서 응답 자체를 실패로 만들 이유가
     없다. 개수는 :data:`NAT_MAX_TOOLS_USED`로 자른다.
     """
@@ -1001,7 +1001,7 @@ def _nat_reasoning_trace_from_payload(
             if not isinstance(name, str) or not name.strip():
                 continue
             name = name.strip()
-            # 호출 순서 유지 + 중복 제거. finus_nat이 이미 그렇게 보내지만,
+            # 호출 순서 유지 + 중복 제거. agents이 이미 그렇게 보내지만,
             # 신뢰 경계 밖의 값이므로 backend에서도 같은 불변식을 세운다.
             if name in seen:
                 continue
@@ -1130,7 +1130,7 @@ async def _llm_nat_chat(user_msg: str, *, conversation_id: str | None = None) ->
 
 # run_mcp_tool 호출 전체(서브프로세스 기동·핸드셰이크 포함)의 벽시계 상한(초). 무기한 블로킹을
 # 막는다. 연속조회 도구에 이보다 짧은 예산을 넘기는 호출자가 이 값에 기대므로
-# (scheduler._RLZ_PL_TIME_BUDGET_MS, mcp-trading/balance.js의 BALANCE_TIME_BUDGET_MS)
+# (scheduler._RLZ_PL_TIME_BUDGET_MS, mcp/trading/balance.js의 BALANCE_TIME_BUDGET_MS)
 # 바꾸면 그 산정도 함께 본다. 시세 갱신 쪽 관계는 test_scheduler.py가 고정한다(#369).
 MCP_TOOL_TIMEOUT_SECONDS = 30.0
 
@@ -1346,7 +1346,7 @@ async def llm_chat(
 # False라는 것은 코드로 증명 가능하다 (#162). 반대로 "nat"은 NAT 멀티에이전트로
 # 라우팅된다는 provider 차원의 능력만 의미할 뿐, 그 호출에서 실제로 도구가 실행됐다는
 # 관측이 아니다 — NAT ReAct 에이전트가 도구 없이도 답을 낼 수 있는 문제(#152, 여섯
-# finus_nat/configs/agents/*.yml 모두 raise_on_parsing_failure: false)가 열려 있는
+# agents/configs/agents/*.yml 모두 raise_on_parsing_failure: false)가 열려 있는
 # 한, 이 필드는 false negative는 구조적으로 불가능해도 false positive는 가능한
 # 비대칭적인 신호다. 실제 도구 호출 이력(ledger)은 #152의 몫이며 여기서 만들지 않는다.
 # 새 provider가 도구를 갖추게 되면 이 집합 한 곳만 갱신하면 provider_supports_tools()를

@@ -89,7 +89,7 @@ QUOTE_TEXT = """[삼성전자] 현재가 시세
 - 전일 대비: +1,000 (1.36%)
 """
 
-# mcp-trading/orderable-cash.js formatOrderableCashReport(). 예수금(BALANCE_TEXT의
+# mcp/trading/orderable-cash.js formatOrderableCashReport(). 예수금(BALANCE_TEXT의
 # 6,000,000원)과 일부러 다른 값을 넣는다 — cash가 잔고가 아니라 이 응답에서 온다는 것을
 # 값 자체로 고정하기 위해서다 (#310).
 ORDERABLE_TEXT = """[주문가능조회] 삼성전자 (005930)
@@ -101,7 +101,7 @@ ORDERABLE_TEXT = """[주문가능조회] 삼성전자 (005930)
 - 주문가능대용: 0원 | 재사용가능금액: 0원
 """
 
-# mcp-trading/balance.js formatTruncationNote()가 잘림 시 덧붙이는 안내다. 사유 부분만
+# mcp/trading/balance.js formatTruncationNote()가 잘림 시 덧붙이는 안내다. 사유 부분만
 # 바뀌고 "조회가 중단되어"는 고정이라, scheduler.is_balance_truncated가 그 리터럴을 본다.
 TRUNCATION_NOTE = """
 [안내] 페이지 상한(20회)에 도달하여 조회가 중단되어 일부 보유 종목이 위 목록에서 누락되었을 수 있습니다. 실제 잔고는 별도로 확인하세요.
@@ -426,7 +426,7 @@ def test_parse_snapshot_rejects_a_truncated_balance():
 
     그대로 통과시키면 BUY 비중 한도와 SELL 보유량 판정이 동시에 헐거워진다 —
     "빠진 값을 0으로 채우면 한도가 조용히 무력해진다"는 이 모듈의 원칙이 정확히
-    이 지점에서 깨진다. 잘림 문구는 mcp-trading/balance.js formatTruncationNote()의
+    이 지점에서 깨진다. 잘림 문구는 mcp/trading/balance.js formatTruncationNote()의
     사유 무관 고정 부분이며 scheduler.is_balance_truncated가 같은 리터럴을 본다.
     """
     truncated = BALANCE_TEXT + TRUNCATION_NOTE
@@ -1165,7 +1165,7 @@ async def test_market_closed_is_rejected_before_anything_else():
 async def test_verify_payload_shape_matches_the_verifier_contract():
     """검증 요청의 필드 이름을 고정한다.
 
-    반대편(finus_nat/src/nat_finus_nat/verifier.py)의 요청 모델은 전부
+    반대편(agents/src/nat_finus_nat/verifier.py)의 요청 모델은 전부
     ``extra="allow"``다 — backend가 필드명을 바꾸거나 오타를 내도 422가 아니라
     **조용히 무시**되고, 검증자는 그 필드의 기본값(0·""·False)으로 판정한다.
     한도 수치가 0으로 읽히는 쪽이 승인 방향이라 이 드리프트는 위험한 방향으로 샌다.

@@ -40,24 +40,25 @@ _rm_if_exists() {
   fi
 }
 
-_rm_if_exists "${ROOT}/mcp-news/node_modules"
-_rm_if_exists "${ROOT}/mcp-trading/node_modules"
+_rm_if_exists "${ROOT}/mcp/news/node_modules"
+_rm_if_exists "${ROOT}/mcp/trading/node_modules"
+_rm_if_exists "${ROOT}/mcp/dart/node_modules"
 _rm_if_exists "${ROOT}/backend/venv"
-_rm_if_exists "${ROOT}/finus_nat/.venv"
-_rm_if_exists "${ROOT}/finus_nat/.pytest_cache"
-_rm_if_exists "${ROOT}/finus_nat/build"
-_rm_if_exists "${ROOT}/finus_nat/dist"
+_rm_if_exists "${ROOT}/agents/.venv"
+_rm_if_exists "${ROOT}/agents/.pytest_cache"
+_rm_if_exists "${ROOT}/agents/build"
+_rm_if_exists "${ROOT}/agents/dist"
 _rm_if_exists "${ROOT}/.pytest_cache"
 
 while IFS= read -r -d '' _d; do
   rm -rf "${_d}"
   echo "  removed ${_d}"
-done < <(find "${ROOT}/backend" "${ROOT}/finus_nat" -type d -name __pycache__ -print0 2>/dev/null || true)
+done < <(find "${ROOT}/backend" "${ROOT}/agents" -type d -name __pycache__ -print0 2>/dev/null || true)
 
 while IFS= read -r -d '' _d; do
   rm -rf "${_d}"
   echo "  removed ${_d}"
-done < <(find "${ROOT}/finus_nat" -type d -name "*.egg-info" -print0 2>/dev/null || true)
+done < <(find "${ROOT}/agents" -type d -name "*.egg-info" -print0 2>/dev/null || true)
 
 echo
 echo "OK. Rebuild / install when ready:"

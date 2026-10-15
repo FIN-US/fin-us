@@ -97,7 +97,7 @@ app = FastAPI(
 # is_authorized_api_call 하나가 판정한다.
 
 # 비브라우저 클라이언트가 키를 싣는 헤더 이름. NAT의 매매일지 도구
-# (finus_nat/src/nat_finus_nat/finus_api.py)와 curl·wscat이 이 경로를 쓴다.
+# (agents/src/nat_finus_nat/finus_api.py)와 curl·wscat이 이 경로를 쓴다.
 API_KEY_HEADER = "X-API-Key"
 # 브라우저가 키를 싣는 쿠키 이름 (#266 3단계). nginx가 문서 응답에 Set-Cookie로 내려
 # 주고(frontend/nginx.conf.template), 브라우저는 이후 same-origin 요청에 이 쿠키를
@@ -715,7 +715,7 @@ async def create_db_diary(
     되돌리지 못한 것이 하나라도 남으면 **저장하지 않는다.** #339의 판정을 그대로
     유지한다 — 남은 토큰은 원값이 이 프로세스 어디에도 없고(이전 턴의 것이거나 LLM이
     지어낸 번호다), 저장은 되돌릴 기회가 다시 오지 않는 종착지다. 조용한 원본 소실보다
-    시끄러운 실패가 낫다. 근거는 docs/pii-masking.md.
+    시끄러운 실패가 낫다.
 
     NAT `finus_save_diary`도 같은 거부를 하지만 **자기가 발급한 scope에 대해서만** 한다.
     두 거부는 막는 것이 다르므로 둘 다 남는다 — NAT은 자기 도구 결과에서 유실·조작된

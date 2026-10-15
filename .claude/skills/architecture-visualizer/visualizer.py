@@ -66,8 +66,10 @@ def _infer_role(dir_path: Path) -> str:
         return "FastAPI 오케스트레이션 계층으로, MCP/LLM 호출을 조합해 분석 API를 제공합니다."
     if name == "frontend":
         return "Unity WebGL UI 계층으로, backend API를 호출해 포트폴리오와 분석 결과를 시각화합니다. 빌드 산출물(Build/)은 compose의 nginx가 정적 서빙합니다."
-    if name == "finus_nat":
+    if name == "agents":
         return "NAT 워크플로 레이어로, 라우터/브랜치 에이전트와 MCP tool 래퍼를 통해 멀티 에이전트 실행을 담당합니다."
+    if name == "mcp":
+        return "MCP 서버 모음입니다. news(뉴스·수급), trading(잔고·주문), dart(OpenDART 공시)를 하위 폴더로 둡니다."
     if name == "mcp-news":
         return "뉴스/수급/리서치 데이터를 제공하는 MCP 서버입니다."
     if name == "mcp-trading":
@@ -98,7 +100,7 @@ def _detect_relationships(start_path: str) -> list[tuple[str, str, str]]:
 
     frontend_api_client = root / "frontend" / "Assets" / "Scripts" / "ApiClient.cs"
     backend_main = root / "backend" / "main.py"
-    finus_api = root / "finus_nat" / "src" / "nat_finus_nat" / "finus_api.py"
+    finus_api = root / "agents" / "src" / "nat_finus_nat" / "finus_api.py"
     scripts_dir = root / "scripts"
 
     api_client_text = _safe_read(frontend_api_client)
@@ -113,20 +115,20 @@ def _detect_relationships(start_path: str) -> list[tuple[str, str, str]]:
     if "mcp-dart" in backend_text or "DART_MCP_PARAMS" in backend_text:
         rels.append(("backend", "mcp-dart", "MCP tool 호출"))
     if "nat_finus_nat" in backend_text:
-        rels.append(("backend", "finus_nat", "NAT 함수/워크플로 활용"))
+        rels.append(("backend", "agents", "NAT 함수/워크플로 활용"))
 
     finus_text = _safe_read(finus_api)
-    if "subdir=\"mcp-news\"" in finus_text:
-        rels.append(("finus_nat", "mcp-news", "MCP 서버 래핑"))
-    if "subdir=\"mcp-trading\"" in finus_text:
-        rels.append(("finus_nat", "mcp-trading", "MCP 서버 래핑"))
-    if "subdir=\"mcp-dart\"" in finus_text:
-        rels.append(("finus_nat", "mcp-dart", "MCP 서버 래핑"))
+    if "subdir=\"mcp/news\"" in finus_text:
+        rels.append(("agents", "mcp-news", "MCP 서버 래핑"))
+    if "subdir=\"mcp/trading\"" in finus_text:
+        rels.append(("agents", "mcp-trading", "MCP 서버 래핑"))
+    if "subdir=\"mcp/dart\"" in finus_text:
+        rels.append(("agents", "mcp-dart", "MCP 서버 래핑"))
 
     if scripts_dir.is_dir():
         rels.append(("scripts", "backend", "실행/배포 스크립트"))
         rels.append(("scripts", "frontend", "실행/배포 스크립트"))
-        rels.append(("scripts", "finus_nat", "실행/설치 스크립트"))
+        rels.append(("scripts", "agents", "실행/설치 스크립트"))
 
     # dedupe while preserving order
     seen = set()

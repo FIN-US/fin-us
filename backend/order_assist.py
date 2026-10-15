@@ -254,7 +254,7 @@ class OrderAssistResult:
 # 받는 것은 의도된 비대칭이다(#138). 사람이 명시적으로 입력한 코드는
 # stock_code.is_orderable_stock_code()가 KIS_ALNUM_STOCK_ORDER_ENABLED를 따라
 # 영숫자·9자까지 열어 주지만, 봇이 스스로 고른 종목은 KIS가 영숫자 PDNO를 실제로
-# 수용하는지 확정될 때까지(docs/alnum-stock-code.md §7 실측) 기존 범위에
+# 수용하는지 실계좌로 확정될 때까지 기존 범위에
 # 묶어 둔다. tests/test_order_assist.py의
 # test_suggestion_path_stays_numeric_only_even_when_alnum_flag_is_on이 이 비대칭을
 # 고정하므로, 없앨 때는 그 테스트를 함께 지워야 한다.
@@ -406,9 +406,9 @@ def parse_proposal(raw: str) -> tuple[OrderProposal | None, str]:
 # KIS 스냅샷 파싱 — mcp-trading의 출력 계약에 붙는다
 # ---------------------------------------------------------------------------
 
-# mcp-trading/index.js getStockQuote(): "- 현재가: 74,500원"
+# mcp/trading/index.js getStockQuote(): "- 현재가: 74,500원"
 _CURRENT_PRICE_RE = re.compile(r"현재가:\s*([\d,]+)\s*원")
-# mcp-trading/orderable-cash.js formatOrderableCashReport(): "- 주문가능금액: 1,000,000원"
+# mcp/trading/orderable-cash.js formatOrderableCashReport(): "- 주문가능금액: 1,000,000원"
 #
 # 이 값의 출처는 inquire-psbl-order(매수가능조회 v1_국내주식-007)의 `ord_psbl_cash`,
 # 즉 KIS가 계산한 **주문가능현금**이다 (#310).
@@ -422,7 +422,7 @@ _CURRENT_PRICE_RE = re.compile(r"현재가:\s*([\d,]+)\s*원")
 #   - cash_floor — 주문 후 남는 현금이 총 평가금액의 일정 비율 미만
 #
 # 라벨이 바뀌면 cash=None으로 떨어져 fail-closed로 거부된다 — 조용히 헐거워지는 길은
-# 없다. 반대쪽 계약(출력하는 쪽)은 mcp-trading/tests/orderable-cash.test.js가 고정한다.
+# 없다. 반대쪽 계약(출력하는 쪽)은 mcp/trading/tests/orderable-cash.test.js가 고정한다.
 _CASH_RE = re.compile(r"주문가능금액:\s*([\d,]+)\s*원")
 # "- 총 평가금액: 1,210,000원"
 _TOTAL_VALUE_RE = re.compile(r"총\s*평가금액:\s*([\d,]+)\s*원")
@@ -528,7 +528,7 @@ def check_orderable_code(stock_code: str, blacklist: frozenset[str]) -> LimitVio
     """"이 코드로 주문을 낼 수 있는가"의 두 갈래를 한자리에서 판정한다.
 
     주문 가능 코드 형태(``stock_code.is_orderable_stock_code_strict()``,
-    mcp-trading/order.js 정책의 백엔드 복제본)와 블랙리스트를 붙여 둔 이유는, 둘을
+    mcp/trading/order.js 정책의 백엔드 복제본)와 블랙리스트를 붙여 둔 이유는, 둘을
     떨어뜨리면 한쪽만 통과하는 경로가 생기기 때문이다. 새 코드 제약이 생기면 여기에
     함께 넣는다.
 
@@ -699,7 +699,7 @@ def load_daily_usage(session_factory: Callable[[], Any], now: datetime) -> Daily
     # #309에서 이 가드를 걷어낼지 검토했고, 걷어내지 않기로 했다. 대신 0이 여기까지
     # 오지 않게 기록 쪽을 고쳤다:
     #   - KIS 현금주문 응답(order-cash)에는 체결가가 없다. output은 KRX_FWDG_ORD_ORGNO·
-    #     ODNO·ORD_TMD뿐이라(mcp-trading/order.js formatOrderResult) "체결가를 되받는"
+    #     ODNO·ORD_TMD뿐이라(mcp/trading/order.js formatOrderResult) "체결가를 되받는"
     #     경로 자체가 존재하지 않는다.
     #   - 그래서 두 주문 경로 모두 시장가에 **주문 시점 현재가**를 기록용 참고단가로
     #     싣는다(telegram_commands._handle_order_command, run_order_assist).
@@ -810,7 +810,7 @@ async def _aclose(client: Any) -> None:
 # NAT 호출
 # ---------------------------------------------------------------------------
 
-# 검증 실패 코드 — finus_nat/src/nat_finus_nat/verifier.py와 짝을 이룬다.
+# 검증 실패 코드 — agents/src/nat_finus_nat/verifier.py와 짝을 이룬다.
 # 여기 있는 값은 backend가 자체적으로 판정한 실패이고, 검증자가 실어 보낸 값은
 # verdict payload의 failure 필드에 그대로 들어 있다.
 FAILURE_HTTP = "verify_http_error"
@@ -845,7 +845,7 @@ async def request_proposal(prompt: str, *, timeout: float = ORDER_PROPOSE_TIMEOU
     이 엔드포인트는 ``fe_branch``(환각 게이트)를 노출하므로 요청은
     ``{"input_message": ...}``이고 응답은 ``{"value": "<답변 텍스트>"}``다.
     NAT은 str 반환 함수의 응답을 ``OutputArgsSchema``로 감싼다 — 로컬 기동 후
-    curl로 확인한 계약이다(finus_nat/configs/agents/verifier_agent.yml 주석 참조).
+    curl로 확인한 계약이다(agents/configs/agents/verifier_agent.yml 주석 참조).
 
     이 경로는 ``services.llm_chat``을 지나지 않고 NAT(→ OpenAI)으로 바로 나가므로 외부 LLM 전송
     경계를 여기서 직접 태운다(#395). 프롬프트는 사용자가 친 종목 인자와 코드 리터럴뿐이라 전체를

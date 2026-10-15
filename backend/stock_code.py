@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 # ──────────────────────────────────────────────────────────────────────────
 # MCP 응답에서 종목코드 추출
 # ──────────────────────────────────────────────────────────────────────────
-# resolve_stock_code 응답 형식: "종목명 (코드, 시장)" — mcp-trading/index.js
+# resolve_stock_code 응답 형식: "종목명 (코드, 시장)" — mcp/trading/index.js
 # 종목명 자체에 괄호가 들어가는 경우가 있어(예: "...1(A)", 닫히지 않는 "(H")
 # 단순 괄호 매칭 대신 코드+쉼표 조합에 앵커한다. 종목명에 쉼표가 들어가는 종목은 없다.
 # 코드 길이는 6자(3,944종목)·7자 ETN(368종목)·9자(89종목)가 섞여 있어 상한을 두지 않는다.
@@ -29,7 +29,7 @@ def extract_stock_name(resolved_text: str) -> str | None:
 
     코드 앵커 **앞부분 전체**가 종목명이다. ``split("(")[0]``으로 자르면 위 주석이
     말하는 그 경우 — 이름 자체에 괄호가 든 종목 — 에서 이름이 잘려 나간다.
-    주문 가능 코드(6~7자리 숫자)만 세어도 mcp-trading/data/stocks.json에 174건이
+    주문 가능 코드(6~7자리 숫자)만 세어도 mcp/trading/data/stocks.json에 174건이
     해당한다(예: ``132030 KODEX 골드선물(H)`` → "KODEX 골드선물").
 
     잘린 이름은 PendingOrder.stock_name → 승인 메시지 → TradeHistory.stock_name까지
@@ -46,11 +46,11 @@ def extract_stock_name(resolved_text: str) -> str | None:
 # 입력이 이미 종목코드 형태인지 판정 (MCP 조회 생략 여부)
 # ──────────────────────────────────────────────────────────────────────────
 # {6,7} → 실제 분포(6·7·9자)에 정확히 맞춤: 9자 코드 89종목을 커버하되, 8자는
-# 종목마스터 4,401종 전수(mcp-trading/data/stocks.json)에 0건이라 제외한다(#140).
+# 종목마스터 4,401종 전수(mcp/trading/data/stocks.json)에 0건이라 제외한다(#140).
 #   길이 분포(전수 실측): 6자 3,944종목 / 7자 368종목(ETN) / 9자 89종목(펀드 84·신주인수권 5) / 8자 0건
 # KIS 국내 종목코드는 6자리 숫자(005930)만이 아니다. 코스닥 스팩·리츠 등 약 18%가
 # 영문이 섞인 형태(0001A0)이고, 펀드는 9자(F70100026).
-# mcp-trading/stock-master.js의 resolveStock()은 #174 이후 코드 완전일치를 길이 무관으로
+# mcp/trading/stock-master.js의 resolveStock()은 #174 이후 코드 완전일치를 길이 무관으로
 # 처리하므로, 9자 펀드 코드를 직접 입력하면 MCP 왕복 없이 바로 반환된다.
 # {6,9}처럼 단순 상한만 넓히면 실재하지 않는 8자 입력까지 "코드 형태"로 통과시켜, MCP
 # 존재 검증을 건너뛰고 그대로 코드로 확정해 버린다(#151과 별개로 이 PR이 만들면 안 되는
@@ -60,7 +60,7 @@ def extract_stock_name(resolved_text: str) -> str | None:
 _STOCK_CODE_RE = re.compile(r"\A(?:[0-9A-Z]{6,7}|[0-9A-Z]{9})\Z")
 
 # ──────────────────────────────────────────────────────────────────────────
-# 주문 가능 코드 판정 — mcp-trading/order.js buildCashOrderBody() 정책의 백엔드 복제본
+# 주문 가능 코드 판정 — mcp/trading/order.js buildCashOrderBody() 정책의 백엔드 복제본
 # ──────────────────────────────────────────────────────────────────────────
 # order.js의 buildCashOrderBody()는 두 가드가 함께 "숫자 6~7자만 주문 가능"을 이룬다:
 #   첫 번째: /^[0-9A-Z]{6,7}$/i && !ORDERABLE_STOCK_CODE_RE → 영숫자 코드 전용 메시지
@@ -70,7 +70,7 @@ _STOCK_CODE_RE = re.compile(r"\A(?:[0-9A-Z]{6,7}|[0-9A-Z]{9})\Z")
 # 백엔드가 조기 거절하므로 영숫자·9자 코드는 /confirm 전에 막힌다.
 # 영숫자 코드 주문 미지원은 #73에서 확정된 정책이다.
 #
-# ⚠️  결합 유지 필수: 이 상수와 mcp-trading/order.js buildCashOrderBody()의 두 가드는
+# ⚠️  결합 유지 필수: 이 상수와 mcp/trading/order.js buildCashOrderBody()의 두 가드는
 #     쌍을 이루므로 한쪽만 바꾸면 해당 계층에서 조용히 계속 막힌다(#138 참조).
 #     영숫자 코드 주문 지원을 검토할 때(#138)는 order.js 두 가드와 이 상수를
 #     **모두** 함께 바꿔야 한다.
@@ -87,13 +87,13 @@ _STOCK_CODE_RE = re.compile(r"\A(?:[0-9A-Z]{6,7}|[0-9A-Z]{9})\Z")
 # 분기에서, 그리고 order_assist.check_orderable_code()에서 쓰인다. 후자는 플래그를 보지
 # 않는 is_orderable_stock_code_strict()를 거친다(아래 ⚠️ 블록 3번째 복제본 항목 참조).
 #
-# 이 상수와 mcp-trading/order.js의 ORDERABLE_STOCK_CODE_RE가 같은 판정을 내는지는
-# mcp-trading/tests/fixtures/orderable_code_policy.json 공유 판정표가 고정한다(#138).
+# 이 상수와 mcp/trading/order.js의 ORDERABLE_STOCK_CODE_RE가 같은 판정을 내는지는
+# mcp/trading/tests/fixtures/orderable_code_policy.json 공유 판정표가 고정한다(#138).
 _ORDERABLE_STOCK_CODE_RE = re.compile(r"\A[0-9]{6,7}\Z")
 
 # 플래그가 켜졌을 때(KIS_ALNUM_STOCK_ORDER_ENABLED=true) 허용하는 범위. _STOCK_CODE_RE
 # (입력이 코드 형태인지 판정하는 정규식)와 같은 길이 분포(6·7·9자, 8자는 마스터에
-# 0건이라 제외)를 쓴다. mcp-trading/order.js의 플래그 켜짐 분기와 형태를 맞춘다.
+# 0건이라 제외)를 쓴다. mcp/trading/order.js의 플래그 켜짐 분기와 형태를 맞춘다.
 # _STOCK_CODE_RE와 패턴이 바이트 단위로 같지만 의도적으로 분리해 둔다 — 하나는 "입력이
 # 코드 형태인가", 다른 하나는 "주문을 받을 범위인가"로 역할이 다르고, 한쪽이 바뀌어도
 # 다른 쪽이 따라갈 이유가 없다(별칭으로 묶으면 그 구분이 사라진다).
@@ -105,7 +105,7 @@ def _alnum_stock_order_enabled() -> bool:
 
     매 호출 os.environ을 다시 읽는다 — 모듈 임포트 시점에 한 번만 굳히면 테스트가
     monkeypatch.setenv로 설정해도 이미 굳은 값을 바꾸지 못한다.
-    mcp-trading/order.js의 `process.env.KIS_ALNUM_STOCK_ORDER_ENABLED === "true"`와
+    mcp/trading/order.js의 `process.env.KIS_ALNUM_STOCK_ORDER_ENABLED === "true"`와
     비교 방식을 맞춘다 — 정확히 "true" 문자열만 켠 것으로 인정하고 대소문자·공백은
     관용하지 않는다. 두 계층이 같은 값에 같은 판정을 내려야 한쪽만 열리는 사고를
     막을 수 있다.
@@ -123,7 +123,7 @@ def describe_orderable_code_policy() -> str:
     0001A0은 주문되는 프로세스에서 "숫자 6~7자리만 주문할 수 있다"는 안내가 나갔다.
 
     문장을 판정 정규식 바로 옆에 둬 정책과 설명이 갈라질 자리를 없앤다. 같은 분기를
-    mcp-trading/order.js의 buildCashOrderBody()도 메시지 단위로 갖고 있다.
+    mcp/trading/order.js의 buildCashOrderBody()도 메시지 단위로 갖고 있다.
     """
     if _alnum_stock_order_enabled():
         return "영숫자 6~7자 또는 9자 코드만 주문할 수 있습니다."
@@ -147,11 +147,11 @@ def is_orderable_stock_code_strict(code: str) -> bool:
 def is_orderable_stock_code(code: str) -> bool:
     """code(이미 upper() 정규화된 값)가 현재 정책상 주문 가능한 형태인지 판정합니다.
 
-    telegram_commands.py의 주문 준비 경로가 이 함수로 mcp-trading/order.js의
+    telegram_commands.py의 주문 준비 경로가 이 함수로 mcp/trading/order.js의
     buildCashOrderBody() 가드를 미리 복제해, 조기 거절로 시세·잔고 조회와 60초 대기
     슬롯 낭비를 막는다(#73).
 
-    ⚠️  결합 유지 필수: 이 함수와 mcp-trading/order.js buildCashOrderBody()의 두 가드
+    ⚠️  결합 유지 필수: 이 함수와 mcp/trading/order.js buildCashOrderBody()의 두 가드
         (+ 플래그 분기)는 쌍을 이루므로 한쪽만 바꾸면 그 계층에서 조용히 계속 막힌다.
         플래그를 켤 때는 두 계층에 같은 KIS_ALNUM_STOCK_ORDER_ENABLED 값을 넣어야
         한다 — mcp-trading은 backend가 띄우는 자식 프로세스라
@@ -295,7 +295,7 @@ def _is_known_master_code(code: str) -> bool:
 # resolveStock은 코드 형태 입력이 마스터에 코드로도 이름·별칭으로도 없으면
 # market="UNKNOWN"으로 입력을 그대로 되돌려준다(stock-master.js resolveStock()).
 # 존재 검증이 아니라 에코이므로 이걸 성공으로 오인하면 #151이 재발한다.
-# 실제 마스터의 market은 KOSPI/KOSDAQ뿐이라(mcp-trading/data/stocks.json 전수 확인)
+# 실제 마스터의 market은 KOSPI/KOSDAQ뿐이라(mcp/trading/data/stocks.json 전수 확인)
 # "(코드, UNKNOWN)" 조합은 이 에코의 신뢰 가능한 신호다.
 #
 # _STOCK_CODE_EXTRACT_RE와 같은 "괄호+코드" 지점에 앵커한다. 문자열 끝에 앵커하면
@@ -334,7 +334,7 @@ def _looks_like_stock_code(stock: str) -> bool:
 
     _has_code_digit이 안전망 역할을 한다 — 코드 형태 이름 3종(SIMPAC/INVENI/WISCOM)이
     모두 숫자를 포함하지 않아 여기서 걸러지고 MCP로 넘어간다.
-    숫자를 포함한 6·7·9자 이름이 신규 상장되면 이 안전망이 뚫린다. mcp-trading/tests/
+    숫자를 포함한 6·7·9자 이름이 신규 상장되면 이 안전망이 뚫린다. mcp/trading/tests/
     stock-master.test.js의 "exactly 3 master stock names..." 테스트가 부분적인 신호다 —
     다만 그 테스트가 쓰는 CODE_SHAPE_PATTERN은 `/^[A-Z0-9]{6,7}$/i`라 6·7자만 덮고
     9자는 검사하지 않는다. 6·7·9자 전 범위를 덮는 신호는 backend/tests/test_stock_code.py의

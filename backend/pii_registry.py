@@ -109,7 +109,7 @@ logger = logging.getLogger(__name__)
 # 자리표시자 형식은 pii_mask._PLACEHOLDER_RE와 같은 것을 매치하지만 **scope를 캡처**한다.
 # 등록소 조회 키가 scope이기 때문이다. 얼터네이션을 같은 출처(_FALLBACK_LABEL)에서
 # 조립하므로 종류가 늘어도 두 정규식이 함께 따라간다 — 둘이 정말 같은 것을 매치하는지는
-# test_pii_registry.py가 고정한다. (finus_nat/pii_guard.py의 _SCOPED_PLACEHOLDER_RE와
+# test_pii_registry.py가 고정한다. (agents/pii_guard.py의 _SCOPED_PLACEHOLDER_RE와
 # 같은 이유의 같은 정규식이다. 그쪽은 NAT 프로세스에 있어 import로 공유할 수 없다 —
 # pii_mask.py를 바이트 복제한 것과 같은 제약이다.)
 _SCOPED_PLACEHOLDER_RE = re.compile(

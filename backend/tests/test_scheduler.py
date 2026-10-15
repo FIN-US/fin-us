@@ -1194,7 +1194,7 @@ def test_start_scheduler_registers_catalyst_calendar_job(monkeypatch):
     assert "catalyst_calendar" in job_ids
 
 
-# mcp-trading/balance.js의 잘림 안내 문구는 test_balance_parser.py가 이미 사유별로
+# mcp/trading/balance.js의 잘림 안내 문구는 test_balance_parser.py가 이미 사유별로
 # 재현해 두었으므로(TRUNCATION_NOTES_BY_REASON), 여기서 다시 베끼지 않고 재사용한다.
 # 같은 JS 리터럴이 Python 두 곳에 복사되면 한쪽만 갱신되는 드리프트가 생긴다(이슈 #136).
 # 이 문구가 [보유 종목 리스트] 뒤에 그대로 붙어 오는 것이 스케줄러가 받는 형태다.
@@ -1567,10 +1567,10 @@ async def test_monitor_market_task_reescalates_error_after_six_cycles(monkeypatc
 def _make_balance_text(*holdings):
     """(name, code, qty, avg_price) 튜플 목록으로 get_balance 텍스트 픽스처를 합성합니다.
 
-    mcp-trading/balance.js의 formatBalanceReport()가 생성하는 형식을 그대로 재현합니다.
+    mcp/trading/balance.js의 formatBalanceReport()가 생성하는 형식을 그대로 재현합니다.
     formatAmount(pchs_avg_pric) = toLocaleString("ko-KR"): 정수는 "N,NNN원",
     소수는 "N,NNN.NN원" 형태. avg_price가 정수가 아니면 소수점을 그대로 보존한다.
-    mcp-trading/tests/balance.test.js가 "평단가 66,666.67원"을 단언하므로 소수 케이스도
+    mcp/trading/tests/balance.test.js가 "평단가 66,666.67원"을 단언하므로 소수 케이스도
     픽스처가 통과시켜야 한다(Critical 1 참고).
     """
     lines = []
@@ -2243,7 +2243,7 @@ async def test_monitor_market_task_survives_portfolio_broadcast_failure(monkeypa
 
 def test_parse_balance_holdings_accepts_fractional_avg_price():
     """balance.js formatAmount는 정수가 아닌 평단가에 소수점을 붙인다.
-    mcp-trading/tests/balance.test.js가 "평단가 66,666.67원"을 리터럴로 단언하므로
+    mcp/trading/tests/balance.test.js가 "평단가 66,666.67원"을 리터럴로 단언하므로
     이것은 가정이 아니라 계약이다.
 
     이 테스트가 잡는 mutation: _AVG_PRICE_RE를 원래 r"평단가\\s+([\\d,]+)원"으로
@@ -2927,12 +2927,12 @@ async def test_recording_recovery_reports_missed_count(monkeypatch, caplog):
 # mcp-trading·backend 공유 픽스처(#196). balance_report.json(#137)과 같은 목적이며,
 # 경로도 같은 방식으로 __file__ 기준 절대 경로라 worktree·CI 양쪽에서 동일하게 풀린다.
 #
-# 고정은 **양방향**이다: mcp-trading/tests/balance-rlz-pl-report.test.js가 같은 파일의
+# 고정은 **양방향**이다: mcp/trading/tests/balance-rlz-pl-report.test.js가 같은 파일의
 # input을 formatter에 넣어 expected_text와 바이트 단위로 비교하므로, formatter가 바뀌면
 # 형식을 소유한 JS 스위트가 먼저 깨진다. 이 파일을 고칠 때는 양쪽을 함께 돌린다.
 _RLZ_PL_FIXTURE_PATH = (
     pathlib.Path(__file__).parent.parent.parent
-    / "mcp-trading" / "tests" / "fixtures" / "balance_rlz_pl_report.json"
+    / "mcp" / "trading" / "tests" / "fixtures" / "balance_rlz_pl_report.json"
 )
 _RLZ_PL_FIXTURE = json.loads(_RLZ_PL_FIXTURE_PATH.read_text(encoding="utf-8"))
 
@@ -2947,7 +2947,7 @@ def _rlz_pl_text(case: str) -> str:
 _PAPER_FALLBACK_CONTRACT = json.loads(
     (
         pathlib.Path(__file__).parent.parent.parent
-        / "mcp-trading" / "tests" / "fixtures" / "paper_rlz_pl_fallback.json"
+        / "mcp" / "trading" / "tests" / "fixtures" / "paper_rlz_pl_fallback.json"
     ).read_text(encoding="utf-8")
 )
 
@@ -3597,7 +3597,7 @@ def test_rlz_pl_time_budget_fits_inside_mcp_call_timeout():
     from ..scheduler import _RLZ_PL_TIME_BUDGET_MS
     from ..services import MCP_TOOL_TIMEOUT_SECONDS
 
-    index_js = (Path(__file__).resolve().parents[2] / "mcp-trading" / "index.js").read_text(
+    index_js = (Path(__file__).resolve().parents[2] / "mcp" / "trading" / "index.js").read_text(
         encoding="utf-8"
     )
     match = re.search(r"const kisAxios = axios\.create\(\{ timeout: (\d+) \}\);", index_js)

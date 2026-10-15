@@ -3,13 +3,13 @@
 backend의 /buy·/sell 파서는 이름 자리가 종목코드 하나면 시장가 해석을 만들지 않는다
 (telegram_commands._order_argument_readings). 그래서 마스터에 "ABC123 200" 같은 이름·별칭이
 생기면 그 종목은 이름으로 시장가 주문할 수 없고 모호한 입력을 되묻지도 못한다. 운영자가
-``mcp-trading/scripts/update_stock_master.py``로 마스터를 직접 갱신할 때 스크립트가 쓰기 전에
+``mcp/trading/scripts/update_stock_master.py``로 마스터를 직접 갱신할 때 스크립트가 쓰기 전에
 같은 검사를 하는데, 스크립트는 backend를 import하지 않고 따로 구현한다.
 
-두 구현은 공유 판정표 ``mcp-trading/tests/fixtures/unreadable_numeric_name_policy.json``으로 묶인다.
+두 구현은 공유 판정표 ``mcp/trading/tests/fixtures/unreadable_numeric_name_policy.json``으로 묶인다.
 이 파일은 표가 실제 backend 파서의 동작과 같은지를 본다 — backend를 import해야 하므로 backend 스위트에
 둔다. 스크립트 쪽 판정·쓰기 거부 테스트는 backend 의존이 없어
-``mcp-trading/tests/test_update_stock_master_numeric_name_guard.py``로 옮겼다(#393에서 CI가
+``mcp/trading/tests/test_update_stock_master_numeric_name_guard.py``로 옮겼다(#393에서 CI가
 mcp-trading의 파이썬 테스트를 돌리게 되면서, 여기 두었던 이유가 사라졌다).
 """
 
@@ -22,7 +22,7 @@ import pytest
 from backend.telegram_commands import TelegramCommandHandler
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_POLICY_PATH = _REPO_ROOT / "mcp-trading" / "tests" / "fixtures" / "unreadable_numeric_name_policy.json"
+_POLICY_PATH = _REPO_ROOT / "mcp" / "trading" / "tests" / "fixtures" / "unreadable_numeric_name_policy.json"
 _CASES = json.loads(_POLICY_PATH.read_text(encoding="utf-8"))["cases"]
 _CASE_IDS = [case["label"] for case in _CASES]
 

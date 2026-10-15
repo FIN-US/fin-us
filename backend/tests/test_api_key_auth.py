@@ -43,7 +43,7 @@ from backend.main import (
 _KEY = "test-secret-key"
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_NAT_FINUS_API = _REPO_ROOT / "finus_nat" / "src" / "nat_finus_nat" / "finus_api.py"
+_NAT_FINUS_API = _REPO_ROOT / "agents" / "src" / "nat_finus_nat" / "finus_api.py"
 
 
 @pytest.fixture
@@ -324,7 +324,7 @@ def test_the_schema_stays_open_by_decision_not_by_accident(auth_on, path):
 def test_the_nat_client_uses_the_same_header_name():
     """NAT가 쓰는 헤더 이름이 backend의 API_KEY_HEADER와 같은지 소스에서 대조합니다.
 
-    `finus_nat`은 별도 패키지라 backend의 상수를 import할 수 없고, 그래서 `"X-API-Key"`
+    `agents`은 별도 패키지라 backend의 상수를 import할 수 없고, 그래서 `"X-API-Key"`
     리터럴이 두 벌 존재합니다. 양쪽 테스트는 각자 자기 리터럴만 확인하므로 한쪽 이름을
     바꿔도 둘 다 초록불인 채 **인증을 켠 날에야** 매매일지 저장이 401로 드러납니다
     (PR #352 리뷰).

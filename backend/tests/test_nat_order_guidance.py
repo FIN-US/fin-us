@@ -2,7 +2,7 @@
 
 #380으로 채팅 ``trading_agent``·``monitoring_agent``는 주문을 내지 않고, 주문 요청을 받으면
 텔레그램 ``/buy``·``/sell``·``/advise`` 명령을 안내한다. 안내 문구는
-``finus_nat/configs/prompts/react_kis_chat.md``에 있고, 문법의 주인은 이 저장소의
+``agents/configs/prompts/react_kis_chat.md``에 있고, 문법의 주인은 이 저장소의
 ``backend/telegram_commands.py``다. 두 곳이 따로 움직이면 에이전트가 **파서가 다르게 읽는
 명령**을 사용자에게 알려 주게 된다 — 확정 화면에서 잡히긴 하지만 사용자는 엉뚱한 주문
 확인을 받는다.
@@ -14,7 +14,7 @@ backend 테스트에 둔 이유는 파서를 import해 **돌려 봐야** 해서�
 (``backend/tests/fixtures/price_gap_policy.json``)를 읽는 것과 같은 방식이다.
 
 #387부터 파서는 위치로 가능한 해석을 모두 내고, 어느 해석인지는 종목 마스터가 정한다. 그래서
-예시는 "해석 목록 중 종목명이 실제 마스터(``mcp-trading/data/stocks.json``)에 있는 것이 기대한
+예시는 "해석 목록 중 종목명이 실제 마스터(``mcp/trading/data/stocks.json``)에 있는 것이 기대한
 해석 **하나뿐**"으로 확인한다. 마스터 대조는 resolveStock의 완전 일치 규칙(코드·이름·별칭)만
 흉내 낸다 — 예시 종목은 그 규칙으로 충분하다.
 """
@@ -37,8 +37,8 @@ from backend.telegram_commands import (
 )
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_PROMPT_PATH = _REPO_ROOT / "finus_nat" / "configs" / "prompts" / "react_kis_chat.md"
-_STOCK_MASTER_PATH = _REPO_ROOT / "mcp-trading" / "data" / "stocks.json"
+_PROMPT_PATH = _REPO_ROOT / "agents" / "configs" / "prompts" / "react_kis_chat.md"
+_STOCK_MASTER_PATH = _REPO_ROOT / "mcp" / "trading" / "data" / "stocks.json"
 _PROMPT = _PROMPT_PATH.read_text(encoding="utf-8")
 _STOCKS = json.loads(_STOCK_MASTER_PATH.read_text(encoding="utf-8"))
 _MASTER_KEYS = {
@@ -160,7 +160,7 @@ def test_prompt_no_longer_warns_the_trailing_number_trap_and_explains_the_fallba
 def test_trap_workaround_code_is_the_named_stock():
     """종목코드 예시가 프롬프트가 든 그 종목(KODEX 200)의 코드다 — 엉뚱한 종목을 안내하지 않는다.
 
-    종목 마스터는 ``/buy``가 종목코드를 해석하는 원천(``mcp-trading/data/stocks.json``)이다.
+    종목 마스터는 ``/buy``가 종목코드를 해석하는 원천(``mcp/trading/data/stocks.json``)이다.
     """
     by_code = {s["code"]: s["name"] for s in _STOCKS}
     assert by_code.get("069500") == "KODEX 200"
