@@ -16,9 +16,9 @@ from pathlib import Path
 
 import pytest
 
-from nat_finus_nat import finus_api
-from nat_finus_nat.finus_api import DATA_TOOL_LEDGER, DataToolLedger
-from nat_finus_nat.order_price_guard import (
+from finus_agents import finus_api
+from finus_agents.finus_api import DATA_TOOL_LEDGER, DataToolLedger
+from finus_agents.order_price_guard import (
     DEFAULT_MAX_PRICE_GAP_RATIO,
     ERROR_GAP_EXCEEDED,
     ERROR_UNVERIFIABLE,
@@ -29,7 +29,7 @@ from nat_finus_nat.order_price_guard import (
     parse_current_price,
     price_gap_exceeds,
 )
-from nat_finus_nat.pii_guard import PII_MAPPING, install_mapping_box, mask_tool_result
+from finus_agents.pii_guard import PII_MAPPING, install_mapping_box, mask_tool_result
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _POLICY_PATH = _REPO_ROOT / "backend" / "tests" / "fixtures" / "price_gap_policy.json"

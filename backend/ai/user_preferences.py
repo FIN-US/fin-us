@@ -1,7 +1,7 @@
 """텔레그램 사용자의 투자 성향 (#397) — NAT 사용자 선호 메모리의 backend 쪽 절반.
 
 성향 값은 backend가 저장하지 않는다. 저장소는 NAT 프로세스 안의 mem0 로컬 메모리 하나이고
-(``agents/src/nat_finus_nat/user_memory.py``), backend는 ``POST /v1/user-preferences``로 읽고 쓴다.
+(``agents/src/finus_agents/user_memory.py``), backend는 ``POST /v1/user-preferences``로 읽고 쓴다.
 설명 수준(/level)처럼 redis에 두지 않는 이유는 성향의 소비자가 NAT의 추천 브랜치뿐이라서다 —
 backend에 사본을 두면 두 저장소가 어긋날 수 있고, NAT이 요청마다 backend를 되묻는 경로가 생긴다.
 

@@ -2,7 +2,7 @@
 
 ## 무엇을 막는가
 
-:func:`~nat_finus_nat.pii_guard.restore_params_for_kis`의 종류 검사는 ``QTY``와
+:func:`~finus_agents.pii_guard.restore_params_for_kis`의 종류 검사는 ``QTY``와
 ``AMOUNT`` 사이의 맞바꿈만 가른다. **같은 ``AMOUNT`` 안의 맞바꿈** — 잔고 결과의
 평가금액 자리표시자(``12,345,000원``)를 ``ORD_UNPR``에 싣는 것 — 은 그대로 복원돼 KIS로
 간다. 68,900원짜리 주식에 12,345,000원 지정가 주문이 나가는 것이다. 자리표시자가 두

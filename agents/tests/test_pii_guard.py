@@ -29,15 +29,15 @@ from nat.data_models.api_server import (
     Usage,
 )
 
-from nat_finus_nat.agents import (
+from finus_agents.agents import (
     FinusReasoningTraceAgentConfig,
     chat_response_plain_text,
     chat_response_with_text,
     finus_reasoning_trace_agent,
 )
-from nat_finus_nat import finus_api
-from nat_finus_nat.finus_api import DATA_TOOL_LEDGER, DataToolLedger, _record_and_mask
-from nat_finus_nat.pii_guard import (
+from finus_agents import finus_api
+from finus_agents.finus_api import DATA_TOOL_LEDGER, DataToolLedger, _record_and_mask
+from finus_agents.pii_guard import (
     MASKED_TOOLS,
     PII_MAPPING,
     _SCOPED_PLACEHOLDER_RE,
@@ -48,12 +48,12 @@ from nat_finus_nat.pii_guard import (
     unmask_response,
     unrestorable_placeholders,
 )
-from nat_finus_nat.pii_mask import _PLACEHOLDER_RE, mask_pii
+from finus_agents.pii_mask import _PLACEHOLDER_RE, mask_pii
 
 _REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
-_FINUS_API_PATH = _REPO_ROOT / "agents" / "src" / "nat_finus_nat" / "finus_api.py"
+_FINUS_API_PATH = _REPO_ROOT / "agents" / "src" / "finus_agents" / "finus_api.py"
 _BACKEND_PII_MASK = _REPO_ROOT / "backend" / "pii" / "mask.py"
-_NAT_PII_MASK = _REPO_ROOT / "agents" / "src" / "nat_finus_nat" / "pii_mask.py"
+_NAT_PII_MASK = _REPO_ROOT / "agents" / "src" / "finus_agents" / "pii_mask.py"
 _BALANCE_FIXTURE = _REPO_ROOT / "mcp" / "trading" / "tests" / "fixtures" / "balance_report.json"
 
 
@@ -256,7 +256,7 @@ class TestMaskToolResult:
     def test_masks_even_without_a_box_and_logs(self, caplog):
         """박스가 없어도 마스킹은 한다(fail-closed) — 유출보다 품질 저하를 택한다."""
         assert PII_MAPPING.get() is None
-        with caplog.at_level(logging.ERROR, logger="nat_finus_nat.pii_guard"):
+        with caplog.at_level(logging.ERROR, logger="finus_agents.pii_guard"):
             masked = mask_tool_result("finus_mcp_trading_get_balance", "예수금 1,000,000원")
         assert "1,000,000원" not in masked
         assert "PII_MAPPING box not set" in caplog.text
@@ -265,14 +265,14 @@ class TestMaskToolResult:
         self, mapping_box, monkeypatch, caplog
     ):
         """마스킹이 예외로 실패해도 원문이 Observation으로 나가지 않는다 (#395)."""
-        from nat_finus_nat import pii_guard
+        from finus_agents import pii_guard
 
         def broken_mask(text):
             raise RuntimeError("정규식 회귀")
 
         monkeypatch.setattr(pii_guard, "mask_pii", broken_mask)
 
-        with caplog.at_level(logging.ERROR, logger="nat_finus_nat.pii_guard"):
+        with caplog.at_level(logging.ERROR, logger="finus_agents.pii_guard"):
             observation = mask_tool_result("finus_mcp_trading_get_balance", "예수금 1,000,000원")
 
         assert "1,000,000" not in observation
@@ -281,10 +281,10 @@ class TestMaskToolResult:
         assert "도구 결과 마스킹 실패" in caplog.text
 
     def test_debug_log_compares_the_result_before_and_after(self, mapping_box, caplog, monkeypatch):
-        from nat_finus_nat import pii_guard
+        from finus_agents import pii_guard
 
         monkeypatch.setattr(pii_guard, "_DEBUG_LOG_ENABLED", True)
-        with caplog.at_level(logging.DEBUG, logger="nat_finus_nat.pii_guard"):
+        with caplog.at_level(logging.DEBUG, logger="finus_agents.pii_guard"):
             masked = mask_tool_result("finus_mcp_trading_get_balance", "예수금 1,000,000원")
 
         messages = [record.getMessage() for record in caplog.records]
@@ -295,11 +295,11 @@ class TestMaskToolResult:
         self, mapping_box, caplog, monkeypatch
     ):
         """NAT CLI ``--log-level debug``처럼 루트만 DEBUG여도 평문이 남지 않는다 (PR #404 리뷰)."""
-        from nat_finus_nat import pii_guard
+        from finus_agents import pii_guard
 
         monkeypatch.setattr(pii_guard, "_DEBUG_LOG_ENABLED", False)
         with caplog.at_level(logging.DEBUG), caplog.at_level(
-            logging.DEBUG, logger="nat_finus_nat.pii_guard"
+            logging.DEBUG, logger="finus_agents.pii_guard"
         ):
             mask_tool_result("finus_mcp_trading_get_balance", "예수금 1,000,000원")
 
@@ -363,7 +363,7 @@ class TestUnmaskResponse:
         scope = next(iter(mapping_box)).rsplit("_", 2)[-2]
         invented = f"<AMOUNT_{scope}_99>"
 
-        with caplog.at_level(logging.WARNING, logger="nat_finus_nat.pii_guard"):
+        with caplog.at_level(logging.WARNING, logger="finus_agents.pii_guard"):
             restored = unmask_response(f"총 {invented} 입니다.")
         assert invented not in restored
         assert restored == "총 (이전 금액 1) 입니다."
@@ -638,7 +638,7 @@ class TestRestoreParamsForKis:
         """자리표시자 원문은 로그에만 남긴다 — 오류 JSON은 LLM 컨텍스트로 재유입된다."""
         _, amount = self._masked_placeholders()
 
-        with caplog.at_level(logging.WARNING, logger="nat_finus_nat.pii_guard"):
+        with caplog.at_level(logging.WARNING, logger="finus_agents.pii_guard"):
             self._restore({"ORD_QTY": amount})
 
         assert amount in caplog.text
@@ -1020,8 +1020,8 @@ class TestVendoredCopy:
         자리표시자 규약이 갈린다.
         """
         assert _NAT_PII_MASK.read_bytes() == _BACKEND_PII_MASK.read_bytes(), (
-            "backend/pii/mask.py 와 agents/src/nat_finus_nat/pii_mask.py 가 다릅니다. "
-            "한쪽을 고쳤다면 `cp backend/pii/mask.py agents/src/nat_finus_nat/pii_mask.py` 로 "
+            "backend/pii/mask.py 와 agents/src/finus_agents/pii_mask.py 가 다릅니다. "
+            "한쪽을 고쳤다면 `cp backend/pii/mask.py agents/src/finus_agents/pii_mask.py` 로 "
             "사본을 맞추세요."
         )
 

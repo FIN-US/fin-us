@@ -1633,7 +1633,7 @@ wheels = [
 ]
 
 [[package]]
-name = "nat-finus-nat"
+name = "finus-agents"
 source = { editable = "." }
 dependencies = [
     { name = "nvidia-nat", extra = ["langchain", "mcp", "mem0ai"] },

@@ -76,7 +76,7 @@ def _load_direct_agent_config(function_name: str):
     12개 라우터 파라미터(2개 라우터 x 6개 함수)가 각자 같은 파일을 다시 로드하던 것을
     함수당 1회로 줄인다.
     """
-    import nat_finus_nat.register  # noqa: F401 - 등록 트리거만 필요
+    import finus_agents.register  # noqa: F401 - 등록 트리거만 필요
     from nat.runtime.loader import load_config
 
     return load_config(AGENTS_DIR / AGENT_YAML[function_name]).functions[function_name]
@@ -84,7 +84,7 @@ def _load_direct_agent_config(function_name: str):
 
 @pytest.mark.parametrize("config_path,function_name", ALL_CONFIGS, ids=ALL_CONFIG_IDS)
 def test_agent_config_builds_with_valid_system_prompt(config_path: Path, function_name: str):
-    import nat_finus_nat.register  # noqa: F401 - 등록 트리거만 필요
+    import finus_agents.register  # noqa: F401 - 등록 트리거만 필요
     from nat.plugins.langchain.agent.react_agent.agent import ReActAgentGraph
     from nat.plugins.langchain.agent.react_agent.agent import create_react_agent_prompt
     from nat.plugins.langchain.agent.react_agent.register import ReActAgentWorkflowConfig
@@ -148,7 +148,7 @@ def test_system_prompt_only_names_real_tools(config_path: Path, function_name: s
     `_type` 값)이 섞여 있었고, 이제는 매 턴 살아 있는 텍스트라 오타/유령 이름이 곧바로
     TOOL_NOT_FOUND_ERROR_MESSAGE로 이어져 max_tool_calls 사이클을 하나 버린다.
     """
-    import nat_finus_nat.register  # noqa: F401 - 등록 트리거만 필요
+    import finus_agents.register  # noqa: F401 - 등록 트리거만 필요
     from nat.runtime.loader import load_config
 
     config = load_config(config_path)
@@ -194,9 +194,9 @@ _KIS_CONFIG_IDS = [p.name for p in _KIS_CONFIGS]
 @pytest.mark.parametrize("config_path", _KIS_CONFIGS, ids=_KIS_CONFIG_IDS)
 def test_kis_tool_is_readonly_in_every_config(config_path: Path):
     """#66: kis-trading-mcp-tool-readonly는 어떤 설정에서 로드해도 finus_account_balance_readonly여야 한다."""
-    import nat_finus_nat.register  # noqa: F401
+    import finus_agents.register  # noqa: F401
     from nat.runtime.loader import load_config
-    from nat_finus_nat.finus_api import FinusAccountBalanceReadonlyConfig
+    from finus_agents.finus_api import FinusAccountBalanceReadonlyConfig
 
     config = load_config(config_path)
     tool_config = config.functions["kis-trading-mcp-tool-readonly"]
@@ -215,7 +215,7 @@ def test_full_permission_kis_tool_is_not_registered(config_path: Path):
     반대로 뒤집었다. 이름만 보는 이 검사는 입구일 뿐이고, 다른 이름으로 같은 타입을 싣는
     경우까지는 아래 전수 스캔(``test_no_config_can_reach_an_order_capable_tool``)이 잡는다.
     """
-    import nat_finus_nat.register  # noqa: F401
+    import finus_agents.register  # noqa: F401
     from nat.runtime.loader import load_config
 
     config = load_config(config_path)
@@ -243,7 +243,7 @@ def test_agent_references_expected_kis_tool(config_path: Path, agent_fn: str, ex
     #380 전에는 trading/monitoring이 전체 권한 kis-trading-mcp-tool을 참조했다. 지금은
     다섯 에이전트 모두 kis-trading-mcp-tool-readonly다. 라우터 설정에서도 동일하게 검사한다.
     """
-    import nat_finus_nat.register  # noqa: F401
+    import finus_agents.register  # noqa: F401
     from nat.runtime.loader import load_config
 
     config = load_config(config_path)
@@ -277,7 +277,7 @@ def test_readonly_api_type_allows_read_only(api_type: str, tool_name: str):
     다른 상품에서 그대로 허용되는지 함께 본다. 국내주식 전용 목록의 판정은
     ``test_kis_readonly_allowlist.py``가 고정한다.
     """
-    from nat_finus_nat.finus_api import _is_readonly_api_type
+    from finus_agents.finus_api import _is_readonly_api_type
     assert _is_readonly_api_type(api_type, tool_name=tool_name) is True, (
         f"{tool_name}/{api_type!r}는 조회 전용 허용 목록에 포함되어야 합니다."
     )
@@ -301,7 +301,7 @@ def test_readonly_api_type_blocks_non_allowlisted(api_type: str):
     허용 범위가 가장 넓은 국내주식(#380 전용 목록 포함)으로 판정한다 — 거기서 막히면 다른
     상품에서도 막힌다.
     """
-    from nat_finus_nat.finus_api import _is_readonly_api_type
+    from finus_agents.finus_api import _is_readonly_api_type
     assert _is_readonly_api_type(api_type, tool_name="domestic_stock") is False, (
         f"{api_type!r}는 조회 전용 허용 목록에서 차단되어야 합니다."
     )
@@ -323,7 +323,7 @@ def test_readonly_api_type_blocks_non_allowlisted(api_type: str):
 ], ids=lambda x: x)
 def test_readonly_tool_name_allows_asset_classes(tool_name: str):
     """#66: 허용 자산군 7종은 _is_readonly_tool_name이 True를 반환해야 한다."""
-    from nat_finus_nat.finus_api import _is_readonly_tool_name
+    from finus_agents.finus_api import _is_readonly_tool_name
     assert _is_readonly_tool_name(tool_name) is True, (
         f"{tool_name!r}는 조회 전용 tool_name 허용 목록에 포함되어야 합니다."
     )
@@ -340,7 +340,7 @@ def test_readonly_tool_name_blocks_non_allowlisted(tool_name: str):
     ``auth`` 케이스가 핵심: 인증 상태를 바꿀 수 있어 조회 전용 래퍼에서 제외한다.
     allowlist 판정을 무조건 True로 교체하면 이 테스트들이 red가 된다.
     """
-    from nat_finus_nat.finus_api import _is_readonly_tool_name
+    from finus_agents.finus_api import _is_readonly_tool_name
     assert _is_readonly_tool_name(tool_name) is False, (
         f"{tool_name!r}는 조회 전용 허용 목록에서 차단되어야 합니다."
     )
@@ -355,7 +355,7 @@ def test_readonly_tool_name_blocks_non_allowlisted(tool_name: str):
 ], ids=lambda x: repr(x) if isinstance(x, str) else str(x))
 def test_readonly_tool_name_case_and_whitespace(tool_name: str, expected: bool):
     """#66: _is_readonly_tool_name은 대소문자·앞뒤 공백을 정규화해 판정해야 한다."""
-    from nat_finus_nat.finus_api import _is_readonly_tool_name
+    from finus_agents.finus_api import _is_readonly_tool_name
     assert _is_readonly_tool_name(tool_name) is expected, (
         f"{tool_name!r}: expected={expected}"
     )
@@ -376,7 +376,7 @@ def test_prepare_kis_normalizes_tool_name_to_lowercase(raw: str, expected: str):
     _is_readonly_tool_name 게이트 통과 여부만이 아니라 실제로 MCP 에 전달되는 값을 검증한다.
     정규화가 없으면 "DOMESTIC_STOCK"은 게이트를 통과하지만 MCP 서버가 unknown tool로 거부한다.
     """
-    from nat_finus_nat.finus_api import (
+    from finus_agents.finus_api import (
         FinusAccountBalanceConfig,
         KisTradingMcpCallInput,
         _prepare_kis_trading_mcp_call,
@@ -405,7 +405,7 @@ def test_trading_tool_name_invalid_raises_validation_error():
     런타임 첫 호출 전에 잡는다. allowlist 판정을 항상 통과로 뒤집으면 이 테스트가 red가 된다.
     """
     from pydantic import ValidationError
-    from nat_finus_nat.finus_api import FinusAccountBalanceConfig
+    from finus_agents.finus_api import FinusAccountBalanceConfig
 
     with pytest.raises(ValidationError, match="trading_tool_name"):
         FinusAccountBalanceConfig(trading_tool_name="invalid_tool_xyz")
@@ -417,7 +417,7 @@ def test_trading_tool_name_invalid_raises_validation_error():
 ], ids=lambda x: x)
 def test_trading_tool_name_valid_values_accepted(name: str):
     """#220: 허용 목록 8종은 trading_tool_name에 지정해도 ValidationError 없이 로드된다."""
-    from nat_finus_nat.finus_api import FinusAccountBalanceConfig
+    from finus_agents.finus_api import FinusAccountBalanceConfig
 
     config = FinusAccountBalanceConfig(trading_tool_name=name)
     assert config.trading_tool_name == name
@@ -430,7 +430,7 @@ def test_readonly_config_rejects_auth():
     두 YAML이 같은 환경변수(FINUS_KIS_TRADING_TOOL_NAME)를 공유하므로 실제로 발생 가능한 경로다.
     """
     from pydantic import ValidationError
-    from nat_finus_nat.finus_api import FinusAccountBalanceReadonlyConfig
+    from finus_agents.finus_api import FinusAccountBalanceReadonlyConfig
 
     with pytest.raises(ValidationError, match="trading_tool_name"):
         FinusAccountBalanceReadonlyConfig(trading_tool_name="auth")
@@ -442,7 +442,7 @@ def test_readonly_config_rejects_auth():
 ], ids=lambda x: x)
 def test_readonly_config_accepts_asset_classes(name: str):
     """#225: readonly Config는 자산군 7종을 설정 시점에 허용해야 한다."""
-    from nat_finus_nat.finus_api import FinusAccountBalanceReadonlyConfig
+    from finus_agents.finus_api import FinusAccountBalanceReadonlyConfig
 
     config = FinusAccountBalanceReadonlyConfig(trading_tool_name=name)
     assert config.trading_tool_name == name
@@ -462,9 +462,9 @@ def test_router_workflow_is_the_reasoning_trace_agent(config_path: Path):
     각주를 **조용히** 생략한다. 관측 형태가 "각주가 안 나온다"뿐이라 런타임에는
     드러나지 않으므로 config 모양을 여기서 고정한다.
     """
-    import nat_finus_nat.register  # noqa: F401 - 등록 트리거만 필요
+    import finus_agents.register  # noqa: F401 - 등록 트리거만 필요
     from nat.runtime.loader import load_config
-    from nat_finus_nat.agents import FinusReasoningTraceAgentConfig
+    from finus_agents.agents import FinusReasoningTraceAgentConfig
 
     workflow = load_config(config_path).workflow
     assert isinstance(workflow, FinusReasoningTraceAgentConfig), (
@@ -485,7 +485,7 @@ def test_router_does_not_store_conversation_text_in_memory(config_path: Path):
     뮤테이션: router.yml의 workflow를 옛 ``memory_router_agent``(auto_memory_agent)로 되돌리거나
     ``add_user_memory``를 ``_type: add_memory``로 되돌리면 red.
     """
-    import nat_finus_nat.register  # noqa: F401 - 등록 트리거만 필요
+    import finus_agents.register  # noqa: F401 - 등록 트리거만 필요
     from nat.runtime.loader import load_config
 
     config = load_config(config_path)
@@ -512,7 +512,7 @@ def test_kis_agents_share_identical_system_prompt():
     문자열**을 비교하기 때문이다: 프롬프트를 다시 블록 스칼라로 인라인하거나 두 에이전트를
     서로 다른 파일로 갈라 놓는 변경이 오면, 그 결과가 실제로 달라졌는지를 여기서 확인한다.
     """
-    import nat_finus_nat.register  # noqa: F401 - 등록 트리거만 필요
+    import finus_agents.register  # noqa: F401 - 등록 트리거만 필요
     from nat.runtime.loader import load_config
 
     prompts = {
@@ -681,9 +681,9 @@ def test_no_config_can_reach_an_order_capable_tool(config_path: Path):
     8개 설정 전부 red. ``agents/``에 같은 등록만 담은 새 YAML을 추가해도 그 파일이 red.
     trading_agent.yml의 tool_names를 ``kis-trading-mcp-tool``로 되돌리면 3번에서 red.
     """
-    import nat_finus_nat.register  # noqa: F401
+    import finus_agents.register  # noqa: F401
     from nat.runtime.loader import load_config
-    from nat_finus_nat.finus_api import FinusAccountBalanceConfig, FinusAccountBalanceReadonlyConfig
+    from finus_agents.finus_api import FinusAccountBalanceConfig, FinusAccountBalanceReadonlyConfig
 
     config = load_config(config_path)
     components = _registered_components(config)

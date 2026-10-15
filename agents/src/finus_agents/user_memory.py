@@ -52,7 +52,7 @@ from nat.data_models.memory import MemoryBaseConfig
 from nat.memory.interfaces import MemoryEditor
 from nat.memory.models import MemoryItem
 from nat.utils.type_converter import GlobalTypeConverter
-from nat_finus_nat.agents import message_content_text
+from finus_agents.agents import message_content_text
 
 logger = logging.getLogger(__name__)
 
@@ -225,7 +225,7 @@ def resolve_storage_dir(raw_path: str) -> Path:
 @register_memory(config_type=FinusMem0LocalMemoryConfig)
 async def finus_mem0_local_memory(config: FinusMem0LocalMemoryConfig, _builder: Builder):
     # mem0 import는 메모리 모드에서만 일어나게 여기서 한다(텔레메트리 차단이 import 전에 걸린다).
-    from nat_finus_nat.mem0_local import build_local_async_memory
+    from finus_agents.mem0_local import build_local_async_memory
 
     storage_dir = resolve_storage_dir(config.storage_dir)
     memory = build_local_async_memory(storage_dir, config.collection_name)

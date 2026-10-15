@@ -21,7 +21,7 @@ from nat.data_models.api_server import (
     UserMessageContentRoleType,
 )
 
-from nat_finus_nat.agents import (
+from finus_agents.agents import (
     _EMPTY_RESULT_REJECTION,
     _TOOL_ENFORCEMENT_REJECTION,
     _check_tool_enforcement,
@@ -29,7 +29,7 @@ from nat_finus_nat.agents import (
     _has_numeric_claims,
     _run_with_gate,
 )
-from nat_finus_nat.finus_api import (
+from finus_agents.finus_api import (
     DATA_TOOL_LEDGER,
     DataToolLedger,
     _EMPTY_RESULT_LITERALS,
@@ -167,7 +167,7 @@ def test_record_to_ledger_logs_error_and_leaves_ledger_empty_when_box_is_none(ca
     """
     token = DATA_TOOL_LEDGER.set(None)
     try:
-        with caplog.at_level(logging.ERROR, logger="nat_finus_nat.finus_api"):
+        with caplog.at_level(logging.ERROR, logger="finus_agents.finus_api"):
             _record_to_ledger("finus_mcp_trading_get_balance", '{"total_balance": 5000000}')
     finally:
         DATA_TOOL_LEDGER.reset(token)

@@ -22,7 +22,7 @@ root = ".."
 where = ["src"]
 
 [project]
-name = "nat-finus-nat"
+name = "finus-agents"
 dynamic = ["version"]
 requires-python = ">=3.11,<3.14"
 description = "Fin-Us NAT: router + sub-agents, mcp-news/mcp-trading/mcp-dart (stdio MCP), Kis Trading MCP pass-through, optional Mem0"
@@ -32,10 +32,10 @@ dependencies = [
 ]
 
 [project.entry-points.'nat.components']
-nat_finus_nat = "nat_finus_nat.register"
+finus_agents = "finus_agents.register"
 
 [project.scripts]
-finus-chat = "nat_finus_nat.chat_cli:main"
+finus-chat = "finus_agents.chat_cli:main"
 
 [dependency-groups]
 dev = [

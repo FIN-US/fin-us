@@ -28,13 +28,13 @@ from nat.data_models.component_ref import FunctionRef
 from nat.data_models.component_ref import LLMRef
 from nat.data_models.function import FunctionBaseConfig
 from nat.utils.type_converter import GlobalTypeConverter
-from nat_finus_nat.finus_api import (
+from finus_agents.finus_api import (
     DATA_TOOL_LEDGER,
     REASONING_TRACE,
     DataToolLedger,
     ReasoningTrace,
 )
-from nat_finus_nat.pii_guard import PII_MAPPING, install_mapping_box, unmask_response
+from finus_agents.pii_guard import PII_MAPPING, install_mapping_box, unmask_response
 
 logger = logging.getLogger(__name__)
 
@@ -720,7 +720,7 @@ async def finus_reasoning_trace_agent(config: FinusReasoningTraceAgentConfig, bu
         # PII 매핑 박스(#231)도 같은 자리에서 같은 이유로 심는다 — 두 라우터 config가
         # 모두 이 함수를 최상위 workflow로 쓰므로, config가 무엇이든(vendor
         # auto_memory_agent가 끼든 안 끼든) 마스킹의 시작과 끝이 한 쌍으로 맞물린다.
-        # 안쪽 도구는 이 dict를 mutate만 한다(nat_finus_nat/pii_guard.py 참고).
+        # 안쪽 도구는 이 dict를 mutate만 한다(finus_agents/pii_guard.py 참고).
         mapping_token = PII_MAPPING.set(install_mapping_box())
         try:
             try:

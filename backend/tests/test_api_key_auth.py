@@ -43,7 +43,7 @@ from backend.main import (
 _KEY = "test-secret-key"
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_NAT_FINUS_API = _REPO_ROOT / "agents" / "src" / "nat_finus_nat" / "finus_api.py"
+_NAT_FINUS_API = _REPO_ROOT / "agents" / "src" / "finus_agents" / "finus_api.py"
 
 
 @pytest.fixture

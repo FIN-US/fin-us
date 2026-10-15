@@ -810,7 +810,7 @@ async def _aclose(client: Any) -> None:
 # NAT 호출
 # ---------------------------------------------------------------------------
 
-# 검증 실패 코드 — agents/src/nat_finus_nat/verifier.py와 짝을 이룬다.
+# 검증 실패 코드 — agents/src/finus_agents/verifier.py와 짝을 이룬다.
 # 여기 있는 값은 backend가 자체적으로 판정한 실패이고, 검증자가 실어 보낸 값은
 # verdict payload의 failure 필드에 그대로 들어 있다.
 FAILURE_HTTP = "verify_http_error"

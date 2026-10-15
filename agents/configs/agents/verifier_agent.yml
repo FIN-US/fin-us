@@ -68,7 +68,7 @@ llms:
 
 functions:
   # react_agent가 아니라 단발 LLM 호출 + pydantic 파싱 커스텀 함수다. 도구는 없다.
-  # 환각 게이트 밖인 이유와 fail-closed 규칙은 src/nat_finus_nat/verifier.py 모듈
+  # 환각 게이트 밖인 이유와 fail-closed 규칙은 src/finus_agents/verifier.py 모듈
   # docstring에 있다.
   order_verifier:
     _type: finus_order_verifier

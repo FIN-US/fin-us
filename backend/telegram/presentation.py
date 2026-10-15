@@ -594,7 +594,7 @@ AGENT_LABELS: dict[str, str] = {
     "diary_agent": "매매일지 에이전트",
 }
 
-# 도구 강제 원장(agents/src/nat_finus_nat/finus_api.py의 _record_to_ledger 호출부)에
+# 도구 강제 원장(agents/src/finus_agents/finus_api.py의 _record_to_ledger 호출부)에
 # 기록되는 내부 도구명 → 사용자에게 보여줄 한국어 라벨.
 # 매핑에 없는 도구는 내부 이름을 그대로 노출한다 — 조용히 감추면 각주가 "확인한 자료"를
 # 실제보다 적게 보여주게 되어, 근거를 보여준다는 목적 자체가 무너진다. 그렇게 열화가

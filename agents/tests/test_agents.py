@@ -2,7 +2,7 @@ from nat.data_models.api_server import ChatRequest
 from nat.data_models.api_server import Message
 from nat.data_models.api_server import UserMessageContentRoleType
 
-from nat_finus_nat import agents
+from finus_agents import agents
 
 
 def _user_request(text: str) -> ChatRequest:

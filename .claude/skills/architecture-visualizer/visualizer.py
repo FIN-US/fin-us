@@ -100,7 +100,7 @@ def _detect_relationships(start_path: str) -> list[tuple[str, str, str]]:
 
     frontend_api_client = root / "frontend" / "Assets" / "Scripts" / "ApiClient.cs"
     backend_main = root / "backend" / "main.py"
-    finus_api = root / "agents" / "src" / "nat_finus_nat" / "finus_api.py"
+    finus_api = root / "agents" / "src" / "finus_agents" / "finus_api.py"
     scripts_dir = root / "scripts"
 
     api_client_text = _safe_read(frontend_api_client)
@@ -114,7 +114,7 @@ def _detect_relationships(start_path: str) -> list[tuple[str, str, str]]:
         rels.append(("backend", "mcp-trading", "MCP tool 호출"))
     if "mcp-dart" in backend_text or "DART_MCP_PARAMS" in backend_text:
         rels.append(("backend", "mcp-dart", "MCP tool 호출"))
-    if "nat_finus_nat" in backend_text:
+    if "finus_agents" in backend_text:
         rels.append(("backend", "agents", "NAT 함수/워크플로 활용"))
 
     finus_text = _safe_read(finus_api)

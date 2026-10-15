@@ -22,10 +22,10 @@ from pathlib import Path
 import pytest
 from nat.data_models.api_server import ChatRequest, Message, UserMessageContentRoleType
 
-from nat_finus_nat import finus_api
-from nat_finus_nat.agents import _check_tool_enforcement
-from nat_finus_nat.finus_api import DATA_TOOL_LEDGER, DataToolLedger
-from nat_finus_nat.pii_guard import MASKED_TOOLS, PII_MAPPING, install_mapping_box, unmask_response
+from finus_agents import finus_api
+from finus_agents.agents import _check_tool_enforcement
+from finus_agents.finus_api import DATA_TOOL_LEDGER, DataToolLedger
+from finus_agents.pii_guard import MASKED_TOOLS, PII_MAPPING, install_mapping_box, unmask_response
 
 _ORDERS_EMPTY = "[당일 주문·체결 내역] 20260922\n- 결과: 해당 조건의 주문·체결이 없습니다."
 _ORDERS = "[당일 주문·체결 내역] 20260922\n1. 삼성전자 매수 10주 체결 700,000원"

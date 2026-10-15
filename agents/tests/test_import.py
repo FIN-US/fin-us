@@ -12,8 +12,8 @@
 
 
 def test_register_module_imports():
-    """`nat_finus_nat.register` import로 NAT 컴포넌트 등록이 로드되는지 확인한다."""
-    import nat_finus_nat.register  # noqa: F401
+    """`finus_agents.register` import로 NAT 컴포넌트 등록이 로드되는지 확인한다."""
+    import finus_agents.register  # noqa: F401
 
 
 def test_react_agent_graph_init_is_unpatched_vendor_code():
@@ -43,7 +43,7 @@ def test_react_agent_graph_init_is_unpatched_vendor_code():
     누군가 소스 재작성 패치나 SYSTEM_PROMPT 런타임 재바인딩을 다시 들여오면
     (마커 이름과 무관하게) 이 테스트가 실패한다.
     """
-    import nat_finus_nat.register  # noqa: F401 - 등록 트리거만 필요
+    import finus_agents.register  # noqa: F401 - 등록 트리거만 필요
     import nat.plugins.langchain.agent.react_agent.agent as ra_mod
     import nat.plugins.langchain.agent.react_agent.prompt as prompt_mod
     from nat.plugins.langchain.agent.react_agent.agent import ReActAgentGraph
@@ -62,7 +62,7 @@ def test_vendor_patch_status_reflects_actual_installation():
     값이 ``"applied"``이면 예상치 못한 런타임 패치가 벤더를 수정하고 있다는 뜻이고,
     값이 ``"unknown"``이면 벤더 모듈을 import하지 못했다는 뜻 — 둘 다 이상 상태다.
     """
-    from nat_finus_nat.register import VENDOR_PATCH_STATUS
+    from finus_agents.register import VENDOR_PATCH_STATUS
 
     assert VENDOR_PATCH_STATUS["react_system_prompt"] == "not_applied", (
         "react_system_prompt: 패치가 예상치 않게 설치돼 있거나 모듈 import 실패"

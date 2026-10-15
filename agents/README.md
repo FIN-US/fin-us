@@ -65,9 +65,9 @@ router.yml에서는 경고도 예외도 없이 각주만 사라졌습니다(#273
 
 별도 서버나 API 키 없이 기본으로 켜져 있습니다. 텔레그램 `/start`의 두 번째 문항이나 `/risk 안정형|공격형|해제`로 고른 투자 성향이 종목 추천 논조에 반영됩니다(안정형: 변동성 경고 우선, 공격형: 기회 요인 우선). 성향을 고르지 않은 사용자의 추천은 이 기능이 없을 때와 같습니다.
 
-**저장 위치는 로컬뿐입니다.** mem0 라이브러리의 `AsyncMemory`를 NAT 프로세스 안에서 띄우고, qdrant 로컬 파일과 sqlite 이력을 `FINUS_MEM0_STORAGE_DIR`(기본 `agents/.state/mem0`)에 둡니다. NAT의 `mem0_memory`(self-hosted 서버나 `api.mem0.ai`로 가는 HTTP 클라이언트)는 쓰지 않습니다. mem0의 PostHog 텔레메트리, OpenAI 임베딩, 추출 LLM은 코드로 막혀 있습니다(`src/nat_finus_nat/mem0_local.py`).
+**저장 위치는 로컬뿐입니다.** mem0 라이브러리의 `AsyncMemory`를 NAT 프로세스 안에서 띄우고, qdrant 로컬 파일과 sqlite 이력을 `FINUS_MEM0_STORAGE_DIR`(기본 `agents/.state/mem0`)에 둡니다. NAT의 `mem0_memory`(self-hosted 서버나 `api.mem0.ai`로 가는 HTTP 클라이언트)는 쓰지 않습니다. mem0의 PostHog 텔레메트리, OpenAI 임베딩, 추출 LLM은 코드로 막혀 있습니다(`src/finus_agents/mem0_local.py`).
 
-**저장하는 값은 투자 성향 열거형뿐입니다.** 쓰기 경로는 `src/nat_finus_nat/user_memory.py`의 허용목록 게이트 하나이고, 대화 본문·계좌·금액은 mem0에 닿기 전에 거부됩니다. 에이전트(LLM)는 메모리에 쓸 수 없습니다 — 대화 전문을 매 턴 저장하던 vendor `auto_memory_agent`는 쓰지 않습니다.
+**저장하는 값은 투자 성향 열거형뿐입니다.** 쓰기 경로는 `src/finus_agents/user_memory.py`의 허용목록 게이트 하나이고, 대화 본문·계좌·금액은 mem0에 닿기 전에 거부됩니다. 에이전트(LLM)는 메모리에 쓸 수 없습니다 — 대화 전문을 매 턴 저장하던 vendor `auto_memory_agent`는 쓰지 않습니다.
 
 흐름:
 

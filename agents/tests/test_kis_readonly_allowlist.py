@@ -22,8 +22,8 @@ from pathlib import Path
 
 import pytest
 
-from nat_finus_nat import finus_api
-from nat_finus_nat.finus_api import (
+from finus_agents import finus_api
+from finus_agents.finus_api import (
     _READONLY_API_ALLOWLIST_EXACT,
     _READONLY_API_ALLOWLIST_PREFIXES,
     _READONLY_DOMESTIC_STOCK_API_EXACT,
@@ -32,7 +32,7 @@ from nat_finus_nat.finus_api import (
     DataToolLedger,
     _is_readonly_api_type,
 )
-from nat_finus_nat.pii_guard import MASKED_TOOLS, PII_MAPPING, install_mapping_box
+from finus_agents.pii_guard import MASKED_TOOLS, PII_MAPPING, install_mapping_box
 
 _VERDICTS_PATH = Path(__file__).parent / "fixtures" / "kis_domestic_stock_tr_verdicts.json"
 _CHAT_PROMPT_PATH = Path(__file__).resolve().parents[1] / "configs" / "prompts" / "react_kis_chat.md"
