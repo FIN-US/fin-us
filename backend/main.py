@@ -377,7 +377,7 @@ async def get_visualization_portfolio(session: Session = Depends(get_session)):
     (price_updated_at) 모르거나 PRICE_FRESHNESS_TTL보다 오래됐으면 "모름"으로 내립니다.
     시세 갱신은 10분 주기 감시 잡에 얹혀 도는데, KIS 장애로 며칠 멈춰도 마지막 값은
     테이블에 그대로 남습니다. 나이를 보지 않으면 그 값이 계속 "현재가"로 나가
-    "모르는데 안다"가 됩니다. 판정은 scheduler.is_price_fresh 한 곳에서만 내립니다.
+    "모르는데 안다"가 됩니다. 판정은 scheduler.portfolio.is_price_fresh 한 곳에서만 내립니다.
 
     price_updated_at은 ISO 문자열(오프셋 포함)로 함께 내려, 소비자가 TTL 판정을
     그대로 받아들이지 않고 스스로 나이를 계산할 수 있게 합니다. NULL이면 ""입니다
@@ -480,7 +480,7 @@ async def get_db_portfolio(session: Session = Depends(get_session)):
 
     이 엔드포인트는 **의도적으로 게이트를 걸지 않은** 원본 덤프입니다. 행을 그대로
     내보내므로 price_updated_at은 저장된 그대로, 즉 오프셋 없는 naive ISO 문자열로
-    나가고 신선도 플래그도 붙지 않습니다 — scheduler.format_price_updated_at의
+    나가고 신선도 플래그도 붙지 않습니다 — scheduler.portfolio.format_price_updated_at의
     docstring이 경고하는 바로 그 형태입니다. 같은 자리의 updated_at도 예전부터 같은
     모양이라 이 엔드포인트의 기존 계약과 일관됩니다.
 
@@ -622,7 +622,7 @@ async def get_db_catalysts(
     }
 
 
-# 걸러진 신호 조회의 출처 필터가 받는 값. scheduler.SIGNAL_SOURCES의 name과 같아야
+# 걸러진 신호 조회의 출처 필터가 받는 값. scheduler.monitor.SIGNAL_SOURCES의 name과 같아야
 # 하며, 어긋나면 test_filtered_signal.py의 드리프트 테스트가 깨진다. 자유 문자열로 두면
 # 오타가 422가 아니라 "total: 0"인 정상 응답으로 돌아와, 임계값 조정 근거를 읽는 쪽에서
 # "걸러진 게 없다"와 "필터를 잘못 썼다"가 구분되지 않는다.

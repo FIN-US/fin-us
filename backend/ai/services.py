@@ -747,7 +747,7 @@ async def score_signal(
         stock, source, Segment(_signal_snippet(signal.text), public=signal.public)
     )
 
-    # provider의 출처는 환경변수(scheduler.FILTER_PROVIDER)라 검증된 적이 없다.
+    # provider의 출처는 환경변수(scheduler.monitor.FILTER_PROVIDER)라 검증된 적이 없다.
     # llm_chat의 마지막 줄은 catch-all이므로 매칭되지 않는 값은 전부 NAT로 떨어진다
     # — 아래 fail-open은 호출이 실패했을 때의 장치이지 오라우팅을 막지 못한다.
     # 계약 밖의 값은 여기서 기본값으로 되돌리고 로그를 남긴다.
@@ -1130,7 +1130,7 @@ async def _llm_nat_chat(user_msg: str, *, conversation_id: str | None = None) ->
 
 # run_mcp_tool 호출 전체(서브프로세스 기동·핸드셰이크 포함)의 벽시계 상한(초). 무기한 블로킹을
 # 막는다. 연속조회 도구에 이보다 짧은 예산을 넘기는 호출자가 이 값에 기대므로
-# (scheduler._RLZ_PL_TIME_BUDGET_MS, mcp/trading/balance.js의 BALANCE_TIME_BUDGET_MS)
+# (scheduler.portfolio._RLZ_PL_TIME_BUDGET_MS, mcp/trading/balance.js의 BALANCE_TIME_BUDGET_MS)
 # 바꾸면 그 산정도 함께 본다. 시세 갱신 쪽 관계는 test_scheduler.py가 고정한다(#369).
 MCP_TOOL_TIMEOUT_SECONDS = 30.0
 

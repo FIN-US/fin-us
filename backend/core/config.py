@@ -287,7 +287,7 @@ ORDER_RULE_TRIGGER_ENABLED = _is_truthy_flag(
     os.environ.get("ORDER_RULE_TRIGGER_ENABLED", "")
 )
 
-# 자동 제안을 부르는 신호 소스(쉼표 구분). scheduler.SIGNAL_SOURCES의 name과 같은 값이다.
+# 자동 제안을 부르는 신호 소스(쉼표 구분). scheduler.monitor.SIGNAL_SOURCES의 name과 같은 값이다.
 # 알 수 없는 이름을 적으면 그 이름은 어떤 신호와도 매칭되지 않아 조용히 무시된다 —
 # 매칭 실패는 "제안하지 않음"이므로 fail-closed 방향이다.
 ORDER_RULE_SOURCES = frozenset(

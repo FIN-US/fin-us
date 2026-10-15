@@ -102,7 +102,7 @@ ORDERABLE_TEXT = """[주문가능조회] 삼성전자 (005930)
 """
 
 # mcp/trading/balance.js formatTruncationNote()가 잘림 시 덧붙이는 안내다. 사유 부분만
-# 바뀌고 "조회가 중단되어"는 고정이라, scheduler.is_balance_truncated가 그 리터럴을 본다.
+# 바뀌고 "조회가 중단되어"는 고정이라, scheduler.portfolio.is_balance_truncated가 그 리터럴을 본다.
 TRUNCATION_NOTE = """
 [안내] 페이지 상한(20회)에 도달하여 조회가 중단되어 일부 보유 종목이 위 목록에서 누락되었을 수 있습니다. 실제 잔고는 별도로 확인하세요.
 """
@@ -427,7 +427,7 @@ def test_parse_snapshot_rejects_a_truncated_balance():
     그대로 통과시키면 BUY 비중 한도와 SELL 보유량 판정이 동시에 헐거워진다 —
     "빠진 값을 0으로 채우면 한도가 조용히 무력해진다"는 이 모듈의 원칙이 정확히
     이 지점에서 깨진다. 잘림 문구는 mcp/trading/balance.js formatTruncationNote()의
-    사유 무관 고정 부분이며 scheduler.is_balance_truncated가 같은 리터럴을 본다.
+    사유 무관 고정 부분이며 scheduler.portfolio.is_balance_truncated가 같은 리터럴을 본다.
     """
     truncated = BALANCE_TEXT + TRUNCATION_NOTE
 

@@ -123,7 +123,7 @@ class ProposalTrigger:
     """제안을 요청한 계기.
 
     두 호출부가 같은 함수로 들어온다 — 텔레그램 수동 요청(``telegram_commands._handle_advise``)과
-    스케줄러 룰 트리거(``scheduler.run_rule_triggered_proposal``, #314)다. 냉각 키가
+    스케줄러 룰 트리거(``scheduler.monitor.run_rule_triggered_proposal``, #314)다. 냉각 키가
     종목코드+룰 단위라, 룰이 없는 수동 요청과 룰 기반 자동 제안이 서로의 냉각을 잡아먹지 않는다.
 
     ``trigger_signal``에는 **수치를 넣지 않는다**. ``build_proposal_prompt``가 이 값을 프롬프트

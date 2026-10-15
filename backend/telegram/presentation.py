@@ -247,7 +247,7 @@ URGENCY_LABELS: dict[str, str] = {
     "normal": "보통",
     "low": "낮음",
 }
-# 신호 출처. 키는 scheduler.SIGNAL_SOURCES의 name과 models.AgentReport.source 기본값이다.
+# 신호 출처. 키는 scheduler.monitor.SIGNAL_SOURCES의 name과 models.AgentReport.source 기본값이다.
 # 사용자에게는 "이 알림이 어디서 왔는가"이지 내부 식별자가 아니다 (#297 검수 2차).
 SOURCE_LABELS: dict[str, str] = {
     "news": "뉴스",

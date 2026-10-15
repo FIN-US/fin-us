@@ -374,7 +374,7 @@ _LABELED_AMOUNT_RE = re.compile(
 #                "345"부터 매치가 시작돼 앞자리 "12,"가 마스킹되지 않고 새어 나간다.
 # - \d(?:[\d,]*\d)? : formatQuantity()가 toLocaleString("ko-KR")을 쓰므로 1,000주
 #                이상은 콤마가 들어간다(mcp/trading/balance.js의 formatQuantity()).
-#                같은 사실을 이미 반영한 선례가 backend/scheduler.py의 _QTY_RE
+#                같은 사실을 이미 반영한 선례가 backend/scheduler/portfolio.py의 _QTY_RE
 #                (r"\)\s*·\s*([\d,]+)주")다.
 #                끝을 숫자로 강제해 "1,234," 같은 후행 콤마를 삼키지 않는다.
 # - (?:\.\d+)? : 소수 표기 수량("0.5주"). 이 갈래가 없으면 정수부가 남는다 —

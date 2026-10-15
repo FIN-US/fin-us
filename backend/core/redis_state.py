@@ -738,7 +738,7 @@ class RedisPendingOrderStore:
     - Redis 장애 → 호출자에게 예외가 전파되고 사용자는 명시적 오류 메시지를 받는다.
       조용한 주문 유실보다 명시적 실패가 금전 경로에서 더 안전하다.
 
-    scheduler.py의 Redis fallback(fail-open)은 멱등 모니터링 작업이라 가능하다.
+    scheduler/monitor.py의 Redis fallback(fail-open)은 멱등 모니터링 작업이라 가능하다.
     주문 확인/취소는 금전이 오가는 경로이므로 같은 기준을 적용할 수 없다.
 
     키 패턴과 TTL:

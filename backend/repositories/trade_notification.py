@@ -2,7 +2,7 @@
 
 `TradeHistory.notified_at` 하나가 outbox의 전부다. 주문 경로가 체결을 기록하면서
 `notified_at`을 비워 두고, 통지가 나가면 그 자리를 채운다. 채워지지 않은 행이 곧
-"체결은 됐는데 사용자가 아무것도 못 받은 주문"이며, `scheduler.trade_notification_task`가
+"체결은 됐는데 사용자가 아무것도 못 받은 주문"이며, `scheduler.trade_notification.trade_notification_task`가
 그것을 다음 주기에 다시 알린다.
 
 `catalyst_repo`의 촉매 알림과 같은 모양이다 — 성공했을 때만 마킹하고 미통지분은 다음
@@ -43,7 +43,7 @@ class PendingTradeNotification:
 
 
 class TradeNotificationRepo(Protocol):
-    """`scheduler.trade_notification_task`가 outbox에 요구하는 전부 (#319의 방식).
+    """`scheduler.trade_notification.trade_notification_task`가 outbox에 요구하는 전부 (#319의 방식).
 
     주문 경로가 쓰는 기록·마킹은 여기 없다. 그쪽은 동기 경로이고 `TradeRecorder`가
     맡는다 — 이 계약에 넣으면 대역이 쓰지도 않는 메서드까지 갖춰야 주입 지점을 통과한다.

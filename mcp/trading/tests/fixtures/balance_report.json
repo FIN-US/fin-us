@@ -1,5 +1,5 @@
 {
-  "_comment": "이슈 #137: mcp/trading/balance.js formatBalanceReport()의 출력 계약을 backend/scheduler.py 파서와 공유하는 픽스처입니다. JS 테스트(balance.test.js)는 formatBalanceReport(input) === expected_text 를 검증하고, Python 테스트(test_balance_parser.py)는 expected_text 를 파서에 직접 넣어 검증합니다. 형식이 바뀌면 이 파일도 함께 수정해야 하며, 수정하지 않으면 양쪽 스위트 중 하나가 반드시 실패합니다.",
+  "_comment": "이슈 #137: mcp/trading/balance.js formatBalanceReport()의 출력 계약을 backend/scheduler/portfolio.py 파서와 공유하는 픽스처입니다. JS 테스트(balance.test.js)는 formatBalanceReport(input) === expected_text 를 검증하고, Python 테스트(test_balance_parser.py)는 expected_text 를 파서에 직접 넣어 검증합니다. 형식이 바뀌면 이 파일도 함께 수정해야 하며, 수정하지 않으면 양쪽 스위트 중 하나가 반드시 실패합니다.",
   "normal": {
     "_comment": "formatBalanceReport(input) 의 기대 출력. balance.test.js 'formatBalanceReport displays unsettled cash fields and account return rate' 테스트와 동일한 입력·기대값. Python의 REAL_BALANCE_TEXT 도 이 값에서 로드합니다.",
     "input": {

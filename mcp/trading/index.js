@@ -110,7 +110,7 @@ const BALANCE_RLZ_PL_MAX_PAGES = 50;
 //
 // 이슈 #369: 이 값은 get_balance_rlz_pl의 기본 예산이자 time_budget_ms 인자의 상한이다.
 // 더 짧은 벽시계 상한 아래에서 부르는 호출자(backend 스케줄러 — run_mcp_tool 30초)는
-// 인자로 예산을 낮춘다(backend/scheduler.py의 _RLZ_PL_TIME_BUDGET_MS). 지금은 원시 MCP
+// 인자로 예산을 낮춘다(backend/scheduler/portfolio.py의 _RLZ_PL_TIME_BUDGET_MS). 지금은 원시 MCP
 // 스키마를 LLM에 넘기는 경로가 없지만(NAT는 stock_name만 감싸 노출한다) 도구 스키마는
 // LLM에 노출될 수 있으므로 늘리는 방향은 막는다 — 이 값을 넘기면 NAT 120초 상한 안에
 // 든다는 위 근거가 깨진다.
@@ -124,7 +124,7 @@ const BALANCE_RLZ_PL_MIN_TIME_BUDGET_MS = 1_000;
 // 이 지연이 그 예산 이상이면 readPageDelayMsEnv 주석 (a)처럼 1페이지로 잘리고, 대기 뒤
 // 재확인(#307)이 요청은 막지만 이미 들어간 대기는 호출자의 벽시계 상한을 그대로 먹는다.
 // 스케줄러(예산 18초)에서는 지연이 약 10초를 넘으면 대기만으로 30초 호출 타임아웃에 걸린다.
-// 기본값 0에서는 발생하지 않는다. 한도 산정은 backend/scheduler.py의 _RLZ_PL_TIME_BUDGET_MS
+// 기본값 0에서는 발생하지 않는다. 한도 산정은 backend/scheduler/portfolio.py의 _RLZ_PL_TIME_BUDGET_MS
 // 주석에, 지연을 올릴 때의 선택지는 #210에 기록했다.
 const BALANCE_RLZ_PL_PAGE_DELAY_MS = readPageDelayMsEnv("BALANCE_RLZ_PL_PAGE_DELAY_MS", 0, {
   maxMs: BALANCE_RLZ_PL_TIME_BUDGET_MS,
@@ -690,7 +690,7 @@ async function getBalanceRlzPl({
     const balanceText = await getBalance();
     // 모의투자 대체 안내 문구(PAPER_RLZ_PL_FALLBACK_NOTE). 주의: 그 안의 "잔고 요약으로
     // 대체했습니다"를 두 곳이 문자열 매칭한다.
-    //   - backend/scheduler.py의 _RLZ_PL_PAPER_FALLBACK_MARKER — 이 대체 응답을 가려낸다. 문구가
+    //   - backend/scheduler/portfolio.py의 _RLZ_PL_PAPER_FALLBACK_MARKER — 이 대체 응답을 가려낸다. 문구가
     //     바뀌면 모의투자 배포에서 마커 부재 error가 10분마다 쌓이고
     //     _PAPER_FALLBACK_SKIP_CYCLES의 호출 건너뛰기도 꺼진다.
     //   - agents finus_api.py의 _PAPER_RLZ_PL_FALLBACK_MARKER — 매매일지 조회 묶음이 이 응답의

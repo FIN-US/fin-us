@@ -8,7 +8,7 @@ class Portfolio(SQLModel, table=True):
     증권사 API(SSOT)의 데이터를 기반으로 동기화됩니다.
     """
     id: Optional[int] = Field(default=None, primary_key=True)
-    # unique=True가 아직 없다 (#196). scheduler._sync_portfolio_from_balance는
+    # unique=True가 아직 없다 (#196). scheduler.portfolio._sync_portfolio_from_balance는
     # stock_code 기준 upsert이므로 논리적으로는 코드당 1행이 불변식이고, 그 함수가
     # 중복 행을 발견하면 한 행으로 수렴시킨다 — upsert의 정확성은 이 제약에
     # 의존하지 않는다.
@@ -24,7 +24,7 @@ class Portfolio(SQLModel, table=True):
     quantity: int = Field(default=0, description="보유 수량")
     avg_price: float = Field(default=0.0, description="평균 매입가")
     # 이 값을 채우도록 배선된 프로덕션 경로는 get_balance_rlz_pl(inquire-balance-rlz-pl,
-    # TTTC8494R)의 텍스트 리포트를 파싱하는 scheduler._sync_portfolio_prices_from_rlz_pl
+    # TTTC8494R)의 텍스트 리포트를 파싱하는 scheduler.portfolio._sync_portfolio_prices_from_rlz_pl
     # 하나뿐이다(#196). 잔고 동기화(_sync_portfolio_from_balance)는 이 필드를 읽지도
     # 쓰지도 않는다 — get_balance(TTTC8434R) output1에 현재가 필드가 있는지가
     # 미확인이라 그쪽에서 채울 근거가 없고, 덮으면 시세 경로가 방금 쓴 값이 10분마다
@@ -39,7 +39,7 @@ class Portfolio(SQLModel, table=True):
     #
     # null이면 "시세 나이를 모른다"이지 "시세가 없다"가 아니다. 구버전 행을 백필하지
     # 않는 이유는 database.py의 _PENDING_COLUMN_MIGRATIONS 주석 한 곳에 둔다.
-    # scheduler.is_price_fresh가 이 null을 "모름"으로 판정해 price_known=False로 내린다.
+    # scheduler.portfolio.is_price_fresh가 이 null을 "모름"으로 판정해 price_known=False로 내린다.
     price_updated_at: Optional[datetime] = Field(
         default=None,
         description="current_price를 마지막으로 갱신한 시각 (UTC). null이면 시세 나이 미상 — 신선도 판정에서 '모름'.",
@@ -58,7 +58,7 @@ class TradeHistory(SQLModel, table=True):
     price: float = Field(description="매매 단가")
     trade_date: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="매매 일시")
     # 체결 통지 outbox의 상태 컬럼 (#259 2단계). null이면 "이 체결에 대한 통지가 아직
-    # 나가지 않았다"는 뜻이고, scheduler.trade_notification_task가 재배달 대상으로 집는다.
+    # 나가지 않았다"는 뜻이고, scheduler.trade_notification.trade_notification_task가 재배달 대상으로 집는다.
     #
     # 별도 통지 테이블 대신 이 컬럼 하나로 끝내는 이유: 체결 사실은 이미 이 행으로
     # 영속화돼 있어 "한 체결 = 한 통지"가 자연히 성립하고, 멱등 키도 이 행의 PK를 그대로

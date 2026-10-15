@@ -258,7 +258,7 @@ class TestBalanceExtraction(unittest.TestCase):
 #     JS 출력을 손으로 베낀 사본이라 그 자체로는 드리프트를 못 잡지만(JS가 바뀌어도
 #     통과), JS 쪽 단언이 리터럴을 고정하므로 결합이 실제로 깨진다.
 # formatTruncationNote()의 reasons 맵이나 고정 리터럴을 바꾸면 이 픽스처들과
-# is_balance_truncated()의 매칭 대상 문자열(backend/scheduler.py의
+# is_balance_truncated()의 매칭 대상 문자열(backend/scheduler/portfolio.py의
 # _BALANCE_TRUNCATION_MARKER)을 함께 검토해야 합니다.
 TRUNCATION_NOTES_BY_REASON = {
     "max_pages": "\n\n[안내] 페이지 상한(20회)에 도달하여 조회가 중단되어 일부 보유 종목이 위 목록에서 누락되었을 수 있습니다. 실제 잔고는 별도로 확인하세요.",

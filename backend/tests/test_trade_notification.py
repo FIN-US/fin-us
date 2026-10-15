@@ -1,7 +1,7 @@
 """체결 통지 outbox (#259 2단계).
 
 주문 경로가 체결을 원장에 남기고(notified_at = null) 통지가 나가면 그 자리를 채운다.
-채워지지 않은 행은 scheduler.trade_notification_task가 다음 주기에 다시 알린다. 여기서
+채워지지 않은 행은 scheduler.trade_notification.trade_notification_task가 다음 주기에 다시 알린다. 여기서
 고정하는 것은 그 창의 양쪽 경계(너무 최근·너무 오래)와 "성공했을 때만 마킹한다"는
 불변식이다 — 그게 깨지면 outbox가 없애려던 무응답이 중복 배달로 바뀔 뿐이다.
 """

@@ -1672,7 +1672,7 @@ _DIARY_SNAPSHOT_FAILED = "diary_snapshot_failed"
 # mcp-trading 실현손익 조회의 모의투자 대체 응답 표지 (#408). 모의투자(openapivts)에서
 # ``get_balance_rlz_pl``은 실현손익 TR 대신 ``get_balance``와 같은 잔고 텍스트를 돌려주고, 그 뒤에
 # 이 문구가 든 안내 문단을 이어 붙인다(mcp-trading balance-rlz-pl-report.js의
-# ``PAPER_RLZ_PL_FALLBACK_NOTE``). backend ``scheduler._RLZ_PL_PAPER_FALLBACK_MARKER``와 같은
+# ``PAPER_RLZ_PL_FALLBACK_NOTE``). backend ``scheduler.portfolio._RLZ_PL_PAPER_FALLBACK_MARKER``와 같은
 # 문자열이고, 세 곳의 일치는 공유 계약 픽스처(mcp/trading/tests/fixtures/paper_rlz_pl_fallback.json)를
 # 세 스위트가 함께 읽어 고정한다. 모의투자 판정(URL)을 여기 다시 두지 않고 mcp-trading이 이미
 # 내놓는 이 표지를 읽는다 — 판정이 두 곳에 있으면 한쪽만 바뀌는 날 갈라진다.

@@ -1935,7 +1935,7 @@ class TelegramCommandHandler:
         #
         # 대신 순서를 기록 → 전송 → 마킹으로 둔다. 체결이 먼저 원장에 남고(notified_at =
         # null) 통지 책임이 outbox로 넘어가므로 전송은 한 번만 시도하면 된다. 실패하면
-        # 미통지 행이 남고 scheduler.trade_notification_task가 다음 주기에 다시 알린다.
+        # 미통지 행이 남고 scheduler.trade_notification.trade_notification_task가 다음 주기에 다시 알린다.
         # 순서를 뒤집어 전송을 먼저 하면 그 사이의 죽음이 곧 무응답이다.
         try:
             trade_id = self.trade_recorder.record(result)
@@ -1994,7 +1994,7 @@ class TelegramCommandHandler:
         if sent is False:
             # 여기서 끝내도 통지가 사라지지는 않는다. notified_at이 비어 있는 행이 곧
             # 재배달 대기열이다. 그래서 이 자리에는 알람을 걸지 않고 횟수만 센다 (#259
-            # 5단계). 알람은 재배달마저 계속 실패할 때 scheduler.trade_notification_task가
+            # 5단계). 알람은 재배달마저 계속 실패할 때 scheduler.trade_notification.trade_notification_task가
             # 울린다 — 사용자가 실제로 아무것도 못 받고 있는 것은 그때다.
             logger.error("체결 통지 전송 실패 — outbox 재배달 대기 (trade_id=%s)", trade_id)
             delivery_metrics.record_failure("fill_notify", trade_id=trade_id)
@@ -3018,7 +3018,7 @@ class TelegramCommandPoller:
         않는다 — 전송 전에 _update_settled_hook으로 확정하므로, 그 뒤의 예외는 아래 committed
         분기가 COMMITTED로 받아 재시도하지 않는다. 그 전송이 실패했을 때 무엇으로
         되살리는지는 경로마다 다르다 — /confirm 체결 성공은 원장에 남은 미통지 행과
-        scheduler.trade_notification_task가 받고(#259 2단계), 나머지 settled 경로는
+        scheduler.trade_notification.trade_notification_task가 받고(#259 2단계), 나머지 settled 경로는
         _send_text_settled의 인플레이스 재시도가 전부다. 그 전송 도중 재시작하면 update가
         재배달·재실행되는데, 이 창은 수용했다(#383 — _commit_update 참조).
 
@@ -3135,7 +3135,7 @@ class TelegramCommandPoller:
         # test_confirmed_order_is_not_reexecuted_when_restart_lands_in_the_fill_send.
         #
         # 먼저 쓰는 대가(전송 전에 죽으면 메시지가 사라진다)는 원장이 받는다. 그 체결은 미통지로
-        # 남아 scheduler.trade_notification_task가 배달한다. 나머지 settled 경로(/buy 프롬프트·
+        # 남아 scheduler.trade_notification.trade_notification_task가 배달한다. 나머지 settled 경로(/buy 프롬프트·
         # /cancel·/confirm 403·불명확)에는 받아줄 원장이 없어 창을 그대로 둔다 — 거기서 먼저
         # 쓰면 재실행이 내보내는 오표시 한 줄 대신 메시지 자체가 사라진다.
         #

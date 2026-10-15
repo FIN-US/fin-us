@@ -3,7 +3,7 @@ import { formatPercent, formatQuantity, formatWon } from "./formatters.js";
 // 모의투자(openapivts) 대체 안내 문구. index.js의 getBalanceRlzPl가 모의투자에서 실현손익 TR 대신
 // getBalance 결과를 돌려줄 때 **그 뒤에 그대로 이어 붙인다**(`${balanceText}${note}`).
 // ⚠️ 이 문구의 부분 문자열 "잔고 요약으로 대체했습니다"를 두 곳이 매칭한다.
-//   - backend/scheduler.py의 _RLZ_PL_PAPER_FALLBACK_MARKER — 모의투자 대체 응답 감지(#367).
+//   - backend/scheduler/portfolio.py의 _RLZ_PL_PAPER_FALLBACK_MARKER — 모의투자 대체 응답 감지(#367).
 //   - agents finus_api.py의 _PAPER_RLZ_PL_FALLBACK_MARKER — 매매일지 조회 묶음이 이 응답의
 //     잔고를 잔고 섹션으로 재사용하고 잔고 조회를 따로 부르지 않는다(#408). 문구 앞의 잔고
 //     텍스트를 떼어 쓰므로 "\n\n[안내]"로 시작하는 마지막 문단이어야 한다.

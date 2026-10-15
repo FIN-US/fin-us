@@ -20,7 +20,7 @@ engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False}, 
 # BEGIN하므로 ALTER는 engine.begin() 안에서도 즉시 커밋된다(_run_table_recreate_migrations의
 # 같은 주석 참조). ALTER와 백필 사이에서 프로세스가 죽으면 컬럼만 남고 백필은 영영 돌지
 # 않는다 — 다음 부팅은 컬럼이 있어 이 항목을 건너뛰기 때문이다. 그때 과거 행이 미통지로
-# 남지만, 재배달 대상은 scheduler.TRADE_NOTIFY_MAX_AGE(기본 24시간) 안의 체결로 한정되므로
+# 남지만, 재배달 대상은 scheduler.trade_notification.TRADE_NOTIFY_MAX_AGE(기본 24시간) 안의 체결로 한정되므로
 # 새어 나가는 통지도 그 창 안으로 유계다.
 _PENDING_COLUMN_MIGRATIONS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     (
@@ -76,7 +76,7 @@ _PENDING_COLUMN_MIGRATIONS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     # **언제** 채워졌는지는 알 방법이 없다. updated_at으로 백필하면 "잔고를 마지막으로
     # 확인한 시각"이 "시세를 마지막으로 갱신한 시각"으로 둔갑해, 지어낸 신선도가
     # 소급 생성된다 — 이 이슈가 없애려는 "모르는데 안다"가 바로 그것이다.
-    # null로 남기면 scheduler.is_price_fresh가 그 행을 "모름"(price_known=False)으로
+    # null로 남기면 scheduler.portfolio.is_price_fresh가 그 행을 "모름"(price_known=False)으로
     # 판정하고, 다음 시세 갱신 주기에 진짜 값으로 채워진다.
     #
     # notified_at을 백필한 이유는 null이 무해하지 않았기 때문이다(없던 통지가 새로

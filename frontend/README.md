@@ -239,7 +239,7 @@ backend를 기다리지 않아도 됩니다. backend가 없는 동안에는 `/ap
 (실측 확인). 문구를 바꾸려면 `nginx.conf.template`의 `@too_many_requests`·`@analysis_in_flight`
 블록만 고치면 됩니다.
 
-**스케줄러의 자동 분석은 이 제한에 걸리지 않습니다.** `backend/scheduler.py`가
+**스케줄러의 자동 분석은 이 제한에 걸리지 않습니다.** `backend/scheduler/monitor.py`가
 `perform_stock_analysis`를 같은 프로세스에서 직접 부르고 HTTP를 타지 않기 때문입니다.
 감시 주기(10분)와 위 한도를 맞출 필요가 없는 것도 그래서입니다.
 
