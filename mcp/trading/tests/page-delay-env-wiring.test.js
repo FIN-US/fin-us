@@ -600,7 +600,7 @@ test("get_balance_rlz_pl은 time_budget_ms를 연속조회 예산으로 쓰고, 
     shortText.includes("[안내] 조회 시간 예산을 초과하여"),
     `잘림 사유가 시간 예산이어야 한다. 실제: ${shortText}`,
   );
-  // backend/scheduler.py의 is_balance_truncated가 이 리터럴로 잘림을 감지한다.
+  // backend/scheduler/portfolio.py의 is_balance_truncated가 이 리터럴로 잘림을 감지한다.
   assert.ok(shortText.includes("조회가 중단되어"), `backend 잘림 마커가 있어야 한다. 실제: ${shortText}`);
 
   // 스텁의 첫 페이지 판정은 requestTimes.length === 1이라 비우면 다시 2페이지를 유도한다.

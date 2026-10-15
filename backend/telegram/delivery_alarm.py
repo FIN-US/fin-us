@@ -5,7 +5,7 @@
 
 - **얼마나 자주**. 429 한 번과 한 시간째 이어지는 실패가 같은 모양이다.
 - **멈췄다**. 체결 통지 재배달은 오래된 순이라 맨 앞 행 하나가 계속 실패하면 뒤가 함께
-  막히는데(``scheduler.trade_notification_task``의 head-of-line 주석), 그동안 매 주기 같은
+  막히는데(``scheduler.trade_notification.trade_notification_task``의 head-of-line 주석), 그동안 매 주기 같은
   error가 한 줄씩 쌓일 뿐이라 "방금 지나간 일시 장애"와 구분되지 않는다. 막는 행이 재배달
   창(24시간)을 벗어날 때까지 이 상태가 조용히 이어진다.
 

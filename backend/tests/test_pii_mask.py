@@ -824,7 +824,7 @@ class TestQuantityRecognizer:
         쓰므로 1,000주 이상은 "1,234주"처럼 콤마가 들어간다. 콤마를 처리하지 못하면
         "1,"이 마스킹되지 않고 남아 **보유 수량의 앞자리가 그대로 외부 LLM으로 나간다**
         — F-17이 막으려던 바로 그 유출이다. 같은 사실을 이미 반영한 선례가
-        backend/scheduler.py의 _QTY_RE(r"\\)\\s*·\\s*([\\d,]+)주")다.
+        backend/scheduler/portfolio.py의 _QTY_RE(r"\\)\\s*·\\s*([\\d,]+)주")다.
 
         이 테스트가 잡는 mutation: _QTY_RE에서 콤마 지원 제거
         (r"(?<![\\d,])\\d(?:[\\d,]*\\d)?" -> r"(?<!\\d)\\d+").

@@ -1,6 +1,6 @@
 """전송 최종 실패의 메트릭과 체결 통지 정지 알람 (#259 5단계).
 
-정지 추적기는 판정만 한다 — 무엇을 어디로 보낼지는 scheduler.trade_notification_task의
+정지 추적기는 판정만 한다 — 무엇을 어디로 보낼지는 scheduler.trade_notification.trade_notification_task의
 몫이고 그쪽은 test_trade_notification.py가 본다. 여기서 고정하는 것은 알람이 **정지 한
 건에 한 번** 울린다는 것과, 그 정지가 어떻게 끝났는지를 구분한다는 것이다. 실패마다
 울리는 알람은 이 단계 전의 error 줄과 다를 게 없다.

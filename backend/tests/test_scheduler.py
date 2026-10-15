@@ -128,7 +128,7 @@ def test_scheduler_lifecycle(monkeypatch):
     mock_start = MagicMock()
     mock_stop = MagicMock()
     
-    # scheduler.py의 함수들을 모킹
+    # 스케줄러 함수들을 모킹
     monkeypatch.setattr("backend.main.start_scheduler", mock_start)
     monkeypatch.setattr("backend.main.stop_scheduler", mock_stop)
     

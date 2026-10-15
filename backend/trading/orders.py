@@ -19,7 +19,7 @@ OrderType = Literal["LIMIT", "MARKET"]
 
 # 대기 주문을 누가 만들었는가 (#390).
 # - user_command: 사용자가 방금 낸 명령이 만든 주문(/buy·/sell·자연어 주문·/advise).
-# - auto_proposal: 사용자 명령 없이 생긴 주문(룰 트리거 자동 제안, scheduler.run_rule_triggered_proposal).
+# - auto_proposal: 사용자 명령 없이 생긴 주문(룰 트리거 자동 제안, scheduler.monitor.run_rule_triggered_proposal).
 # 텍스트 /confirm은 user_command만 확정할 수 있다. 근거는 PendingOrder.confirmable_by_text 참조.
 OrderOrigin = Literal["user_command", "auto_proposal"]
 # 출처의 fail-closed 기본값. 모르는 주문은 자동 제안으로 간주해 텍스트 확정을 막는다.
@@ -236,7 +236,7 @@ class TradeLedger(Protocol):
     서는 순간 그 선택성은 곧 **통지가 조용히 사라지는 경로**가 된다 — 원장이 없으면
     미통지 행도 없고, 미통지 행이 없으면 재배달도 없다. 그래서 전제를 타입으로 고정한다.
 
-    재배달 쪽(``scheduler.trade_notification_task``)이 쓰는 조회는 여기 없다. 그건
+    재배달 쪽(``scheduler.trade_notification.trade_notification_task``)이 쓰는 조회는 여기 없다. 그건
     ``trade_notification_repo.TradeNotificationRepo``의 몫이고, 주문 경로는 쓰지 않는다.
     """
 

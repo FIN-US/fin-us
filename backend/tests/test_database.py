@@ -321,7 +321,7 @@ def test_get_visualization_portfolio_price_known_honours_freshness_ttl(
     assert PRICE_FRESHNESS_TTL == timedelta(minutes=30)
     assert PRICE_FRESHNESS_TTL == 3 * timedelta(minutes=10), (
         "시세 갱신 주기(market_monitoring, 10분)의 3배라는 근거가 깨졌습니다. "
-        "주기를 바꿨다면 scheduler.PRICE_FRESHNESS_TTL의 주석부터 갱신하세요."
+        "주기를 바꿨다면 scheduler.portfolio.PRICE_FRESHNESS_TTL의 주석부터 갱신하세요."
     )
 
     # 경계 판정 자체는 now를 명시해 결정적으로 확인한다(요청 처리 지연에 흔들리지 않게).
