@@ -2340,7 +2340,7 @@ def test_sync_portfolio_allows_genuinely_empty_holdings(portfolio_session):
     portfolio_session.add(Portfolio(stock_code="005930", stock_name="삼성전자", quantity=10, avg_price=70000))
     portfolio_session.commit()
 
-    # balance.js가 보유 0건일 때 실제로 생성하는 텍스트(balance.js:273-274)
+    # balance.js가 보유 0건일 때 실제로 생성하는 텍스트(balance.js formatBalanceReport())
     empty_holdings_text = (
         "[계좌 잔고 현황]\n"
         "- 총 평가금액: 0원\n"

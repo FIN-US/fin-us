@@ -27,7 +27,7 @@
 export const KIS_RATE_LIMIT_MSG_CODES = Object.freeze(["EGW00201", "EGW00133", "EGW00215"]);
 
 // msg_cd가 아니라 msg1 본문으로도 판정한다. msg_cd 목록이 완전하다는 보장이 없기 때문이다 —
-// docs/issue-138-alnum-stock-code.md:495가 기록하듯 공식 msg_cd FAQ 페이지에 접근하지
+// docs/alnum-stock-code.md 4.3절이 기록하듯 공식 msg_cd FAQ 페이지에 접근하지
 // 못했고, 그래서 목록 밖의 유량 제한 코드가 없다는 것을 확인할 방법이 없다. 실제로 목록이
 // 두 코드뿐이던 때 2026-09-22 모의투자 실측(#210)에서 목록 밖의 EGW00215가 나왔고, 그때
 // 이 문구 경로가 그것을 rate_limit로 잡았다(그 뒤 목록에 추가). 한국어 본문은 그 미확인을
@@ -39,7 +39,7 @@ export const KIS_CLASS_RATE_LIMIT = "rate_limit";
 export const KIS_CLASS_OTHER = "other";
 
 // 로그 한 줄의 접두사. 운영자가 컨테이너 로그에서 이 토큰으로 grep한다
-// (docs/issue-210-rate-limit-observation.md).
+// (docs/kis-rate-limit-observation.md).
 export const KIS_REQUEST_LOG_PREFIX = "[kis-req]";
 
 // msg1은 KIS 서버가 준 한국어 문자열이다. 계좌번호(CANO, 8자리)처럼 자릿수가 긴 숫자가

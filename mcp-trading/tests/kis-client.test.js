@@ -4,7 +4,7 @@ import { kisOrderPost } from "../kis-client.js";
 
 // #163: kisOrderPost (formerly kisPost, index.js) tags a thrown error with exactly one of
 // three flags depending on where in the call the failure happened. submitOrder()
-// (order-submit.js:17) reads these flags to decide whether the duplicate-order dedup
+// (order-submit.js) reads these flags to decide whether the duplicate-order dedup
 // guard is safe to release. A wrong flag here means either a duplicate real order goes
 // through, or a legitimate order stays blocked for the full TTL. Before this file, kisPost
 // was not exported and nothing exercised its production side — only order-submit.js's

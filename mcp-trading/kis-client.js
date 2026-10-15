@@ -1,8 +1,8 @@
-// index.js는 부작용을 가진 서버 진입점이라 여기서 import하지 않는다(balance.js:17,
-// order-submit.js:1-3와 동일한 컨벤션) — 이 파일도 그래서 index.js 밖으로 분리했다.
+// index.js는 부작용을 가진 서버 진입점이라 여기서 import하지 않는다(balance.js,
+// order-submit.js 상단 주석과 동일한 컨벤션) — 이 파일도 그래서 index.js 밖으로 분리했다.
 //
 // #163: kisPost(주문 제출 HTTP POST)가 export되지 않아 이 함수가 던지는 세 가지 플래그
-// (kisOrderNotSubmitted / kisOrderSubmittedMaybe / kisOrderRejected) — order-submit.js:17의
+// (kisOrderNotSubmitted / kisOrderSubmittedMaybe / kisOrderRejected) — order-submit.js submitOrder()의
 // 중복 주문 가드 해제 여부를 좌우하는 그 경계 — 를 고정하는 테스트가 하나도 없었다. 여기로
 // 옮기고 kisAxios 인스턴스를 주입받게 해서, 실제 네트워크 없이 세 갈래 분류를 테스트할 수
 // 있게 한다.

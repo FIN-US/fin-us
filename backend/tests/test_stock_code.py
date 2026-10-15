@@ -36,7 +36,7 @@ _STOCKS_JSON_PATH = Path(__file__).resolve().parents[2] / "mcp-trading" / "data"
 # mcp-trading/tests/order.test.js와 같은 파일을 읽는다. 정책이 JS·Python 두 곳에
 # 복제돼 있으므로(order.js의 buildCashOrderBody 가드 / 이 모듈의 주문 가능 판정),
 # 표를 공유하지 않으면 한쪽만 넓혀도 아무 테스트도 red가 되지 않는다
-# (docs/issue-138-alnum-stock-code.md 6.2). 경로는 __file__ 기준 절대 경로라
+# (docs/alnum-stock-code.md 6.2). 경로는 __file__ 기준 절대 경로라
 # worktree·CI 양쪽에서 동일하게 해석된다 — test_balance_parser.py가 이슈 #137에서
 # balance_report.json에 쓴 방식과 같다.
 #
@@ -328,7 +328,7 @@ def test_policy_fixture_rows_are_all_exercised():
     assert _DRIVEN_CODES == set(codes)
 
     # 형식별 대표 코드와 경계 케이스는 표에서 사라지면 안 된다
-    # (docs/issue-138-alnum-stock-code.md 6.4-1·6.4-4).
+    # (docs/alnum-stock-code.md 6.4-1·6.4-4).
     for required in ("005930", "0001A0", "Q500020", "F70100026", "12345678", "００５９３０"):
         assert required in codes, f"판정표에서 대표 코드 {required}가 사라졌다"
 
@@ -712,7 +712,7 @@ class TestIsUnresolvedEcho:
     def test_detects_echo_with_trailing_text(self):
         """문자열 끝이 아니라 _STOCK_CODE_EXTRACT_RE와 같은 지점에 앵커한다.
 
-        endswith(", UNKNOWN)")로 앵커하면 index.js:559가 응답 뒤에 무언가를 덧붙이는
+        endswith(", UNKNOWN)")로 앵커하면 index.js callTradingTool()이 resolve_stock_code 응답 뒤에 무언가를 덧붙이는
         순간 코드 추출은 계속 성공하는데 에코 감지만 조용히 멈춰 #151이 되돌아온다.
         뮤테이션: 판정을 endswith로 되돌리면 이 케이스가 red가 된다.
         """

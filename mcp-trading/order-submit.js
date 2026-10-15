@@ -1,4 +1,4 @@
-// index.js는 부작용을 가진 서버 진입점이라 여기서 import하지 않는다(balance.js:17와 동일한
+// index.js는 부작용을 가진 서버 진입점이라 여기서 import하지 않는다(balance.js 상단 주석과 동일한
 // 컨벤션) — order.js, order-dedup.js, formatters.js, stock-master.js처럼 이 파일도 그래서
 // index.js 밖으로 분리했다.
 //

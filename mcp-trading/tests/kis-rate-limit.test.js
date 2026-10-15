@@ -46,7 +46,7 @@ test("msg_cd 대소문자·공백이 섞여도 유량 제한으로 본다", () =
 
 test("msg_cd가 없어도 msg1의 '초당 거래건수'로 유량 제한을 잡는다", () => {
   // 공식 msg_cd FAQ에 접근하지 못해 코드 목록이 완전하다는 보장이 없다
-  // (docs/issue-138-alnum-stock-code.md:495). 한국어 본문이 두 번째 증거 경로다.
+  // (docs/alnum-stock-code.md 4.3절). 한국어 본문이 두 번째 증거 경로다.
   assert.equal(
     isKisRateLimitError({ msgCd: "EGW99999", msg1: "초당 거래건수를 초과하였습니다." }),
     true,

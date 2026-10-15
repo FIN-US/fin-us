@@ -115,7 +115,7 @@ test("buildCashOrderBody creates market KIS order body", () => {
 // ---------------------------------------------------------------------------
 // 이슈 #138: mcp-trading·backend 공유 판정표. 같은 파일을 backend/tests/test_stock_code.py도
 // 읽어 같은 행에 같은 판정을 내는지 확인하므로, 한쪽 계층만 정책을 바꾸면 그 계층의
-// 스위트가 red가 된다(docs/issue-138-alnum-stock-code.md §6.2·§6.4-1).
+// 스위트가 red가 된다(docs/alnum-stock-code.md §6.2·§6.4-1).
 // 아래 테스트 이름은 표로 바꾸기 전(단일 케이스 시절)의 이름을 그대로 둔다 — 이름으로
 // 히스토리를 따라가는 경로를 끊지 않기 위해서다. 지금은 각 테스트가 표의 한 구획을
 // 담당하며, 구획의 합집합이 표 전체임을 마지막 메타 테스트가 고정한다.
@@ -276,7 +276,7 @@ test("orderable code policy fixture rows are all exercised by this suite (#138)"
   assert.deepEqual([...drivenCodes].sort(), [...freshCodes].sort());
 
   // 형식별 대표 코드와 경계 케이스는 표에서 사라지면 안 된다
-  // (docs/issue-138-alnum-stock-code.md §6.4-1·§6.4-4).
+  // (docs/alnum-stock-code.md §6.4-1·§6.4-4).
   for (const required of ["005930", "0001A0", "Q500020", "F70100026", "12345678", "００５９３０"]) {
     assert.ok(freshCodes.includes(required), `판정표에서 대표 코드 ${required}가 사라졌다`);
   }

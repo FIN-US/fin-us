@@ -53,6 +53,7 @@ ExportedObj/
 *.csproj
 *.unityproj
 *.sln
+*.slnx
 *.suo
 *.tmp
 *.user
@@ -110,3 +111,6 @@ InitTestScene*.unity*
 
 Assets/_gitignore/
 Assets/_gitignore.meta
+
+# Unity가 에디터에서 자동 생성하는 UXML 스키마
+/UIElementsSchema/

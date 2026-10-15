@@ -258,7 +258,7 @@ test("fetchAllBalance normalizes a non-array output2 object into summary, and fo
 
   assert.deepEqual(result.summary, { tot_evlu_amt: "5000000" });
 
-  // Reproduce index.js:319-321's wrapping of the raw summary before handing it to formatBalanceReport.
+  // Reproduce index.js getBalance()'s wrapping of the raw summary before handing it to formatBalanceReport.
   const text = formatBalanceReport(
     { output1: result.rows, output2: result.summary ? [result.summary] : [] },
     { pages: result.pages, truncated: result.truncated },

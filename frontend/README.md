@@ -19,8 +19,7 @@ frontend/
 ├── Build/           # WebGL 빌드 산출물 — 아래 3개 경로만 선별 추적
 │                    #   index.html / Build/** / TemplateData/**
 ├── build-stamp.txt  # 위 번들이 어느 Assets/에서 나왔는지 적어 둔 트리 해시 (CI가 대조)
-├── nginx.conf.template  # frontend 서비스의 nginx 설정 — envsubst로 API 키를 주입하는 템플릿
-└── frontend.slnx    # Visual Studio 솔루션
+└── nginx.conf.template  # frontend 서비스의 nginx 설정 — envsubst로 API 키를 주입하는 템플릿
 ```
 
 ## Build/를 git으로 추적하는 이유와 재빌드 규칙

@@ -177,7 +177,7 @@ def is_orderable_stock_code(code: str) -> bool:
 # ──────────────────────────────────────────────────────────────────────────
 # 경로를 config._TRADING_MCP_DIR에서 파생시킨다. 백엔드가 MCP를 띄우는 디렉터리와
 # 마스터를 읽는 디렉터리가 *같은 계산*에서 나오므로, 백엔드가 읽는 파일은 MCP가
-# stock-master.js:8(DEFAULT_STOCKS_PATH)로 읽는 파일과 정의상 같다.
+# stock-master.js의 DEFAULT_STOCKS_PATH로 읽는 파일과 정의상 같다.
 # 이 파일 위치(backend/)에 고정하면 안 된다 — TRADING_MCP_DIR로 MCP 디렉터리를 옮긴
 # 구성에서 둘이 갈라진다(backend/Dockerfile: 백엔드 소스는 /app에 bind mount,
 # MCP는 이미지 안 /opt/mcp-trading). 특히 레포 바깥을 가리키면 backend 쪽 경로에
@@ -293,13 +293,13 @@ def _is_known_master_code(code: str) -> bool:
 # 미해석 에코 판정 (#151) — stock-master.js Step 3
 # ──────────────────────────────────────────────────────────────────────────
 # resolveStock은 코드 형태 입력이 마스터에 코드로도 이름·별칭으로도 없으면
-# market="UNKNOWN"으로 입력을 그대로 되돌려준다(stock-master.js:91-93).
+# market="UNKNOWN"으로 입력을 그대로 되돌려준다(stock-master.js resolveStock()).
 # 존재 검증이 아니라 에코이므로 이걸 성공으로 오인하면 #151이 재발한다.
 # 실제 마스터의 market은 KOSPI/KOSDAQ뿐이라(mcp-trading/data/stocks.json 전수 확인)
 # "(코드, UNKNOWN)" 조합은 이 에코의 신뢰 가능한 신호다.
 #
 # _STOCK_CODE_EXTRACT_RE와 같은 "괄호+코드" 지점에 앵커한다. 문자열 끝에 앵커하면
-# index.js:559가 응답 뒤에 무언가를 덧붙이는 순간 코드 추출은 계속 성공하는데
+# index.js callTradingTool()이 resolve_stock_code 응답 뒤에 무언가를 덧붙이는 순간 코드 추출은 계속 성공하는데
 # 에코 감지만 조용히 멈춰 #151이 되돌아온다.
 _UNRESOLVED_ECHO_RE = re.compile(r"\([0-9A-Z]{6,}, UNKNOWN\)")
 

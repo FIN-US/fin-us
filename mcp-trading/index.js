@@ -242,7 +242,7 @@ async function getAccessToken({ lockWaitMs } = {}) {
 // 자체다. 그 밖의 요청별 타이밍 줄은 KIS_REQUEST_LOG로 켤 때만 나간다.
 // stdout은 MCP JSON-RPC 채널이므로 console.error(stderr)만 쓴다. 이 stderr는 MCP Python
 // SDK가 자식 프로세스를 띄울 때 부모 stderr로 그대로 이어 준다
-// (docs/issue-210-rate-limit-observation.md).
+// (docs/kis-rate-limit-observation.md).
 // 로깅이 원래 오류를 대체하지 않게 통째로 감싼다. 이 함수는 kisApiGet과 getAccessToken의
 // catch 안에서도 불리는데, 여기서 무언가 던지면 KIS가 준 진짜 실패 대신 로깅 쪽 예외가
 // 위로 올라가 진단이 통째로 사라진다. formatKisRequestLog에서 도달 가능한 throw는 찾지

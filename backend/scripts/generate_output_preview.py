@@ -101,7 +101,7 @@ CASES = [
     ),
     (
         "3. 현재가 조회 (시세 틀)",
-        "/quote 삼성전자 — mcp-trading/index.js:230 실제 출력",
+        "/quote 삼성전자 — mcp-trading/index.js getStockQuote() 실제 출력",
         KIND_QUOTE,
         "[삼성전자] 현재가 시세\n"
         "- 종목코드: 005930\n"
