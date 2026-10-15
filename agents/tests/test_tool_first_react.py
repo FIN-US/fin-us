@@ -22,8 +22,8 @@ from nat.plugins.langchain.agent.react_agent.agent import ReActAgentGraph
 from nat.plugins.langchain.agent.react_agent.agent import ReActGraphState
 from nat.plugins.langchain.agent.react_agent.agent import create_react_agent_prompt
 from nat.plugins.langchain.agent.react_agent.register import ReActAgentWorkflowConfig
-from nat_finus_nat.tool_first_react import FinusToolFirstReActAgentConfig
-from nat_finus_nat.tool_first_react import ToolFirstReActAgentGraph
+from finus_agents.tool_first_react import FinusToolFirstReActAgentConfig
+from finus_agents.tool_first_react import ToolFirstReActAgentGraph
 
 NEWS_OBSERVATION = "삼성전자 뉴스 헤드라인 OBS"
 DIRECT_REFUSAL = "Thought: I now know the final answer\nFinal Answer: 조회 결과가 없어 답할 수 없습니다."
@@ -130,7 +130,7 @@ async def test_falls_back_to_text_react_with_warning_when_provider_ignores_tool_
     called: list[str] = []
     news, memory = _tools(called)
 
-    with caplog.at_level(logging.WARNING, logger="nat_finus_nat.tool_first_react"):
+    with caplog.at_level(logging.WARNING, logger="finus_agents.tool_first_react"):
         state = await _run(ToolFirstReActAgentGraph, _ScriptedChatModel(honors_tool_choice=False),
                            (news, memory), first_turn_tools=[news])
 
@@ -148,7 +148,7 @@ async def test_retries_forced_call_when_tool_arguments_are_invalid_json(caplog):
     news, memory = _tools(called)
     llm = _ScriptedChatModel(invalid_forced_calls=1)
 
-    with caplog.at_level(logging.WARNING, logger="nat_finus_nat.tool_first_react"):
+    with caplog.at_level(logging.WARNING, logger="finus_agents.tool_first_react"):
         state = await _run(ToolFirstReActAgentGraph, llm, (news, memory), first_turn_tools=[news])
 
     assert called == ["news:삼성전자"]
@@ -161,13 +161,13 @@ async def test_retries_forced_call_when_tool_arguments_are_invalid_json(caplog):
 
 async def test_falls_back_after_repeated_invalid_tool_arguments(caplog):
     """재시도는 상한까지만 한다 — 계속 깨지면 벤더 경로로 답하고 원인을 구분해 남긴다."""
-    from nat_finus_nat.tool_first_react import FIRST_TURN_MAX_ATTEMPTS
+    from finus_agents.tool_first_react import FIRST_TURN_MAX_ATTEMPTS
 
     called: list[str] = []
     news, memory = _tools(called)
     llm = _ScriptedChatModel(invalid_forced_calls=FIRST_TURN_MAX_ATTEMPTS)
 
-    with caplog.at_level(logging.WARNING, logger="nat_finus_nat.tool_first_react"):
+    with caplog.at_level(logging.WARNING, logger="finus_agents.tool_first_react"):
         state = await _run(ToolFirstReActAgentGraph, llm, (news, memory), first_turn_tools=[news])
 
     assert called == []
@@ -185,7 +185,7 @@ def test_graph_kwargs_cover_vendor_graph_signature():
     """
     import inspect
 
-    from nat_finus_nat.tool_first_react import graph_kwargs
+    from finus_agents.tool_first_react import graph_kwargs
 
     vendor = set(inspect.signature(ReActAgentGraph.__init__).parameters) - {"self", "callbacks"}
     config = FinusToolFirstReActAgentConfig(llm_name="llm", tool_names=["t"], first_turn_tool_names=["t"])
@@ -241,7 +241,7 @@ _TOOL_FIRST_AGENTS = [
 def _load_config(config_name: str):
     from pathlib import Path
 
-    import nat_finus_nat.register  # noqa: F401
+    import finus_agents.register  # noqa: F401
     from nat.runtime.loader import load_config
 
     return load_config(Path(__file__).resolve().parents[1] / "configs" / config_name)

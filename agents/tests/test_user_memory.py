@@ -20,8 +20,8 @@ from pydantic import ValidationError
 
 from nat.data_models.api_server import ChatRequest, Message, UserMessageContentRoleType
 from nat.memory.models import MemoryItem
-from nat_finus_nat import user_memory
-from nat_finus_nat.user_memory import (
+from finus_agents import user_memory
+from finus_agents.user_memory import (
     DisallowedMemoryWrite,
     FinusPreferenceMemoryEditor,
     FinusRiskProfileBranchConfig,
@@ -56,7 +56,7 @@ def _no_external_network():
 
 @pytest.fixture
 def local_editor(tmp_path):
-    from nat_finus_nat.mem0_local import build_local_async_memory
+    from finus_agents.mem0_local import build_local_async_memory
 
     memory = build_local_async_memory(tmp_path / "mem0", "test_preferences")
     yield FinusPreferenceMemoryEditor(memory), memory
@@ -115,7 +115,7 @@ def test_second_process_on_the_same_storage_gets_actionable_error(tmp_path):
     같은 프로세스 안에서도 qdrant 로컬 잠금이 걸려 두 번째 기동을 재현할 수 있다.
     뮤테이션: ``build_local_async_memory``의 ``except RuntimeError`` 안내를 지우면 red(qdrant 원문만 남는다).
     """
-    from nat_finus_nat.mem0_local import build_local_async_memory
+    from finus_agents.mem0_local import build_local_async_memory
 
     first = build_local_async_memory(tmp_path / "mem0", "shared")
     try:
@@ -138,7 +138,7 @@ def test_mem0_telemetry_embedder_and_llm_cannot_leave_the_process(local_editor):
     import mem0.client.main as client_main
     import mem0.memory.main as memory_main
     import mem0.memory.telemetry as telemetry
-    from nat_finus_nat.mem0_local import LocalHashEmbedding, RefusingLlm, _no_telemetry
+    from finus_agents.mem0_local import LocalHashEmbedding, RefusingLlm, _no_telemetry
 
     _, memory = local_editor
     assert memory_main.capture_event is _no_telemetry
@@ -154,7 +154,7 @@ def test_mem0_telemetry_embedder_and_llm_cannot_leave_the_process(local_editor):
 
 
 def test_local_hash_embedding_is_deterministic_and_normalized():
-    from nat_finus_nat.mem0_local import EMBEDDING_DIMS, LocalHashEmbedding
+    from finus_agents.mem0_local import EMBEDDING_DIMS, LocalHashEmbedding
 
     embedder = LocalHashEmbedding()
     first = embedder.embed("risk_profile=conservative")

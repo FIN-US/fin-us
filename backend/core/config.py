@@ -78,7 +78,7 @@ _MCP_ENV_ALLOWED_KEYS = {
 # 키 자체가 자식에 전달되지 않으므로 mcp/trading/order.js의
 # validateRealOrderGuard는 fail-closed를 유지한다.
 #
-# agents/src/nat_finus_nat/finus_api.py에 동일 목적의 화이트리스트가
+# agents/src/finus_agents/finus_api.py에 동일 목적의 화이트리스트가
 # 별도 존재한다(NAT 자식 프로세스 경로) — 접두사를 바꿀 때 함께 갱신할 것.
 _MCP_ENV_ALLOWED_PREFIXES = ("FIN_US_", "FINUS_KIS_", "KIS_")
 

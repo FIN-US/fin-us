@@ -1886,7 +1886,7 @@ async def test_placeholders_do_not_collide_across_calls_in_same_conversation(mon
 
     NAT 경로는 마스킹 매핑과 달리 대화 히스토리를 **호출을 넘어 서버 쪽에 유지**한다:
     backend/services.py의 _llm_nat_chat이 messages에 현재 메시지 1건만 보내고
-    conversation-id 헤더로 세션을 식별하면, agents/src/nat_finus_nat/agents.py의
+    conversation-id 헤더로 세션을 식별하면, agents/src/finus_agents/agents.py의
     _load_history()가 SQLite chat_messages에서 과거 턴을 읽어 오고 같은 파일의
     finus_sqlite_transcript_agent가 `history + chat_request.messages`로 합쳐
     라우터에 넘긴다(agents/configs/router.yml의 max_history_messages: 30).

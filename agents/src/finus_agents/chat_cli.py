@@ -12,7 +12,7 @@ import sys
 import uuid
 import urllib.request
 
-from nat_finus_nat.agents import nat_chat_extra_headers
+from finus_agents.agents import nat_chat_extra_headers
 
 MODEL = (
     os.environ.get("FINUS_CHAT_MODEL")

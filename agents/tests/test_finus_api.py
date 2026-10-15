@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import anyio
 import httpx
 
-from nat_finus_nat import finus_api
+from finus_agents import finus_api
 
 # path helpers live on finus_api (no separate finus_paths module)
 finus_paths = finus_api

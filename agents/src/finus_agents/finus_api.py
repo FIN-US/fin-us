@@ -178,8 +178,8 @@ class ReasoningTrace:
         """supervisor가 브랜치에서 받아 돌려보내는 답변 본문을 기록한다 (#294).
 
         **각주 부착 조건의 정본이다** — 이 판정의 근거 설명은 여기 한 곳에 둔다.
-        (:func:`~nat_finus_nat.agents._trace_branch_answer`,
-        :func:`~nat_finus_nat.agents.with_reasoning_trace`가 이 설명을 참조한다.)
+        (:func:`~finus_agents.agents._trace_branch_answer`,
+        :func:`~finus_agents.agents.with_reasoning_trace`가 이 설명을 참조한다.)
 
         ``routed_agent``/``tools_used``는 브랜치를 **부르기 전후**로 채워지므로, 그
         값이 있다는 사실만으로는 지금 돌려보내는 텍스트가 그 브랜치가 만든 답변이라는
@@ -370,7 +370,7 @@ def _record_and_mask(tool_name: str, result: str) -> str:
     ``test_pii_guard.py::test_empty_result_literals_survive_masking``이 잡는다.
 
     마스킹 대상이 아닌 도구(뉴스·공시·실적·일지 저장)에서는
-    :func:`~nat_finus_nat.pii_guard.mask_tool_result`가 원문을 그대로 돌려주므로
+    :func:`~finus_agents.pii_guard.mask_tool_result`가 원문을 그대로 돌려주므로
     이 함수는 종전과 동일하게 동작한다.
     """
     _record_to_ledger(tool_name, result)
@@ -1331,7 +1331,7 @@ async def _order_price_gap_rejection(
     고르면, 목록에 없는 쓰기성 TR이 이 검사를 조용히 우회한다. #66이 readonly 래퍼에서
     택한 fail-closed 판정(:func:`_is_readonly_api_type`)을 그대로 뒤집어 쓴다 — "읽기
     전용이라고 확인된 것만 빼고 전부 주문일 수 있다". 그 안에서 무엇을 통과시키고 무엇을
-    막는지는 :func:`~nat_finus_nat.order_price_guard.check_order_price_gap`이 정한다:
+    막는지는 :func:`~finus_agents.order_price_guard.check_order_price_gap`이 정한다:
     단가가 0이거나 없는 호출(시장가)과 원주문 취소(``ORGN_ODNO`` + ``RVSE_CNCL_DVSN_CD=02``)는
     단가와 무관하게 통과하고, 종목코드가 없는 가격 정정(국내주식 ``order_rvsecncl``은
     스키마에 ``PDNO``가 없다)은 기준가를 알 수 없어 전용 사유로 거부한다(PR #379 리뷰).

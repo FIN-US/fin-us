@@ -3,7 +3,7 @@ base: agents/verifier_agent.yml
 # 검증자 config를 diary와 라우터 사이에 끼워, 라우터가 로드하는 설정에
 # backend 전용 엔드포인트(주문 보조 2개, 사용자 선호 1개)와 order_verifier가 함께 들어오게 한다.
 # supervisor의 브랜치 6개는 불변이다 — 검증자는 브랜치가 아니며 채팅으로 도달할 수 없다.
-# src/nat_finus_nat/supervisor.py 의 router_supervisor_agent 설정을 확장합니다(common.yml 상속).
+# src/finus_agents/supervisor.py 의 router_supervisor_agent 설정을 확장합니다(common.yml 상속).
 # 메모리 모드(기본값, #397): mem0 로컬 스토리지 + 사용자 선호(투자 성향) 허용목록.
 # FINUS_MEM0_ENABLED=0 이면 run.sh·Dockerfile이 router_nomemory.yml을 고릅니다.
 llms:
@@ -13,9 +13,9 @@ llms:
     base_url: ${OPENAI_API_BASE_URL:-${OPENAI_BASE_URL:-https://api.openai.com/v1}}
     model_name: ${ROUTER_OPENAI_CHAT_MODEL:-gpt-5.4-mini}
 
-# mem0를 이 프로세스 안에서 로컬 파일로 띄웁니다(nat_finus_nat/mem0_local.py). 외부 서비스·
+# mem0를 이 프로세스 안에서 로컬 파일로 띄웁니다(finus_agents/mem0_local.py). 외부 서비스·
 # 텔레메트리·외부 임베딩을 쓰지 않습니다. 저장할 수 있는 것은 허용목록의 선호 값뿐입니다
-# (nat_finus_nat/user_memory.py). NAT의 mem0_memory(HTTP 클라이언트 → self-hosted 서버나
+# (finus_agents/user_memory.py). NAT의 mem0_memory(HTTP 클라이언트 → self-hosted 서버나
 # api.mem0.ai)는 쓰지 않습니다.
 memory:
   finus_user_memory:

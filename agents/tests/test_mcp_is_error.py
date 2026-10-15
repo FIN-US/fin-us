@@ -36,10 +36,10 @@ from nat.data_models.api_server import (
     UserMessageContentRoleType,
 )
 
-from nat_finus_nat import finus_api
-from nat_finus_nat.agents import _TOOL_ENFORCEMENT_REJECTION, _check_tool_enforcement, _run_with_gate
-from nat_finus_nat.finus_api import DATA_TOOL_LEDGER, DataToolLedger
-from nat_finus_nat.order_price_guard import parse_current_price
+from finus_agents import finus_api
+from finus_agents.agents import _TOOL_ENFORCEMENT_REJECTION, _check_tool_enforcement, _run_with_gate
+from finus_agents.finus_api import DATA_TOOL_LEDGER, DataToolLedger
+from finus_agents.order_price_guard import parse_current_price
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 

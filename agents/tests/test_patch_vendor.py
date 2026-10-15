@@ -1,7 +1,7 @@
 """`agents/scripts/patch_vendor.py` 동작 고정 테스트.
 
 `patch_vendor.py`는 패키지가 아니라 독립 스크립트이므로 `importlib.util`로 파일
-경로 기준으로 로드한다. 표준 라이브러리만 사용하므로 `nat`/`nat_finus_nat` 벤더
+경로 기준으로 로드한다. 표준 라이브러리만 사용하므로 `nat`/`finus_agents` 벤더
 라이브러리 설치 여부와 무관하게 동작해야 한다 (이 파일은 절대 그 두 패키지를
 import하지 않는다).
 

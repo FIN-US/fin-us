@@ -22,7 +22,7 @@ import json
 import httpx
 import pytest
 
-from nat_finus_nat import finus_api
+from finus_agents import finus_api
 
 
 class RecordedBackend:

@@ -37,7 +37,7 @@ test_unit_and_bare_won_amounts_coexist_losslessly에 있다.
 
 ## 이 파일은 agents에도 그대로 복제돼 있다 (#231)
 
-`agents/src/nat_finus_nat/pii_mask.py`가 이 파일의 **바이트 단위 사본**이다.
+`agents/src/finus_agents/pii_mask.py`가 이 파일의 **바이트 단위 사본**이다.
 NAT은 backend를 의존성으로 갖지 않고(`agents/pyproject.toml`), NAT 이미지도
 backend를 COPY하지 않으므로(`agents/Dockerfile`) import로 공유할 수 없다.
 그래서 복제하고, 두 파일이 어긋나면
@@ -52,7 +52,7 @@ backend를 COPY하지 않으므로(`agents/Dockerfile`) import로 공유할 수 
 
 - NAT 멀티에이전트가 자체적으로 MCP 도구(KIS 잔고 등)를 호출해 만드는 프롬프트 조각은
   backend가 보지 못하므로 이 계층 밖이다. NAT 프로세스 안에서 위 사본과
-  `nat_finus_nat/pii_guard.py`가 같은 일을 한다 (#231).
+  `finus_agents/pii_guard.py`가 같은 일을 한다 (#231).
 - Telegram 경로 중 **LLM을 아예 거치지 않고 원값을 그대로 사용자에게 표시하는** 것들
   (예: `/balance`)은 이 계층이 손댈 지점이 없다 (#232에서 다룬다). 반대로
   `telegram/commands.py`의 `_handle_chat_fallback`과 `/earnings`(`_handle_earnings`)는
@@ -482,9 +482,9 @@ class _Counter:
 
     - backend/services.py의 _llm_nat_chat() — backend는 messages에 현재 메시지 1건만
       보내고, conversation-id 헤더로 세션을 식별한다.
-    - agents/src/nat_finus_nat/agents.py의 `_load_history()` — SQLite
+    - agents/src/finus_agents/agents.py의 `_load_history()` — SQLite
       chat_messages에서 `WHERE conversation_id = ?`로 과거 메시지를 로드한다.
-    - agents/src/nat_finus_nat/agents.py의 `finus_sqlite_transcript_agent()` — 그 안
+    - agents/src/finus_agents/agents.py의 `finus_sqlite_transcript_agent()` — 그 안
       `_response_fn`이 `forward_messages = history + chat_request.messages`로 과거 턴과
       현재 턴을 합쳐 내부 라우터에 넘긴다.
     - agents/configs/router.yml의 `transcript_router_agent`에

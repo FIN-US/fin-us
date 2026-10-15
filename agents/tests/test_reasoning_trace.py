@@ -28,7 +28,7 @@ from nat.data_models.api_server import (
 
 from nat.utils.type_converter import GlobalTypeConverter
 
-from nat_finus_nat.agents import (
+from finus_agents.agents import (
     MEMORY_PROMPT_PREFIX,
     FinusReasoningTraceAgentConfig,
     FinusSqliteTranscriptAgentConfig,
@@ -43,7 +43,7 @@ from nat_finus_nat.agents import (
     finus_sqlite_transcript_agent,
     with_reasoning_trace,
 )
-from nat_finus_nat.finus_api import (
+from finus_agents.finus_api import (
     DATA_TOOL_LEDGER,
     REASONING_TRACE,
     DataToolLedger,
@@ -790,7 +790,7 @@ async def test_memory_mode_omits_footnote_when_memory_write_fails_after_success(
         _branch_recording("news_agent", "finus_market_news", answer="삼성전자 뉴스입니다."),
         capture_error=RuntimeError("Mem0 연결이 거부되었습니다"),
     ) as response_fn:
-        with caplog.at_level(logging.WARNING, logger="nat_finus_nat.agents"):
+        with caplog.at_level(logging.WARNING, logger="finus_agents.agents"):
             result = await response_fn(
                 ChatRequestOrMessage(messages=[{"role": "user", "content": "삼성전자 뉴스"}])
             )

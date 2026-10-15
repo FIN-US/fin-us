@@ -8,7 +8,7 @@ NAT 쪽 접두사 규칙만 검증하고, 마지막 테스트에서만 backend/c
 import ast
 from pathlib import Path
 
-from nat_finus_nat.finus_api import _MCP_ENV_ALLOWED_PREFIXES, _mcp_child_env
+from finus_agents.finus_api import _MCP_ENV_ALLOWED_PREFIXES, _mcp_child_env
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 

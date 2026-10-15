@@ -20,8 +20,8 @@ from pathlib import Path
 
 import pytest
 
-from nat_finus_nat import verifier
-from nat_finus_nat.verifier import (
+from finus_agents import verifier
+from finus_agents.verifier import (
     FAILURE_HARD_CHECK,
     FAILURE_ID_MISMATCH,
     FAILURE_LLM_ERROR,
@@ -353,7 +353,7 @@ _CONFIG_IDS = [p.name for p in _CONFIGS_WITH_ENDPOINTS]
 
 
 def _load(config_path: Path):
-    import nat_finus_nat.register  # noqa: F401 - 등록 트리거만 필요
+    import finus_agents.register  # noqa: F401 - 등록 트리거만 필요
     from nat.runtime.loader import load_config
 
     return load_config(config_path)
@@ -382,7 +382,7 @@ def test_order_assist_endpoints_are_registered(config_path: Path):
 @pytest.mark.parametrize("config_path", _CONFIGS_WITH_ENDPOINTS, ids=_CONFIG_IDS)
 def test_propose_endpoint_keeps_the_hallucination_gate(config_path: Path):
     """제안 엔드포인트는 fe_branch(게이트)를 노출해야 한다 — 안쪽 react_agent 직노출 금지."""
-    from nat_finus_nat.agents import FeBranchConfig
+    from finus_agents.agents import FeBranchConfig
 
     config = _load(config_path)
     exposed = config.functions["strategy_branch_agent"]
@@ -398,8 +398,8 @@ def test_verifier_is_outside_the_gate(config_path: Path):
     게이트에 넣으면 backend가 넘겨준 수치를 근거로 쓰는 판정문이 구조적 오탐에 걸린다.
     그 자리는 파싱 실패=REJECT라는 더 보수적인 방어가 대신한다(verifier.py 참조).
     """
-    from nat_finus_nat.agents import FeBranchConfig
-    from nat_finus_nat.verifier import OrderVerifierConfig as _VerifierConfig
+    from finus_agents.agents import FeBranchConfig
+    from finus_agents.verifier import OrderVerifierConfig as _VerifierConfig
 
     config = _load(config_path)
 

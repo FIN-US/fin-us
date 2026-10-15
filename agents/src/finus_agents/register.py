@@ -4,17 +4,17 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 # agents 패키지 루트의 .env 파일을 찾아 환경 변수에 로드한다.
-# register.py -> nat_finus_nat/ -> src/ -> agents/
+# register.py -> finus_agents/ -> src/ -> agents/
 _FINUS_NAT_ENV = Path(__file__).resolve().parents[2] / ".env"
 if _FINUS_NAT_ENV.is_file():
     load_dotenv(_FINUS_NAT_ENV, override=False)
 
 #  NAT에 함수/도구 등록을 트리거
-from nat_finus_nat import agents
-from nat_finus_nat import finus_api
-from nat_finus_nat import tool_first_react  # noqa: F401 - finus_tool_first_react_agent 등록 (#394)
-from nat_finus_nat import verifier  # noqa: F401 - finus_order_verifier 등록 (#299)
-from nat_finus_nat import user_memory  # noqa: F401 - 사용자 선호 메모리·추천 성향 주입 등록 (#397)
+from finus_agents import agents
+from finus_agents import finus_api
+from finus_agents import tool_first_react  # noqa: F401 - finus_tool_first_react_agent 등록 (#394)
+from finus_agents import verifier  # noqa: F401 - finus_order_verifier 등록 (#299)
+from finus_agents import user_memory  # noqa: F401 - 사용자 선호 메모리·추천 성향 주입 등록 (#397)
 
 
 def _build_vendor_patch_status() -> dict[str, str]:

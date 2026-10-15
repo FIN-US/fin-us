@@ -1165,7 +1165,7 @@ async def test_market_closed_is_rejected_before_anything_else():
 async def test_verify_payload_shape_matches_the_verifier_contract():
     """검증 요청의 필드 이름을 고정한다.
 
-    반대편(agents/src/nat_finus_nat/verifier.py)의 요청 모델은 전부
+    반대편(agents/src/finus_agents/verifier.py)의 요청 모델은 전부
     ``extra="allow"``다 — backend가 필드명을 바꾸거나 오타를 내도 422가 아니라
     **조용히 무시**되고, 검증자는 그 필드의 기본값(0·""·False)으로 판정한다.
     한도 수치가 0으로 읽히는 쪽이 승인 방향이라 이 드리프트는 위험한 방향으로 샌다.

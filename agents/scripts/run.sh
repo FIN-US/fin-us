@@ -64,7 +64,7 @@ _CHAT_PORT="${FINUS_CHAT_PORT:-8765}"
 _CHAT_URL="${FINUS_NAT_URL:-}"
 
 # Multi-turn chat: NAT OpenAI-compatible API + ``finus_sqlite_transcript_agent`` (SQLite).
-#   REPL: ``finus-chat`` sends ``conversation-id`` (see ``nat_finus_nat.transcript``); local ``messages`` + server transcript.
+#   REPL: ``finus-chat`` sends ``conversation-id`` (see ``finus_agents.transcript``); local ``messages`` + server transcript.
 #   FINUS_CHAT_CONVERSATION_ID=<uuid>  재실행 시 같은 DB 스레드 유지 (미설정 시 매 실행 새 UUID)
 #   FINUS_CHAT_COT=0  단계 출력 끔  |  FINUS_CHAT_STREAM=0  비스트림 한 방 응답
 #   FINUS_CHAT_COLOR=0  stderr ANSI 끔
