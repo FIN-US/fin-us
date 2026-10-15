@@ -23,11 +23,11 @@
 //   가능한 초당 거래건수를 초과하였습니다.", HTTP 500 + rt_cd=1. EGW00201과 달리 계정 호출률이
 //   낮을 때도(직렬 호출, 초당 1건 미만) 났다. 지금은 msg1의 "초당 거래건수"로도 잡히지만,
 //   그 문구가 바뀌면 이 코드가 class=other로 떨어지고 게이트가 꺼진 기본 설정에서는 줄이
-//   아예 안 나가므로 코드로도 고정한다(런북 7절 "실측에서 나온 코드는 이 목록에 추가").
+//   아예 안 나가므로 코드로도 고정한다. 실측에서 새 코드가 나오면 이 목록에 추가한다.
 export const KIS_RATE_LIMIT_MSG_CODES = Object.freeze(["EGW00201", "EGW00133", "EGW00215"]);
 
 // msg_cd가 아니라 msg1 본문으로도 판정한다. msg_cd 목록이 완전하다는 보장이 없기 때문이다 —
-// docs/alnum-stock-code.md 4.3절이 기록하듯 공식 msg_cd FAQ 페이지에 접근하지
+// 공식 msg_cd FAQ 페이지에 접근하지
 // 못했고, 그래서 목록 밖의 유량 제한 코드가 없다는 것을 확인할 방법이 없다. 실제로 목록이
 // 두 코드뿐이던 때 2026-09-22 모의투자 실측(#210)에서 목록 밖의 EGW00215가 나왔고, 그때
 // 이 문구 경로가 그것을 rate_limit로 잡았다(그 뒤 목록에 추가). 한국어 본문은 그 미확인을
@@ -38,8 +38,7 @@ export const KIS_CLASS_OK = "ok";
 export const KIS_CLASS_RATE_LIMIT = "rate_limit";
 export const KIS_CLASS_OTHER = "other";
 
-// 로그 한 줄의 접두사. 운영자가 컨테이너 로그에서 이 토큰으로 grep한다
-// (docs/kis-rate-limit-observation.md).
+// 로그 한 줄의 접두사. 운영자가 컨테이너 로그에서 이 토큰으로 grep한다.
 export const KIS_REQUEST_LOG_PREFIX = "[kis-req]";
 
 // msg1은 KIS 서버가 준 한국어 문자열이다. 계좌번호(CANO, 8자리)처럼 자릿수가 긴 숫자가
@@ -52,7 +51,7 @@ export const KIS_REQUEST_LOG_PREFIX = "[kis-req]";
 // KIS가 그 값을 되울려 주면 "조회기간 20260101~20261231이 올바르지 않습니다"가
 // "조회기간 ********~********이 올바르지 않습니다"로 나간다. **일부러 완화하지 않는다** —
 // 날짜를 살리려고 경계를 9로 올리면 8자리 CANO가 그대로 새고, 그건 정반대 방향의 실수다.
-// 운영자가 별표로 뒤덮인 날짜를 보고 당황하지 않도록 여기와 런북 2절에 적어 둔다.
+// 운영자가 별표로 뒤덮인 날짜를 보고 당황하지 않도록 여기 적어 둔다.
 //
 // **우회(가려야 하는데 안 가려지는 것)** — 어느 쪽도 KIS가 쓰는 형식이 아니라 지금은
 // 고치지 않고 기록만 한다(#230의 lookbehind 커밋들과 같은 관례):
@@ -174,17 +173,17 @@ export function formatKisRequestLog({
   // msg_cd/msg1 옆에 error_code/error_description을 함께 보는 이유: 토큰 발급
   // (POST /oauth2/tokenP)의 실패 바디가 조회(GET)와 모양이 다른 OAuth 형식
   // (`{ error_code: "EGW00133", error_description: "..." }`)일 가능성이다.
-  // **이 모양은 아직 확인되지 않았다**(런북 0절의 미확인 항목). 저장소의 증거는 오히려
+  // **이 모양은 아직 확인되지 않았다**. 저장소의 증거는 오히려
   // 반대를 가리킨다 — tests/kis-client.test.js "pre-flight failure" 테스트의 픽스처가 이 경로 오류를
   // "Access Token 발급 실패: EGW00133 ..."로 쓰는데, index.js가 그 문자열을 만드는 자리는
   // error.response?.data?.msg1이라 msg1이 채워져 있어야만 나올 수 있는 모양이다.
-  // 그래서 한쪽으로 고르지 않고 둘 다 읽는다. 실측(런북 5.2)이 판정하기 전에는 ?? 를
+  // 그래서 한쪽으로 고르지 않고 둘 다 읽는다. 실계좌 실측이 판정하기 전에는 ?? 를
   // 한쪽 필드로 되돌리지 말 것. OAuth 갈래를 안 보면
   // 그 경로의 EGW00133이 class=other로 떨어지고, 게이트가 꺼진 기본 설정에서는
   // rateLimited가 false라 **줄이 아예 나가지 않는다**(index.js의 logKisRequest는
   // `KIS_REQUEST_LOG_ENABLED || rateLimited`일 때만 쓴다). 줄이 나빠지는 게 아니라
-  // 통째로 침묵한다 — 런북 2절이 "게이트를 꺼도 class=rate_limit 줄은 항상 나간다"고
-  // 약속한 그 경로에서, 그리고 index.js가 "EGW00133이 관측될 수 있는 곳은 사실상
+  // 통째로 침묵한다 — "게이트를 꺼도 class=rate_limit 줄은 항상 나간다"는
+  // 약속(.env.example)이 걸린 그 경로에서, 그리고 index.js가 "EGW00133이 관측될 수 있는 곳은 사실상
   // 이 경로뿐"이라고 적어 둔 그 경로에서.
   // 조회 바디는 이 두 필드를 쓰지 않으므로 KIS 표준 필드를 먼저 보고 ?? 로 뒤에 둔다.
   const rawMsgCd = body && typeof body === "object" ? (body.msg_cd ?? body.error_code) : undefined;

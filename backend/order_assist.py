@@ -254,7 +254,7 @@ class OrderAssistResult:
 # 받는 것은 의도된 비대칭이다(#138). 사람이 명시적으로 입력한 코드는
 # stock_code.is_orderable_stock_code()가 KIS_ALNUM_STOCK_ORDER_ENABLED를 따라
 # 영숫자·9자까지 열어 주지만, 봇이 스스로 고른 종목은 KIS가 영숫자 PDNO를 실제로
-# 수용하는지 확정될 때까지(docs/alnum-stock-code.md §7 실측) 기존 범위에
+# 수용하는지 실계좌로 확정될 때까지 기존 범위에
 # 묶어 둔다. tests/test_order_assist.py의
 # test_suggestion_path_stays_numeric_only_even_when_alnum_flag_is_on이 이 비대칭을
 # 고정하므로, 없앨 때는 그 테스트를 함께 지워야 한다.

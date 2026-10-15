@@ -241,8 +241,7 @@ async function getAccessToken({ lockWaitMs } = {}) {
 // 유량 제한 분류는 게이트와 무관하게 항상 내보낸다 — 드물게 나고, 이슈 #210이 찾는 신호
 // 자체다. 그 밖의 요청별 타이밍 줄은 KIS_REQUEST_LOG로 켤 때만 나간다.
 // stdout은 MCP JSON-RPC 채널이므로 console.error(stderr)만 쓴다. 이 stderr는 MCP Python
-// SDK가 자식 프로세스를 띄울 때 부모 stderr로 그대로 이어 준다
-// (docs/kis-rate-limit-observation.md).
+// SDK가 자식 프로세스를 띄울 때 부모 stderr로 그대로 이어 준다.
 // 로깅이 원래 오류를 대체하지 않게 통째로 감싼다. 이 함수는 kisApiGet과 getAccessToken의
 // catch 안에서도 불리는데, 여기서 무언가 던지면 KIS가 준 진짜 실패 대신 로깅 쪽 예외가
 // 위로 올라가 진단이 통째로 사라진다. formatKisRequestLog에서 도달 가능한 throw는 찾지
@@ -268,8 +267,8 @@ function logKisRequest(input) {
 //   - /oauth2/tokenP (getAccessToken) — 위에서 같은 방식으로 계측한다(tr_id=tokenP).
 //   - kis-client.js의 createKisHashKey(hashkey POST)와 kisOrderPost(주문 POST) — **계측되지 않는다.**
 //     kis-client.js가 이 PR의 범위 밖이라 손대지 않았다. 실측 집계에서 place_order 1건이
-//     실제로 만드는 KIS 요청 2건은 빠져 있다는 뜻이다(런북 2절에 같은 내용을 적어 두었다).
-//     애초에 런북 4절이 "주문 API로 유량 제한을 때리지 말 것"이라 측정 대상도 아니지만,
+//     실제로 만드는 KIS 요청 2건은 빠져 있다는 뜻이다.
+//     애초에 주문 API는 유량 제한 측정에 쓰지 않으므로 측정 대상도 아니지만,
 //     겹침을 셀 때 그 2건이 로그에 없다는 사실은 알고 세야 한다.
 async function kisApiGet(pathname, trId, params, { trCont = "" } = {}) {
   const token = await getAccessToken();

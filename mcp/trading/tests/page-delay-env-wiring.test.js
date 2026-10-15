@@ -146,7 +146,7 @@ function startKisStub(kisPath, {
       if (tokenIssueStatus !== 200) {
         // 바디는 일부러 msg_cd/msg1도 error_code/error_description도 아닌 모양으로 둔다.
         // 이 테스트가 보는 것은 "실패해도 줄이 나가는가"이지 실패 바디의 모양이 아니고,
-        // 그 모양은 아직 미확인이다(런북 0절).
+        // 그 모양은 아직 미확인이다.
         res.writeHead(tokenIssueStatus, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ message: "stub token issue failure" }));
         return;
@@ -164,8 +164,8 @@ function startKisStub(kisPath, {
         return;
       }
       if (requestTimes.length === rateLimitOnPage) {
-        // 유량 제한이 HTTP 200 + rt_cd=1로 오는 경우를 흉내 낸다(런북 2절 `http` 필드 주석은
-        // "그런 경우가 있다"까지만 적는다 — HTTP 500으로 오는 갈래는 httpErrorOnPage가 다룬다).
+        // 유량 제한이 HTTP 200 + rt_cd=1로 오는 경우를 흉내 낸다(HTTP 500으로 오는 갈래는
+        // httpErrorOnPage가 다룬다).
         // 이 갈래에서는 axios가 던지지 않고 kisApiGet의 rt_cd 분기가 잡는다 — logKisRequest는
         // 그전에 이미 지났다.
         res.writeHead(200, { "Content-Type": "application/json", tr_cont: "D" });
@@ -267,7 +267,7 @@ for (const { tool, envKey, constant, kisPath } of PAGED_TOOLS) {
   });
 
   // -------------------------------------------------------------------------
-  // 이슈 #210: 이 PR의 중심 약속은 ".env.example:78 / index.js / 런북 2절이 말하는 대로,
+  // 이슈 #210: 이 PR의 중심 약속은 ".env.example / index.js가 말하는 대로,
   // 게이트(KIS_REQUEST_LOG)를 꺼도 유량 제한 판정 줄은 항상 나간다"이다. 기본 설정에서
   // 이 PR이 만들어 내는 관측 가능한 출력은 그 줄 하나뿐인데, 지금까지 그것을 고정하는
   // 테스트가 없었다 — logKisRequest가 줄을 실제로 내보내게 만드는 테스트가 하나도 없어서
@@ -326,7 +326,7 @@ for (const { tool, envKey, constant, kisPath } of PAGED_TOOLS) {
     const line = await waitForStderrLine(() => stderrText, /^\[kis-req\] .*class=rate_limit/);
     assert.ok(
       line,
-      "게이트를 꺼도 class=rate_limit 줄은 항상 나가야 한다(.env.example, 런북 2절의 약속). " +
+      "게이트를 꺼도 class=rate_limit 줄은 항상 나가야 한다(.env.example의 약속). " +
         `stderr was: ${stderrText}`,
     );
     assert.match(line, /msg_cd=EGW00201/);
@@ -392,7 +392,7 @@ for (const { tool, envKey, constant, kisPath } of PAGED_TOOLS) {
 
 // ---------------------------------------------------------------------------
 // 이슈 #210: 위 프로브들은 전부 **성공 경로**만 지난다. KIS는 유량 제한을 HTTP 200 +
-// rt_cd=1로 돌려주므로(런북 2절의 `http` 필드) axios가 던지지 않고, 그래서 index.js의 두
+// rt_cd=1로 돌려주므로 axios가 던지지 않고, 그래서 index.js의 두
 // catch 안에 있는 logKisRequest — getAccessToken의 것과 kisApiGet의 것 — 는 어떤 테스트에도
 // 닿지 않았다. 둘을 통째로 지워도 전 스위트가 초록이었다.
 //

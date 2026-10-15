@@ -31,7 +31,7 @@ function assertPositiveInteger(value, fieldName) {
 }
 
 // 영숫자·9자 코드 주문 가드 완화 플래그(#138). KIS Open API가 영숫자 PDNO(ETN 7자·
-// 9자 펀드 등)를 order-cash TR에서 실제로 수용하는지는 docs/alnum-stock-code.md
+// 9자 펀드 등)를 order-cash TR에서 실제로 수용하는지는 조사
 // (#265)에서도 "ETN 7자는 문서 근거 있음, 나머지는 미확인, 전부 실호출 확인은 아님"으로
 // 결론났다 — 실계좌 없이는 확정할 수 없으므로 가드를 무조건 열지 않는다. 미설정 시
 // 현행(숫자 6~7자만) 유지, "true"로 설정하면 아래 buildCashOrderBody()가 영숫자·9자
@@ -47,8 +47,7 @@ function isAlnumStockOrderEnabled() {
 // 주문 가능 코드 정책을 이루는 두 정규식. buildCashOrderBody() 안에 리터럴로 묻어
 // 두면 "지금 정책이 무엇인가"를 함수 본문을 읽어야만 알 수 있다. 이름을 붙여 올려
 // 두면 판정표(tests/fixtures/orderable_code_policy.json)를 짝인 backend/stock_code.py와
-// 맞출 때 두 계층이 무엇을 비교하는지가 드러난다(#138,
-// docs/alnum-stock-code.md §6.2).
+// 맞출 때 두 계층이 무엇을 비교하는지가 드러난다(#138).
 //
 // 내보내지는 않는다. 정책을 드러내는 건 export가 아니라 이름이고, 내보내면 호출부가
 // 이 정규식으로 가드를 각자 재구현할 수 있어 "정책이 몇 군데에 있는가"를 grep으로만

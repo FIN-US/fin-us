@@ -30,8 +30,7 @@
 
 시세(현재가·호가)도 공개 데이터지만 backend가 시세를 프롬프트에 직접 싣는 경로는 지금 없다.
 NAT 안에서 KIS 도구로 조회하는 시세는 잔고와 같은 pass-through 도구에서 나와 도구 단위로
-마스킹된다(`agents/.../pii_guard.MASKED_TOOLS`, #231) — 이 모듈의 범위 밖이며 남는 한계로
-`docs/pii-masking.md`에 적었다.
+마스킹된다(`agents/.../pii_guard.MASKED_TOOLS`, #231) — 이 모듈의 범위 밖이다.
 
 ## 공개 구간에도 거는 것 — 설정된 계좌번호
 

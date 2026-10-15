@@ -36,7 +36,7 @@ LLM 호출 실패·타임아웃·JSON 파싱 실패·verdict 값 불명·proposa
 계좌 스냅샷은 **원값으로 나가지 않는다.** :func:`derive_ratio_view`가 비율 구간으로 바꾼
 뒤에야 프롬프트에 실린다. 이 모듈은 #230(backend ``llm_chat``)과 #231(NAT 도구 결과)
 두 마스킹 계층 **모두**의 사정거리 밖이라 — 위 1·3번이 그 이유다 — 자기 경계에서 스스로
-닫는다. 근거와 구간 설계는 :func:`derive_ratio_view` 위 주석과 ``docs/pii-masking.md``.
+닫는다. 근거와 구간 설계는 :func:`derive_ratio_view` 위 주석에 있다.
 """
 
 import asyncio

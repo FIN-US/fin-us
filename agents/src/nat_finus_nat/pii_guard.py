@@ -6,8 +6,10 @@ NAT에 보내는 `user_msg`만 본다. 그런데 계좌·잔고 데이터는 bac
 `openai_cloud_llm`(`configs/common.yml`)으로 나간다. 즉 유출량이 가장 큰 경로가
 backend 계층 바깥에 있었다.
 
-이 모듈은 그 경로를 NAT 안에서 닫는다. **옵션 A(도구 결과 마스킹)** 를 택했고,
-옵션 B·C를 택하지 않은 근거는 `docs/pii-masking.md`에 적었다.
+이 모듈은 그 경로를 NAT 안에서 닫는다. **도구 결과 마스킹**을 택했다. LLM
+호출 경계 훅은 NAT이 제공하지 않아 NAT 업그레이드마다 깨지는 벤더 패치가 되고,
+계좌 취급 에이전트만 로컬 LLM으로 돌리는 안은 라우터까지 로컬로 내려야 하는 데다
+로컬 모델의 도구 호출 품질이 도구 강제 게이트의 전제를 만족한다는 근거가 없다.
 
 ## 배선 — 세 지점
 
@@ -26,7 +28,7 @@ backend 계층 바깥에 있었다.
 주문을 내려 하고, 그때 자리표시자가 KIS `params`에 실린다. 목적지가 외부 LLM이 아니라
 KIS MCP이므로 여기서도 되돌리는 것이 맞다 — 다만 무조건 되돌리면 종류가 어긋난 값까지
 숫자가 되어 조용한 오주문이 가능해지므로, :func:`restore_params_for_kis`가 종류 검사를
-함께 건다. 근거는 그 함수의 docstring과 `docs/pii-masking.md`.
+함께 건다. 근거는 그 함수의 docstring에 있다.
 
 ## ContextVar 방향성
 
@@ -269,8 +271,7 @@ def unrestorable_placeholders(text: str) -> list[str]:
       낯선 scope다. 아무것도 돌려주지 않고 backend가 판정하게 둔다.
 
     호출자(``finus_save_diary``)는 이 목록이 비어 있지 않으면 **저장하지 않는다.**
-    조용한 원본 소실보다 시끄러운 실패가 낫다는 판정이다(#339 방향 3). 근거는
-    ``docs/pii-masking.md``에 적었다.
+    조용한 원본 소실보다 시끄러운 실패가 낫다는 판정이다(#339 방향 3).
     """
     if not text:
         return []

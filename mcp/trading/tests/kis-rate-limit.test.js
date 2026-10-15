@@ -46,7 +46,7 @@ test("msg_cd 대소문자·공백이 섞여도 유량 제한으로 본다", () =
 
 test("msg_cd가 없어도 msg1의 '초당 거래건수'로 유량 제한을 잡는다", () => {
   // 공식 msg_cd FAQ에 접근하지 못해 코드 목록이 완전하다는 보장이 없다
-  // (docs/alnum-stock-code.md 4.3절). 한국어 본문이 두 번째 증거 경로다.
+  // 한국어 본문이 두 번째 증거 경로다.
   assert.equal(
     isKisRateLimitError({ msgCd: "EGW99999", msg1: "초당 거래건수를 초과하였습니다." }),
     true,
@@ -181,16 +181,16 @@ test("HTTP 오류 응답의 바디에서도 유량 제한을 잡는다", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 토큰 발급(tr_id=tokenP). index.js의 getAccessToken 주석과 런북 2절이 "EGW00133이 실제로
+// 토큰 발급(tr_id=tokenP). index.js의 getAccessToken 주석이 "EGW00133이 실제로
 // 관측될 수 있는 곳은 사실상 이 경로"라고 못 박는데, 정작 이 경로의 줄 모양을 고정하는
 // 테스트가 하나도 없었다. 게다가 이 경로의 실패 바디 모양은 아직 미확인이다 — OAuth
 // 형식이라 msg_cd/msg1이 아니라 error_code/error_description으로 온다는 서술이 있지만
 // 확인된 바 없고, 저장소 픽스처(tests/kis-client.test.js의 "pre-flight failure" 테스트)는 오히려 msg1이 채워진
-// 모양을 가리킨다(런북 0·2절). 그래서 아래 테스트들은 두 모양을 모두 고정한다.
+// 모양을 가리킨다. 그래서 아래 테스트들은 두 모양을 모두 고정한다.
 // ---------------------------------------------------------------------------
 
-test("토큰 발급 성공 줄은 런북이 적어 둔 rt_cd=- msg_cd=- class=ok 모양 그대로다", () => {
-  // 런북 2절이 이 모양을 "정상"이라고 설명한다. 그 문장을 코드가 지키는지 통째로 고정한다.
+test("토큰 발급 성공 줄은 rt_cd=- msg_cd=- class=ok 모양이다", () => {
+  // 이 모양이 토큰 발급의 "정상" 줄이다. 통째로 고정한다.
   const { line, classification, rateLimited } = formatKisRequestLog({
     trId: "tokenP",
     elapsedMs: 14,
