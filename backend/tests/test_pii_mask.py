@@ -1155,7 +1155,7 @@ class TestUnmaskFailOpen:
 class _TaggedStr(str):
     """str을 상속해 메타데이터를 얹는 호출자를 흉내낸다(#260 ai.llm.NatAnswer).
 
-    services를 import하지 않고 로컬에 정의한다 — 순환 의존과, 이 테스트가 요구하지도
+    ai.llm을 import하지 않고 로컬에 정의한다 — 순환 의존과, 이 테스트가 요구하지도
     않는 httpx 의존을 끌어오지 않기 위함이다.
     """
 

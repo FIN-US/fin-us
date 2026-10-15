@@ -16,11 +16,8 @@ from fastapi import HTTPException
 from mcp import StdioServerParameters
 
 from backend.ai import analysis as ai_analysis
-
 from backend.ai import llm as ai_llm
-
 from backend.ai import mcp_tools as ai_mcp
-
 from backend.ai import signals as ai_signals
 from backend.pii.egress import render_unmasked
 from backend.ai.signals import SignalScore
@@ -234,7 +231,9 @@ async def test_toolless_providers_pass_no_tools_to_the_model(monkeypatch):
                 choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))]
             )
 
-    monkeypatch.setattr(ai_llm, "AsyncOpenAI",
+    monkeypatch.setattr(
+        ai_llm,
+        "AsyncOpenAI",
         lambda api_key: SimpleNamespace(
             chat=SimpleNamespace(completions=FakeCompletions())
         ),
@@ -1857,13 +1856,6 @@ async def test_llm_chat_masking_does_not_leak_between_concurrent_calls():
 
         return _inner
 
-    from backend.ai import analysis as ai_analysis
-
-    from backend.ai import llm as ai_llm
-
-    from backend.ai import mcp_tools as ai_mcp
-
-    from backend.ai import signals as ai_signals
     orig_openai = ai_llm._llm_openai_chat
     orig_anthropic = ai_llm._llm_anthropic_chat
     try:
@@ -2036,7 +2028,7 @@ def test_no_bypass_of_llm_chat_masking_layer():
     - import 시 이름을 바꾸는 경우: `from openai import AsyncOpenAI as _OAI`
     - SDK를 쓰지 않고 httpx 등으로 provider HTTP API를 직접 때리는 코드
       (감시 대상 이름이 소스에 나타나지 않는다)
-    - 동적 참조: `getattr(services, "_llm_openai_chat")`, importlib
+    - 동적 참조: `getattr(ai_llm, "_llm_openai_chat")`, importlib
     """
     backend_dir = pathlib.Path(inspect.getfile(ai_llm)).parents[1]
     provider_fns = {
@@ -2103,11 +2095,11 @@ def test_no_bypass_of_llm_chat_masking_layer():
             self._record(node.id)
             self.generic_visit(node)
 
-        def visit_Call(self, node):
-            # `ai_llm._llm_openai_chat()`처럼 속성 접근으로 부르는 형태는 ast.Name이
-            # 아니므로 visit_Name이 잡지 못한다 - 이 분기를 남겨 둔다.
-            if isinstance(node.func, ast.Attribute):
-                self._record(node.func.attr)
+        def visit_Attribute(self, node):
+            # `llm._llm_openai_chat()`처럼 속성으로 부르는 형태는 ast.Name이 아니므로
+            # visit_Name이 잡지 못한다. 호출만 보면 `f = llm._llm_openai_chat`처럼 호출 없이
+            # 속성만 가져가는 별칭 대입이 빠지므로, 호출 여부와 무관하게 속성 접근을 기록한다.
+            self._record(node.attr)
             self.generic_visit(node)
 
     visitor = _RefVisitor()

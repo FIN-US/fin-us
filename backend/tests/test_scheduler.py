@@ -3730,7 +3730,7 @@ def test_rlz_pl_time_budget_fits_inside_mcp_call_timeout():
     """시세 갱신 예산 + 진행 중 요청 1회 + 기동이 run_mcp_tool 호출 타임아웃보다 짧다 (#369).
 
     이 관계를 벗어나면 연속조회가 긴 계좌는 잘림 안내 대신 504로 빠진다. 값만 고정한 위
-    테스트는 호출 타임아웃(backend/ai/llm.py)이나 kisAxios 타임아웃(index.js)이 바뀌어도 초록이라
+    테스트는 호출 타임아웃(backend/ai/mcp_tools.py)이나 kisAxios 타임아웃(index.js)이 바뀌어도 초록이라
     (PR #378 리뷰), 세 값을 각자의 출처에서 읽어 부등식을 단언한다.
 
     kisAxios 타임아웃은 index.js 소스에서 읽는다 — index.js는 import 시점에 stdio 서버를

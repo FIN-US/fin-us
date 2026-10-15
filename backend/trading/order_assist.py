@@ -59,7 +59,7 @@ from backend.core.config import (
     ORDER_VERIFY_TIMEOUT_SECONDS,
     TRADING_MCP_PARAMS,
 )
-# services는 order_assist를 import하지 않으므로 순환하지 않는다. run_mcp_tool은
+# ai.mcp_tools는 order_assist를 import하지 않으므로 순환하지 않는다. run_mcp_tool은
 # 호출 시점에 늦게 가져오지만(테스트가 주입하는 것이 기본 경로다) short_error는
 # 순수 포매터라 여기서 바로 묶는다.
 from backend.ai.mcp_tools import short_error

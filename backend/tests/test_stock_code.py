@@ -695,7 +695,7 @@ def test_master_code_cache_invalidates_when_path_changes(tmp_path, monkeypatch):
 # ──────────────────────────────────────────────────────────────────────────
 
 class TestIsUnresolvedEcho:
-    """리포트 저장(services)과 주문 준비(telegram/handlers/orders.py)가 공유하는 판정."""
+    """리포트 저장(ai/analysis.py)과 주문 준비(telegram/handlers/orders.py)가 공유하는 판정."""
 
     def test_detects_numeric_echo(self):
         assert _is_unresolved_echo("999999 (999999, UNKNOWN)") is True

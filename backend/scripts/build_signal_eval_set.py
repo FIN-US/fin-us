@@ -30,8 +30,8 @@ from backend.core.config import NEWS_MCP_PARAMS  # noqa: E402
 from backend.core.database import engine  # noqa: E402
 from backend.pii.egress import public  # noqa: E402
 from backend.scheduler.monitor import DEFAULT_MONITOR_STOCKS  # noqa: E402
-from backend.ai.mcp_tools import run_mcp_tool
-from backend.ai.signals import score_signal
+from backend.ai.mcp_tools import run_mcp_tool  # noqa: E402
+from backend.ai.signals import score_signal  # noqa: E402
 from backend.repositories.watchlist import SqliteWatchlistRepo  # noqa: E402
 
 DEFAULT_COUNT = 30
