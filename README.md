@@ -51,6 +51,23 @@
 | **Diary Agent** | 매매 복기 기록가 | 매매 기록과 투자 일지 작성 지원 | 매매 기록, 투자 일지 |
 | **Verifier** | 주문 검증자 | AI가 제안한 주문을 재심사해 위험하면 거부 | 제안된 주문 |
 
+## 폴더 구조
+
+```
+fin-us/
+├── frontend/   3D 대시보드 (Unity WebGL) + nginx 설정
+├── backend/    API 서버·스케줄러·텔레그램 봇 (FastAPI)
+├── agents/     멀티 에이전트 엔진 (NVIDIA NAT)
+├── mcp/        데이터 공급 MCP 서버
+│   ├── trading/  한국투자증권: 잔고·시세·수급·주문
+│   ├── news/     네이버 뉴스
+│   └── dart/     OpenDART 공시·실적
+├── scripts/    설치·실행 스크립트
+└── docker-compose.yml
+```
+
+폴더별 역할과 구성은 각 폴더의 README 참고: [frontend](frontend/README.md) · [backend](backend/README.md) · [agents](agents/README.md) · [mcp](mcp/README.md) · [scripts](scripts/README.md)
+
 ## 실행 방법
 
 ### 사전 준비 사항
@@ -58,6 +75,7 @@
 - Docker / Docker Compose
 - Node.js & npm
 - [uv](https://docs.astral.sh/uv/)
+- [KIS Trading MCP](https://github.com/koreainvestment/open-trading-api) 서버 (포트 3300): 에이전트의 계좌·시세 조회용
 
 | API 키 | 용도 |
 | :--- | :--- |

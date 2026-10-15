@@ -324,7 +324,7 @@ server {
     }
 
     # Unity 로더는 .wasm을 WebAssembly.instantiateStreaming으로 받으므로 Content-Type이
-    # 정확히 application/wasm이어야 한다(frontend/README.md 참고). nginx 1.21.5+ 기본
+    # 정확히 application/wasm이어야 한다. nginx 1.21.5+ 기본
     # mime.types에 이미 매핑이 있지만, 베이스 이미지가 바뀌어 빠지더라도 default_type이
     # 받아내도록 명시해 둔다. types 블록을 새로 열면 상속받은 매핑 전체가 대체되므로
     # 여기서는 location + default_type 방식을 쓴다.
