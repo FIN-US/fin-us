@@ -126,7 +126,7 @@ async def trade_notification_task(
     배치의 다른 update가 예산을 잃기 때문이다. 그래서 전송 책임을 루프 밖의 이 작업으로
     옮겼다.
 
-    ``backend/scheduler.py``의 촉매 알림과 같은 모양이다 — 성공했을 때만 마킹하고 미통지분은
+    ``backend/scheduler/catalyst.py``의 촉매 알림과 같은 모양이다 — 성공했을 때만 마킹하고 미통지분은
     다음 주기에 재배달한다. 그쪽이 이미 이 레포에서 돌고 있는 검증된 패턴이다.
 
     전송에 ``send_text_settled``를 쓰지 않는다. 여기서는 재시도의 단위가 함수 호출이 아니라

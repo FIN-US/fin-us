@@ -12,6 +12,7 @@ from backend.core.database import engine
 from backend.core.models import Portfolio
 # SQLite에서 읽은 naive UTC와 tz-aware now를 같은 축으로 맞추는 보정(#196).
 # 같은 보정을 여기서 다시 정의하면 한쪽만 고쳐질 때 두 모듈의 시각 축이 갈린다.
+# 모듈 밖에서 쓰므로 밑줄 없는 공개 이름이다(PR #367 리뷰).
 from backend.repositories.filtered_signal import as_utc_naive
 from backend.scheduler import deps
 
