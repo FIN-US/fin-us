@@ -82,7 +82,7 @@
   요청 A와 요청 B가 같은 프로세스에 들어온다. `--workers`를 늘리면 요청 B가 다른
   워커에 배정될 수 있고, 그때는 등록소가 비어 있어 저장이 거부된다 — 조용한 손상이
   아니라 실패이므로 안전 방향이지만, 워커를 늘릴 때 함께 봐야 하는 자리다
-  (외부 저장소로 옮기려면 Redis가 이미 있다: `backend/redis_state.py`).
+  (외부 저장소로 옮기려면 Redis가 이미 있다: `backend/core/redis_state.py`).
 - **되돌리기는 살아 있는 scope에만 걸린다.** 이전 턴 자리표시자(NAT SQLite 히스토리에서
   올라온 것)나 LLM이 지어낸 번호는 등록소에 없다. 그 값은 이 프로세스 어디에도 없으므로
   #339의 판정이 그대로 유지된다 — 호출자가 저장을 거부한다.
@@ -102,7 +102,7 @@ import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 
-from .pii_mask import _FALLBACK_LABEL
+from backend.pii.mask import _FALLBACK_LABEL
 
 logger = logging.getLogger(__name__)
 

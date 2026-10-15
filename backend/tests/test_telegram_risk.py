@@ -9,16 +9,16 @@
 
 import pytest
 
-import backend.services as services
-import backend.user_preferences as user_preferences
-from backend.telegram_commands import (
+import backend.ai.services as services
+import backend.ai.user_preferences as user_preferences
+from backend.telegram.commands import (
     RISK_COMMAND_HELP,
     RISK_MEMORY_DISABLED_TEXT,
     RISK_ONBOARDING_QUESTION,
     TelegramCommandHandler,
 )
 from backend.tests.test_telegram_level import FakeNotifier, FakeState, _press, _send
-from backend.user_preferences import (
+from backend.ai.user_preferences import (
     UserMemoryDisabled,
     nat_user_id_for_conversation,
     normalize_risk_choice,

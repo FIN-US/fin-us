@@ -16,7 +16,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from backend.redis_state import (
+from backend.core.redis_state import (
     _DELETE_IF_UNCHANGED_SCRIPT,
     _REPLACE_IF_UNCHANGED_SCRIPT,
     CONFIRM_UPDATE_MARKER_TTL_SEC,
@@ -27,8 +27,8 @@ from backend.redis_state import (
     RedisKeys,
     RedisPendingOrderStore,
 )
-from backend.trading_orders import OrderExecutionResult, PendingOrder
-from backend.telegram_commands import (
+from backend.trading.orders import OrderExecutionResult, PendingOrder
+from backend.telegram.commands import (
     CONFIRM_AUTO_PROPOSAL_BUTTON_ONLY_TEXT,
     CONFIRM_BEFORE_PROMPT_TEXT,
     TelegramCommandHandler,
@@ -485,7 +485,7 @@ async def test_cancel_after_ttl_expiry_gives_explicit_error():
 @pytest.mark.asyncio
 async def test_confirm_button_after_ttl_expiry_gives_stale_callback_text():
     """인라인 버튼 클릭 시 TTL 만료(키 없음)이면 ORDER_STALE_CALLBACK_TEXT 응답."""
-    from backend.telegram_commands import ORDER_STALE_CALLBACK_TEXT
+    from backend.telegram.commands import ORDER_STALE_CALLBACK_TEXT
 
     redis = FakeRedis()
     store = RedisPendingOrderStore(redis)

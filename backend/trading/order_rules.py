@@ -3,7 +3,7 @@
 #299(PR #302)가 ``/advise``로 수동 주문 보조를 넣으면서 자료구조는 룰 트리거를 이미
 수용하도록 만들어 뒀다(``ProposalTrigger.source``/``rule_id``/``trigger_signal``, 종목코드+룰
 단위 냉각 키). 이 모듈은 그 호출부다 — **어떤 감시 신호가 자동 제안을 부르는가**만 정하고,
-제안·한도 판정·검증·대기 주문 저장은 전부 :func:`backend.order_assist.run_order_assist`가
+제안·한도 판정·검증·대기 주문 저장은 전부 :func:`backend.trading.order_assist.run_order_assist`가
 그대로 한다. 판정 규칙을 여기에 한 줄이라도 복제하지 않는다.
 
 #299의 세 원칙은 자동 트리거에서도 그대로다. 특히 **확정 버튼 없이는 주문이 나가지 않는다** —
@@ -38,7 +38,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping
 
-from .config import (
+from backend.core.config import (
     ORDER_RULE_SOURCES,
     ORDER_RULE_TRIGGER_ENABLED,
     ORDER_RULE_URGENCY_LEVELS,

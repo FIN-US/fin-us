@@ -13,7 +13,7 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 from pydantic import ValidationError
-from .config import (
+from backend.core.config import (
     OPENAI_API_KEY, OPENAI_CHAT_MODEL,
     ANTHROPIC_API_KEY, ANTHROPIC_CHAT_MODEL,
     OLLAMA_API_KEY, OLLAMA_MODEL, OLLAMA_BASE_URL,
@@ -21,19 +21,19 @@ from .config import (
     NEWS_MCP_PARAMS, TRADING_MCP_PARAMS,
     SIGNAL_SCORE_MIN, SIGNAL_SCORE_MAX, SIGNAL_SCORE_THRESHOLD,
 )
-from .schemas import TradingSignal, AnalysisReport, UrgencyLevel
-from .models import AgentReport
-from .stock_code import (
+from backend.core.schemas import TradingSignal, AnalysisReport, UrgencyLevel
+from backend.core.models import AgentReport
+from backend.trading.stock_code import (
     _STOCK_CODE_EXTRACT_RE,
     _has_code_digit,
     _is_known_master_code,
     _is_unresolved_echo,
     _looks_like_stock_code,
 )
-from .pii_egress import EgressPrompt, Segment, personal, prepare_egress, public
-from .pii_mask import unmask_pii
-from .pii_registry import active_mapping
-from .user_preferences import nat_user_id_for_conversation
+from backend.pii.egress import EgressPrompt, Segment, personal, prepare_egress, public
+from backend.pii.mask import unmask_pii
+from backend.pii.registry import active_mapping
+from backend.ai.user_preferences import nat_user_id_for_conversation
 
 logger = logging.getLogger(__name__)
 _NAT_RESPONSE_LOG_PREVIEW_CHARS = 800
@@ -61,7 +61,7 @@ _ScoringProvider = Literal["openai", "anthropic", "ollama"]
 _SCORING_PROVIDERS: frozenset[_ScoringProvider] = frozenset(get_args(_ScoringProvider))
 _DEFAULT_SCORING_PROVIDER: _ScoringProvider = "ollama"
 
-# _STOCK_CODE_EXTRACT_RE, _has_code_digit, _looks_like_stock_code → backend/stock_code.py (#140)
+# _STOCK_CODE_EXTRACT_RE, _has_code_digit, _looks_like_stock_code → backend/trading/stock_code.py (#140)
 
 # 종목명 -> 종목코드 프로세스 메모리 캐시.
 # resolve_stock_code MCP 호출은 매번 새 stdio 서브프로세스를 띄우는 비용이 있고
@@ -458,7 +458,7 @@ async def perform_stock_analysis(
 async def generate_morning_briefing(watchlist: list[str] | None = None) -> dict[str, Any]:
     stocks = list(dict.fromkeys(watchlist or []))
     # 공개/개인 구분(#395): 뉴스·종목 수급은 공개, 잔고 리포트는 개인이다. 기준은
-    # backend/pii_egress.py 모듈 docstring. 잔고만 마스킹되고 뉴스 속 금액은 그대로 나간다.
+    # backend/pii/egress.py 모듈 docstring. 잔고만 마스킹되고 뉴스 속 금액은 그대로 나간다.
     market_summary_source = await _collect_morning_context(
         NEWS_MCP_PARAMS,
         "get_market_news",

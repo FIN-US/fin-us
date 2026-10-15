@@ -7,9 +7,9 @@ import csv
 
 import pytest
 
-from backend.pii_egress import public
+from backend.pii.egress import public
 from backend.scripts import build_signal_eval_set as eval_set
-from backend.services import SignalScore
+from backend.ai.services import SignalScore
 
 
 def test_parse_article_line_splits_title_and_summary():

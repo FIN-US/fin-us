@@ -5,7 +5,7 @@ from typing import Callable, Protocol
 from pydantic import BaseModel, Field
 from sqlmodel import Session, col, select
 
-from .models import CatalystEvent
+from backend.core.models import CatalystEvent
 
 
 class CatalystEventInput(BaseModel):

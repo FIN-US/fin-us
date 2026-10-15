@@ -14,7 +14,7 @@ from urllib.parse import quote as _url_quote
 from fastapi import HTTPException
 from sqlmodel import Session
 
-from .config import (
+from backend.core.config import (
     DART_MCP_PARAMS,
     KIS_ORDER_ENV,
     KIS_REAL_ORDER_ENABLED,
@@ -22,10 +22,10 @@ from .config import (
     TRADING_MCP_PARAMS,
     VISUALIZATION_URL,
 )
-from .catalyst_repo import SqliteCatalystEventRepo
-from .database import engine
-from .delivery_alarm import delivery_metrics
-from .redis_state import (
+from backend.repositories.catalyst import SqliteCatalystEventRepo
+from backend.core.database import engine
+from backend.telegram.delivery_alarm import delivery_metrics
+from backend.core.redis_state import (
     InMemoryPendingOrderStore,
     PendingOrderStore,
     RedisSchedulerState,
@@ -37,7 +37,7 @@ from .redis_state import (
     create_redis_client,
     redis_state,
 )
-from .presentation import (
+from backend.telegram.presentation import (
     DEFAULT_TELEGRAM_USER_LEVEL,
     KIND_ANALYSIS,
     KIND_QUOTE,
@@ -52,10 +52,10 @@ from .presentation import (
     render,
     split_for_telegram,
 )
-from .pii_egress import Segment, public
-from .services import llm_chat, run_mcp_tool, short_error as _short_error
-from .watchlist_repo import SqliteWatchlistRepo
-from .telegram_notifier import (
+from backend.pii.egress import Segment, public
+from backend.ai.services import llm_chat, run_mcp_tool, short_error as _short_error
+from backend.repositories.watchlist import SqliteWatchlistRepo
+from backend.telegram.notifier import (
     SETTLED_SEND_RETRY_BACKOFF_SECONDS,
     SETTLED_SEND_TIMEOUT_SECONDS,
     TELEGRAM_ALERT_MODES,
@@ -65,8 +65,8 @@ from .telegram_notifier import (
     send_text_settled,
     telegram_notifier,
 )
-from .timeutil import KST
-from .trading_orders import (
+from backend.core.timeutil import KST
+from backend.trading.orders import (
     ORDER_CANCEL_CALLBACK,
     ORDER_CONFIRM_CALLBACK,
     ORDER_EXPIRES_AFTER,
@@ -81,7 +81,7 @@ from .trading_orders import (
     order_reply_markup,
     send_order_prompt,
 )
-from .stock_code import (
+from backend.trading.stock_code import (
     _STOCK_CODE_EXTRACT_RE,
     _is_unresolved_echo,
     _looks_like_stock_code,
@@ -89,8 +89,8 @@ from .stock_code import (
     extract_stock_name,
     is_orderable_stock_code,
 )
-from .order_assist import ProposalTrigger, parse_current_price, run_order_assist
-from .user_preferences import (
+from backend.trading.order_assist import ProposalTrigger, parse_current_price, run_order_assist
+from backend.ai.user_preferences import (
     RISK_AGGRESSIVE,
     RISK_CLEAR,
     RISK_CONSERVATIVE,
@@ -145,8 +145,8 @@ NATURAL_ORDER_HELP = "자연어 주문을 해석할 수 없습니다. /buy 또�
 UNRESOLVED_STOCK_WARNING = (
     "⚠️ 종목명을 확인하지 못했습니다. 입력한 코드가 맞는지 다시 확인하세요."
 )
-# _STOCK_CODE_EXTRACT_RE, _ORDERABLE_STOCK_CODE_RE → backend/stock_code.py (#140)
-# ORDER_CONFIRM_CALLBACK, ORDER_CANCEL_CALLBACK, order_reply_markup → trading_orders.py (#314).
+# _STOCK_CODE_EXTRACT_RE, _ORDERABLE_STOCK_CODE_RE → backend/trading/stock_code.py (#140)
+# ORDER_CONFIRM_CALLBACK, ORDER_CANCEL_CALLBACK, order_reply_markup → trading/orders.py (#314).
 # 스케줄러의 자동 제안도 같은 버튼을 써야 해서 옮겼다. 이름은 여기서 계속 읽을 수 있다.
 ORDER_STALE_CALLBACK_TEXT = "이전 주문 버튼입니다. 최신 주문 메시지에서 다시 선택하세요."
 # 재시작 전에 처리를 시작한 /confirm이 재배달됐을 때의 안내 (#383). 원래 실행의 결과 메시지가
@@ -1222,7 +1222,7 @@ class TelegramCommandHandler:
         """/risk 안정형|공격형|해제. 인자가 없으면 현재 설정을 버튼과 함께 보여준다 (#397).
 
         /level과 같은 모양이다. 다른 점은 저장소가 redis가 아니라 NAT 사용자 선호 메모리라는 것
-        하나다(backend/user_preferences.py). 그래서 캐시를 두지 않는다 — 이 값을 매 메시지마다
+        하나다(backend/ai/user_preferences.py). 그래서 캐시를 두지 않는다 — 이 값을 매 메시지마다
         읽는 쪽은 backend가 아니라 NAT이다.
         """
         parts = argument.split()
@@ -2635,7 +2635,7 @@ class TelegramCommandHandler:
         # 공개/개인 구분(#395): DART 실적과 뉴스는 공개 데이터라 수치를 그대로 보낸다 — 이
         # 명령은 매출·영업이익 증감을 읽는 것이 목적이라, 마스킹하면 분석이 성립하지 않는다.
         # 종목·기간은 사용자가 친 인자라 개인 구간(맨 문자열)으로 둔다. 기준은
-        # backend/pii_egress.py 모듈 docstring.
+        # backend/pii/egress.py 모듈 docstring.
         period_line = f"조회 기간: {period}" if period else "조회 기간: DART MCP 기본값"
         return [
             "News Analyst 실적 분석 모드로 다음 종목의 구조화된 실적 리포트를 작성하라.\n"

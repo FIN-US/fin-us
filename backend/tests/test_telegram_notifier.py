@@ -6,9 +6,9 @@ from typing import cast
 import httpx
 import pytest
 
-import backend.telegram_notifier
-from backend.presentation import SIGNAL_SCORE_LABEL, TELEGRAM_TRUNCATION_SUFFIX
-from backend.telegram_notifier import (
+import backend.telegram.notifier
+from backend.telegram.presentation import SIGNAL_SCORE_LABEL, TELEGRAM_TRUNCATION_SUFFIX
+from backend.telegram.notifier import (
     TELEGRAM_MESSAGE_LIMIT,
     SendReceipt,
     TelegramApiError,
@@ -620,8 +620,8 @@ def test_no_module_builds_a_telegram_url_outside_the_gateway():
     #257이 예측한 재발이 #257을 고치는 중에 실제로 일어난 셈이다. 리뷰가 잡지 못하면
     배포까지 간다는 것이 이 이슈의 출발점이었으니, 리뷰에 맡기지 않고 여기서 잡는다.
     """
-    backend_dir = Path(backend.telegram_notifier.__file__).parent
-    gateway_source = inspect.getsource(backend.telegram_notifier._request_telegram_api)
+    backend_dir = Path(backend.telegram.notifier.__file__).parents[1]
+    gateway_source = inspect.getsource(backend.telegram.notifier._request_telegram_api)
 
     offenders = []
     for path in sorted(backend_dir.rglob("*.py")):
@@ -645,7 +645,7 @@ def test_no_module_builds_a_telegram_url_outside_the_gateway():
             if "api.telegram.org" not in line:
                 continue
             # 관문 안의 그 한 줄만 허용한다.
-            if path.name == "telegram_notifier.py" and line in gateway_source:
+            if relative.as_posix() == "telegram/notifier.py" and line in gateway_source:
                 continue
             # 상대 경로로 남긴다 — 파일명만 찍으면 어느 트리의 파일인지 알 수 없다.
             offenders.append(f"{relative}:{number}: {line.strip()}")
@@ -898,7 +898,7 @@ def test_format_analysis_alert_passes_the_configured_threshold(monkeypatch):
     """
     notifier = TelegramNotifier(bot_token="token", chat_id="chat")
     monkeypatch.setattr(
-        backend.telegram_notifier, "SIGNAL_UNCERTAINTY_ALERT_THRESHOLD", 2.0
+        backend.telegram.notifier, "SIGNAL_UNCERTAINTY_ALERT_THRESHOLD", 2.0
     )
 
     message = notifier.format_analysis_alert(

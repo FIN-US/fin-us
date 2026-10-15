@@ -6,8 +6,8 @@ import pytest
 
 from mcp import StdioServerParameters
 
-import backend.config as config
-from backend.config import DART_MCP_PARAMS, NEWS_MCP_PARAMS, TRADING_MCP_PARAMS, _stdio_server_params
+import backend.core.config as config
+from backend.core.config import DART_MCP_PARAMS, NEWS_MCP_PARAMS, TRADING_MCP_PARAMS, _stdio_server_params
 
 
 def child_env(params: StdioServerParameters) -> dict[str, str]:

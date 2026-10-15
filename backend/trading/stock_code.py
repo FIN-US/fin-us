@@ -9,7 +9,7 @@ import os
 import re
 from pathlib import Path
 
-from .config import _TRADING_MCP_DIR
+from backend.core.config import _TRADING_MCP_DIR
 
 logger = logging.getLogger(__name__)
 

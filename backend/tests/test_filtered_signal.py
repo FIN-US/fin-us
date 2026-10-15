@@ -8,15 +8,15 @@ from fastapi.testclient import TestClient
 from sqlmodel import Session, SQLModel, create_engine, select
 from sqlmodel.pool import StaticPool
 
-from ..filtered_signal_repo import (
+from backend.repositories.filtered_signal import (
     ScoreBucket,
     SqliteFilteredSignalRepo,
     fill_score_axis,
     score_histogram,
 )
-from ..config import SIGNAL_SCORE_THRESHOLD
-from ..main import app, get_session
-from ..models import FilteredSignal
+from backend.core.config import SIGNAL_SCORE_THRESHOLD
+from backend.main import app, get_session
+from backend.core.models import FilteredSignal
 
 
 @pytest.fixture(name="session")
@@ -270,7 +270,7 @@ def test_fill_score_axis_warns_when_dropping_out_of_axis_buckets(caplog):
     지금은 채점이 -3~+3으로 clamp되어 도달할 수 없지만, 그 clamp가 사라지면
     무증상으로 깨지는 자리다.
     """
-    with caplog.at_level(logging.WARNING, logger="backend.filtered_signal_repo"):
+    with caplog.at_level(logging.WARNING, logger="backend.repositories.filtered_signal"):
         filled = fill_score_axis(
             (ScoreBucket(score=1, count=3), ScoreBucket(score=7, count=2)), -3, 3
         )
@@ -282,8 +282,8 @@ def test_fill_score_axis_warns_when_dropping_out_of_axis_buckets(caplog):
 
 def test_source_filter_matches_signal_sources():
     """조회 필터가 받는 값이 실제 감시 출처와 어긋나면 조회가 조용히 빈다."""
-    from ..main import SignalSourceName
-    from ..scheduler import SIGNAL_SOURCES
+    from backend.main import SignalSourceName
+    from backend.scheduler import SIGNAL_SOURCES
 
     assert set(get_args(SignalSourceName)) == {source.name for source in SIGNAL_SOURCES}
 

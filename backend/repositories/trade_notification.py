@@ -19,7 +19,7 @@ from typing import Any, Callable, Protocol
 
 from sqlmodel import Session, col, select
 
-from .models import TradeHistory
+from backend.core.models import TradeHistory
 
 
 @dataclass(frozen=True)

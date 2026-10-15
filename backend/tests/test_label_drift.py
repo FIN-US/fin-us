@@ -1,6 +1,6 @@
 """TOOL_LABELS/AGENT_LABELS와 agents 식별자의 드리프트 검사 (#282).
 
-`backend/telegram_commands.py`의 두 라벨 맵은 **다른 서비스(agents)의 식별자**를
+`backend/telegram/commands.py`의 두 라벨 맵은 **다른 서비스(agents)의 식별자**를
 키로 쓴다 — `TOOL_LABELS`는 도구 강제 원장에 기록되는 내부 도구명,
 `AGENT_LABELS`는 supervisor 브랜치명이다. agents이 도구를 리네임하면 backend에는
 아무 신호도 가지 않고, 각주에 한국어 라벨 대신 내부 이름이 그대로 노출된다.
@@ -27,7 +27,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from backend.presentation import AGENT_LABELS, TOOL_LABELS
+from backend.telegram.presentation import AGENT_LABELS, TOOL_LABELS
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _FINUS_NAT_ROOT = _REPO_ROOT / "agents"

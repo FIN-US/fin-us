@@ -63,7 +63,7 @@ export function readPageDelayMsEnv(name, fallback, { maxMs = SET_TIMEOUT_MAX_MS 
 // 이 값은 KIS가 tr_cont를 계속 "F"/"M"으로 응답하는 이상 상황에 대한 2차 안전장치다.
 export const BALANCE_MAX_PAGES = 20;
 
-// get_balance 전체 호출은 backend의 run_mcp_tool(backend/services.py)이 30초에서 끊는다.
+// get_balance 전체 호출은 backend의 run_mcp_tool(backend/ai/services.py)이 30초에서 끊는다.
 // 여기에 MCP stdio 서브프로세스 기동/핸드셰이크(수백 ms~1초대)와, 예산 초과 판정 이후에도
 // 이미 시작된 요청 1회가 kisAxios 인스턴스(mcp/trading/index.js)의 8초 타임아웃만큼 더 걸릴
 // 수 있는 여유를 더해야 한다. getAccessToken()의 토큰 발급 요청은 fetchPage(index.js의

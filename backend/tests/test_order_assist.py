@@ -17,8 +17,8 @@ from zoneinfo import ZoneInfo
 import httpx
 import pytest
 
-from backend import order_assist
-from backend.order_assist import (
+from backend.trading import order_assist
+from backend.trading.order_assist import (
     CONFLICT_MESSAGE,
     FAILURE_ID_MISMATCH,
     FAILURE_PARSE,
@@ -39,9 +39,9 @@ from backend.order_assist import (
     request_verification,
     run_order_assist,
 )
-from backend.redis_state import InMemoryPendingOrderStore, RedisKeys
-from backend.telegram_commands import ADVISE_COMMAND_HELP, TelegramCommandHandler
-from backend.trading_orders import ORDER_EXPIRES_AFTER
+from backend.core.redis_state import InMemoryPendingOrderStore, RedisKeys
+from backend.telegram.commands import ADVISE_COMMAND_HELP, TelegramCommandHandler
+from backend.trading.orders import ORDER_EXPIRES_AFTER
 
 KST = ZoneInfo("Asia/Seoul")
 
@@ -644,7 +644,7 @@ def test_qualitative_reason_handles_empty_input():
 
 
 def test_approval_message_numbers_come_from_the_payload_not_the_verifier():
-    from backend.trading_orders import PendingOrder
+    from backend.trading.orders import PendingOrder
 
     order = PendingOrder(
         chat_id="123",
@@ -837,7 +837,7 @@ def test_order_origin_for_an_unknown_source_is_auto_proposal():
 @pytest.mark.asyncio
 async def test_conflict_when_a_pending_order_already_exists():
     """충돌은 조용히 사라지면 안 된다 — 상태와 문장을 모두 돌려준다."""
-    from backend.trading_orders import PendingOrder
+    from backend.trading.orders import PendingOrder
 
     store = InMemoryPendingOrderStore()
     await store.set_if_absent(
@@ -871,7 +871,7 @@ async def test_expired_pending_order_does_not_block_a_new_proposal():
     약 9분간 남는다. /buy는 같은 자리에서 만료분을 치우므로 통과하는데 /advise만
     막히던 자리를 고정한다.
     """
-    from backend.trading_orders import PendingOrder
+    from backend.trading.orders import PendingOrder
 
     store = InMemoryPendingOrderStore()
     await store.set_if_absent(
@@ -909,7 +909,7 @@ async def test_expiry_check_reads_a_naive_now_as_kst():
     갈린다. 따라서 이 테스트는 로컬 tz가 KST가 아닌 호스트(UTC로 도는 CI 등)에서
     보정 누락을 잡아낸다. KST 호스트에서는 두 해석이 같아져 통과만 한다.
     """
-    from backend.trading_orders import PendingOrder
+    from backend.trading.orders import PendingOrder
 
     store = InMemoryPendingOrderStore()
     created_at = datetime(2026, 5, 20, 10, 0, tzinfo=KST)
@@ -935,7 +935,7 @@ async def test_expiry_check_reads_a_naive_now_as_kst():
 @pytest.mark.asyncio
 async def test_unexpired_pending_order_still_conflicts():
     """만료 정리가 '충돌 검사를 없앤 것'이 되면 안 된다 — 살아 있는 주문은 그대로 막는다."""
-    from backend.trading_orders import PendingOrder
+    from backend.trading.orders import PendingOrder
 
     store = InMemoryPendingOrderStore()
     await store.set_if_absent(
@@ -1312,7 +1312,7 @@ def _advise_handler(monkeypatch, result, *, captured=None):
             captured.append((trigger, kwargs))
         return result
 
-    monkeypatch.setattr("backend.telegram_commands.run_order_assist", fake_run)
+    monkeypatch.setattr("backend.telegram.commands.run_order_assist", fake_run)
 
     async def no_progress(text):
         return None
@@ -1336,7 +1336,7 @@ async def test_advise_without_argument_shows_usage(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_advise_passes_the_stock_name_and_chat_id(monkeypatch):
-    from backend.order_assist import OrderAssistResult
+    from backend.trading.order_assist import OrderAssistResult
 
     captured = []
     handler, _ = _advise_handler(
@@ -1356,8 +1356,8 @@ async def test_advise_passes_the_stock_name_and_chat_id(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_advise_approved_result_gets_the_existing_confirm_buttons(monkeypatch):
-    from backend.order_assist import OrderAssistResult
-    from backend.trading_orders import PendingOrder
+    from backend.trading.order_assist import OrderAssistResult
+    from backend.trading.orders import PendingOrder
 
     order = PendingOrder(
         chat_id="123",
@@ -1389,7 +1389,7 @@ async def test_advise_approved_result_gets_the_existing_confirm_buttons(monkeypa
 
 @pytest.mark.asyncio
 async def test_advise_conflict_message_reaches_the_user(monkeypatch):
-    from backend.order_assist import OrderAssistResult
+    from backend.trading.order_assist import OrderAssistResult
 
     handler, notifier = _advise_handler(
         monkeypatch, OrderAssistResult(status="conflict", message=CONFLICT_MESSAGE)
@@ -1408,7 +1408,7 @@ async def test_advise_failure_is_reported_not_swallowed(monkeypatch):
     async def boom(trigger, **kwargs):
         raise RuntimeError("NAT 연결 실패")
 
-    monkeypatch.setattr("backend.telegram_commands.run_order_assist", boom)
+    monkeypatch.setattr("backend.telegram.commands.run_order_assist", boom)
 
     await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/advise 삼성전자"}})
 
@@ -1689,9 +1689,9 @@ async def test_advise_records_the_prompt_message_id_on_the_pending_order(monkeyp
 
     이 테스트가 잡는 mutation: _handle_advise가 id 없는 전송(_send_text_settled)으로 되돌아감.
     """
-    from backend.order_assist import OrderAssistResult
-    from backend.telegram_notifier import SendReceipt
-    from backend.trading_orders import PendingOrder
+    from backend.trading.order_assist import OrderAssistResult
+    from backend.telegram.notifier import SendReceipt
+    from backend.trading.orders import PendingOrder
 
     order = PendingOrder(
         chat_id="123",
@@ -1725,8 +1725,8 @@ async def test_advise_records_the_prompt_message_id_on_the_pending_order(monkeyp
 @pytest.mark.asyncio
 async def test_advise_deletes_the_pending_order_when_the_prompt_never_sends(monkeypatch):
     """프롬프트가 안 나갔으면 대기 주문도 남기지 않는다 — 사용자는 그 존재를 모른다."""
-    from backend.order_assist import OrderAssistResult
-    from backend.trading_orders import PendingOrder
+    from backend.trading.order_assist import OrderAssistResult
+    from backend.trading.orders import PendingOrder
 
     order = PendingOrder(
         chat_id="123",
@@ -1769,7 +1769,7 @@ def test_verdict_reason_strips_markdown_residue():
 
 
 def test_approval_message_strips_markdown_from_the_rationale():
-    from backend.trading_orders import PendingOrder
+    from backend.trading.orders import PendingOrder
 
     order = PendingOrder(
         chat_id="123",

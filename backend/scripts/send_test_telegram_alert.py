@@ -5,7 +5,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from backend.telegram_notifier import telegram_notifier
+from backend.telegram.notifier import telegram_notifier
 
 
 def build_parser() -> argparse.ArgumentParser:

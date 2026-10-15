@@ -4,7 +4,7 @@
 
 1. **판정 의미가 backend와 같다** — 판정표(``backend/tests/fixtures/price_gap_policy.json``)를
    backend ``evaluate_hard_limits`` 스위트와 함께 읽는다(#138 공유 판정표 방식). 임계값의
-   env 이름·기본값은 ``backend/config.py``를 **정적으로** 읽어 대조한다 — import하면
+   env 이름·기본값은 ``backend/core/config.py``를 **정적으로** 읽어 대조한다 — import하면
    ``load_dotenv()``가 테스트 세션의 env를 오염시킨다(``test_env_whitelist.py`` 참고).
 2. **순수 함수** — 현재가 파싱, 단가 필드 판별, 임계값 해석.
 3. **배선** — 실제 ``finus_account_balance`` 도구를 통과시켜, 평가금액 자리표시자가
@@ -34,7 +34,7 @@ from nat_finus_nat.pii_guard import PII_MAPPING, install_mapping_box, mask_tool_
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _POLICY_PATH = _REPO_ROOT / "backend" / "tests" / "fixtures" / "price_gap_policy.json"
 _POLICY_CASES = json.loads(_POLICY_PATH.read_text(encoding="utf-8"))["cases"]
-_BACKEND_CONFIG = _REPO_ROOT / "backend" / "config.py"
+_BACKEND_CONFIG = _REPO_ROOT / "backend" / "core" / "config.py"
 
 
 # ---------------------------------------------------------------------------
@@ -90,7 +90,7 @@ def test_threshold_is_read_from_the_backend_env_name(monkeypatch):
 
 @pytest.mark.parametrize("raw", ["", "  ", "abc", "inf", "nan", "-0.01"])
 def test_threshold_falls_back_like_backend(monkeypatch, raw):
-    """``backend/config.py``의 ``_float_env``와 같은 규칙 — 조용히 한도가 사라지지 않는다.
+    """``backend/core/config.py``의 ``_float_env``와 같은 규칙 — 조용히 한도가 사라지지 않는다.
 
     뮤테이션: ``isfinite``·음수 가드를 빼면 ``inf``/``nan``/``-0.01`` 행이 red.
     """

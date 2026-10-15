@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from backend.order_assist import (
+from backend.trading.order_assist import (
     AccountSnapshot,
     DailyUsage,
     OrderLimits,

@@ -1,7 +1,7 @@
 import pytest
 from sqlmodel import SQLModel, create_engine, Session
 
-from backend.watchlist_repo import SqliteWatchlistRepo
+from backend.repositories.watchlist import SqliteWatchlistRepo
 
 
 @pytest.fixture()

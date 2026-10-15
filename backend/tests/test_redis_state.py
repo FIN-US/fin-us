@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from backend.redis_state import (
+from backend.core.redis_state import (
     SCHEDULER_LOCK_TTL_SEC,
     SIGNAL_HASH_TTL_SEC,
     TELEGRAM_POLLER_STATE_TTL_SEC,

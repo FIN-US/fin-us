@@ -27,7 +27,7 @@
 - **기준가**: 주문 직전 조회한 현재가(``stck_prpr``). backend도 시세 조회의 현재가다.
 - **식**: ``abs(단가 - 현재가) / 현재가 > 임계값``이면 초과다. 양방향이고 경계는 통과한다.
 - **임계값**: 같은 env 이름 :data:`PRICE_GAP_RATIO_ENV`, 같은 기본값, 같은 해석 규칙
-  (``backend/config.py``의 ``_float_env``).
+  (``backend/core/config.py``의 ``_float_env``).
 
 두 계층이 갈리지 않도록 판정표 ``backend/tests/fixtures/price_gap_policy.json``을 양쪽
 스위트가 함께 읽고, 기본값은 ``agents/tests/test_order_price_guard.py``가 backend
@@ -51,7 +51,7 @@ from typing import Any, NamedTuple
 
 logger = logging.getLogger(__name__)
 
-# backend/config.py ``ORDER_MAX_PRICE_GAP_RATIO = _float_env("ORDER_MAX_PRICE_GAP_RATIO", 0.03)``와
+# backend/core/config.py ``ORDER_MAX_PRICE_GAP_RATIO = _float_env("ORDER_MAX_PRICE_GAP_RATIO", 0.03)``와
 # 같은 이름·같은 기본값이어야 한다. compose에서는 두 서비스가 같은 ./.env를 싣는다
 # (docker-compose.yml의 env_file). 둘이 어긋나면 test_order_price_guard.py가 잡는다.
 PRICE_GAP_RATIO_ENV = "ORDER_MAX_PRICE_GAP_RATIO"
@@ -103,7 +103,7 @@ _CURRENT_PRICE_TEXT_RE = re.compile(
 def max_price_gap_ratio() -> float:
     """임계값을 읽는다. 해석 불가·비유한·음수면 기본값으로 되돌린다.
 
-    ``backend/config.py``의 ``_float_env``와 같은 규칙이다. 호출할 때마다 읽는 이유:
+    ``backend/core/config.py``의 ``_float_env``와 같은 규칙이다. 호출할 때마다 읽는 이유:
     backend는 import 시점에 한 번 읽지만, NAT에서는 테스트가 env를 바꿔 끼울 수 있어야
     하고 매 주문 한 번 읽는 비용은 무시할 수 있다.
     """
@@ -130,7 +130,7 @@ def max_price_gap_ratio() -> float:
 def price_gap_exceeds(price: float, reference: float, ratio: float) -> bool:
     """지정가 *price*가 현재가 *reference*에서 *ratio*보다 멀리 벗어났는가.
 
-    ``backend/order_assist.py``의 ``evaluate_hard_limits``와 같은 식이다. *reference*는
+    ``backend/trading/order_assist.py``의 ``evaluate_hard_limits``와 같은 식이다. *reference*는
     0보다 커야 한다 — :func:`parse_current_price`가 0 이하를 ``None``으로 거른다.
     """
     return abs(price - reference) / reference > ratio

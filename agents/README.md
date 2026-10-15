@@ -71,7 +71,7 @@ router.yml에서는 경고도 예외도 없이 각주만 사라졌습니다(#273
 
 흐름:
 
-- 쓰기: 텔레그램 버튼·`/risk` → backend(`backend/user_preferences.py`) → `POST /v1/user-preferences`
+- 쓰기: 텔레그램 버튼·`/risk` → backend(`backend/ai/user_preferences.py`) → `POST /v1/user-preferences`
 - 읽기: backend가 채팅 스레드(`telegram:<chat_id>`)에만 `x-user-id` 헤더를 싣고, 추천 브랜치(`recommend_branch_agent`, `finus_risk_profile_branch`)가 그 사용자의 성향을 코드로 읽어 `configs/agents/recommend_agent.yml`의 논조 지시를 현재 요청 앞에 붙입니다.
 
 끄려면 `.env`에 `FINUS_MEM0_ENABLED=0`을 두고 NAT을 다시 띄웁니다. 이때 `/risk`는 "사용자 메모리가 꺼져 있다"고 안내하고, 저장돼 있던 파일은 지우지 않습니다(다시 켜면 그대로 쓰입니다). 모두 지우려면 NAT을 멈추고 저장 디렉터리를 삭제합니다.

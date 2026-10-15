@@ -14,7 +14,7 @@
 
 좁힌 뒤로는 `.env.example`의 `REDIS_URL`·`NAT_BASE_URL`이 호스트에서 백엔드만 띄우는
 흐름의 유일한 접속 경로다. compose의 호스트 포트와 그 두 줄, 그리고 `.env`에 키가
-없을 때 쓰이는 `backend/config.py`의 기본값은 한쪽만 바뀌면 조용히 끊기므로 서로
+없을 때 쓰이는 `backend/core/config.py`의 기본값은 한쪽만 바뀌면 조용히 끊기므로 서로
 맞물려 고정한다.
 
 검사 범위는 `docker-compose.yml` 한 파일이다. `docker compose up`은
@@ -38,7 +38,7 @@ from backend.scripts.setup_env import parse_env_values
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _COMPOSE_PATH = _REPO_ROOT / "docker-compose.yml"
 _ENV_EXAMPLE_PATH = _REPO_ROOT / ".env.example"
-_CONFIG_PATH = _REPO_ROOT / "backend" / "config.py"
+_CONFIG_PATH = _REPO_ROOT / "backend" / "core" / "config.py"
 _OVERRIDE_EXAMPLE_PATH = _REPO_ROOT / "docker-compose.override.example.yml"
 _BACKEND_DOCKERFILE_PATH = _REPO_ROOT / "backend" / "Dockerfile"
 
@@ -73,7 +73,7 @@ _HOST_URL_KEYS = {
     "NAT_BASE_URL": "finus-nat",
 }
 
-# `.env`에 키가 없으면 `backend/config.py`의 기본값 리터럴이 호스트 실행의 유일한
+# `.env`에 키가 없으면 `backend/core/config.py`의 기본값 리터럴이 호스트 실행의 유일한
 # 경로가 되므로, `.env.example`과 같은 주소를 가리켜야 한다.
 # `NAT_BASE_URL`은 #305에서 기본값을 8001로 옮기며 들어왔다. 그 전에는 8000이라
 # 백엔드 자기 자신을 가리켰고, 어긋난 채로 고정할 수 없어 일부러 빠져 있었다.
@@ -128,9 +128,9 @@ def _host_side(mapping):
 
 
 def _config_resolution(name, source=None):
-    """`backend/config.py`가 *name*을 푸는 방식을 기본값과 정규화로 갈라 돌려준다.
+    """`backend/core/config.py`가 *name*을 푸는 방식을 기본값과 정규화로 갈라 돌려준다.
 
-    import해서 읽으면 안 된다 — `config.py`는 `load_dotenv()`로 개발자의 실제 `.env`를
+    import해서 읽으면 안 된다 — `core/config.py`는 `load_dotenv()`로 개발자의 실제 `.env`를
     먹으므로, 그 사람 설정이 있으면 기본값이 아니라 그 값을 보게 된다. 고정하려는 것은
     `.env`가 비었을 때 쓰이는 소스의 값이다.
 
@@ -153,7 +153,7 @@ def _config_resolution(name, source=None):
             continue
         default, wrappers = _unwrap_env_get(node.value, name)
         return _apply_wrappers(default, wrappers), lambda v: _apply_wrappers(v, wrappers)
-    raise AssertionError(f"`backend/config.py`에서 {name} 대입을 찾지 못했다.")
+    raise AssertionError(f"`backend/core/config.py`에서 {name} 대입을 찾지 못했다.")
 
 
 def _unwrap_env_get(value, name):
@@ -172,7 +172,7 @@ def _unwrap_env_get(value, name):
         value = value.func.value
 
     assert isinstance(value, ast.Call) and len(value.args) == 2, (
-        f"`backend/config.py`의 {name} 대입에서 `os.environ.get(키, 기본값)`을 찾지 "
+        f"`backend/core/config.py`의 {name} 대입에서 `os.environ.get(키, 기본값)`을 찾지 "
         f"못했다. 모양을 바꿨다면 이 헬퍼를 함께 갱신할 것."
     )
     # 기본값 자리에 폴백이 중첩된 대입이 실제로 있다(`NAT_CONVERSATION_ID`의
@@ -180,7 +180,7 @@ def _unwrap_env_get(value, name):
     # `ValueError`로 죽어서, 바로 위 assert가 주는 "헬퍼를 갱신하라"는 안내를 이 경로만
     # 못 받는다. 같은 문구로 멈추도록 리터럴인지 먼저 본다.
     assert isinstance(value.args[1], ast.Constant), (
-        f"`backend/config.py`의 {name} 기본값이 리터럴이 아니다(중첩된 폴백 등). "
+        f"`backend/core/config.py`의 {name} 기본값이 리터럴이 아니다(중첩된 폴백 등). "
         f"모양을 바꿨다면 이 헬퍼를 함께 갱신할 것."
     )
     return ast.literal_eval(value.args[1]), list(reversed(wrappers))
@@ -196,7 +196,7 @@ def _apply_wrappers(default, wrappers):
     for wrapper in wrappers:
         attr = wrapper.func.attr
         assert isinstance(getattr(str, attr, None), type(str.strip)), (
-            f"`backend/config.py`의 기본값을 `str`이 아닌 `{attr}`로 감쌌다. "
+            f"`backend/core/config.py`의 기본값을 `str`이 아닌 `{attr}`로 감쌌다. "
             f"이 검사가 실제로 쓰이는 값을 보게 하려면 헬퍼를 함께 갱신할 것."
         )
         args = [ast.literal_eval(a) for a in wrapper.args]
@@ -231,7 +231,7 @@ def test_unwrap_env_get_orders_wrappers_the_way_the_source_applies_them():
 def test_unwrap_env_get_stops_with_guidance_on_a_nested_default():
     """기본값 자리에 폴백이 중첩된 대입에서도 안내를 남기고 멈춰야 한다.
 
-    `config.py`의 `NAT_CONVERSATION_ID`가 이 모양이다. `literal_eval`이 `ValueError`로
+    `core/config.py`의 `NAT_CONVERSATION_ID`가 이 모양이다. `literal_eval`이 `ValueError`로
     죽으면 "헬퍼를 갱신하라"는 안내가 사라지므로, 그 경로를 여기서 막아 둔다.
     """
 
@@ -255,7 +255,7 @@ def test_apply_wrappers_rejects_a_method_that_is_not_a_string_method():
 def test_config_resolution_normalizes_the_env_side_the_same_way():
     """정규화 함수가 `.env` 쪽 값에도 같은 래퍼를 먹이는지 본다(#305 리뷰).
 
-    합성 소스를 쓴다. 실제 키를 붙잡으면 `config.py`에서 그 키의 `.rstrip("/")`를 떼는
+    합성 소스를 쓴다. 실제 키를 붙잡으면 `core/config.py`에서 그 키의 `.rstrip("/")`를 떼는
     날 깨진 것이 없는데도 이 테스트가 실패한다. 실제 키에 대한 배선은 위의
     `test_config_default_matches_the_env_example`이 이미 `normalize`를 불러 덮는다.
     """
@@ -342,7 +342,7 @@ def test_config_default_matches_the_env_example(env_example_values, env_key):
     나왔다 — 호스트 표기(루프백 게시가 IPv4 전용이라 `localhost`가 아니라 `127.0.0.1`)와
     포트(8000은 백엔드 자신이라 finus-nat이 아니다).
 
-    비교하려는 것은 리터럴이 아니라 **런타임에 풀리는 값**이므로, `config.py`가 씌우는
+    비교하려는 것은 리터럴이 아니라 **런타임에 풀리는 값**이므로, `core/config.py`가 씌우는
     정규화를 `.env.example` 쪽에도 똑같이 먹인다. 한쪽에만 적용하면 예제에 `.../`처럼
     `.rstrip("/")`가 흡수할 표기를 써도 런타임은 같은데 이 검사만 실패한다.
     """
@@ -350,7 +350,7 @@ def test_config_default_matches_the_env_example(env_example_values, env_key):
     default, normalize = _config_resolution(env_key)
 
     assert default == normalize(env_example_values[env_key]), (
-        f"`backend/config.py`의 {env_key} 기본값이 `.env.example`과 어긋난다. "
+        f"`backend/core/config.py`의 {env_key} 기본값이 `.env.example`과 어긋난다. "
         f"`.env.example`은 compose 게시와 맞물려 있으므로 기본값도 같이 옮길 것."
     )
 

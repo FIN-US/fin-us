@@ -8,14 +8,14 @@ from typing import Any, Awaitable, Callable, Protocol
 
 import httpx
 
-from .config import (
+from backend.core.config import (
     SIGNAL_UNCERTAINTY_ALERT_THRESHOLD,
     TELEGRAM_BOT_TOKEN,
     TELEGRAM_CHAT_ID,
     is_placeholder_secret,
 )
-from .delivery_alarm import delivery_metrics
-from .presentation import (
+from backend.telegram.delivery_alarm import delivery_metrics
+from backend.telegram.presentation import (
     DEFAULT_TELEGRAM_USER_LEVEL,
     TELEGRAM_MESSAGE_LIMIT,
     alert_kind,

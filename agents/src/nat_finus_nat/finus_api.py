@@ -316,7 +316,7 @@ def _record_to_ledger(tool_name: str, result: str) -> None:
     correct conservative behaviour.
 
     ``tool_name`` leaves this service: backend renders it in the reasoning
-    footnote through ``TOOL_LABELS`` (backend/presentation.py, #260).
+    footnote through ``TOOL_LABELS`` (backend/telegram/presentation.py, #260).
     Renaming a tool without updating that map degrades gracefully — the raw
     internal name shows up instead of the Korean label — so the mismatch is
     caught by backend/tests/test_label_drift.py in CI (#282). Keep the name a
@@ -1850,7 +1850,7 @@ async def finus_save_diary(config: FinusSaveDiaryConfig, _builder: Builder):
         #
         # 낯선 scope(backend가 사용자 발화를 마스킹해 만든 것, #230)는 더 이상 여기서
         # 거부하지 않는다 (#354). backend가 llm_chat의 매핑을 요청 범위로 들고 있다가
-        # POST 시점에 되돌리므로(backend/pii_registry.py), 여기서 막으면 그 복구를
+        # POST 시점에 되돌리므로(backend/pii/registry.py), 여기서 막으면 그 복구를
         # 우리가 막는 셈이 된다. 되돌릴 수 없는 낯선 scope는 backend가 같은 자리에서
         # 422로 거부한다 — 판정을 값이 있는 쪽이 한다.
         leftover = unrestorable_placeholders(title) + unrestorable_placeholders(content)

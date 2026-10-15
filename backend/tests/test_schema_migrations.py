@@ -9,11 +9,11 @@ import threading
 
 from sqlalchemy import Column, DateTime, Float, Integer, MetaData, String, Table, create_engine
 
-from backend import database
+from backend.core import database
 
 
 def _create_old_schema_agentreport(db_path: str) -> None:
-    """provider_supports_tools 컬럼이 없던 시절(이 브랜치 이전 models.py)의
+    """provider_supports_tools 컬럼이 없던 시절(이 브랜치 이전 core/models.py)의
     agentreport 테이블을 그대로 재현한다 — created_at을 포함한 다른 컬럼은 이번
     변경으로 새로 생긴 것이 아니므로 그대로 둔다.
 
@@ -115,7 +115,7 @@ def test_pre_existing_row_does_not_read_as_provider_supports_tools(tmp_path, mon
 
     from sqlmodel import Session, select
 
-    from backend.models import AgentReport
+    from backend.core.models import AgentReport
 
     with Session(test_engine) as session:
         rows = session.exec(select(AgentReport)).all()

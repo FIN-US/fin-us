@@ -17,15 +17,15 @@ import httpx
 import pytest
 from fastapi import HTTPException
 
-import backend.config as backend_config
-import backend.order_assist as order_assist_module
-import backend.redis_state as redis_state_module
-import backend.telegram_commands as telegram_commands
-import backend.telegram_notifier as telegram_notifier_module
-from backend.config import DART_MCP_PARAMS, NEWS_MCP_PARAMS, TRADING_MCP_PARAMS
-from backend.delivery_alarm import delivery_metrics
-from backend.pii_egress import render_unmasked
-from backend.telegram_commands import (
+import backend.core.config as backend_config
+import backend.trading.order_assist as order_assist_module
+import backend.core.redis_state as redis_state_module
+import backend.telegram.commands as telegram_commands
+import backend.telegram.notifier as telegram_notifier_module
+from backend.core.config import DART_MCP_PARAMS, NEWS_MCP_PARAMS, TRADING_MCP_PARAMS
+from backend.telegram.delivery_alarm import delivery_metrics
+from backend.pii.egress import render_unmasked
+from backend.telegram.commands import (
     BUY_COMMAND_HELP,
     CATALYST_COMMAND_HELP,
     EARNINGS_COMMAND_HELP,
@@ -42,14 +42,14 @@ from backend.telegram_commands import (
 )
 # 길이 상한과 말줄임 규칙은 출력 계층이 정의한다. telegram_commands는 더 이상 그것을
 # 다시 내보내지 않는다 — 재수출만 남은 임포트는 이름이 두 곳에 있다는 착시를 만든다.
-from backend.presentation import (
+from backend.telegram.presentation import (
     REASONING_FOOTNOTE_MAX_CHARS,
     REASONING_FOOTNOTE_SEPARATOR,
     TELEGRAM_MESSAGE_LIMIT,
     TELEGRAM_TRUNCATION_SUFFIX,
     reasoning_footnote as _reasoning_footnote,
 )
-from backend.redis_state import (
+from backend.core.redis_state import (
     InMemoryPendingOrderStore,
     InMemoryTelegramPollerStore,
     RedisPendingOrderStore,
@@ -57,11 +57,11 @@ from backend.redis_state import (
     TelegramPollerState,
     TelegramPollerStore,
 )
-from backend.order_assist import OrderAssistResult, _drop_expired_pending_order, order_origin_for
-from backend.order_rules import RULE_ID, RuleMatch
-from backend.services import NatAnswer, NatToolUse
-from backend.telegram_notifier import SendReceipt
-from backend.trading_orders import OrderExecutionResult, OrderOrigin, PendingOrder
+from backend.trading.order_assist import OrderAssistResult, _drop_expired_pending_order, order_origin_for
+from backend.trading.order_rules import RULE_ID, RuleMatch
+from backend.ai.services import NatAnswer, NatToolUse
+from backend.telegram.notifier import SendReceipt
+from backend.trading.orders import OrderExecutionResult, OrderOrigin, PendingOrder
 
 KST = ZoneInfo("Asia/Seoul")
 
@@ -2737,7 +2737,7 @@ async def test_poller_keeps_offset_when_update_handling_fails(monkeypatch):
         raise pytest.fail.Exception("stop after first failed polling iteration")
 
     monkeypatch.setattr(poller, "_get_updates", fake_get_updates)
-    monkeypatch.setattr("backend.telegram_commands.asyncio.sleep", stop_after_failure)
+    monkeypatch.setattr("backend.telegram.commands.asyncio.sleep", stop_after_failure)
 
     with pytest.raises(pytest.fail.Exception):
         await poller.run()
@@ -2765,7 +2765,7 @@ async def test_poller_loads_bot_username_before_updates(monkeypatch):
         raise pytest.fail.Exception("stop after first failed polling iteration")
 
     monkeypatch.setattr(poller, "_get_updates", fake_get_updates)
-    monkeypatch.setattr("backend.telegram_commands.asyncio.sleep", stop_after_failure)
+    monkeypatch.setattr("backend.telegram.commands.asyncio.sleep", stop_after_failure)
 
     with pytest.raises(pytest.fail.Exception):
         await poller.run()
@@ -2793,7 +2793,7 @@ async def test_poller_sets_bot_command_menu_before_updates(monkeypatch):
         raise pytest.fail.Exception("stop after first failed polling iteration")
 
     monkeypatch.setattr(poller, "_get_updates", fake_get_updates)
-    monkeypatch.setattr("backend.telegram_commands.asyncio.sleep", stop_after_failure)
+    monkeypatch.setattr("backend.telegram.commands.asyncio.sleep", stop_after_failure)
 
     with pytest.raises(pytest.fail.Exception):
         await poller.run()
@@ -4389,7 +4389,7 @@ async def test_watch_list_waits_between_quote_calls(monkeypatch):
     async def fake_sleep(seconds):
         events.append(("sleep", seconds))
 
-    monkeypatch.setattr("backend.telegram_commands.asyncio.sleep", fake_sleep)
+    monkeypatch.setattr("backend.telegram.commands.asyncio.sleep", fake_sleep)
 
     handler = TelegramCommandHandler(
         notifier=notifier,
