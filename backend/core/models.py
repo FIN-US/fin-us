@@ -109,7 +109,7 @@ class AgentReport(SQLModel, table=True):
     # - 이 컬럼이 없던 구버전 행은 database._run_schema_migrations()가
     #   ALTER TABLE ... DEFAULT 0으로 채운다 — False는 "도구 미지원"과
     #   "과거 행이라 확인 불가" 둘 다를 의미하며, 절대 True로 소급되지 않는다.
-    # - services.provider_supports_tools()가 provider 자체에서 파생하며,
+    # - ai.llm.provider_supports_tools()가 provider 자체에서 파생하며,
     #   호출부가 직접 True/False를 넘기지 않는다.
     provider_supports_tools: bool = Field(
         default=False,

@@ -889,8 +889,8 @@ async def test_analyze_stock_saves_report(client: TestClient, session: Session, 
     async def mock_run_mcp_tool(*args, **kwargs):
         return "삼성전자 (005930, KOSPI)"
 
-    monkeypatch.setattr("backend.ai.services.llm_chat", mock_llm_chat)
-    monkeypatch.setattr("backend.ai.services.run_mcp_tool", mock_run_mcp_tool)
+    monkeypatch.setattr("backend.ai.llm.llm_chat", mock_llm_chat)
+    monkeypatch.setattr("backend.ai.mcp_tools.run_mcp_tool", mock_run_mcp_tool)
 
     # API Call
     response = client.get("/api/v1/analyze?stock=삼성전자")
@@ -943,9 +943,9 @@ async def test_analyze_stock_via_nat_marks_report_tool_supporting(client: TestCl
     async def mock_run_mcp_tool(*args, **kwargs):
         return "삼성전자 (005930, KOSPI)"
 
-    monkeypatch.setattr("backend.ai.services.llm_chat", mock_llm_chat)
-    monkeypatch.setattr("backend.ai.services.analysis_from_nat_text", mock_analysis_from_nat_text)
-    monkeypatch.setattr("backend.ai.services.run_mcp_tool", mock_run_mcp_tool)
+    monkeypatch.setattr("backend.ai.llm.llm_chat", mock_llm_chat)
+    monkeypatch.setattr("backend.ai.analysis.analysis_from_nat_text", mock_analysis_from_nat_text)
+    monkeypatch.setattr("backend.ai.mcp_tools.run_mcp_tool", mock_run_mcp_tool)
 
     response = client.get("/api/v1/analyze?stock=삼성전자&provider=nat")
     assert response.status_code == 200
@@ -981,9 +981,9 @@ async def test_db_reports_round_trips_provider_supports_tools_field(client: Test
     async def mock_run_mcp_tool(*args, **kwargs):
         return "삼성전자 (005930, KOSPI)"
 
-    monkeypatch.setattr("backend.ai.services.llm_chat", mock_llm_chat)
-    monkeypatch.setattr("backend.ai.services.analysis_from_nat_text", mock_analysis_from_nat_text)
-    monkeypatch.setattr("backend.ai.services.run_mcp_tool", mock_run_mcp_tool)
+    monkeypatch.setattr("backend.ai.llm.llm_chat", mock_llm_chat)
+    monkeypatch.setattr("backend.ai.analysis.analysis_from_nat_text", mock_analysis_from_nat_text)
+    monkeypatch.setattr("backend.ai.mcp_tools.run_mcp_tool", mock_run_mcp_tool)
 
     # openai(기본값, 도구 미지원)와 nat(도구 경로) 둘 다 저장
     assert client.get("/api/v1/analyze?stock=삼성전자").status_code == 200

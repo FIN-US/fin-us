@@ -64,7 +64,7 @@ from backend.core.redis_state import (
 )
 from backend.trading.order_assist import OrderAssistResult, _drop_expired_pending_order, order_origin_for
 from backend.trading.order_rules import RULE_ID, RuleMatch
-from backend.ai.services import NatAnswer, NatToolUse
+from backend.ai.llm import NatAnswer, NatToolUse
 from backend.telegram.notifier import SendReceipt
 from backend.trading.orders import OrderExecutionResult, OrderOrigin, PendingOrder
 

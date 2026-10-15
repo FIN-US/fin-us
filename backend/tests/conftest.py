@@ -5,8 +5,7 @@ from typing import Any
 import httpx
 import pytest
 
-from backend.ai import services
-
+from backend.ai import analysis as ai_analysis
 from backend.trading import stock_code
 
 from backend.telegram.delivery_alarm import delivery_metrics, trade_outbox_stall
@@ -123,9 +122,9 @@ def _clear_stock_code_cache():
     # 어떤 테스트가 run_mcp_tool을 몽키패치하지 않아 실제 MCP stdio 서브프로세스를
     # 띄우는 회귀는 이 픽스처로 잡히지 않고, `-s` 없이는 그 서브프로세스 실행 자체도
     # 화면에 보이지 않는다. 실제 방어는 test_database.py의 run_mcp_tool 몽키패치다.
-    services._stock_code_cache.clear()
+    ai_analysis._stock_code_cache.clear()
     yield
-    services._stock_code_cache.clear()
+    ai_analysis._stock_code_cache.clear()
 
 
 @pytest.fixture(autouse=True)

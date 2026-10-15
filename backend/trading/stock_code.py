@@ -1,6 +1,6 @@
 """종목코드 추출·판정 공용 상수 및 헬퍼 (#140).
 
-services.py와 telegram 주문 핸들러가 각자 중복 구현하던 정규식과 함수를
+ai/analysis.py와 telegram 주문 핸들러가 각자 중복 구현하던 정규식과 함수를
 이 모듈로 통합한다. 두 파일에서 import해 사용한다.
 """
 import json
@@ -307,7 +307,7 @@ _UNRESOLVED_ECHO_RE = re.compile(r"\([0-9A-Z]{6,}, UNKNOWN\)")
 def _is_unresolved_echo(resolved_text: str) -> bool:
     """resolve_stock_code 응답이 stock-master.js Step 3의 미해석 에코인지 판정합니다.
 
-    리포트 저장(services._resolve_stock_code)과 주문 준비(telegram/handlers/orders.py)가
+    리포트 저장(ai.analysis._resolve_stock_code)과 주문 준비(telegram/handlers/orders.py)가
     같은 판정을 쓰도록 여기 둔다 — 한쪽에만 적용하면 같은 미해석 입력이 위험도가
     높은 주문 경로로만 통과한다.
     """
@@ -343,7 +343,7 @@ def _looks_like_stock_code(stock: str) -> bool:
 
     #140 영향: {6,7} → {6,7}|{9} 확대로 F70100026 같은 9자 펀드 코드가 이제 지름길을 탄다.
     이 함수 자체는 마스터를 보지 않으므로 실재 여부를 가리지 못한다 — 그 존재
-    검증은 이 함수의 True를 소비하는 쪽(services._resolve_stock_code의
+    검증은 이 함수의 True를 소비하는 쪽(ai.analysis._resolve_stock_code의
     _is_known_master_code 호출)이 담당한다(#151).
     """
     value = stock.strip().upper()

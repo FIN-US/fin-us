@@ -12,7 +12,9 @@ from typing import Any, Awaitable, Callable
 from contextvars import ContextVar
 from sqlmodel import Session
 
-from backend.ai.services import llm_chat, run_mcp_tool
+from backend.ai.llm import llm_chat
+
+from backend.ai.mcp_tools import run_mcp_tool
 from backend.ai.user_preferences import request_risk_profile
 from backend.core.config import (
     KIS_ORDER_ENV,
@@ -109,7 +111,7 @@ def _nat_answer_message(
 ) -> str:
     """NAT 응답을 텔레그램 메시지로 만든다 (#260, #297).
 
-    ``routed_agent``/``tools_used``는 ``services.NatAnswer``가 실어 오는 속성이다.
+    ``routed_agent``/``tools_used``는 ``ai.llm.NatAnswer``가 실어 오는 속성이다.
     속성이 없는 값(구버전 경로, 문자열만 주는 대역)이면 각주 없이 본문만 보낸다.
 
     #297에서 조립을 presentation.render에 위임했다. 마크다운 정리와 용어 각주가 함께

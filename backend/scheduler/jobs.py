@@ -5,7 +5,7 @@ from datetime import datetime
 
 from sqlmodel import Session
 
-from backend.ai.services import generate_morning_briefing
+from backend.ai.analysis import generate_morning_briefing
 from backend.core.config import FILTERED_SIGNAL_RETENTION_DAYS
 from backend.core.database import engine
 from backend.core.ws_manager import manager

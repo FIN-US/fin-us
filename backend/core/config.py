@@ -87,7 +87,7 @@ DATABASE_URL = os.environ.get("DATABASE_URL") or f"sqlite:///{_FIN_US_ROOT}/back
 DB_ECHO = os.getenv("DB_ECHO", "false").lower() == "true"
 
 # 신호 유의성 점수화 (#298).
-# 2차 필터(services.score_signal)가 YES/NO 대신 -3~+3 정수를 받는다.
+# 2차 필터(ai.signals.score_signal)가 YES/NO 대신 -3~+3 정수를 받는다.
 # 레인지를 좁게 잡은 것은 의도다 — 경량 모델은 0~100 같은 넓은 축에서 재현성이 없다.
 SIGNAL_SCORE_MIN = -3
 SIGNAL_SCORE_MAX = 3

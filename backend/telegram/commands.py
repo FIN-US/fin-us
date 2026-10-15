@@ -2,7 +2,7 @@
 
 from typing import Any
 
-from backend.ai.services import short_error as _short_error
+from backend.ai.mcp_tools import short_error as _short_error
 from backend.telegram.handlers.base import (
     _nat_answer_message,
     _telegram_command_parts,

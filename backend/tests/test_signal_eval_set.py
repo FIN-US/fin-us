@@ -9,7 +9,7 @@ import pytest
 
 from backend.pii.egress import public
 from backend.scripts import build_signal_eval_set as eval_set
-from backend.ai.services import SignalScore
+from backend.ai.signals import SignalScore
 
 
 def test_parse_article_line_splits_title_and_summary():

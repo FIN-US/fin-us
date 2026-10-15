@@ -1,7 +1,7 @@
 """backend/trading/stock_code.py 공용 모듈 테스트 (#140).
 
 _STOCK_CODE_EXTRACT_RE, _STOCK_CODE_RE / _looks_like_stock_code, _ORDERABLE_STOCK_CODE_RE에 대한
-순수 단위 테스트. 각 호출부 고유 동작(services.py의 빈 문자열 폴백,
+순수 단위 테스트. 각 호출부 고유 동작(ai/analysis.py의 빈 문자열 폴백,
 telegram/handlers/orders.py의 조기 거절)은 각자의 테스트 파일에 남아 있다.
 """
 import json

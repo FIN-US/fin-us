@@ -63,7 +63,7 @@ export function readPageDelayMsEnv(name, fallback, { maxMs = SET_TIMEOUT_MAX_MS 
 // 이 값은 KIS가 tr_cont를 계속 "F"/"M"으로 응답하는 이상 상황에 대한 2차 안전장치다.
 export const BALANCE_MAX_PAGES = 20;
 
-// get_balance 전체 호출은 backend의 run_mcp_tool(backend/ai/services.py)이 30초에서 끊는다.
+// get_balance 전체 호출은 backend의 run_mcp_tool(backend/ai/mcp_tools.py)이 30초에서 끊는다.
 // 여기에 MCP stdio 서브프로세스 기동/핸드셰이크(수백 ms~1초대)와, 예산 초과 판정 이후에도
 // 이미 시작된 요청 1회가 kisAxios 인스턴스(mcp/trading/index.js)의 8초 타임아웃만큼 더 걸릴
 // 수 있는 여유를 더해야 한다. getAccessToken()의 토큰 발급 요청은 fetchPage(index.js의
@@ -164,7 +164,7 @@ export async function fetchAllPaged(fetchPage, {
     //
     // 대기 시간은 여전히 시간 예산에서 빼지 않는다(대기한 만큼 예산이 그대로 줄어든다):
     // 이 함수의 상위 호출자는 내부 시간 예산과 무관하게 실제 벽시계 시간으로 잘린다 —
-    // backend/services.py의 run_mcp_tool 30초 하드컷(get_balance), diary_agent.yml의
+    // backend/ai/mcp_tools.py의 run_mcp_tool 30초 하드컷(get_balance), diary_agent.yml의
     // timeout_sec: 120 (fetchAllDailyOrderCcld/fetchAllBalanceRlzPl). 대기 시간을
     // 예산 계산에서 제외하면 내부적으로는 예산 안에 있다고 판단해도 실제 총 소요 시간이
     // 이 상위 하드컷을 넘어설 수 있다. now/sleep 모두 기본값이 실제 시각(Date.now)·실제

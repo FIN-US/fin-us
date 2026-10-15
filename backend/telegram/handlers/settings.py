@@ -4,7 +4,7 @@ import logging
 import time
 from typing import Any
 
-from backend.ai.services import short_error as _short_error
+from backend.ai.mcp_tools import short_error as _short_error
 from backend.ai.user_preferences import (
     normalize_risk_choice,
     RISK_AGGRESSIVE,

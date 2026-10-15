@@ -26,13 +26,9 @@ from backend.scheduler.jobs import start_scheduler, stop_scheduler
 from backend.scheduler.portfolio import format_price_updated_at, is_price_fresh
 from backend.telegram.poller import start_telegram_commands, stop_telegram_commands
 from backend.core.schemas import CommonResponse, DiaryCreate
-from backend.ai.services import (
-    run_mcp_tool,
-    normalize_llm_provider,
-    llm_chat,
-    analysis_from_nat_text,
-    perform_stock_analysis
-)
+from backend.ai.analysis import analysis_from_nat_text, perform_stock_analysis
+from backend.ai.llm import llm_chat, normalize_llm_provider
+from backend.ai.mcp_tools import run_mcp_tool
 from backend.core.database import init_db, get_session
 from backend.telegram.delivery_alarm import delivery_metrics, trade_outbox_stall
 from backend.core.models import Portfolio, TradeHistory, AgentReport, Diary, CatalystEvent

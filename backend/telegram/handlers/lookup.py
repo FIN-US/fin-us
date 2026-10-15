@@ -7,7 +7,7 @@ from typing import Any
 
 from urllib.parse import quote as _url_quote
 
-from backend.ai.services import short_error as _short_error
+from backend.ai.mcp_tools import short_error as _short_error
 from backend.core.config import DART_MCP_PARAMS, NEWS_MCP_PARAMS, TRADING_MCP_PARAMS
 from backend.core.timeutil import KST
 from backend.pii.egress import public, Segment

@@ -205,7 +205,7 @@ class TestAmountRecognizer:
 
         직격하는 경로는 자유 입력 두 곳이다: telegram/commands.py의 _handle_chat_fallback이
         넘기는 사용자 원문("3천만원 있는데 어디 투자할까요?")과
-        services.check_signal_significance가 프롬프트에 싣는 뉴스 원문 1000자
+        ai.signals.check_signal_significance가 프롬프트에 싣는 뉴스 원문 1000자
         ("영업이익 1천억원", "시가총액 3천억원").
 
         이 테스트가 잡는 mutation: _AMOUNT_UNIT_RE에서 (?:[천백십]\\d*)+ 갈래 제거.
@@ -334,7 +334,7 @@ class TestAmountRecognizer:
         "1800억원")로 **부분** 마스킹했고, "조"를 단위로 알지 못해 "10조원"은 전량
         평문이었다(#330). 부분 마스킹은 전량 마스킹보다도 전량 미변경보다도 나쁘다 —
         앞자리 "9조"가 평문으로 남고 바로 뒤에 크기를 알 수 없는 불투명 토큰이 붙어,
-        services.check_signal_significance가 뉴스 원문을 실어 보내는 채점 모델이 값을
+        ai.signals.check_signal_significance가 뉴스 원문을 실어 보내는 채점 모델이 값을
         "9조"로 읽을 여지가 생긴다(실제 값은 9조1800억원이라 자릿수 차이가 크다).
 
         이 테스트가 잡는 mutation:
@@ -877,7 +877,7 @@ class TestQuantityRecognizer:
         """'주'가 기간 단위로 쓰인 표현은 보유 수량이 아니므로 마스킹하지 않는다.
 
         '52주 신고가'는 주식 뉴스에서 가장 흔한 관용구인데,
-        backend/services.py의 check_signal_significance()가 외부 뉴스 원문
+        backend/ai/signals.py의 check_signal_significance()가 외부 뉴스 원문
         1000자를 그대로 프롬프트에 넣으므로(mcp/news/index.js의 네이버 뉴스 검색
         title/description, 필터링 없음) 과탐이 곧바로 판정 품질을 떨어뜨린다.
 
@@ -1153,7 +1153,7 @@ class TestUnmaskFailOpen:
 
 
 class _TaggedStr(str):
-    """str을 상속해 메타데이터를 얹는 호출자를 흉내낸다(#260 services.NatAnswer).
+    """str을 상속해 메타데이터를 얹는 호출자를 흉내낸다(#260 ai.llm.NatAnswer).
 
     services를 import하지 않고 로컬에 정의한다 — 순환 의존과, 이 테스트가 요구하지도
     않는 httpx 의존을 끌어오지 않기 위함이다.
@@ -1196,7 +1196,7 @@ class TestUnmaskPreservesStrSubclass:
     """입력이 str 서브클래스면 반환값도 같은 타입이어야 한다.
 
     re.sub은 str 서브클래스를 벗겨 항상 plain str을 반환한다. 그래서 호출자가 str을
-    상속해 메타데이터를 얹은 값을 넘기면(#260이 도입하는 services.NatAnswer — 추론
+    상속해 메타데이터를 얹은 값을 넘기면(#260이 도입하는 ai.llm.NatAnswer — 추론
     과정 각주를 속성으로 들고 다닌다) 역치환을 통과하는 순간 그 메타데이터가 조용히
     사라진다.
 

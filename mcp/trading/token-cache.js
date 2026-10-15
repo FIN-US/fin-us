@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 // KIS OAuth 토큰 캐시. MCP 호출 하나마다 mcp-trading node 프로세스가 새로 뜨므로
-// (backend/services.py의 run_mcp_tool → stdio_client), 이 캐시는 프로세스 안이 아니라
+// (backend/ai/mcp_tools.py의 run_mcp_tool → stdio_client), 이 캐시는 프로세스 안이 아니라
 // 프로세스 "사이"에서 동작해야 한다. 이슈 #324가 잡는 결함이 정확히 그 지점이다:
 // 캐시가 비었거나 만료 직후면 동시에 뜬 프로세스들이 각자 /oauth2/tokenP를 쳐서
 // KIS의 발급 유량 제한에 걸리고, 걸린 쪽은 `Access Token 발급 실패`로 끝난다.
@@ -25,7 +25,7 @@ export const DEFAULT_TOKEN_TTL_MARGIN_MS = 60_000;
 // 넘기면 무락 발급으로 넘어간다(fail-open) — 락 때문에 토큰 발급 자체가 막히는 쪽이
 // 더 나쁘기 때문이다.
 //
-// 상위 시간 예산과의 관계. MCP 호출 하나의 상한은 backend/ai/services.py run_mcp_tool의
+// 상위 시간 예산과의 관계. MCP 호출 하나의 상한은 backend/ai/mcp_tools.py run_mcp_tool의
 // 30초이고, 이 상한을 통째로 소진하는 경우(보유자가 자기 타임아웃마저 넘겨 멈춘 드문
 // 상황)의 토큰 확보 최악은 대기 10초 + 자기 발급 8초 = 18초다.
 //   - 조회 경로: 18 + 조회 요청 1회 8초 + 기동 ~2초 = 28초 < 30초. get_balance의 15초

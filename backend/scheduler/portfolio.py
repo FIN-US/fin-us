@@ -81,7 +81,7 @@ _BALANCE_TRUNCATION_MARKER = "조회가 중단되어"
 # balance.js formatBalanceReport()가 보유 종목 섹션을 구분하는 헤더 리터럴.
 # 이 함수는 보유 종목이 0건이어도 이 마커와 "보유 종목이 없습니다."를
 # 항상 출력한다. 따라서 이 마커가 없다는 것은 "보유 0건"이 아니라 "응답을 읽지 못함"이다.
-# run_mcp_tool은 MCP content가 비면 예외 대신 빈 문자열을 반환하므로(ai/services.py),
+# run_mcp_tool은 MCP content가 비면 예외 대신 빈 문자열을 반환하므로(ai/mcp_tools.py),
 # 이 경로는 실재한다. _sync_portfolio_from_balance가 이 마커 부재를 계약 위반으로
 # 처리해, 보유 0건으로 오인한 전 종목 삭제를 막는다.
 _BALANCE_HOLDINGS_MARKER = "[보유 종목 리스트]"
@@ -210,7 +210,7 @@ _RLZ_PL_PRICE_RE = re.compile(r"현재가\s+([\d,]+(?:\.\d+)?)원")
 #
 # 도구의 기본 예산은 NAT의 120초 호출자를 기준으로 잡은 90초다(mcp/trading/index.js의
 # BALANCE_RLZ_PL_TIME_BUDGET_MS). 이 호출은 run_mcp_tool이 MCP_TOOL_TIMEOUT_SECONDS(30초,
-# backend/ai/services.py)에서 끊으므로, 기본 예산으로 부르면 연속조회가 30초를 넘는 계좌는 JS가
+# backend/ai/mcp_tools.py)에서 끊으므로, 기본 예산으로 부르면 연속조회가 30초를 넘는 계좌는 JS가
 # 잘림 안내를 내기 전에 서브프로세스째 끊겨 504 실패로 빠진다. 예산을 30초 안으로 낮추면 그
 # 계좌는 예산에서 멈춰 잘림 안내를 받고, _sync_portfolio_prices_from_rlz_pl의 잘림 경고가
 # 사유("조회 시간 예산을 초과하여")를 그대로 싣는다. 시세를 못 얻는 결과는 504 때와 같다 —
@@ -435,7 +435,7 @@ def _sync_portfolio_from_balance(
     # 마커가 없으면 "보유 0건"이 아니라 "응답을 읽지 못함"이다.
     # balance.js는 보유 종목이 없어도 마커와 "보유 종목이 없습니다."를 항상 출력한다
     # (balance.js formatBalanceReport()). run_mcp_tool은 MCP content가 비면 예외 대신 ""를
-    # 반환하므로(ai/services.py) 이 경로는 실재한다. upsert로 바뀐 뒤에도 "잔고에 없는
+    # 반환하므로(ai/mcp_tools.py) 이 경로는 실재한다. upsert로 바뀐 뒤에도 "잔고에 없는
     # 종목은 삭제"는 그대로라 빈 응답으로 동기화하면 전 종목이 지워지고 되돌릴 수
     # 없다. 기존 데이터를 보존하고 error 로그로 운영자에게 알린다.
     if _BALANCE_HOLDINGS_MARKER not in balance_text:
@@ -879,7 +879,7 @@ async def _refresh_portfolio_prices() -> int | None:
 
     연속조회 시간 예산은 도구 기본값(90초, NAT 호출자 기준)이 아니라
     _RLZ_PL_TIME_BUDGET_MS(18초)를 time_budget_ms 인자로 넘깁니다(#369). run_mcp_tool이
-    30초에서 끊기 때문입니다(backend/services.py의 MCP_TOOL_TIMEOUT_SECONDS). 예산을 넘는
+    30초에서 끊기 때문입니다(backend/ai/mcp_tools.py의 MCP_TOOL_TIMEOUT_SECONDS). 예산을 넘는
     계좌는 504 타임아웃이 아니라 도구의 잘림 안내를 받고, _sync_portfolio_prices_from_rlz_pl의
     잘림 경고가 사유를 싣습니다. 값의 근거, 18~28초 계좌가 치르는 대가, 페이지 간 지연이
     있을 때의 한도(#210)는 상수 주석에 있습니다.

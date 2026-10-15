@@ -62,7 +62,7 @@ from backend.core.config import (
 # services는 order_assist를 import하지 않으므로 순환하지 않는다. run_mcp_tool은
 # 호출 시점에 늦게 가져오지만(테스트가 주입하는 것이 기본 경로다) short_error는
 # 순수 포매터라 여기서 바로 묶는다.
-from backend.ai.services import short_error
+from backend.ai.mcp_tools import short_error
 from backend.pii.egress import prepare_egress
 from backend.pii.mask import unmask_pii
 # presentation은 의존이 없는 리프 모듈이라 여기서 바로 가져와도 순환하지 않는다.
@@ -335,7 +335,7 @@ def parse_proposal(raw: str) -> tuple[OrderProposal | None, str]:
     실패 시 ``(None, 사유)``를 돌려준다 — 사유는 사용자에게 그대로 보여도 되는 문장이다.
     성공 시에도 ``stock_code``는 아직 신뢰하지 않는다. 호출부가 MCP로 다시 확인한다.
     """
-    from backend.ai.services import _json_objects_from_text
+    from backend.ai.llm import _json_objects_from_text
 
     text = (raw or "").strip()
     if not text:
@@ -847,7 +847,7 @@ async def request_proposal(prompt: str, *, timeout: float = ORDER_PROPOSE_TIMEOU
     NAT은 str 반환 함수의 응답을 ``OutputArgsSchema``로 감싼다 — 로컬 기동 후
     curl로 확인한 계약이다(agents/configs/agents/verifier_agent.yml 주석 참조).
 
-    이 경로는 ``services.llm_chat``을 지나지 않고 NAT(→ OpenAI)으로 바로 나가므로 외부 LLM 전송
+    이 경로는 ``ai.llm.llm_chat``을 지나지 않고 NAT(→ OpenAI)으로 바로 나가므로 외부 LLM 전송
     경계를 여기서 직접 태운다(#395). 프롬프트는 사용자가 친 종목 인자와 코드 리터럴뿐이라 전체를
     개인 구간으로 마스킹해도 잃는 것이 없다 — 템플릿과 ``build_trigger_signal``에는 금액·수량이
     없다. 비식별화가 실패하면 ``EgressBlocked``가 올라와 NAT을 부르지 않는다.
@@ -1102,7 +1102,7 @@ async def run_order_assist(
     이 함수는 주문을 **내지 않는다**.
     """
     if mcp_runner is None:
-        from backend.ai.services import run_mcp_tool as mcp_runner  # type: ignore[assignment]
+        from backend.ai.mcp_tools import run_mcp_tool as mcp_runner
     if session_factory is None:
         from backend.core.database import engine
 

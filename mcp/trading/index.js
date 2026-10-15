@@ -160,7 +160,7 @@ const tokenCache = new KisTokenCache({ filePath: TOKEN_CACHE_PATH });
 // 10초)을 그대로 쓰면 상위 시간 예산을 넘긴다 — place_order는 토큰 확보 뒤에도
 // hashkey POST와 주문 POST를 각각 치므로(kis-client.js의 kisOrderPost) kisAxios
 // 타임아웃 8초짜리 요청이 조회 경로보다 하나 더 붙는다. run_mcp_tool의 상한 30초
-// (backend/ai/services.py)에서 기동 ~2초와 그 두 요청 16초를 빼면 토큰 확보에 남는 몫은
+// (backend/ai/mcp_tools.py)에서 기동 ~2초와 그 두 요청 16초를 빼면 토큰 확보에 남는 몫은
 // 12초이고, 대기 뒤 자기 발급(최대 8초)까지 감안하면 대기는 4초 이하여야 한다.
 // 1초 여유를 더 두어 3초로 잡는다.
 //
@@ -303,7 +303,7 @@ async function kisApiGet(pathname, trId, params, { trCont = "" } = {}) {
     // msg1에는 maskLongDigitRuns를 씌운다. KIS가 되울려 주는 msg1에 계좌번호가 실려 오고
     // (관측된 예: "... 계좌 50123456"), 이 error.message는 그대로 여러 갈래로 새어 나간다 —
     // balance.js fetchAllPaged의 "페이지 조회 실패" stderr 줄, MCP 도구 결과 텍스트,
-    // backend services.short_error를 거쳐 텔레그램까지. [kis-req] 줄만 가리고 정작 원본
+    // backend ai.mcp_tools.short_error를 거쳐 텔레그램까지. [kis-req] 줄만 가리고 정작 원본
     // 메시지가 안 가려지면 마스킹이 반쪽이 된다. 여기 한 군데를 가리면 그 하위 소비자가 전부
     // 함께 닫힌다.
     // (kis-client.js kisOrderPost의 같은 모양 주문 경로와 도구 결과 전반의 마스킹은 #230/#231

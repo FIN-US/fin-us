@@ -10,7 +10,7 @@ from unittest.mock import MagicMock
 from backend.main import app
 from backend.pii.egress import personal
 from backend.core.redis_state import RedisSchedulerState
-from backend.ai.services import SignalScore
+from backend.ai.signals import SignalScore
 from .test_balance_parser import TRUNCATION_NOTES_BY_REASON
 
 
@@ -2470,7 +2470,7 @@ async def test_monitor_signal_passes_signal_score_to_analysis(monkeypatch):
     DB·알림에서 사라진다. 여기서는 필터를 monkeypatch하지 않고 llm_chat만
     갈아끼워 실제 채점 경로를 태운다.
     """
-    from backend.ai import services
+    from backend.ai import llm as ai_llm
     from backend.scheduler.monitor import SignalSource, monitor_market_task
 
     state = RedisSchedulerState(FakeRedis())
@@ -2487,7 +2487,7 @@ async def test_monitor_signal_passes_signal_score_to_analysis(monkeypatch):
     async def fake_llm_chat(provider, prompt, *, conversation_id=None):
         return '{"score": 3, "reason": "대형 수주 공시", "headline_scores": [3, 2]}'
 
-    monkeypatch.setattr(services, "llm_chat", fake_llm_chat)
+    monkeypatch.setattr(ai_llm, "llm_chat", fake_llm_chat)
 
     mock_perform_analysis = MagicMock(return_value=asyncio.Future())
     mock_perform_analysis.return_value.set_result({"summary": "Mocked"})
@@ -2524,7 +2524,7 @@ async def test_monitor_signal_passes_none_when_scoring_fails_open(monkeypatch):
 
     실패를 0점으로 넘기면 "모델이 중립이라고 판단함"이라는 없던 사실이 DB에 남는다.
     """
-    from backend.ai import services
+    from backend.ai import llm as ai_llm
     from backend.scheduler.monitor import SignalSource, monitor_market_task
 
     state = RedisSchedulerState(FakeRedis())
@@ -2541,7 +2541,7 @@ async def test_monitor_signal_passes_none_when_scoring_fails_open(monkeypatch):
     async def exploding_llm_chat(provider, prompt, *, conversation_id=None):
         raise RuntimeError("ollama 연결 실패")
 
-    monkeypatch.setattr(services, "llm_chat", exploding_llm_chat)
+    monkeypatch.setattr(ai_llm, "llm_chat", exploding_llm_chat)
 
     mock_perform_analysis = MagicMock(return_value=asyncio.Future())
     mock_perform_analysis.return_value.set_result({"summary": "Mocked"})
@@ -3698,7 +3698,7 @@ async def test_refresh_portfolio_prices_skips_calls_after_paper_fallback(monkeyp
 async def test_refresh_portfolio_prices_passes_time_budget_within_call_timeout(monkeypatch):
     """시세 갱신은 도구 기본 예산(90초)이 아니라 30초 호출 타임아웃 안의 예산을 넘긴다 (#369).
 
-    run_mcp_tool은 30초에서 끊는다(backend/ai/services.py). 인자를 빼면 도구가 NAT 기준
+    run_mcp_tool은 30초에서 끊는다(backend/ai/mcp_tools.py). 인자를 빼면 도구가 NAT 기준
     90초 예산으로 돌아, 연속조회가 30초를 넘는 계좌는 잘림 안내 대신 504 타임아웃으로
     빠진다. 값의 근거(18 + 8 + 2 = 28초)는 _RLZ_PL_TIME_BUDGET_MS 주석에 있다.
 
@@ -3730,7 +3730,7 @@ def test_rlz_pl_time_budget_fits_inside_mcp_call_timeout():
     """시세 갱신 예산 + 진행 중 요청 1회 + 기동이 run_mcp_tool 호출 타임아웃보다 짧다 (#369).
 
     이 관계를 벗어나면 연속조회가 긴 계좌는 잘림 안내 대신 504로 빠진다. 값만 고정한 위
-    테스트는 호출 타임아웃(ai/services.py)이나 kisAxios 타임아웃(index.js)이 바뀌어도 초록이라
+    테스트는 호출 타임아웃(backend/ai/llm.py)이나 kisAxios 타임아웃(index.js)이 바뀌어도 초록이라
     (PR #378 리뷰), 세 값을 각자의 출처에서 읽어 부등식을 단언한다.
 
     kisAxios 타임아웃은 index.js 소스에서 읽는다 — index.js는 import 시점에 stdio 서버를
@@ -3744,7 +3744,7 @@ def test_rlz_pl_time_budget_fits_inside_mcp_call_timeout():
     from pathlib import Path
 
     from backend.scheduler.portfolio import _RLZ_PL_TIME_BUDGET_MS
-    from backend.ai.services import MCP_TOOL_TIMEOUT_SECONDS
+    from backend.ai.mcp_tools import MCP_TOOL_TIMEOUT_SECONDS
 
     index_js = (Path(__file__).resolve().parents[2] / "mcp" / "trading" / "index.js").read_text(
         encoding="utf-8"
