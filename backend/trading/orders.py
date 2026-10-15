@@ -40,8 +40,8 @@ PENDING_ORDER_NEXT_STEP_TEXT = (
 )
 
 # 대기 주문의 앱 레벨 만료 창. PendingOrder의 성질이므로 여기 둔다 (#299).
-# telegram_commands가 같은 이름으로 재수출하며(기존 import 경로 유지), order_assist도
-# 여기서 직접 읽는다 — telegram_commands에 두면 order_assist와 순환 import가 된다.
+# 텔레그램 주문 핸들러와 order_assist가 모두 여기서 직접 읽는다 — 텔레그램 핸들러
+# 쪽에 두면 order_assist와 순환 import가 된다.
 # redis 쪽 PENDING_ORDER_TTL_SEC(10분)은 이 값의 10배 여유로 잡힌 별개 장치다.
 ORDER_EXPIRES_AFTER = timedelta(seconds=60)
 
@@ -160,8 +160,8 @@ async def _record_prompt_message_id(
 
 
 # 확정·취소 콜백 데이터 접두사와 그 버튼을 만드는 함수. ORDER_EXPIRES_AFTER와 같은 이유로
-# 여기 있다 — telegram_commands가 재수출하고(기존 import 경로 유지), 스케줄러의 자동
-# 제안(#314)도 여기서 직접 읽는다. 이 함수가 telegram_commands의 메서드로만 있으면 자동
+# 여기 있다 — 텔레그램 주문 핸들러와 스케줄러의 자동 제안(#314)이 모두 여기서 직접
+# 읽는다. 이 함수가 텔레그램 핸들러의 메서드로만 있으면 자동
 # 제안이 버튼을 직접 조립하게 되고, 그 순간 "확정 버튼은 한 곳에서만 만든다"가 깨진다.
 # 콜백 문자열이 갈리면 _handle_callback_query가 못 알아보는 버튼이 사용자에게 나간다.
 ORDER_CONFIRM_CALLBACK = "order:confirm"

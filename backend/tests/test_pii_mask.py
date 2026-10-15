@@ -203,7 +203,7 @@ class TestAmountRecognizer:
         위 test_masks_comma_grouped_unit_amount_entirely가 고정한 "3,000만원" 앞자리
         유출과 같은 자리·같은 근거이고, 부분 유출이 아니라 전량 유출이라 방향이 더 나쁘다.
 
-        직격하는 경로는 자유 입력 두 곳이다: telegram_commands._handle_chat_fallback이
+        직격하는 경로는 자유 입력 두 곳이다: telegram/commands.py의 _handle_chat_fallback이
         넘기는 사용자 원문("3천만원 있는데 어디 투자할까요?")과
         services.check_signal_significance가 프롬프트에 싣는 뉴스 원문 1000자
         ("영업이익 1천억원", "시가총액 3천억원").
@@ -228,7 +228,7 @@ class TestAmountRecognizer:
     def test_masks_amount_with_korean_numerals_only(self):
         """선행 아라비아 숫자 없이 수사만으로 표기된 금액도 전체가 마스킹돼야 한다.
 
-        "천만원"·"오천만원"은 telegram_commands._handle_chat_fallback이 넘기는 자유
+        "천만원"·"오천만원"은 telegram/commands.py의 _handle_chat_fallback이 넘기는 자유
         입력에서 "3천만원"만큼(오히려 그보다 더) 흔하다. _AMOUNT_UNIT_RE가 선두 \\d+로
         숫자를 강제하면 세 금액 정규식 중 어느 것에도 걸리지 않아 값 **전체**가 평문으로
         외부 LLM에 나간다 — 위 test_masks_korean_numeral_unit_amount가 고정한 "3천만원"과
@@ -436,7 +436,7 @@ class TestAmountRecognizer:
         "5000원"만 잘라가고 앞자리 "1만"이 평문으로 남는다. 꼬리가 한글 수사인 "1만5천원"은
         #330의 마디 연쇄로 이미 전량 마스킹되고 아라비아 숫자 꼬리만 남아 있었다.
 
-        "1만5000원"·"7만8000원"은 주가·체결가 표기로 흔하고 telegram_commands의
+        "1만5000원"·"7만8000원"은 주가·체결가 표기로 흔하고 telegram/commands.py의
         _handle_chat_fallback이 사용자 원문을 가공 없이 넘기므로, 뉴스 본문뿐이던 #330과
         달리 F-17 보호 대상인 금액의 앞자리가 실제로 외부 LLM에 나갔다.
 
@@ -902,7 +902,7 @@ class TestQuantityRecognizer:
     def test_masks_quantity_in_free_form_user_message(self):
         """텔레그램 자유 입력 경로의 보유 수량도 마스킹돼야 한다.
 
-        backend/telegram_commands.py의 _handle_chat_fallback은 사용자 원문을
+        backend/telegram/commands.py의 _handle_chat_fallback은 사용자 원문을
         가공 없이 llm_chat으로 보낸다. 잔고 리포트의 "· {qty}주" 형태로만 앵커링하면
         이 경로의 실제 보유 수량을 통째로 놓치므로, 앵커 없는 "3주"도 잡아야 한다.
         """
@@ -920,7 +920,7 @@ class TestQuantityRecognizer:
         놓쳐 **실제 보유 수량이 그대로 외부 LLM으로 나간다.**
 
         그리고 그 경로가 하필 잔고 리포트 앵커링("· {qty}주"로만 매치)을 거절한 유일한
-        근거였다 — backend/telegram_commands.py의 _handle_chat_fallback이
+        근거였다 — backend/telegram/commands.py의 _handle_chat_fallback이
         텔레그램 사용자 원문을 가공 없이 llm_chat으로 넘기는 경로. 앵커링을
         포기하면서까지 지키려던 경로를 조사 하나로 다시 놓치면 안 되므로 여기서 고정한다.
 

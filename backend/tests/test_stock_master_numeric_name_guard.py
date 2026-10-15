@@ -1,7 +1,7 @@
 """종목 마스터 "코드 형태 토큰 + 숫자" 이름 판정표를 backend 파서와 대조한다 (PR #392 리뷰).
 
 backend의 /buy·/sell 파서는 이름 자리가 종목코드 하나면 시장가 해석을 만들지 않는다
-(telegram_commands._order_argument_readings). 그래서 마스터에 "ABC123 200" 같은 이름·별칭이
+(telegram/handlers/orders.py의 _order_argument_readings). 그래서 마스터에 "ABC123 200" 같은 이름·별칭이
 생기면 그 종목은 이름으로 시장가 주문할 수 없고 모호한 입력을 되묻지도 못한다. 운영자가
 ``mcp/trading/scripts/update_stock_master.py``로 마스터를 직접 갱신할 때 스크립트가 쓰기 전에
 같은 검사를 하는데, 스크립트는 backend를 import하지 않고 따로 구현한다.

@@ -57,7 +57,7 @@ class TelegramApiError(Exception):
     httpx가 만드는 예외, 특히 raise_for_status의 HTTPStatusError는 메시지에 요청 URL을
     그대로 담는다. 텔레그램 URL은 경로에 봇 토큰이 있으므로 그 예외를 호출부까지 올려
     보내면 "이 예외를 %s로 찍는 모든 로거"에 리댁션을 걸어야 한다. 그 로거 이름 목록은
-    두 번 뚫렸다 (PR #253 1차 리뷰: 이 모듈, 2차 리뷰: telegram_commands 폴러).
+    두 번 뚫렸다 (PR #253 1차 리뷰: 이 모듈, 2차 리뷰: 텔레그램 명령 폴러).
 
     발생 지점에서 URL 없는 예외로 바꿔 던지면 목록을 유지할 이유 자체가 없어진다.
     대신 httpx 예외 타입이 소비자에게 도달하지 않으므로, 429 판정에 필요한
@@ -537,7 +537,7 @@ class TelegramNotifier:
 
         조각이 하나뿐이면 이전과 똑같이 한 번 호출한다 — 짧은 메시지의 경로는 달라지지
         않는다. 이미 조각인 문자열을 다시 넘겨도 상한 안이라 그대로 한 통으로 나간다.
-        telegram_commands._send_text_settled가 이 멱등성에 기대 조각 단위로 재시도한다.
+        telegram.handlers.base._send_text_settled가 이 멱등성에 기대 조각 단위로 재시도한다.
 
         도중에 실패하면 남은 조각을 보내지 않고 False를 돌려준다. 앞이 빠진 채 뒤만
         도착하면 사용자는 빠진 자리를 알 수 없는데, 조각마다 붙는 머리표("📄 2/3")가
@@ -598,7 +598,7 @@ class TelegramNotifier:
         except Exception as exc:
             retry_after = _retry_after_seconds(exc)
             # 반환형은 bool로 두되 flood-wait 길이는 호출부가 읽을 수 있게 남긴다.
-            # telegram_commands._send_text_settled가 이 값으로 "남은 예산 안에 풀리는
+            # telegram.handlers.base._send_text_settled가 이 값으로 "남은 예산 안에 풀리는
             # ban인가"를 판단한다 — 없으면 재시도 간격이 순전히 추측이 된다 (PR #253 리뷰).
             self.last_retry_after_seconds = retry_after
             # 나뉜 메시지는 "몇 조각까지 갔는가"가 진단의 핵심이다. 한 조각짜리 메시지의
@@ -608,7 +608,7 @@ class TelegramNotifier:
             if retry_after is None:
                 logger.error("Telegram message send failed%s: %s", progress, exc)
             else:
-                # 호출부(telegram_commands._send_text_settled)의 재시도 간격은 이 값을
+                # 호출부(telegram.handlers.base._send_text_settled)의 재시도 간격은 이 값을
                 # 볼 수 없어 고정 추측값이다. 실제 ban 길이가 그 가정과 맞는지 판단할
                 # 근거를 남긴다 — 어긋나면 간격을 조정하거나 값을 전달하도록 바꿔야 한다.
                 logger.error(
@@ -895,7 +895,7 @@ async def send_text_settled(
     이 함수가 도는 동안(최대 SETTLED_SEND_TIMEOUT_SECONDS) 프로세스가 재시작하면 폴러가 offset을
     영속화하기 전이라 같은 update가 재배달·재실행되고, 위에 적은 "다른 메시지"나 LLM 재호출이
     한 번 더 난다. 발동이 드물고 피해가 유계라 이 창은 수용했다(#383). 재실행된 텍스트 /confirm이
-    그사이 생긴 다른 대기 주문을 실행하는 경우만은 수용하지 않는다(telegram_commands의
+    그사이 생긴 다른 대기 주문을 실행하는 경우만은 수용하지 않는다(telegram.handlers.orders의
     _handle_confirm이 막는다).
 
     이 함수가 핸들러 메서드가 아니라 모듈 함수인 것은 텔레그램 명령 경로와 스케줄러의 자동

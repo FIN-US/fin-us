@@ -1,7 +1,7 @@
 """종목 마스터 갱신 스크립트의 "코드 형태 토큰 + 숫자" 이름 검사 (PR #392 리뷰, #393에서 이동).
 
 backend의 /buy·/sell 파서는 이름 자리가 종목코드 하나면 시장가 해석을 만들지 않는다
-(telegram_commands._order_argument_readings). 그래서 마스터에 "ABC123 200" 같은 이름·별칭이
+(telegram.handlers.orders._order_argument_readings). 그래서 마스터에 "ABC123 200" 같은 이름·별칭이
 생기면 그 종목은 이름으로 시장가 주문할 수 없고 모호한 입력을 되묻지도 못한다. 커밋된
 stocks.json은 backend test_telegram_commands의 전수 테스트가 보지만, 운영자가
 ``mcp/trading/scripts/update_stock_master.py``로 직접 갱신하면 CI 없이 파일이 바뀐다. 그래서

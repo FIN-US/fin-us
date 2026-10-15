@@ -24,7 +24,7 @@ from backend.pii.registry import placeholder_kind, restore_live_placeholders
 from backend.core.ws_manager import manager
 from backend.scheduler.jobs import start_scheduler, stop_scheduler
 from backend.scheduler.portfolio import format_price_updated_at, is_price_fresh
-from backend.telegram.commands import start_telegram_commands, stop_telegram_commands
+from backend.telegram.poller import start_telegram_commands, stop_telegram_commands
 from backend.core.schemas import CommonResponse, DiaryCreate
 from backend.ai.services import (
     run_mcp_tool,

@@ -17,7 +17,7 @@ STOCKS_PATH = ROOT_DIR / "data" / "stocks.json"
 # ---------------------------------------------------------------------------
 # "종목코드 형태 토큰 + 수량 토큰" 이름 검사 (PR #392 리뷰)
 # ---------------------------------------------------------------------------
-# backend의 /buy·/sell 파서(telegram_commands._order_argument_readings)는 `/buy 005930 10 75000`처럼
+# backend의 /buy·/sell 파서(telegram.handlers.orders._order_argument_readings)는 `/buy 005930 10 75000`처럼
 # 이름 자리가 종목코드 하나면 "005930 10"을 종목명으로 읽는 시장가 해석을 만들지 않는다. 그래서 마스터에
 # "ABC123 200" 같은 이름·별칭이 생기면 `/buy ABC123 200 10`은 그 종목의 시장가 주문으로 읽힐 수 없고,
 # 두 해석이 모두 실재할 때의 되묻기도 하지 못한다(ABC123이 다른 종목의 코드면 그 종목의 지정가 주문
@@ -87,7 +87,7 @@ def check_unreadable_numeric_names(stocks, *, allow, stream=None):
         print(f"  {code}\t{label}", file=stream)
     if not allow:
         print(
-            "stocks.json을 쓰지 않았습니다. backend/telegram/commands.py _order_argument_readings의 "
+            "stocks.json을 쓰지 않았습니다. backend/telegram/handlers/orders.py _order_argument_readings의 "
             "종목코드 이름 자리 분기를 먼저 재검토하거나, 알고 넘기려면 "
             "--allow-unreadable-numeric-names로 다시 실행하세요.",
             file=stream,

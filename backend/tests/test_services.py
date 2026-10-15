@@ -1890,7 +1890,7 @@ async def test_placeholders_do_not_collide_across_calls_in_same_conversation(mon
     _load_history()가 SQLite chat_messages에서 과거 턴을 읽어 오고 같은 파일의
     finus_sqlite_transcript_agent가 `history + chat_request.messages`로 합쳐
     라우터에 넘긴다(agents/configs/router.yml의 max_history_messages: 30).
-    conversation_id는 호출 간 재사용된다(backend/telegram_commands.py의
+    conversation_id는 호출 간 재사용된다(backend/telegram/commands.py의
     f"telegram:{chat_id}"는 그 사용자의 모든 메시지가 같은 스레드).
 
     따라서 NAT은 이전 턴의 자리표시자를 응답에 인용할 수 있다. 자리표시자 이름이

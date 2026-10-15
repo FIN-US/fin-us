@@ -38,7 +38,7 @@ _CONFIGS_ROOT = _FINUS_NAT_ROOT / "configs"
 # branches는 router 두 파일에만 있지만, 그걸 상수로 박아 두면 새 모듈·새 라우터 config가
 # 검사 밖에서 조용히 자란다 — 이 검사가 막으려던 것과 정확히 같은 실패 모드를 한 겹
 # 안쪽에 다시 만드는 셈이다(1400줄짜리 finus_api.py가 분할되는 시점이 특히 그렇다).
-# telegram_commands.py의 주석도 특정 파일이 아니라 router*.yml로 계약을 적어 뒀다.
+# telegram/commands.py의 주석도 특정 파일이 아니라 router*.yml로 계약을 적어 뒀다.
 # 두 목록이 비면 검사가 통째로 공허해지므로 아래 test_scan_inputs_are_discovered가 잡는다.
 _SOURCE_FILES = sorted(_SRC_ROOT.rglob("*.py"))
 _ROUTER_CONFIGS = sorted(_CONFIGS_ROOT.glob("router*.yml"))

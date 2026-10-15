@@ -18,7 +18,7 @@ mcp-trading 스크립트 pytest(`mcp/trading/tests/*.py`), Unity `Assets`/`Build
 - [ ] 소켓 타임아웃 없이 무한 대기할 수 있는 호출이 추가되지 않았는가
 - [ ] 실 redis 없이 도는 테스트가 실제 동작을 검증한다고 착각하게 만들지 않는가
 
-## 텔레그램 (`backend/telegram/commands.py`, `telegram_notifier.py`)
+## 텔레그램 (`backend/telegram/commands.py`, `handlers/*`, `poller.py`, `notifier.py`)
 
 - [ ] 새 `except Exception`이 `TelegramSendError` 재전파를 가로막지 않는가
       (`tests/test_telegram_commands.py`의 ast 기반 구조 검사가 강제한다. **allowlist에

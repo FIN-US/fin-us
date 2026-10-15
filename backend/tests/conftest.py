@@ -9,7 +9,6 @@ from backend.ai import services
 
 from backend.trading import stock_code
 
-from backend.telegram import commands as telegram_commands
 from backend.telegram.delivery_alarm import delivery_metrics, trade_outbox_stall
 from backend.trading.orders import TradeRecorder
 
@@ -193,8 +192,6 @@ def _forbid_implicit_trade_ledger(monkeypatch):
             "대역을 주입하세요 (#259)."
         )
 
-    monkeypatch.setattr(
-        telegram_commands,
-        "_create_trade_recorder",
+    monkeypatch.setattr("backend.telegram.handlers.base._create_trade_recorder",
         lambda: TradeRecorder(_forbidden_session),
     )

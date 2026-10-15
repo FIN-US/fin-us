@@ -1,6 +1,6 @@
 """종목코드 추출·판정 공용 상수 및 헬퍼 (#140).
 
-services.py와 telegram_commands.py가 각자 중복 구현하던 정규식과 함수를
+services.py와 telegram 주문 핸들러가 각자 중복 구현하던 정규식과 함수를
 이 모듈로 통합한다. 두 파일에서 import해 사용한다.
 """
 import json
@@ -33,7 +33,7 @@ def extract_stock_name(resolved_text: str) -> str | None:
     해당한다(예: ``132030 KODEX 골드선물(H)`` → "KODEX 골드선물").
 
     잘린 이름은 PendingOrder.stock_name → 승인 메시지 → TradeHistory.stock_name까지
-    그대로 간다. 주문 준비(telegram_commands)와 주문 보조(order_assist)가 같은 규칙을
+    그대로 간다. 주문 준비(telegram/handlers/orders.py)와 주문 보조(order_assist)가 같은 규칙을
     쓰도록 여기 둔다 — 두 곳이 각자 자르면 같은 종목이 화면마다 다른 이름으로 남는다.
     """
     match = _STOCK_CODE_EXTRACT_RE.search(resolved_text or "")
@@ -117,7 +117,7 @@ def describe_orderable_code_policy() -> str:
     """지금 이 프로세스가 주문을 받는 코드 형태를 사용자 문장으로 돌려줍니다.
 
     거절 안내 문구를 호출부에 리터럴로 두면 정책의 4번째 복제본이 되고, 그 복제본만
-    플래그를 보지 않아 조용히 어긋난다 — 실제로 telegram_commands.py의 안내는 플래그를
+    플래그를 보지 않아 조용히 어긋난다 — 실제로 텔레그램 주문 핸들러의 안내는 플래그를
     보는 가드 아래에서 플래그 꺼짐 규칙을 무조건 서술하고 있었다. 코드 상한이 없는
     _STOCK_CODE_EXTRACT_RE 덕분에 8자 코드가 거기까지 도달하므로, 플래그를 켠 채
     0001A0은 주문되는 프로세스에서 "숫자 6~7자리만 주문할 수 있다"는 안내가 나갔다.
@@ -147,7 +147,7 @@ def is_orderable_stock_code_strict(code: str) -> bool:
 def is_orderable_stock_code(code: str) -> bool:
     """code(이미 upper() 정규화된 값)가 현재 정책상 주문 가능한 형태인지 판정합니다.
 
-    telegram_commands.py의 주문 준비 경로가 이 함수로 mcp/trading/order.js의
+    telegram/handlers/orders.py의 주문 준비 경로가 이 함수로 mcp/trading/order.js의
     buildCashOrderBody() 가드를 미리 복제해, 조기 거절로 시세·잔고 조회와 60초 대기
     슬롯 낭비를 막는다(#73).
 
@@ -307,7 +307,7 @@ _UNRESOLVED_ECHO_RE = re.compile(r"\([0-9A-Z]{6,}, UNKNOWN\)")
 def _is_unresolved_echo(resolved_text: str) -> bool:
     """resolve_stock_code 응답이 stock-master.js Step 3의 미해석 에코인지 판정합니다.
 
-    리포트 저장(services._resolve_stock_code)과 주문 준비(telegram_commands)가
+    리포트 저장(services._resolve_stock_code)과 주문 준비(telegram/handlers/orders.py)가
     같은 판정을 쓰도록 여기 둔다 — 한쪽에만 적용하면 같은 미해석 입력이 위험도가
     높은 주문 경로로만 통과한다.
     """

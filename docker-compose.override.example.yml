@@ -11,7 +11,7 @@
 # 들어 있다). 끄려면 복사본을 지우고 다시 `docker compose up -d backend`.
 #
 # ⚠️ 리로드는 스케줄러와 텔레그램 폴러까지 함께 재시작한다 — 파일 저장 하나가 재시작 계기다
-# (backend/telegram_commands.py의 #350 주석). 실계좌(KIS_ORDER_ENV=real) 구성에서는 쓰지 말 것.
+# (backend/telegram/poller.py의 #350 주석). 실계좌(KIS_ORDER_ENV=real) 구성에서는 쓰지 말 것.
 #
 # ⚠️ 여기에 command 말고 다른 키(ports 등)를 넣지 말 것. backend/tests/test_compose_ports.py의
 # 루프백 게시 가드는 docker-compose.yml만 읽으므로, override가 게시를 바꾸면 가드가 실제로

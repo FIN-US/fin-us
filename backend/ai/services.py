@@ -1186,7 +1186,7 @@ def short_error(exc: BaseException) -> str:
     박으면 텔레그램 4096자 한도에 걸려 **거부 메시지 자체가 전송되지 않는다** — 가장
     알려야 할 순간에 아무 말도 못 하게 되는 것이라 300자에서 자른다.
 
-    telegram_commands(주문·조회 명령)와 order_assist(주문 보조)가 함께 쓴다. 두 곳이
+    텔레그램 핸들러(주문·조회 명령)와 order_assist(주문 보조)가 함께 쓴다. 두 곳이
     각자 자르면 한도가 갈라지므로 예외를 실제로 만들어 올리는 이 모듈에 둔다.
     """
     raw = getattr(exc, "detail", str(exc))

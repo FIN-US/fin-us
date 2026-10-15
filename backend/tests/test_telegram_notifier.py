@@ -826,7 +826,7 @@ async def test_send_text_failure_log_redacts_bot_token(caplog, mock_httpx):
 async def test_send_text_publishes_and_clears_retry_after(monkeypatch):
     """429의 flood-wait을 호출부가 읽을 수 있게 남기고, 성공하면 지운다 (PR #253 3차 리뷰).
 
-    telegram_commands._send_text_settled가 이 값 하나로 "재시도할 가치가 있는가"를 가른다.
+    telegram.handlers.base._send_text_settled가 이 값 하나로 "재시도할 가치가 있는가"를 가른다.
     소비 측 두 분기는 고정돼 있었지만 생산 측이 무커버라, 두 대입을 지워도 스위트가
     초록이었다 — 재시도가 조용히 (1, 3, 9) 추측 백오프로 되돌아간다.
     """

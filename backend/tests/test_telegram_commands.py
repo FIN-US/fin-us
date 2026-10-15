@@ -4,6 +4,7 @@ import json
 import logging
 import re
 import socket
+import sys
 import textwrap
 import time
 from contextlib import asynccontextmanager
@@ -20,27 +21,31 @@ from fastapi import HTTPException
 import backend.core.config as backend_config
 import backend.trading.order_assist as order_assist_module
 import backend.core.redis_state as redis_state_module
-import backend.telegram.commands as telegram_commands
+import backend.telegram.handlers.base as tg_base
+import backend.telegram.commands as tg_commands
+import backend.telegram.handlers.orders as tg_orders
+import backend.telegram.poller as tg_poller
+import backend.telegram.handlers.texts as tg_texts
 import backend.telegram.notifier as telegram_notifier_module
 from backend.core.config import DART_MCP_PARAMS, NEWS_MCP_PARAMS, TRADING_MCP_PARAMS
 from backend.telegram.delivery_alarm import delivery_metrics
 from backend.pii.egress import render_unmasked
-from backend.telegram.commands import (
+from backend.telegram.commands import TelegramCommandHandler
+from backend.telegram.handlers.texts import (
     BUY_COMMAND_HELP,
     CATALYST_COMMAND_HELP,
     EARNINGS_COMMAND_HELP,
+    LOOKUP_COMMAND_HELP,
     NAT_PROGRESS_MESSAGE,
     PROGRESS_DONE_MESSAGE,
     QUOTE_COMMAND_HELP,
     TELEGRAM_INTERACTIVE_HELP,
     TRADE_COMMAND_HELP,
-    LOOKUP_COMMAND_HELP,
     TREND_COMMAND_HELP,
     UNRESOLVED_STOCK_WARNING,
-    TelegramCommandHandler,
-    TelegramCommandPoller,
 )
-# 길이 상한과 말줄임 규칙은 출력 계층이 정의한다. telegram_commands는 더 이상 그것을
+from backend.telegram.poller import TelegramCommandPoller
+# 길이 상한과 말줄임 규칙은 출력 계층이 정의한다. 핸들러 모듈은 더 이상 그것을
 # 다시 내보내지 않는다 — 재수출만 남은 임포트는 이름이 두 곳에 있다는 착시를 만든다.
 from backend.telegram.presentation import (
     REASONING_FOOTNOTE_MAX_CHARS,
@@ -576,7 +581,7 @@ async def test_lookup_quote_button_replies_with_quote_guidance():
 
 
 def test_bot_command_menu_includes_all_user_commands():
-    commands = [command["command"] for command in telegram_commands.TELEGRAM_BOT_COMMANDS]
+    commands = [command["command"] for command in tg_texts.TELEGRAM_BOT_COMMANDS]
 
     assert commands == [
         "help", "balance", "watch", "catalysts", "quote", "trend", "earnings",
@@ -1850,7 +1855,7 @@ def test_format_order_prompt_warns_when_name_equals_code():
     도달하지 않는다(#151) — 그래도 마스터에 name == code인 항목이 생기는 경우를 대비한
     방어선이라면 실제로 경고를 붙이는지 확인할 수 있어야 한다.
 
-    뮤테이션: telegram_commands._format_order_prompt의
+    뮤테이션: handlers/orders.py _format_order_prompt의
     `if order.stock_name == order.stock_code:` 분기를 제거하면 이 단정이 red가 된다.
     """
     notifier = FakeNotifier()
@@ -1934,7 +1939,7 @@ async def test_confirm_falls_back_to_in_place_retry_when_the_ledger_write_fails(
 
     await handler.handle_update(_text_confirm())
 
-    assert sleeps == list(telegram_commands.SETTLED_SEND_RETRY_BACKOFF_SECONDS)
+    assert sleeps == list(telegram_notifier_module.SETTLED_SEND_RETRY_BACKOFF_SECONDS)
     assert len(notifier.messages) == len(sleeps) + 1
     assert all(
         "이 메시지가 유일한 통지입니다" in message for message in notifier.messages
@@ -2185,9 +2190,9 @@ async def test_stale_order_button_falls_back_to_a_message_when_the_callback_answ
     await handler.handle_update(_stale_order_callback_update())
 
     assert notifier.callback_answers == [
-        ("stale-callback", telegram_commands.ORDER_STALE_CALLBACK_TEXT)
+        ("stale-callback", tg_texts.ORDER_STALE_CALLBACK_TEXT)
     ]
-    assert notifier.messages == [telegram_commands.ORDER_STALE_CALLBACK_TEXT]
+    assert notifier.messages == [tg_texts.ORDER_STALE_CALLBACK_TEXT]
     assert delivery_metrics.count("settled_send") == 0
 
 
@@ -2205,7 +2210,7 @@ async def test_callback_answer_fallback_that_also_fails_is_counted_as_settled_se
 
     await handler.handle_update(_stale_order_callback_update())
 
-    assert set(notifier.messages) == {telegram_commands.ORDER_STALE_CALLBACK_TEXT}
+    assert set(notifier.messages) == {tg_texts.ORDER_STALE_CALLBACK_TEXT}
     assert delivery_metrics.count("settled_send") == settled_failures_before + 1
 
 
@@ -2234,17 +2239,16 @@ async def test_textless_callback_answer_failure_sends_no_fallback(monkeypatch):
     assert delivery_metrics.count("settled_send") == 0
 
 
-def _callback_answers_with_text_not_ending_branch(
-    source: str | None = None,
-) -> tuple[list[int], int]:
+def _callback_answers_with_text_not_ending_branch(source: str) -> tuple[list[int], int]:
     """``text``를 실은 _answer_callback_query 호출 중 곧바로 끝나지 않는 것의 행 번호와 검사 수.
 
     답 실패 시 대체 전송은 그 답이 유일한 통지라는 전제에 선다 (#382). 뒤에 메시지를 이어
     보내는 분기가 ``text``를 실으면 답이 실패했을 때 대체 메시지와 본 메시지가 중복으로 나간다.
     그래서 호출 문장 바로 다음이 ``return``이거나, 호출이 함수 본문의 마지막 문장이어야 한다.
 
-    source를 주면 그 소스를, 없으면 telegram_commands.py를 본다 — 위반 검출 테스트가 판정
-    로직을 다시 구현하지 않고 이 함수를 직접 부르게 하기 위해서다(PR #253 3차 리뷰의 전례).
+    소스 하나를 받는다 — 위반 검출 테스트가 판정 로직을 다시 구현하지 않고 이 함수를 직접
+    부르게 하기 위해서다(PR #253 3차 리뷰의 전례). 실제 핸들러 전체 검사는
+    ``_handler_callback_answer_violations``가 모듈마다 이 함수를 부른다.
 
     fail-closed: ``await self._answer_callback_query(...)`` 한 문장이 아닌 형태(대입·식 안의
     호출 등)로 ``text``를 실으면 위반으로 본다. 함수 끝에 닿는 if 본문의 마지막 호출처럼
@@ -2275,11 +2279,7 @@ def _callback_answers_with_text_not_ending_branch(
             return statement.value.value
         return None
 
-    tree = ast.parse(
-        source
-        if source is not None
-        else Path(telegram_commands.__file__).read_text(encoding="utf-8")
-    )
+    tree = ast.parse(source)
     calls = [
         node for node in ast.walk(tree) if isinstance(node, ast.Call) and text_answer_call(node)
     ]
@@ -2303,13 +2303,34 @@ def _callback_answers_with_text_not_ending_branch(
     return violations, len(calls)
 
 
+def _handler_callback_answer_violations() -> tuple[list[str], int]:
+    """핸들러 클래스를 이루는 모듈 전부에 위 검사를 돌린다.
+
+    핸들러 메서드는 진입점·기반·묶음별 모듈에 나뉘어 있다. 한 파일만 보면 다른 파일로 옮긴
+    핸들러가 검사에서 빠진 채 "위반 0건"으로 통과하므로, 클래스의 MRO에서 모듈을 모은다.
+    """
+    modules = {
+        sys.modules[klass.__module__]
+        for klass in TelegramCommandHandler.__mro__
+        if klass.__module__.startswith("backend.telegram")
+    }
+    violations: list[str] = []
+    checked = 0
+    for module in sorted(modules, key=lambda m: m.__name__):
+        path = Path(cast(str, module.__file__))
+        lines, count = _callback_answers_with_text_not_ending_branch(path.read_text(encoding="utf-8"))
+        violations += [f"{module.__name__}:{line}" for line in lines]
+        checked += count
+    return violations, checked
+
+
 def test_every_callback_answer_with_text_ends_its_branch():
     """``text``를 실은 콜백 답은 곧바로 끝나는 분기에서만 쓴다 (#382, PR #384 리뷰).
 
     답 실패 시 대체 전송이 그 전제에 서 있는데 독스트링만으로는 지켜지지 않는다. 검사 수가
     0이면 메서드 이름이 바뀌어 가드가 빈 채로 초록인 것이므로 함께 막는다.
     """
-    violations, checked = _callback_answers_with_text_not_ending_branch()
+    violations, checked = _handler_callback_answer_violations()
 
     assert violations == []
     assert checked > 0
@@ -2542,7 +2563,7 @@ async def test_sell_command_rejects_duplicate_pending_order():
         {"message": {"chat": {"id": 123}, "text": "/sell 삼성전자 1 75000"}}
     )
 
-    assert notifier.messages[-1] == telegram_commands.PENDING_ORDER_CONFLICT_TEXT
+    assert notifier.messages[-1] == tg_texts.PENDING_ORDER_CONFLICT_TEXT
     assert _orders(handler)["123"].side == "BUY"
 
 
@@ -2672,8 +2693,8 @@ def test_poller_default_handler_uses_order_gateway_and_trade_recorder_factories(
     recorder = object()
     notifier = FakeNotifier()
 
-    monkeypatch.setattr(telegram_commands, "_create_order_gateway", lambda: gateway)
-    monkeypatch.setattr(telegram_commands, "_create_trade_recorder", lambda: recorder)
+    monkeypatch.setattr("backend.telegram.handlers.base._create_order_gateway", lambda: gateway)
+    monkeypatch.setattr("backend.telegram.handlers.base._create_trade_recorder", lambda: recorder)
 
     poller = TelegramCommandPoller(notifier=notifier)
 
@@ -2688,8 +2709,8 @@ def test_poller_explicit_handler_does_not_call_dependency_factories(monkeypatch)
     def fail_factory():
         raise AssertionError("factory must not be called for explicit handler")
 
-    monkeypatch.setattr(telegram_commands, "_create_order_gateway", fail_factory)
-    monkeypatch.setattr(telegram_commands, "_create_trade_recorder", fail_factory)
+    monkeypatch.setattr("backend.telegram.handlers.base._create_order_gateway", fail_factory)
+    monkeypatch.setattr("backend.telegram.handlers.base._create_trade_recorder", fail_factory)
 
     poller = _make_poller(notifier, handler=handler)
 
@@ -2703,16 +2724,16 @@ def test_create_order_gateway_uses_local_mcp_trading(monkeypatch):
         def __init__(self, **kwargs):
             captured.update(kwargs)
 
-    monkeypatch.setattr(telegram_commands, "McpTradingOrderGateway", FakeGateway)
-    monkeypatch.setattr(telegram_commands, "KIS_ORDER_ENV", "sandbox")
-    monkeypatch.setattr(telegram_commands, "KIS_REAL_ORDER_ENABLED", True)
+    monkeypatch.setattr("backend.telegram.handlers.base.McpTradingOrderGateway", FakeGateway)
+    monkeypatch.setattr("backend.telegram.handlers.base.KIS_ORDER_ENV", "sandbox")
+    monkeypatch.setattr("backend.telegram.handlers.base.KIS_REAL_ORDER_ENABLED", True)
 
-    gateway = telegram_commands._create_order_gateway()
+    gateway = tg_base._create_order_gateway()
 
     assert isinstance(gateway, FakeGateway)
     assert captured == {
         "server_params": TRADING_MCP_PARAMS,
-        "mcp_runner": telegram_commands.run_mcp_tool,
+        "mcp_runner": tg_base.run_mcp_tool,
         "order_env": "demo",
         "real_order_enabled": True,
     }
@@ -2737,7 +2758,7 @@ async def test_poller_keeps_offset_when_update_handling_fails(monkeypatch):
         raise pytest.fail.Exception("stop after first failed polling iteration")
 
     monkeypatch.setattr(poller, "_get_updates", fake_get_updates)
-    monkeypatch.setattr("backend.telegram.commands.asyncio.sleep", stop_after_failure)
+    monkeypatch.setattr("asyncio.sleep", stop_after_failure)
 
     with pytest.raises(pytest.fail.Exception):
         await poller.run()
@@ -2765,7 +2786,7 @@ async def test_poller_loads_bot_username_before_updates(monkeypatch):
         raise pytest.fail.Exception("stop after first failed polling iteration")
 
     monkeypatch.setattr(poller, "_get_updates", fake_get_updates)
-    monkeypatch.setattr("backend.telegram.commands.asyncio.sleep", stop_after_failure)
+    monkeypatch.setattr("asyncio.sleep", stop_after_failure)
 
     with pytest.raises(pytest.fail.Exception):
         await poller.run()
@@ -2786,14 +2807,14 @@ async def test_poller_sets_bot_command_menu_before_updates(monkeypatch):
     poller = _make_poller(notifier, handler=NoopHandler())
 
     async def fake_get_updates():
-        assert notifier.bot_commands == telegram_commands.TELEGRAM_BOT_COMMANDS
+        assert notifier.bot_commands == tg_texts.TELEGRAM_BOT_COMMANDS
         raise RuntimeError("stop after bot command setup")
 
     async def stop_after_failure(delay):
         raise pytest.fail.Exception("stop after first failed polling iteration")
 
     monkeypatch.setattr(poller, "_get_updates", fake_get_updates)
-    monkeypatch.setattr("backend.telegram.commands.asyncio.sleep", stop_after_failure)
+    monkeypatch.setattr("asyncio.sleep", stop_after_failure)
 
     with pytest.raises(pytest.fail.Exception):
         await poller.run()
@@ -2840,7 +2861,7 @@ async def test_poller_does_not_rerun_llm_when_nat_response_send_fails(monkeypatc
         await poller.run()
 
     assert calls == [("nat", "질문", "telegram:123")]
-    assert settled_sleeps == list(telegram_commands.SETTLED_SEND_RETRY_BACKOFF_SECONDS)
+    assert settled_sleeps == list(telegram_notifier_module.SETTLED_SEND_RETRY_BACKOFF_SECONDS)
     # 맨 앞은 진행 메시지 한 건(#260), 그 뒤가 settled 재시도만큼 반복된 답변이다.
     # 진행 메시지가 **한 번뿐**인 것이 이 테스트의 일부다 — update가 재시도됐다면
     # _handle_chat_fallback이 처음부터 다시 돌아 진행 메시지도 매번 새로 나간다. LLM 실패
@@ -2893,8 +2914,8 @@ async def test_poller_does_not_rerun_llm_when_llm_failure_notice_send_fails(monk
         await poller.run()
 
     assert calls == [("nat", "질문", "telegram:123")]
-    assert settled_sleeps == list(telegram_commands.SETTLED_SEND_RETRY_BACKOFF_SECONDS)
-    failure_notice = f"응답 생성 실패: {telegram_commands._short_error(RuntimeError('LLM 장애'))}"
+    assert settled_sleeps == list(telegram_notifier_module.SETTLED_SEND_RETRY_BACKOFF_SECONDS)
+    failure_notice = f"응답 생성 실패: {tg_commands._short_error(RuntimeError('LLM 장애'))}"
     # 진행 메시지는 한 번뿐이고, 그 뒤가 settled 재시도만큼 반복된 실패 통지다.
     assert notifier.messages == [NAT_PROGRESS_MESSAGE] + [failure_notice] * (
         len(settled_sleeps) + 1
@@ -2977,11 +2998,11 @@ async def test_poller_skips_update_after_retry_window(monkeypatch):
     # 5 + 15 + 45 = 65초 > 60초 창. 예산이 실질 10초가 아니라는 회귀 가드다.
     # 상수를 그대로 비교하면 동어반복이라 값 변경을 못 잡는다. 리터럴로 고정한다 (PR #242 리뷰).
     assert clock.sleeps == [5.0, 15.0, 45.0]
-    assert clock.now > telegram_commands.UPDATE_RETRY_WINDOW_SECONDS
+    assert clock.now > tg_poller.UPDATE_RETRY_WINDOW_SECONDS
     assert attempts == [41, 41, 41, 41]
     assert poller.offset == 42
     assert notifier.messages == [
-        f"{telegram_commands.UPDATE_SKIPPED_NOTICE}\n실패한 요청: /alerts off"
+        f"{tg_poller.UPDATE_SKIPPED_NOTICE}\n실패한 요청: /alerts off"
     ]
     assert poller._failures == {}
 
@@ -2995,7 +3016,7 @@ async def test_poller_does_not_spend_poison_budget_on_send_failures(monkeypatch)
 
     class SendFailingHandler:
         async def handle_update(self, update):
-            raise telegram_commands.TelegramSendError("telegram send failed")
+            raise tg_base.TelegramSendError("telegram send failed")
 
     poller = _make_poller(notifier, handler=SendFailingHandler())
     clock = FakePollerClock(stop_after=5)
@@ -3010,7 +3031,7 @@ async def test_poller_does_not_spend_poison_budget_on_send_failures(monkeypatch)
         await poller.run()
 
     # 일반 창(60초)은 이미 지났지만 전송 실패는 더 긴 창을 쓰므로 아직 폐기되지 않는다.
-    assert clock.now > telegram_commands.UPDATE_RETRY_WINDOW_SECONDS
+    assert clock.now > tg_poller.UPDATE_RETRY_WINDOW_SECONDS
     assert poller.offset is None
     assert poller._failures[41].send_failure is True
     assert notifier.messages == []
@@ -3032,7 +3053,7 @@ async def test_poller_retries_when_elapsed_equals_window(monkeypatch):
     clock.install(monkeypatch, poller)
     # 기본 백오프(5/15/45)로는 경과가 창에 정확히 걸리지 않아 경계를 지나친다.
     monkeypatch.setattr(
-        poller, "_retry_delay", lambda: telegram_commands.UPDATE_RETRY_WINDOW_SECONDS
+        poller, "_retry_delay", lambda: tg_poller.UPDATE_RETRY_WINDOW_SECONDS
     )
 
     async def fake_get_updates():
@@ -3045,7 +3066,7 @@ async def test_poller_retries_when_elapsed_equals_window(monkeypatch):
     with pytest.raises(asyncio.CancelledError):
         await poller.run()
 
-    assert clock.now == telegram_commands.UPDATE_RETRY_WINDOW_SECONDS * 2
+    assert clock.now == tg_poller.UPDATE_RETRY_WINDOW_SECONDS * 2
     assert poller.offset is None
     assert poller._failures[41].attempts == 2
     assert notifier.messages == []
@@ -3070,7 +3091,7 @@ async def test_poller_keeps_send_failure_window_after_other_error(monkeypatch):
         async def handle_update(self, update):
             self.calls += 1
             if self.calls <= 3:
-                raise telegram_commands.TelegramSendError("telegram send failed")
+                raise tg_base.TelegramSendError("telegram send failed")
             raise RuntimeError("redis timeout")
 
     handler = FlippingHandler()
@@ -3090,7 +3111,7 @@ async def test_poller_keeps_send_failure_window_after_other_error(monkeypatch):
 
     # 4번째 시도(t=65초)는 비-전송 오류다. 창이 60초로 줄었다면 여기서 폐기됐을 것이다.
     assert handler.calls == 4
-    assert clock.now > telegram_commands.UPDATE_RETRY_WINDOW_SECONDS
+    assert clock.now > tg_poller.UPDATE_RETRY_WINDOW_SECONDS
     assert poller.offset is None
     assert poller._failures[41].send_failure is True
     assert notifier.messages == []
@@ -3111,7 +3132,7 @@ async def test_poller_extends_window_when_send_failure_appears_later(monkeypatch
             self.calls += 1
             if self.calls == 1:
                 raise RuntimeError("redis timeout")
-            raise telegram_commands.TelegramSendError("telegram send failed")
+            raise tg_base.TelegramSendError("telegram send failed")
 
     handler = FlippingHandler()
     poller = _make_poller(notifier, handler=handler)
@@ -3130,7 +3151,7 @@ async def test_poller_extends_window_when_send_failure_appears_later(monkeypatch
 
     # 첫 실패는 일반 오류였지만 이후 전송 실패가 섞였으므로 60초에서 폐기되지 않는다.
     assert handler.calls == 4
-    assert clock.now > telegram_commands.UPDATE_RETRY_WINDOW_SECONDS
+    assert clock.now > tg_poller.UPDATE_RETRY_WINDOW_SECONDS
     assert poller.offset is None
     assert poller._failures[41].send_failure is True
 
@@ -3156,7 +3177,7 @@ async def test_poller_retry_delay_follows_the_newest_failure(monkeypatch):
     clock = FakePollerClock(stop_after=1)
     clock.install(monkeypatch, poller)
     # 41은 이미 오래 재시도 중(45초 간격), 42는 이제 막 실패한다.
-    poller._failures[41] = telegram_commands._UpdateFailure(
+    poller._failures[41] = tg_poller._UpdateFailure(
         first_at=0.0, attempts=8, send_failure=False, first_wall_at=WALL_EPOCH
     )
 
@@ -3187,7 +3208,7 @@ def test_forget_passed_updates_drops_only_what_the_offset_passed():
 
     poller = _make_poller(notifier, handler=NoopHandler())
     for update_id in (40, 41, 42):
-        poller._failures[update_id] = telegram_commands._UpdateFailure(
+        poller._failures[update_id] = tg_poller._UpdateFailure(
             first_at=0.0, attempts=1, send_failure=False, first_wall_at=WALL_EPOCH
         )
 
@@ -3209,7 +3230,7 @@ async def test_poller_eventually_skips_persistent_send_failures(monkeypatch):
 
     class SendFailingHandler:
         async def handle_update(self, update):
-            raise telegram_commands.TelegramSendError("telegram send failed")
+            raise tg_base.TelegramSendError("telegram send failed")
 
     poller = _make_poller(notifier, handler=SendFailingHandler())
     # stop_after는 안전망이다. 창에 상한이 없으면 여기서 끊겨 아래 offset 단언이 실패한다.
@@ -3227,8 +3248,8 @@ async def test_poller_eventually_skips_persistent_send_failures(monkeypatch):
         await poller.run()
 
     assert poller.offset == 42
-    assert clock.now > telegram_commands.SEND_FAILURE_RETRY_WINDOW_SECONDS
-    assert clock.now < telegram_commands.SEND_FAILURE_RETRY_WINDOW_SECONDS * 2
+    assert clock.now > tg_poller.SEND_FAILURE_RETRY_WINDOW_SECONDS
+    assert clock.now < tg_poller.SEND_FAILURE_RETRY_WINDOW_SECONDS * 2
     assert poller._failures == {}
 
 
@@ -3288,7 +3309,7 @@ async def test_poller_stops_the_batch_at_a_poison_update(monkeypatch):
     # 상수를 그대로 비교하면 동어반복이라 값 변경을 못 잡는다. 리터럴로 고정한다 (PR #242 리뷰).
     assert clock.sleeps == [5.0, 15.0, 45.0]
     assert notifier.messages == [
-        f"{telegram_commands.UPDATE_SKIPPED_NOTICE}\n실패한 요청: /alerts off"
+        f"{tg_poller.UPDATE_SKIPPED_NOTICE}\n실패한 요청: /alerts off"
     ]
 
 
@@ -3332,7 +3353,7 @@ async def test_poller_offset_stays_behind_poison_until_retries_exhausted(monkeyp
     assert handled == []
     assert poller.offset is None
     assert poller._failures[41].attempts == 2
-    assert clock.now < telegram_commands.UPDATE_RETRY_WINDOW_SECONDS
+    assert clock.now < tg_poller.UPDATE_RETRY_WINDOW_SECONDS
     assert notifier.messages == []
 
 
@@ -3418,8 +3439,8 @@ async def test_poller_skips_poison_updates_one_at_a_time(monkeypatch):
     # 41의 예산(4회)이 소진되기 전에는 42를 건드리지 않는다.
     assert attempted == [41, 41, 41, 41, 42, 42, 42, 42]
     assert notifier.messages == [
-        f"{telegram_commands.UPDATE_SKIPPED_NOTICE}\n실패한 요청: /alerts off",
-        f"{telegram_commands.UPDATE_SKIPPED_NOTICE}\n실패한 요청: /help",
+        f"{tg_poller.UPDATE_SKIPPED_NOTICE}\n실패한 요청: /alerts off",
+        f"{tg_poller.UPDATE_SKIPPED_NOTICE}\n실패한 요청: /help",
     ]
 
 
@@ -3445,7 +3466,7 @@ async def test_skip_notice_merges_updates_into_one_message():
     await poller._notify_updates_skipped(_poison_batch())
 
     assert notifier.messages == [
-        f"{telegram_commands.UPDATE_SKIPPED_NOTICE}\n실패한 요청: /alerts off, /help"
+        f"{tg_poller.UPDATE_SKIPPED_NOTICE}\n실패한 요청: /alerts off, /help"
     ]
 
 
@@ -3544,7 +3565,7 @@ async def test_poller_skip_notice_omits_other_chat_labels_in_mixed_batch(monkeyp
         await poller.run()
 
     assert notifier.messages == [
-        f"{telegram_commands.UPDATE_SKIPPED_NOTICE}\n실패한 요청: /alerts off"
+        f"{tg_poller.UPDATE_SKIPPED_NOTICE}\n실패한 요청: /alerts off"
     ]
 
 
@@ -3604,11 +3625,11 @@ def test_poller_defaults_to_redis_state_store(monkeypatch):
     """
     notifier = FakeNotifier()
     client = object()
-    monkeypatch.setattr(telegram_commands, "create_redis_client", lambda: client)
+    monkeypatch.setattr("backend.telegram.handlers.base.create_redis_client", lambda: client)
 
     poller = TelegramCommandPoller(notifier=notifier, handler=TelegramCommandHandler(notifier=notifier))
 
-    assert isinstance(poller.state_store, telegram_commands.RedisTelegramPollerStore)
+    assert isinstance(poller.state_store, tg_base.RedisTelegramPollerStore)
     assert poller.state_store.redis is client
 
 
@@ -3765,7 +3786,7 @@ async def test_poison_budget_survives_restarts_faster_than_the_window(monkeypatc
     assert processes == 4
     assert poller.offset == 43
     assert notifier.messages == [
-        f"{telegram_commands.UPDATE_SKIPPED_NOTICE}\n실패한 요청: /alerts off"
+        f"{tg_poller.UPDATE_SKIPPED_NOTICE}\n실패한 요청: /alerts off"
     ]
     # 폐기된 예산은 저장소에서도 사라져야 한다. 남으면 다음 재시작이 낡은 앵커를 되살린다.
     assert store.state == TelegramPollerState(offset=43)
@@ -3837,7 +3858,7 @@ async def test_send_failure_window_survives_a_restart(monkeypatch):
 
         async def handle_update(self, update):
             if len(processes) == 1:
-                raise telegram_commands.TelegramSendError("telegram send failed")
+                raise tg_base.TelegramSendError("telegram send failed")
             raise RuntimeError("redis unavailable")
 
     def run_process(clock):
@@ -4389,7 +4410,7 @@ async def test_watch_list_waits_between_quote_calls(monkeypatch):
     async def fake_sleep(seconds):
         events.append(("sleep", seconds))
 
-    monkeypatch.setattr("backend.telegram.commands.asyncio.sleep", fake_sleep)
+    monkeypatch.setattr("asyncio.sleep", fake_sleep)
 
     handler = TelegramCommandHandler(
         notifier=notifier,
@@ -4493,7 +4514,7 @@ async def test_help_and_bot_menu_include_catalysts_command(monkeypatch):
     await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/help"}})
 
     assert "/catalysts <종목명> - 예정 촉매 이벤트 조회" in notifier.messages[-1]
-    assert "catalysts" in [command["command"] for command in telegram_commands.TELEGRAM_BOT_COMMANDS]
+    assert "catalysts" in [command["command"] for command in tg_texts.TELEGRAM_BOT_COMMANDS]
 
 # ── #260: 추론 과정 표시 (진행 메시지 + 응답 근거 각주) ──────────────────────
 
@@ -5011,20 +5032,20 @@ def test_settled_send_retry_is_bounded():
     상한은 백오프 합이 아니라 SETTLED_SEND_TIMEOUT_SECONDS다. 시도마다 HTTP 왕복이
     붙으므로(httpx 타임아웃 10초) 백오프 합만 재면 실제 최악을 40초 놓친다 (PR #253 리뷰).
     """
-    bound = telegram_commands.SETTLED_SEND_TIMEOUT_SECONDS
-    expiry = telegram_commands.ORDER_EXPIRES_AFTER.total_seconds()
+    bound = telegram_notifier_module.SETTLED_SEND_TIMEOUT_SECONDS
+    expiry = tg_orders.ORDER_EXPIRES_AFTER.total_seconds()
 
     # 만료 창의 절반은 사용자가 확인 버튼을 누를 시간으로 남는다.
     assert bound * 2 <= expiry
 
     # 백오프 합이 상한을 넘으면 429 흡수가 상한에 잘려 재시도의 목적을 잃는다.
-    assert sum(telegram_commands.SETTLED_SEND_RETRY_BACKOFF_SECONDS) < bound
+    assert sum(telegram_notifier_module.SETTLED_SEND_RETRY_BACKOFF_SECONDS) < bound
 
     # 상한이 없을 때의 최악(무응답 4시도 × httpx 10초 + 백오프)은 53초다. 만료 창을 넘지는
     # 않지만 사용자에게 7초만 남기므로, 위의 "절반은 남긴다" 보장이 무너진다.
     # 벽시계 상한을 두는 이유가 이것이다.
-    attempts = len(telegram_commands.SETTLED_SEND_RETRY_BACKOFF_SECONDS) + 1
-    unbounded_worst = sum(telegram_commands.SETTLED_SEND_RETRY_BACKOFF_SECONDS) + 10.0 * attempts
+    attempts = len(telegram_notifier_module.SETTLED_SEND_RETRY_BACKOFF_SECONDS) + 1
+    unbounded_worst = sum(telegram_notifier_module.SETTLED_SEND_RETRY_BACKOFF_SECONDS) + 10.0 * attempts
     assert unbounded_worst > expiry / 2
     assert expiry - unbounded_worst < 10.0
 
@@ -5046,8 +5067,8 @@ async def test_settled_send_gives_up_at_the_wall_clock_bound(monkeypatch, caplog
 
     notifier = HangingNotifier()
     handler = TelegramCommandHandler(notifier=notifier)
-    # 상한을 읽는 곳은 telegram_notifier다 (PR #327 리뷰). telegram_commands는 그 이름을
-    # 다시 내보내기만 하므로, 여기를 패치하면 상한은 실제 20초로 남고 테스트는 통과한 채
+    # 상한을 읽는 곳은 telegram_notifier다 (PR #327 리뷰). 핸들러 모듈이 그 이름을
+    # 다시 내보내던 시절에는 거기를 패치하면 상한은 실제 20초로 남고 테스트는 통과한 채
     # 20초를 벽시계로 문다 — 아래 elapsed 단언이 그 어긋남을 실패로 만든다.
     monkeypatch.setattr(telegram_notifier_module, "SETTLED_SEND_TIMEOUT_SECONDS", 0.05)
 
@@ -5108,7 +5129,7 @@ async def test_buy_prompt_send_failure_does_not_ask_poller_to_retry(monkeypatch)
         {"message": {"chat": {"id": 123}, "text": "/buy 삼성전자 10"}}
     )
 
-    assert sleeps == list(telegram_commands.SETTLED_SEND_RETRY_BACKOFF_SECONDS)
+    assert sleeps == list(telegram_notifier_module.SETTLED_SEND_RETRY_BACKOFF_SECONDS)
     assert len(notifier.messages) == len(sleeps) + 1
     assert all("삼성전자 매수 주문 확인" in message for message in notifier.messages)
     # 프롬프트가 끝내 안 나갔으므로 대기 주문을 남기지 않는다. 남기면 사용자는 존재를
@@ -5131,7 +5152,7 @@ async def test_buy_prompt_send_recovers_within_settled_retry(monkeypatch):
         {"message": {"chat": {"id": 123}, "text": "/buy 삼성전자 10"}}
     )
 
-    assert sleeps == list(telegram_commands.SETTLED_SEND_RETRY_BACKOFF_SECONDS[:2])
+    assert sleeps == list(telegram_notifier_module.SETTLED_SEND_RETRY_BACKOFF_SECONDS[:2])
     assert len(notifier.messages) == 3
     assert notifier.reply_markups[-1]["inline_keyboard"][0][0]["text"] == "✅ 확정"
 
@@ -5204,7 +5225,7 @@ async def test_confirm_unclear_result_send_failure_does_not_ask_poller_to_retry(
     await handler.handle_update(_text_confirm())
 
     assert len(gateway.orders) == 1
-    assert sleeps == list(telegram_commands.SETTLED_SEND_RETRY_BACKOFF_SECONDS)
+    assert sleeps == list(telegram_notifier_module.SETTLED_SEND_RETRY_BACKOFF_SECONDS)
     assert len(notifier.messages) == len(sleeps) + 1
     assert all(
         message.startswith("주문 실패 또는 상태 확인 필요: broker timeout")
@@ -5232,7 +5253,7 @@ async def test_confirm_403_keeps_update_retryable_when_order_is_restored():
     notifier.messages.clear()
     notifier.send_text_result = False
 
-    with pytest.raises(telegram_commands.TelegramSendError):
+    with pytest.raises(tg_base.TelegramSendError):
         await handler.handle_update(_text_confirm())
 
     # 인플레이스 재시도 없이 한 번만 시도하고 폴러에 넘긴다.
@@ -5323,7 +5344,7 @@ async def test_earnings_failure_notice_send_failure_does_not_raise_for_retry(mon
         {"message": {"chat": {"id": 123}, "text": "/earnings 삼성전자"}}
     )
 
-    notice = f"조회 실패: {telegram_commands._short_error(RuntimeError('LLM 장애'))}"
+    notice = f"조회 실패: {tg_commands._short_error(RuntimeError('LLM 장애'))}"
     assert len(llm_calls) == 1
     assert notifier.messages == [notice] * (len(sleeps) + 1)
 
@@ -5342,14 +5363,14 @@ async def test_advise_failure_notice_send_failure_does_not_raise_for_retry(monke
         assist_calls.append(trigger.stock)
         raise RuntimeError("냉각 저장 실패")
 
-    monkeypatch.setattr(telegram_commands, "run_order_assist", failing_order_assist)
+    monkeypatch.setattr("backend.telegram.handlers.orders.run_order_assist", failing_order_assist)
     notifier = FakeNotifier(send_text_result=False)
     handler = TelegramCommandHandler(notifier=notifier)
     sleeps = _capture_settled_sleeps(monkeypatch, handler)
 
     await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/advise 삼성전자"}})
 
-    notice = f"주문 보조 실패: {telegram_commands._short_error(RuntimeError('냉각 저장 실패'))}"
+    notice = f"주문 보조 실패: {tg_commands._short_error(RuntimeError('냉각 저장 실패'))}"
     assert assist_calls == ["삼성전자"]
     assert notifier.messages == [NAT_PROGRESS_MESSAGE] + [notice] * (len(sleeps) + 1)
 
@@ -5378,7 +5399,7 @@ async def test_order_prepare_does_not_convert_send_failure_into_user_message():
         now_factory=lambda: datetime(2026, 5, 20, 10, 0, tzinfo=KST),
     )
 
-    with pytest.raises(telegram_commands.TelegramSendError):
+    with pytest.raises(tg_base.TelegramSendError):
         await handler.handle_update(
             {"message": {"chat": {"id": 123}, "text": "/buy 삼성전자 10"}}
         )
@@ -5487,12 +5508,12 @@ async def test_market_callback_token_survives_a_failed_send(monkeypatch):
     handler = TelegramCommandHandler(notifier=notifier, mcp_runner=mcp_runner)
     handler.market_callbacks["tok"] = ("123", "삼성전자")
 
-    with pytest.raises(telegram_commands.TelegramSendError):
+    with pytest.raises(tg_base.TelegramSendError):
         await handler.handle_update(
             {
                 "callback_query": {
                     "id": "cb-1",
-                    "data": f"{telegram_commands.MARKET_QUOTE_CALLBACK}:tok",
+                    "data": f"{tg_texts.MARKET_QUOTE_CALLBACK}:tok",
                     "message": {"chat": {"id": 123}},
                 }
             }
@@ -5506,7 +5527,7 @@ async def test_market_callback_token_survives_a_failed_send(monkeypatch):
         {
             "callback_query": {
                 "id": "cb-1",
-                "data": f"{telegram_commands.MARKET_QUOTE_CALLBACK}:tok",
+                "data": f"{tg_texts.MARKET_QUOTE_CALLBACK}:tok",
                 "message": {"chat": {"id": 123}},
             }
         }
@@ -5543,7 +5564,7 @@ async def test_pending_order_is_stamped_at_store_time_not_command_time():
     order = _orders(handler)["123"]
     # 명령 수신 시각(10:00:00)이었다면 만료가 10:01:00 — 이미 지난 뒤다.
     assert order.created_at > datetime(2026, 5, 20, 10, 0, 0, tzinfo=KST)
-    expires_at = order.created_at + telegram_commands.ORDER_EXPIRES_AFTER
+    expires_at = order.created_at + tg_orders.ORDER_EXPIRES_AFTER
     assert expires_at > clock[0]  # 저장 순간엔 항상 미래여야 한다
     assert f"이 주문은 {expires_at:%H:%M:%S}에 만료됩니다." in notifier.messages[-1]
 
@@ -5554,9 +5575,9 @@ def test_get_updates_bounds_the_batch_size():
     상수 invariant만 본다 — limit이 payload에 실제로 실리는지는
     test_get_updates_sends_the_batch_limit이 검사한다 (PR #253 3차 리뷰).
     """
-    assert telegram_commands.GET_UPDATES_LIMIT <= 10
+    assert tg_poller.GET_UPDATES_LIMIT <= 10
     worst_case = (
-        telegram_commands.GET_UPDATES_LIMIT * telegram_commands.SETTLED_SEND_TIMEOUT_SECONDS
+        tg_poller.GET_UPDATES_LIMIT * telegram_notifier_module.SETTLED_SEND_TIMEOUT_SECONDS
     )
     assert worst_case <= 200.0
 
@@ -5578,7 +5599,7 @@ async def test_get_updates_sends_the_batch_limit(mock_httpx):
 
     assert await poller._get_updates() == []
     (_, payload), = recorded.calls
-    assert payload["limit"] == telegram_commands.GET_UPDATES_LIMIT
+    assert payload["limit"] == tg_poller.GET_UPDATES_LIMIT
     # 롱폴링 대기(payload의 timeout)보다 클라이언트 타임아웃이 길어야 update가 없는 정상
     # 응답을 타임아웃 오류로 읽지 않는다. 클라이언트 생성 인자는 요청 객체에 남지 않으므로
     # 따로 고정한다 (#360).
@@ -5592,10 +5613,10 @@ _SEND_ERROR_CATCHING_NAMES = frozenset(
 )
 
 
-def _try_blocks_missing_send_failure_reraise(source: str | None = None) -> list[int]:
+def _try_blocks_missing_send_failure_reraise(source: str) -> list[int]:
     """본문에 _send_text_or_raise가 있는데 TelegramSendError를 재던지지 않는 try의 행 번호.
 
-    source를 주면 그 소스를, 없으면 telegram_commands.py를 본다. 파라미터화한 이유는
+    소스 하나를 받는다(실제 핸들러 전체 검사는 ``_handler_send_failure_violations``). 이렇게 둔 이유는
     test_the_static_send_failure_guard_actually_detects_a_violation이 판정 로직을 다시
     구현하는 대신 이 함수를 직접 부르게 하기 위해서다 — 인라인 재구현은 가드 본체를
     무력화해도 초록으로 남았다 (PR #253 3차 리뷰).
@@ -5643,11 +5664,7 @@ def _try_blocks_missing_send_failure_reraise(source: str | None = None) -> list[
             )
         return True
 
-    tree = ast.parse(
-        source
-        if source is not None
-        else Path(telegram_commands.__file__).read_text(encoding="utf-8")
-    )
+    tree = ast.parse(source)
     return [
         node.lineno
         for node in ast.walk(tree)
@@ -5655,6 +5672,20 @@ def _try_blocks_missing_send_failure_reraise(source: str | None = None) -> list[
         and calls_retryable_send(node.body)
         and not effective_handler_reraises(node)
     ]
+
+
+def _handler_send_failure_violations() -> list[str]:
+    """핸들러 클래스를 이루는 모듈 전부에 위 검사를 돌린다(모듈은 MRO에서 모은다)."""
+    modules = {
+        sys.modules[klass.__module__]
+        for klass in TelegramCommandHandler.__mro__
+        if klass.__module__.startswith("backend.telegram")
+    }
+    violations: list[str] = []
+    for module in sorted(modules, key=lambda m: m.__name__):
+        source = Path(cast(str, module.__file__)).read_text(encoding="utf-8")
+        violations += [f"{module.__name__}:{line}" for line in _try_blocks_missing_send_failure_reraise(source)]
+    return violations
 
 
 def test_every_try_containing_a_retryable_send_reraises_it():
@@ -5672,7 +5703,7 @@ def test_every_try_containing_a_retryable_send_reraises_it():
     "마지막 settled 전송 이후에 실패했다"로 의미가 미끄러지는 순서 의존성도 없다
     (PR #253 2차 리뷰).
     """
-    assert _try_blocks_missing_send_failure_reraise() == []
+    assert _handler_send_failure_violations() == []
 
 
 def test_the_static_send_failure_guard_actually_detects_a_violation():
@@ -5777,7 +5808,7 @@ async def test_poller_keeps_polling_when_state_store_hangs(monkeypatch, caplog):
         async def save(self, state: TelegramPollerState) -> None:
             await asyncio.Event().wait()
 
-    monkeypatch.setattr(telegram_commands, "STATE_STORE_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr("backend.telegram.poller.STATE_STORE_TIMEOUT_SECONDS", 0.01)
     poller = _make_poller(notifier, handler=NoopHandler(), state_store=HangingStore())
 
     async def fake_get_updates():
@@ -5828,7 +5859,7 @@ class _FillSendBlocker(FakeNotifier):
 async def test_confirmed_order_is_not_reexecuted_when_restart_lands_in_the_fill_send(monkeypatch):
     """체결 성공 후 결과 전송 도중 취소돼도 재시작 뒤 같은 update가 재실행되지 않는다 (#269).
 
-    창의 정체: place_order 성공(telegram_commands.py의 _handle_confirm)과 offset 영속화
+    창의 정체: place_order 성공(handlers/orders.py의 _handle_confirm)과 offset 영속화
     사이에 결과 전송이 들어앉아 있었다. 그 사이 SIGTERM이 오면 offset이 전진하지 못한 채
     죽고, Telegram이 같은 update를 재배달하며, claim(GETDEL)이 이미 주문을 소비했으므로
     재실행은 "확정할 대기 주문이 없습니다"로 끝났다 — 체결된 주문을 미체결로 오표시했다.
@@ -5967,7 +5998,7 @@ async def test_settled_update_is_not_retried_when_the_handler_fails_after_settli
         async def handle_update(self, update):
             handled.append(update["update_id"])
             if update["update_id"] == 41:
-                hook = telegram_commands._update_settled_hook.get()
+                hook = tg_base._update_settled_hook.get()
                 assert hook is not None
                 await hook()
                 # 확정이 돌아온 시점에 이미 저장돼 있다 — 이 뒤에 죽어도 재배달되지 않는다.
@@ -6004,7 +6035,7 @@ async def test_settled_update_is_not_retried_when_the_handler_fails_after_settli
     # 41은 핸들러 안에서 한 번, 42는 배치 루프에서 한 번 — 41을 두 번 쓰지 않는다.
     assert store.saved_offsets == [42, 43]
     # 폴러가 handle_update를 부르는 동안에만 보인다.
-    assert telegram_commands._update_settled_hook.get() is None
+    assert tg_base._update_settled_hook.get() is None
 
 
 # ---------------------------------------------------------------------------
@@ -6106,7 +6137,7 @@ async def test_reexecuted_text_confirm_does_not_execute_a_pending_order_created_
     assert [order.quantity for order in gateway.orders] == [1]
     kept = await pending_orders.get("123")
     assert kept is not None and kept.callback_token == "token-b"
-    assert second_notifier.messages == [telegram_commands.CONFIRM_REPLAY_REFUSED_TEXT]
+    assert second_notifier.messages == [tg_texts.CONFIRM_REPLAY_REFUSED_TEXT]
 
 
 @pytest.mark.asyncio
@@ -6125,7 +6156,7 @@ async def test_in_process_retry_of_a_text_confirm_is_not_refused():
     handler = _replay_handler(notifier, gateway, pending_orders, now)
     update = _text_confirm(update_id=41)
 
-    with pytest.raises(telegram_commands.TelegramSendError):
+    with pytest.raises(tg_base.TelegramSendError):
         await handler.handle_update(update)
     await handler.handle_update(update)
 
@@ -6163,7 +6194,7 @@ async def test_redelivered_confirm_button_does_not_execute_a_pending_order_creat
     kept = await pending_orders.get("123")
     assert kept is not None and kept.callback_token == "token-b"
     assert second_notifier.callback_answers == [
-        ("cb-a", telegram_commands.ORDER_STALE_CALLBACK_TEXT)
+        ("cb-a", tg_texts.ORDER_STALE_CALLBACK_TEXT)
     ]
 
 
@@ -6302,7 +6333,7 @@ async def test_late_text_confirm_does_not_execute_a_pending_order_created_after_
 
     assert gateway.orders == []
     assert _orders(handler)["123"] == order_b
-    assert notifier.messages[-1] == telegram_commands.CONFIRM_AUTO_PROPOSAL_BUTTON_ONLY_TEXT
+    assert notifier.messages[-1] == tg_texts.CONFIRM_AUTO_PROPOSAL_BUTTON_ONLY_TEXT
 
     # 5) B의 확정 버튼은 B를 실행한다.
     await handler.handle_update(_confirm_button("token-b"))
@@ -6334,7 +6365,7 @@ async def test_text_confirm_not_after_the_prompt_is_refused_and_keeps_the_order(
 
     assert gateway.orders == []
     assert "123" in _orders(handler)
-    assert notifier.messages[-1] == telegram_commands.CONFIRM_BEFORE_PROMPT_TEXT
+    assert notifier.messages[-1] == tg_texts.CONFIRM_BEFORE_PROMPT_TEXT
 
 
 class _PromptIdFailingStore(InMemoryPendingOrderStore):
@@ -6376,7 +6407,7 @@ async def test_text_confirm_does_not_execute_an_order_whose_prompt_id_is_unknown
 
     assert gateway.orders == []
     assert await pending_orders.has("123")
-    assert notifier.messages[-1] == telegram_commands.CONFIRM_PROMPT_UNKNOWN_TEXT
+    assert notifier.messages[-1] == tg_texts.CONFIRM_PROMPT_UNKNOWN_TEXT
 
 
 @pytest.mark.asyncio
@@ -6394,7 +6425,7 @@ async def test_text_confirm_without_a_message_id_is_not_executed():
 
     assert gateway.orders == []
     assert "123" in _orders(handler)
-    assert notifier.messages[-1] == telegram_commands.CONFIRM_PROMPT_UNKNOWN_TEXT
+    assert notifier.messages[-1] == tg_texts.CONFIRM_PROMPT_UNKNOWN_TEXT
 
 
 @pytest.mark.asyncio
@@ -6475,7 +6506,7 @@ async def test_text_confirm_in_the_window_before_the_prompt_id_is_recorded_is_no
 
     assert gateway.orders == []
     assert _orders(handler)["123"].prompt_message_id is None
-    assert notifier.messages[-1] == telegram_commands.CONFIRM_AUTO_PROPOSAL_BUTTON_ONLY_TEXT
+    assert notifier.messages[-1] == tg_texts.CONFIRM_AUTO_PROPOSAL_BUTTON_ONLY_TEXT
 
     notifier.release_prompt.set()
     await asyncio.wait_for(proposal, timeout=5.0)
@@ -6484,7 +6515,7 @@ async def test_text_confirm_in_the_window_before_the_prompt_id_is_recorded_is_no
     await handler.handle_update(_text_confirm(message_id=notifier.next_user_message_id()))
 
     assert gateway.orders == []
-    assert notifier.messages[-1] == telegram_commands.CONFIRM_AUTO_PROPOSAL_BUTTON_ONLY_TEXT
+    assert notifier.messages[-1] == tg_texts.CONFIRM_AUTO_PROPOSAL_BUTTON_ONLY_TEXT
 
     await handler.handle_update(_confirm_button("token-b"))
 
@@ -6542,7 +6573,7 @@ async def test_text_confirm_released_from_the_offline_queue_does_not_execute_an_
 
     assert gateway.orders == []
     assert _orders(handler)["123"] == order_b
-    assert notifier.messages[-1] == telegram_commands.CONFIRM_AUTO_PROPOSAL_BUTTON_ONLY_TEXT
+    assert notifier.messages[-1] == tg_texts.CONFIRM_AUTO_PROPOSAL_BUTTON_ONLY_TEXT
 
     # 4) B는 B의 버튼으로 확정된다.
     await handler.handle_update(_confirm_button("token-b"))
@@ -6610,7 +6641,7 @@ async def test_text_confirm_on_an_auto_proposal_is_refused_regardless_of_the_pro
 
     assert gateway.orders == []
     assert await pending_orders.has("123")
-    assert notifier.messages == [telegram_commands.CONFIRM_AUTO_PROPOSAL_BUTTON_ONLY_TEXT]
+    assert notifier.messages == [tg_texts.CONFIRM_AUTO_PROPOSAL_BUTTON_ONLY_TEXT]
 
 
 @pytest.mark.asyncio
@@ -6638,9 +6669,9 @@ async def test_confirm_button_is_not_gated_by_the_order_origin():
 @pytest.mark.parametrize(
     "text",
     [
-        telegram_commands.PENDING_ORDER_CONFLICT_TEXT,
+        tg_texts.PENDING_ORDER_CONFLICT_TEXT,
         order_assist_module.CONFLICT_MESSAGE,
-        telegram_commands.CONFIRM_REPLAY_REFUSED_TEXT,
+        tg_texts.CONFIRM_REPLAY_REFUSED_TEXT,
     ],
     ids=["order_conflict", "advise_conflict", "confirm_replay"],
 )
@@ -6668,7 +6699,7 @@ async def test_new_order_blocked_by_an_auto_proposal_is_told_to_use_the_button()
 
     await handler.handle_update(_buy_update(notifier))
 
-    assert notifier.messages == [telegram_commands.PENDING_ORDER_CONFLICT_TEXT]
+    assert notifier.messages == [tg_texts.PENDING_ORDER_CONFLICT_TEXT]
     assert _orders(handler)["123"].callback_token == "token-auto"
 
 
@@ -6764,7 +6795,7 @@ def test_stock_not_found_marker_matches_the_stock_master_error():
     /buy KODEX 200 10이 다시 주문 준비 실패로 끝난다(잘못된 주문이 나가는 쪽으로는 틀리지 않는다).
     """
     source = _STOCK_MASTER_JS_PATH.read_text(encoding="utf-8")
-    assert telegram_commands.STOCK_NOT_FOUND_ERROR_MARKER in source
+    assert tg_base.STOCK_NOT_FOUND_ERROR_MARKER in source
 
 
 def test_resolve_stock_code_tool_error_carries_the_stock_master_message():
@@ -6797,7 +6828,7 @@ def test_order_argument_readings_offer_both_readings_only_when_the_last_two_toke
     이 테스트가 잡는 mutation: 끝 두 토큰이 정수일 때 시장가 해석을 빼는 것(예전 파서).
     """
     handler = TelegramCommandHandler(notifier=FakeNotifier())
-    reading = telegram_commands.OrderReading
+    reading = tg_base.OrderReading
 
     assert handler._order_argument_readings("KODEX 200 10") == [
         reading("KODEX", 200, 10, "LIMIT"),
@@ -7006,7 +7037,7 @@ def test_order_argument_readings_skip_the_market_reading_only_for_a_stock_code_n
     해석을 그대로 둔다. 코드 뒤에 토큰이 더 붙은 이름 자리도 코드 하나가 아니다.
     """
     handler = TelegramCommandHandler(notifier=FakeNotifier())
-    reading = telegram_commands.OrderReading
+    reading = tg_base.OrderReading
 
     assert handler._order_argument_readings("005930 10 75000") == [
         reading("005930", 10, 75000, "LIMIT")
@@ -7032,7 +7063,7 @@ def test_no_master_name_is_a_stock_code_followed_by_a_number():
             parts = str(label).split()
             if (
                 len(parts) == 2
-                and telegram_commands._looks_like_stock_code(parts[0])
+                and tg_orders._looks_like_stock_code(parts[0])
                 and parts[1].replace(",", "").isdigit()
             ):
                 offenders.append(label)

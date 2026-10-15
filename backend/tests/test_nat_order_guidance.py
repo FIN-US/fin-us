@@ -3,7 +3,7 @@
 #380으로 채팅 ``trading_agent``·``monitoring_agent``는 주문을 내지 않고, 주문 요청을 받으면
 텔레그램 ``/buy``·``/sell``·``/advise`` 명령을 안내한다. 안내 문구는
 ``agents/configs/prompts/react_kis_chat.md``에 있고, 문법의 주인은 이 저장소의
-``backend/telegram/commands.py``다. 두 곳이 따로 움직이면 에이전트가 **파서가 다르게 읽는
+``backend/telegram/handlers/orders.py``(자연어·슬래시 주문 파싱)다. 두 곳이 따로 움직이면 에이전트가 **파서가 다르게 읽는
 명령**을 사용자에게 알려 주게 된다 — 확정 화면에서 잡히긴 하지만 사용자는 엉뚱한 주문
 확인을 받는다.
 
@@ -27,13 +27,14 @@ from typing import Any
 
 import pytest
 
-from backend.telegram.commands import (
+from backend.telegram.commands import TelegramCommandHandler
+
+from backend.telegram.handlers.base import OrderReading, _telegram_command_parts
+
+from backend.telegram.handlers.texts import (
     ADVISE_COMMAND_HELP,
     BUY_COMMAND_HELP,
     SELL_COMMAND_HELP,
-    OrderReading,
-    TelegramCommandHandler,
-    _telegram_command_parts,
 )
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
