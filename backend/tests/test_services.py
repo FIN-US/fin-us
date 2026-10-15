@@ -1990,9 +1990,8 @@ def test_no_bypass_of_llm_chat_masking_layer():
        (_llm_gemini_chat 등)를 추가한다"와 "다른 모듈에서 AsyncOpenAI(...)를 직접
        만들어 부른다".
 
-       2026-08 시점 실제 위치(직접 grep으로 확인): services.py:758 AsyncOpenAI(
-       -> _llm_openai_chat, 752-767행), 774 AsyncAnthropic(-> _llm_anthropic_chat,
-       768-786행), 788 AsyncOpenAI(-> _llm_ollama_chat, 787-811행). 10·11행의
+       현재 생성자는 _llm_openai_chat·_llm_ollama_chat(AsyncOpenAI)과
+       _llm_anthropic_chat(AsyncAnthropic) 안에만 있다. 모듈 상단의
        `from openai import AsyncOpenAI` 같은 import 문은 ast.Name이 아니라 alias
        노드라 참조로 집계되지 않는다.
 

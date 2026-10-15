@@ -448,6 +448,6 @@ grep '^\[kis-req\]' kis-req.log | sort -t= -k2 \
 
 마지막 행이 중요하다. 목록(`EGW00201`/`EGW00133`/`EGW00215`) 밖의 유량 제한 코드가 관측되면
 `mcp-trading/kis-rate-limit.js`의 `KIS_RATE_LIMIT_MSG_CODES`에 추가한다. 그 목록이 완전하다는
-보장이 없어서(공식 `msg_cd` FAQ 접근 실패 — `docs/alnum-stock-code.md:495`)
+보장이 없어서(공식 `msg_cd` FAQ 접근 실패 — `docs/alnum-stock-code.md` 4.3절)
 `msg1`의 "초당 거래건수" 문구를 두 번째 판정 경로로 함께 두었다. 실측에서 나온 코드는
 그 목록을 실제 관측으로 채우는 값이다.

@@ -83,7 +83,7 @@ test("submitOrder: a markSucceeded (ledger write) failure after a successful KIS
 //
 // Caveat noted for the PR body, not fixed here: markSucceeded failing leaves the
 // original reservedAt/expiresAt untouched, so this only blocks a retry for whatever
-// remains of the original TTL window (order-dedup.js:80). A retry after the window
+// remains of the original TTL window (order-dedup.js reserve()). A retry after the window
 // fully elapses still duplicates — that is pre-existing dedup design, not new here.
 test("submitOrder: after a markSucceeded failure, the ledger entry stays in place (in_flight) so a retried reserve() is still blocked as a duplicate within the TTL window", async (t) => {
   const store = new OrderDedupStore({ filePath: tempDedupLedgerPath(t), ttlMs: 60_000, now: () => 1_000 });
@@ -228,7 +228,7 @@ test("submitOrder: a non-Error thrown by markSucceeded (e.g. a plain string) doe
 // Mutation this catches: calling release() after a successful markSucceeded, which
 // releases the dedup guard while the order is already confirmed live in KIS. If the guard
 // is released, a retried order for the same key would pass dedup and produce a duplicate
-// fill. The comment at order-submit.js:35 spells out exactly this risk; this test pins it.
+// fill. The comment in submitOrder()'s markSucceeded() catch spells out exactly this risk; this test pins it.
 test("submitOrder: release()는 markSucceeded가 성공한 경로에서 호출되지 않는다 — 해제하면 재시도가 통과해 중복 주문이 나간다", async (t) => {
   const releaseCalls = [];
   const store = {

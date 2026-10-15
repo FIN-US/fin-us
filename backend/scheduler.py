@@ -248,7 +248,7 @@ def extract_stocks_from_balance(balance_text: str) -> list[str]:
 # 상한")를 매칭 대상에 넣지 않아도 모든 현재·미래 사유를 잡는다. 사유별 문구까지
 # 매칭하면 새 사유가 추가될 때마다 이 목록도 함께 고쳐야 해서 더 잘 깨진다.
 #
-# 판별은 "조회가 중단되어" 하나로만 한다. "[안내]"는 mcp-trading/index.js:570의
+# 판별은 "조회가 중단되어" 하나로만 한다. "[안내]"는 mcp-trading/index.js formatPaginationTruncationNote()의
 # 모의투자 실현손익 안내와도 공유하는 표지라 get_balance 밖에서도 등장할 수 있어
 # 판별력이 없고, 실제 discriminator는 잘림 문구에만 존재하는 이 접미사다. 고정할
 # 리터럴이 하나로 줄어 아래 결합 테스트도 이 한 줄만 지키면 된다.
@@ -261,7 +261,7 @@ def extract_stocks_from_balance(balance_text: str) -> list[str]:
 _BALANCE_TRUNCATION_MARKER = "조회가 중단되어"
 
 # balance.js formatBalanceReport()가 보유 종목 섹션을 구분하는 헤더 리터럴.
-# balance.js:273-274를 보면, 보유 종목이 0건이어도 이 마커와 "보유 종목이 없습니다."를
+# 이 함수는 보유 종목이 0건이어도 이 마커와 "보유 종목이 없습니다."를
 # 항상 출력한다. 따라서 이 마커가 없다는 것은 "보유 0건"이 아니라 "응답을 읽지 못함"이다.
 # run_mcp_tool은 MCP content가 비면 예외 대신 빈 문자열을 반환하므로(services.py),
 # 이 경로는 실재한다. _sync_portfolio_from_balance가 이 마커 부재를 계약 위반으로
@@ -319,7 +319,7 @@ _AVG_PRICE_RE = re.compile(r"평단가\s+([\d,]+(?:\.\d+)?)원")
 # ---------------------------------------------------------------------------
 #
 # get_balance(TTTC8434R)의 텍스트 리포트에는 현재가가 없다. 반면 실현손익 조회의
-# 리포트는 종목 줄 바로 아래에 "현재가 71,200원"을 낸다(balance-rlz-pl-report.js:54-55).
+# 리포트는 종목 줄 바로 아래에 "현재가 71,200원"을 낸다(balance-rlz-pl-report.js formatBalanceRlzPlReport()).
 # 이슈가 검토한 다른 선택지는 둘 다 막혀 있다: 옵션 A(get_balance output1에 현재가
 # 필드가 있는지 실계좌 실측)는 계좌 없이 확인할 수 없고, 옵션 B(종목마다
 # get_stock_quote, 호출당 1.1초 대기)는 유지보수자가 거부했다.
@@ -332,7 +332,7 @@ _AVG_PRICE_RE = re.compile(r"평단가\s+([\d,]+(?:\.\d+)?)원")
 #
 # balance.js의 "[보유 종목 리스트]"와 **의미가 다르다**: 저쪽은 0건에도 마커를 항상
 # 내므로 마커 부재가 곧 계약 위반이지만, 이쪽은 rows.length === 0이면 마커 자체를
-# 내지 않고 "- 보유 종목이 없습니다."만 낸다(balance-rlz-pl-report.js:38-48).
+# 내지 않고 "- 보유 종목이 없습니다."만 낸다(balance-rlz-pl-report.js formatBalanceRlzPlReport()).
 # 그래서 마커 부재를 곧바로 오류로 보면 정상적인 빈 계좌가 10분마다 error 로그를
 # 쌓는다 — _RLZ_PL_EMPTY_MARKER를 먼저 확인해 두 경우를 가른다.
 # 두 리터럴은 부분 문자열로 겹치지 않는다("[보유 종목 리스트]"에는 "[보유 종목]"이
@@ -575,9 +575,9 @@ def _sync_portfolio_from_balance(
 
     upsert여야 하는 이유는 **잔고 응답에 없는 필드를 보존**하기 위해서입니다.
     전량 교체(DELETE + INSERT)는 그런 필드를 매 주기 기본값으로 되돌립니다.
-    지금은 current_price가 항상 null이라 관측되는 차이가 없지만, 이 이슈(#196)가
-    시세 조회를 붙이는 순간 10분 주기마다 값이 null로 덮여, PR #204가 도입한
-    price_known 플래그가 "시세를 채웠는데도 모름"으로 잘못 나가는 회귀가 됩니다.
+    current_price는 _sync_portfolio_prices_from_rlz_pl이 따로 채우므로, 전량 교체로
+    돌아가면 10분 주기마다 그 값이 null로 덮여 price_known 플래그가 "시세를 채웠는데도
+    모름"으로 잘못 나가는 회귀가 됩니다.
 
     잔고가 잘린 경우(is_balance_truncated) 동기화를 수행하면 아직 파악되지 않은
     보유 종목이 삭제될 수 있으므로, 동기화를 건너뛰고 기존 데이터를 보존합니다.
@@ -616,7 +616,7 @@ def _sync_portfolio_from_balance(
 
     # 마커가 없으면 "보유 0건"이 아니라 "응답을 읽지 못함"이다.
     # balance.js는 보유 종목이 없어도 마커와 "보유 종목이 없습니다."를 항상 출력한다
-    # (balance.js:273-274). run_mcp_tool은 MCP content가 비면 예외 대신 ""를
+    # (balance.js formatBalanceReport()). run_mcp_tool은 MCP content가 비면 예외 대신 ""를
     # 반환하므로(services.py) 이 경로는 실재한다. upsert로 바뀐 뒤에도 "잔고에 없는
     # 종목은 삭제"는 그대로라 빈 응답으로 동기화하면 전 종목이 지워지고 되돌릴 수
     # 없다. 기존 데이터를 보존하고 error 로그로 운영자에게 알린다.
@@ -772,7 +772,7 @@ def _parse_rlz_pl_quotes(report_text: str) -> dict[str, float]:
         name = match.group("name").strip()
         code = match.group("code")
         # 종목명이 비었는지는 보지 않는다. formatter가 `${row.prdt_name || "-"}`를 내므로
-        # (balance-rlz-pl-report.js:54) 빈 이름은 사실상 나오지 않고, 설령 공백뿐인
+        # (balance-rlz-pl-report.js formatBalanceRlzPlReport()) 빈 이름은 사실상 나오지 않고, 설령 공백뿐인
         # prdt_name으로 도달하더라도 name은 로그 표시용일 뿐이다 — 그것 때문에 멀쩡한
         # 코드의 시세를 버리면 이름 하나 때문에 값을 잃는다.
         # 중복 코드 판정보다 **먼저** 값을 읽습니다. 두 번째 행을 곧바로 버리면
@@ -960,7 +960,7 @@ def _sync_portfolio_prices_from_rlz_pl(report_text: str, session: Session) -> in
 
     if _RLZ_PL_HOLDINGS_MARKER not in report_text:
         # 마커가 없는 정상 경우가 하나 있습니다: 보유 0건. balance.js와 달리 이
-        # 포맷터는 0건이면 마커를 아예 내지 않습니다(balance-rlz-pl-report.js:38-48).
+        # 포맷터는 0건이면 마커를 아예 내지 않습니다(balance-rlz-pl-report.js formatBalanceRlzPlReport()).
         if _RLZ_PL_EMPTY_MARKER in report_text:
             logger.info("실현손익 응답에 보유 종목이 없어 갱신할 시세가 없습니다.")
             return 0

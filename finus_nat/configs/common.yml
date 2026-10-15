@@ -1,6 +1,6 @@
 # 공용 LLM 및 함수 tools 등록. agents/*.yml 의 base: 체인이 최종적으로 도달하는 파일이다.
 #
-# base: 자체는 deep-merge 상속이 맞다(nat/utils/io/yaml_tools.py, scripts/run.sh:120).
+# base: 자체는 deep-merge 상속이 맞다(nat/utils/io/yaml_tools.py, scripts/run.sh).
 # 다만 에이전트끼리 이어진 base: 체인은 파생 관계가 아니라 라우터가 6개 에이전트를 한 config로
 # 모으기 위한 경로다 - diary -> strategy -> recommend -> news -> monitoring -> trading -> common.
 # 여러 에이전트가 공유하는 도구 정의(kis-trading-mcp-tool-readonly)를 이 파일에 둔 것도 그래서다 (#284).

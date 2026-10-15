@@ -712,7 +712,7 @@ class TestIsUnresolvedEcho:
     def test_detects_echo_with_trailing_text(self):
         """문자열 끝이 아니라 _STOCK_CODE_EXTRACT_RE와 같은 지점에 앵커한다.
 
-        endswith(", UNKNOWN)")로 앵커하면 index.js:559가 응답 뒤에 무언가를 덧붙이는
+        endswith(", UNKNOWN)")로 앵커하면 index.js callTradingTool()이 resolve_stock_code 응답 뒤에 무언가를 덧붙이는
         순간 코드 추출은 계속 성공하는데 에코 감지만 조용히 멈춰 #151이 되돌아온다.
         뮤테이션: 판정을 endswith로 되돌리면 이 케이스가 red가 된다.
         """

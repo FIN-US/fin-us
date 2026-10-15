@@ -142,7 +142,7 @@
 
 ## 3. 현재가 조회 (시세 틀)
 
-경로: `/quote 삼성전자 — mcp-trading/index.js:230 실제 출력`  ·  사용자 입력: `삼성전자`
+경로: `/quote 삼성전자 — mcp-trading/index.js getStockQuote() 실제 출력`  ·  사용자 입력: `삼성전자`
 
 **before**
 
