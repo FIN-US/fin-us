@@ -96,7 +96,7 @@ bash scripts/run_stack.sh    # 실행 (첫 실행은 최대 4분)
 ```
 
 - 3D 대시보드: http://localhost:8080
-- 기본은 모의투자. 실계좌는 `.env`에 `KIS_ORDER_ENV=real`, `KIS_REAL_ORDER_ENABLED=true` 둘 다 필요.
+- 기본은 모의투자. 실계좌는 `.env`에 `KIS_ORDER_ENV=real`, `KIS_REAL_ORDER_ENABLED=true`, 실전 `KIS_URL`(`https://openapi.koreainvestment.com:9443`)과 실계좌 키가 모두 필요.
 
 ## 사용 방법
 

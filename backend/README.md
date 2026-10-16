@@ -8,7 +8,7 @@ FastAPI 서버. 대시보드 API, 10분 주기 감시 스케줄러, 텔레그램
 backend/
 ├── main.py         FastAPI 앱 진입점 (API 라우트, 기동 시 스케줄러·텔레그램 폴러 시작)
 ├── core/           설정(.env 로드)·DB 엔진·모델·스키마·Redis 상태·WebSocket
-├── repositories/   DB 접근 (관심 종목, 촉매 이벤트, 걸러진 신호, 체결 통지)
+├── repositories/   DB 접근 (관심 종목, 예정(촉매) 이벤트, 걸러진 신호, 체결 통지)
 ├── ai/             외부 지능 호출
 │   ├── llm.py        LLM 호출 단일 진입점 llm_chat (OpenAI·Anthropic·Ollama·NAT)
 │   ├── mcp_tools.py  MCP 서버 도구 실행 run_mcp_tool
@@ -18,7 +18,7 @@ backend/
 │   ├── jobs.py       작업 등록
 │   ├── monitor.py    10분 주기 감시·알림·자동 제안
 │   ├── portfolio.py  잔고·시세 동기화
-│   ├── catalyst.py   실적·공시 일정 사전 알림
+│   ├── catalyst.py   예정(촉매) 이벤트 사전 알림
 │   ├── trade_notification.py  체결 통지 재배달
 │   └── deps.py       작업들이 함께 쓰는 외부 의존성
 ├── telegram/       텔레그램 봇
@@ -28,7 +28,7 @@ backend/
 │   ├── notifier.py   메시지 전송·재시도
 │   ├── delivery_alarm.py  전송 실패 집계·정지 알람
 │   └── presentation.py  메시지 틀·용어 각주 (terms.json)
-├── trading/        주문 경로 (주문 객체·한도 규칙·AI 주문 제안·종목코드 판정)
+├── trading/        주문 경로 (주문 객체·확정 대기, AI 주문 제안과 한도 검사, 자동 제안 룰, 종목코드 판정)
 ├── pii/            외부 LLM으로 나가는 개인·계좌 정보 마스킹
 ├── scripts/        보조 스크립트 (초기 설정 CLI, 테스트 알림 전송, 신호 평가셋 수집)
 ├── tests/          pytest

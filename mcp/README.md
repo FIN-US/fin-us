@@ -29,7 +29,7 @@ trading/
 ```
 
 - 신규 상장 종목이 인식되지 않으면 `python3 mcp/trading/scripts/update_stock_master.py`로 마스터 갱신.
-- 실계좌 주문은 `.env`의 `KIS_ORDER_ENV=real`과 `KIS_REAL_ORDER_ENABLED=true`가 모두 있어야 실행.
+- 기본은 모의투자. 실계좌는 `.env`에 `KIS_ORDER_ENV=real`, `KIS_REAL_ORDER_ENABLED=true`, 실전 `KIS_URL`(`https://openapi.koreainvestment.com:9443`)과 실계좌 키가 모두 필요.
 
 ## 개발
 
