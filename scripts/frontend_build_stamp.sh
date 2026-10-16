@@ -20,7 +20,7 @@
 # --force로 넘길 수 있고, 재빌드 커밋과 소스 수정 커밋을 나누면 CI의 두 검사를 모두
 # 통과할 수 있다. 그것까지 막으려면 CI에서 실제로 Unity 빌드를 돌려야 한다
 # (#345의 선택지 B — 라이선스와 빌드 시간 비용 때문에 택하지 않았다).
-# frontend/README.md의 "CI가 잡아 주는 것과 사람이 해야 하는 것" 참고.
+# frontend/README.md의 "소스 수정 시 재빌드" 참고.
 #
 # 사용법:
 #   scripts/frontend_build_stamp.sh write [--force]  # 재빌드 직후 스탬프를 갱신한다
