@@ -399,7 +399,7 @@ _MCP_ENV_ALLOWED_KEYS = frozenset({
     "NAVER_CLIENT_SECRET",
     "DART_API_KEY",
 })
-# backend/config.py의 _MCP_ENV_ALLOWED_PREFIXES와 같은 규칙. 한쪽만 바꾸면
+# backend/core/config.py의 _MCP_ENV_ALLOWED_PREFIXES와 같은 규칙. 한쪽만 바꾸면
 # 같은 .env로 backend 경로와 NAT 경로의 동작이 갈린다(#130). KIS_API_KEY 등
 # 개별 KIS_* 키 나열은 이제 KIS_ 접두사에 포함되므로 위 목록에서 제거했다.
 # KIS_만 추가하면 자식 네임스페이스(KIS_)가 양쪽에서 일치한다. FINUS_ 범위는

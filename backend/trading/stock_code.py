@@ -180,7 +180,7 @@ def is_orderable_stock_code(code: str) -> bool:
 # stock-master.js의 DEFAULT_STOCKS_PATH로 읽는 파일과 정의상 같다.
 # 이 파일 위치(backend/)에 고정하면 안 된다 — TRADING_MCP_DIR로 MCP 디렉터리를 옮긴
 # 구성에서 둘이 갈라진다(backend/Dockerfile: 백엔드 소스는 /app에 bind mount,
-# MCP는 이미지 안 /opt/mcp-trading). 특히 레포 바깥을 가리키면 backend 쪽 경로에
+# MCP는 이미지 안 /opt/mcp/trading). 특히 레포 바깥을 가리키면 backend 쪽 경로에
 # 파일이 없어 fail-open으로 #151 검증이 조용히 꺼진다.
 # config는 stock_code를 import하지 않으므로 순환 import는 발생하지 않는다.
 #

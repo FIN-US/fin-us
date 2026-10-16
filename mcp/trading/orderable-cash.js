@@ -5,7 +5,7 @@ import { formatQuantity, formatWon } from "./formatters.js";
  *
  * 이 TR이 필요한 이유는 이슈 #310이다. inquire-balance의 `dnca_tot_amt`(예수금총금액)는
  * 미수·증거금·미결제 정산이 반영되지 않은 값이라 "지금 낼 수 있는 현금"이 아니다.
- * 실제 주문가능현금은 이 TR의 `ord_psbl_cash` 하나뿐이고, backend/order_assist.py의
+ * 실제 주문가능현금은 이 TR의 `ord_psbl_cash` 하나뿐이고, backend/trading/order_assist.py의
  * 하드 한도 두 개(insufficient_cash, cash_floor)가 그 값 위에 선다.
  *
  * PDNO는 선택이 아니라 필수다 — KIS가 종목별 증거금률로 가능수량을 계산하기 때문이다.
@@ -42,7 +42,7 @@ export function buildOrderableCashParams(accountNo, { stockCode, price = 0, orde
 /**
  * 매수가능조회 결과 리포트.
  *
- * "- 주문가능금액: 1,000,000원" 줄은 backend/order_assist.py의 `_CASH_RE`가 직접 읽는
+ * "- 주문가능금액: 1,000,000원" 줄은 backend/trading/order_assist.py의 `_CASH_RE`가 직접 읽는
  * 출력 계약이다. 라벨을 바꾸면 그쪽에서 cash=None으로 떨어져 /advise가 전부 거부된다
  * (조용히 헐거워지지는 않는다 — fail-closed). 아래 tests/orderable-cash.test.js가 이
  * 줄의 모양을 고정한다.

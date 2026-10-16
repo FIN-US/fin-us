@@ -63,7 +63,7 @@ logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # 실패 코드 — 사용자에게 보이는 문장이 아니라 backend 로그·테스트가 붙잡는 식별자다.
-# 값이 바뀌면 backend/order_assist.py의 거부 사유 표기와 테스트가 함께 흔들린다.
+# 값이 바뀌면 backend/trading/order_assist.py의 거부 사유 표기와 테스트가 함께 흔들린다.
 # ---------------------------------------------------------------------------
 FAILURE_HARD_CHECK = "hard_check_failed"
 FAILURE_LLM_ERROR = "llm_error"

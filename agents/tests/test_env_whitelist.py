@@ -1,6 +1,6 @@
 """NAT 경로 MCP 자식 프로세스 env 화이트리스트(_MCP_ENV_ALLOWED_PREFIXES) 테스트.
 
-backend/config.py에 같은 목적의 화이트리스트가 별도로 존재한다(#130). 이 파일은
+backend/core/config.py에 같은 목적의 화이트리스트가 별도로 존재한다(#130). 이 파일은
 NAT 쪽 접두사 규칙만 검증하고, 마지막 테스트에서만 backend/core/config.py 소스를
 정적으로 읽어(import하지 않는다) 두 경로가 반드시 같이 움직여야 하는 차원이
 어긋나지 않는지 확인한다.
@@ -58,7 +58,7 @@ def test_mcp_child_env_still_forwards_finus_kis_overrides(monkeypatch):
 
 
 def test_mcp_child_env_does_not_forward_backend_only_secret(monkeypatch):
-    # TELEGRAM_BOT_TOKEN: backend/config.py에 실재하는 값이고 mcp-trading·
+    # TELEGRAM_BOT_TOKEN: backend/core/config.py에 실재하는 값이고 mcp-trading·
     # mcp-news·mcp-dart 중 어느 것도 읽지 않는 backend 전용 비밀값이다
     # (backend/tests/test_config.py의 같은 단언과 동일 근거 — 임의의 더미가
     # 아니라 경계가 무너지면 실제로 아픈 값을 고른다). KIS_/FINUS_/FIN_US_

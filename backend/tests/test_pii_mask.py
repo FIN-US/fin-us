@@ -966,7 +966,7 @@ class TestQuantityRecognizer:
 
         _QTY_RE의 관용구 배제 lookahead를 `(?!\\s*(?:신고가|...))`로 쓰면 \\s*가
         개행을 넘는다. 잔고 리포트는 수량이 줄 끝에 오는 여러 줄 텍스트이므로
-        (mcp-trading\\balance.js의 formatBalanceReport()가 만드는
+        (mcp/trading/balance.js의 formatBalanceReport()가 만드는
         "- {종목} ({코드}) · {수량}주\\n  평단가 ..."),
         다음 줄이 배제 목록 단어로 시작하면 배제가 잘못 발동해 **보유 수량이 전혀
         마스킹되지 않은 채 외부 LLM으로 나간다.** 배제는 같은 줄의 후속 어절만

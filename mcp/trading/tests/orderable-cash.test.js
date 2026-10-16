@@ -53,7 +53,7 @@ test("buildOrderableCashParams sends the limit price only for LIMIT", () => {
 });
 
 test("CMA·해외 포함 플래그는 항상 N이다 — 확인하지 못한 여유를 한도에 얹지 않는다", () => {
-  // Y로 바뀌면 주문가능액이 커지고 backend/order_assist.py의 insufficient_cash·
+  // Y로 바뀌면 주문가능액이 커지고 backend/trading/order_assist.py의 insufficient_cash·
   // cash_floor 두 하드 한도가 그만큼 헐거워진다. 값이 고정이라는 것 자체가 계약이다.
   for (const orderType of ["LIMIT", "MARKET"]) {
     const params = buildOrderableCashParams("1234567801", {

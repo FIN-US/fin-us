@@ -18,7 +18,7 @@ general:
     #   - 그 외 인자          -> {"<인자이름>": 값} 형태의 InputArgsSchema
     #   - BaseModel 반환      -> 그 모델의 JSON이 곧 응답 본문
     #   - str 반환            -> {"value": "<문자열>"} (OutputArgsSchema)
-    # 즉 아래 두 엔드포인트의 직렬화 형식이 서로 다르다. backend/order_assist.py의
+    # 즉 아래 두 엔드포인트의 직렬화 형식이 서로 다르다. backend/trading/order_assist.py의
     # _post_propose_order / _post_verify_order 주석이 같은 계약을 반대편에서 고정한다.
     endpoints:
       # 제안 생성. strategy_agent가 아니라 strategy_branch_agent(fe_branch)를 노출한다 —

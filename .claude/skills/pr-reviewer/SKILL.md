@@ -101,11 +101,11 @@ git -C "<REPO>" log --oneline -10          # 최근 커밋 이력
 ### 2. 프리플라이트 체크
 
 새 worktree에는 gitignore 대상인 의존성 디렉토리가 없다. 이 레포의 해당 디렉토리는
-`backend/.venv`, `agents/.venv`, 그리고 `mcp-dart`·`mcp-news`·`mcp-trading` 각각의
+`backend/.venv`, `agents/.venv`, 그리고 `mcp/dart`·`mcp/news`·`mcp/trading` 각각의
 `node_modules`다.
 
 **이 목록은 `.github/workflows/ci.yml`의 잡과 맞춰 둔다.** 좁게 적어두면 CI가 검증하는 영역을
-리뷰가 조용히 건너뛴다(실제로 `mcp-trading`이 그랬다). node 패키지가 추가되면 둘을 함께 갱신한다.
+리뷰가 조용히 건너뛴다(실제로 `mcp/trading`이 그랬다). node 패키지가 추가되면 둘을 함께 갱신한다.
 
 #### 절대 실행하지 않는 명령
 
@@ -135,7 +135,7 @@ uv run --no-sync --project "<WT_PATH>/backend" pytest
 
 worktree에서 `pytest`나 `ruff check .`를 venv 활성화 없이 그냥 실행하면 해석되지 않는다.
 
-#### Node 영역(`mcp-dart`, `mcp-news`, `mcp-trading`)은 링크 후 실행 가능
+#### Node 영역(`mcp/dart`, `mcp/news`, `mcp/trading`)은 링크 후 실행 가능
 
 `node_modules`는 실행만으로 재설치되지 않아 링크해도 안전하다.
 **diff가 건드린 패키지만** 검증한다.
