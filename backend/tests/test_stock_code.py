@@ -589,7 +589,7 @@ def test_master_stocks_path_follows_trading_mcp_dir(tmp_path):
 
     trading/stock_code.py 위치에 고정하면 개발 환경에서는 두 경로가 우연히 같아 문제가
     드러나지 않지만, backend/Dockerfile은 백엔드 소스(/app bind mount)와 MCP
-    디렉터리(/opt/mcp-trading 이미지 스냅샷)를 실제로 갈라놓는다. TRADING_MCP_DIR이
+    디렉터리(/opt/mcp/trading 이미지 스냅샷)를 실제로 갈라놓는다. TRADING_MCP_DIR이
     레포 바깥을 가리키면 backend 쪽 경로에 파일이 없어 fail-open으로 #151 검증이
     조용히 꺼진다.
 

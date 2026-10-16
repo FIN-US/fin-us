@@ -70,7 +70,7 @@ def test_threshold_env_name_and_default_match_backend_config():
             call = node.value
             break
     else:
-        raise AssertionError("backend/config.py에서 ORDER_MAX_PRICE_GAP_RATIO를 찾지 못했다")
+        raise AssertionError("backend/core/config.py에서 ORDER_MAX_PRICE_GAP_RATIO를 찾지 못했다")
 
     assert isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
     # backend가 해석 규칙을 다른 로더로 바꾸면 아래 test_threshold_falls_back_like_backend가

@@ -93,7 +93,7 @@ def test_mcp_stdio_params_pass_real_order_enabled_and_fail_closed_when_unset(mon
 
 
 def test_mcp_stdio_params_pass_finus_kis_tr_id_overrides_but_not_other_finus_vars(monkeypatch):
-    # #130 — backend/config.py의 접두사는 기존 FIN_US_(밑줄 포함)와 겹치지
+    # #130 — backend/core/config.py의 접두사는 기존 FIN_US_(밑줄 포함)와 겹치지
     # 않는 FINUS_KIS_TR_ID_* 오버라이드(mcp/trading/index.js)를 놓치고
     # 있었다. FINUS_KIS_ 접두사로 이 변수들만 통과시키고, KIS_와 무관한 다른
     # FINUS_* 변수(backend/NAT 전용, mcp-trading이 읽지 않음)는 여전히

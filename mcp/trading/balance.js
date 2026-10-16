@@ -377,7 +377,7 @@ function formatTruncationNote(truncated, pages) {
 // 미수·증거금·미결제 정산이 반영되지 않은 값이라 실제로 낼 수 있는 금액이 아니었다
 // (#310). 같은 필드를 balance-rlz-pl-report.js도 "예수금"이라 부르므로 표기를 그쪽에
 // 맞춘다. 진짜 주문가능현금이 필요하면 get_orderable_cash(inquire-psbl-order의
-// ord_psbl_cash)를 쓴다 — backend/order_assist.py의 하드 한도가 그쪽을 읽는다.
+// ord_psbl_cash)를 쓴다 — backend/trading/order_assist.py의 하드 한도가 그쪽을 읽는다.
 export function formatBalanceReport(data, { pages, truncated } = {}) {
   const summary = data.output2?.[0] || {};
   const holdings = data.output1 || [];

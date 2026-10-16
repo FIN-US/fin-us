@@ -68,7 +68,7 @@ from typing import Any, NamedTuple
 from .pii_mask import _FALLBACK_LABEL, mask_pii
 
 logger = logging.getLogger(__name__)
-# 마스킹 전후 비교 로그 스위치 — backend/config.py의 같은 이름 env와 짝이다(#395).
+# 마스킹 전후 비교 로그 스위치 — backend/core/config.py의 같은 이름 env와 짝이다(#395).
 # 정확히 "true"만 켠다(backend `_is_truthy_flag`와 같은 기준). 켜면 평문 잔고가 로그에 남는다.
 # 이 값이 게이트다. 로거 레벨만 보면 NAT CLI `--log-level debug`(루트를 DEBUG로 올린다)만으로
 # 평문이 로그에 남는다(PR #404 리뷰에서 재현).
