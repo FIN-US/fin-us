@@ -641,6 +641,51 @@ def humanize_tool_names(text: str) -> str:
     return _TOOL_NAME_RE.sub(lambda match: _TOOL_NAME_LABELS[match.group(0)], text)
 
 
+# 답변 끝의 "원하시면 …해 드릴게요"류 제안. NAT는 이전 답변을 앞부분만 남겨 다음 턴에
+# 넘기므로 사용자가 "응"이라고 답해도 그 제안은 이어지지 않는다. 프롬프트로 금지해도 모델이
+# 어기므로 여기서 걷어낸다.
+# 제안의 시작: 본문 맨 앞·줄 머리·문장 끝 뒤에 오는 "원하시면"류.
+_OFFER_START_RE = re.compile(
+    r"(?:^|(?<=\n)|(?<=[.!?]\s))"
+    r"[ \t>*_\-•·]*"
+    r"(?:(?:추가로|더|혹시|또|다음으로|이어서)[,\s]+)?"
+    r"(?:원하시면|원하신다면|필요하시면|필요하신다면|필요하다면)"
+)
+# 제안으로 볼 서술어. "원하시면 /buy 삼성전자 10으로 주문하세요" 같은 명령 안내는
+# 사용자가 직접 실행할 수 있으므로 지우지 않는다(아래 _COMMAND_RE).
+_OFFER_VERB_RE = re.compile(
+    r"드릴|드립니다|드려요|할까요|볼까요|줄까요|해 ?줄게|말씀해 ?주세요|알려 ?주세요"
+)
+_COMMAND_RE = re.compile(r"(?<![\w/])/[a-z]+")
+
+
+def strip_trailing_offer(text: str) -> str:
+    """답변 끝에 붙은 추가 제안·되묻기 문장을 걷어낸다.
+
+    대상은 마지막 문단 안에서 "원하시면"류로 시작해 본문 끝까지 이어지는 구간이고,
+    시작점이 여럿이면 가장 뒤의 것만 본다(앞쪽의 평범한 "필요하시면 …" 문장을 함께
+    지우지 않도록). 제안 서술어가 없거나 텔레그램 명령이 들어 있으면 남기고, 걷어내면
+    본문이 비는 경우에도 남긴다. 제안이 문단 여러 개로 이어지면 끝에서부터 반복한다.
+    """
+    stripped = text.rstrip()
+    while True:
+        last_paragraph_start = stripped.rfind("\n\n") + 1
+        starts = [
+            match.start()
+            for match in _OFFER_START_RE.finditer(stripped)
+            if match.start() >= last_paragraph_start
+        ]
+        if not starts:
+            return stripped
+        offer = stripped[starts[-1]:]
+        if not _OFFER_VERB_RE.search(offer) or _COMMAND_RE.search(offer):
+            return stripped
+        remaining = stripped[: starts[-1]].rstrip()
+        if not remaining:
+            return stripped
+        stripped = remaining
+
+
 def clamp(text: str, limit: int = TELEGRAM_MESSAGE_LIMIT) -> str:
     """앞뒤 공백을 털고 상한에 맞춰 자른다. 자르면 말줄임 접미사를 붙인다.
 
@@ -928,7 +973,7 @@ def render(
 ) -> str:
     """텔레그램으로 나가기 직전의 단일 통과 지점 (#297).
 
-    순서: 마크다운 정리 → 도구명 한국어화 → 틀 적용 → 용어 각주 → 추론 각주.
+    순서: 마크다운 정리 → 끝의 추가 제안 제거 → 도구명 한국어화 → 틀 적용 → 용어 각주 → 추론 각주.
 
     ``question``은 이 메시지를 부른 사용자 입력이다. 거기 이미 나온 용어는 설명하지
     않는다(term_footnote 참조). 봇이 먼저 거는 메시지는 그냥 비워 둔다.
@@ -959,7 +1004,7 @@ def render(
     포기시킬 이유가 없다.
     """
     body = template_for(kind).apply(
-        humanize_tool_names(sanitize_markdown(str(text)))
+        humanize_tool_names(strip_trailing_offer(sanitize_markdown(str(text))))
     )
     blocks = [body, term_footnote(body, level=level, question=question), reasoning]
     return "\n\n".join(block for block in blocks if block)

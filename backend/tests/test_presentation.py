@@ -40,6 +40,7 @@ from backend.telegram.presentation import (
     render,
     sanitize_markdown,
     split_for_telegram,
+    strip_trailing_offer,
     term_footnote,
     urgency_label,
 )
@@ -709,3 +710,77 @@ def test_a_paragraph_of_only_whitespace_does_not_crash():
     restored = "".join(part.split("\n", 1)[-1] for part in parts)
     assert "머리말" in restored
     assert "꼬리말" in restored
+
+
+# ---- 답변 끝의 추가 제안 제거 (#424) ----
+
+# 실제 전략 에이전트 답변의 끝부분 (2026-10-16 재현).
+_STRATEGY_ANSWER_TAIL = (
+    "- 매매 관점\n"
+    "  - 이미 보유 중이면: 홀드(HOLD) 쪽이 더 합리적\n"
+    "  - 신규 진입이면: 한 번에 몰빵보다 분할매수"
+)
+
+
+@pytest.mark.parametrize(
+    "offer",
+    [
+        "원하시면 제가 이어서 \"SK하이닉스 단기 매매전략(매수/매도/손절 기준)\" 형태로 바로 짜드릴게요.",
+        "원하시면 제가 바로 삼성전자 현재가/등락률도 조회해서 정리해드릴게요.",
+        "추가로 원하시면 관련 공시도 확인해 드릴까요?",
+        "필요하시면 다음 중 하나를 골라 말씀해 주세요:\n1. 단기 전략\n2. 장기 전략",
+    ],
+)
+def test_strip_trailing_offer_removes_offer_paragraph(offer):
+    assert strip_trailing_offer(f"{_STRATEGY_ANSWER_TAIL}\n\n{offer}") == _STRATEGY_ANSWER_TAIL
+
+
+def test_strip_trailing_offer_removes_offer_sentence_in_same_line():
+    text = "오늘은 1.2% 올랐습니다. 원하시면 수급도 확인해 드릴게요."
+
+    assert strip_trailing_offer(text) == "오늘은 1.2% 올랐습니다."
+
+
+def test_strip_trailing_offer_removes_consecutive_offer_paragraphs():
+    text = "본문입니다.\n\n원하시면 뉴스도 정리해 드릴게요.\n\n필요하시면 공시도 찾아 드릴까요?"
+
+    assert strip_trailing_offer(text) == "본문입니다."
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # 사용자가 직접 실행할 수 있는 명령 안내는 남긴다.
+        "현재가는 7만원입니다.\n\n원하시면 /buy 삼성전자 10 으로 주문하실 수 있습니다.",
+        # 제안 서술어가 없는 조건문은 본문이다.
+        "현재가는 7만원입니다.\n\n필요하다면 분할매수가 유리합니다.",
+        # 마지막 문단이 아닌 곳의 제안은 건드리지 않는다.
+        "원하시면 조회해 드릴게요.\n\n마지막 문단이 본문이면 그대로다.",
+        # 걷어내면 본문이 비는 경우는 남긴다.
+        "원하시면 조회해 드릴게요.",
+    ],
+)
+def test_strip_trailing_offer_keeps_non_offers(text):
+    assert strip_trailing_offer(text) == text
+
+
+def test_strip_trailing_offer_keeps_earlier_conditional_in_last_paragraph():
+    text = "필요하시면 손절 기준을 먼저 정하세요.\n원하시면 기준가도 계산해 드릴게요."
+
+    assert strip_trailing_offer(text) == "필요하시면 손절 기준을 먼저 정하세요."
+
+
+def test_render_strips_trailing_offer_before_footnotes(fake_terms):
+    fake_terms([])
+    reasoning = reasoning_footnote("strategy_agent", (FakeTool("finus_market_news"),))
+
+    message = render(
+        "분할매수가 유리합니다.\n\n원하시면 제가 바로 전략을 짜드릴게요.",
+        KIND_ANALYSIS,
+        LEVEL_BEGINNER,
+        reasoning=reasoning,
+    )
+
+    assert "원하시면" not in message
+    assert message.startswith("분할매수가 유리합니다.")
+    assert message.endswith(reasoning)
