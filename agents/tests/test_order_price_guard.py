@@ -35,6 +35,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 _POLICY_PATH = _REPO_ROOT / "backend" / "tests" / "fixtures" / "price_gap_policy.json"
 _POLICY_CASES = json.loads(_POLICY_PATH.read_text(encoding="utf-8"))["cases"]
 _BACKEND_CONFIG = _REPO_ROOT / "backend" / "core" / "config.py"
+_QUOTE_FIXTURES = Path(__file__).resolve().parent / "fixtures" / "kis_trading_mcp_inquire_price"
 
 
 # ---------------------------------------------------------------------------
@@ -104,17 +105,85 @@ def test_threshold_falls_back_like_backend(monkeypatch, raw):
 # ---------------------------------------------------------------------------
 
 
+def _quote_fixture(name: str) -> str:
+    """Kis Trading MCP ``inquire_price`` 실응답 원문(#381).
+
+    모의투자 계정으로 가드와 같은 인자(``fid_cond_mrkt_div_code=J``, ``fid_input_iscd``,
+    ``env_dv``)를 ``_mcp_call_tool_remote``로 보내 받은 문자열을 손대지 않고 저장했다. 시세
+    응답뿐이라 계좌번호·키·토큰이 없다.
+
+    - ``005930_listed`` — 정상 종목(삼성전자). ``env_dv=real``·``env_dv`` 생략도 같은 모양이었다.
+    - ``000300_trading_halted`` — 거래정지 종목(``iscd_stat_cls_code=58``). 마지막 체결가가 실린다.
+    - ``999999_unknown_code`` — 존재하지 않는 종목코드. 오류가 아니라 0으로 채운 행이 오고
+      ``stck_shrn_iscd``가 없다. 상장폐지 종목(071460)도 같은 모양이었다.
+    - ``error_missing_argument`` — 인자 누락. ``success: false`` + ``error``.
+    - ``error_kis_rejected`` — KIS가 거절(``OPSQ2001``). ``success: true``인데 ``data``가 텍스트다.
+    """
+    return (_QUOTE_FIXTURES / f"{name}.json").read_text(encoding="utf-8")
+
+
+def _quote_with_rows(rows: list[dict]) -> str:
+    """정상 종목 실응답의 봉투는 그대로 두고 안쪽 행만 바꾼다."""
+    envelope = json.loads(_quote_fixture("005930_listed"))
+    envelope["data"]["data"] = json.dumps(rows, ensure_ascii=False) + "\n"
+    return json.dumps(envelope, ensure_ascii=False)
+
+
+def _listed_row() -> dict:
+    envelope = json.loads(_quote_fixture("005930_listed"))
+    (row,) = json.loads(envelope["data"]["data"])
+    return row
+
+
+def quote_text(stock_code: str = "005930", price: str = "68900") -> str:
+    """배선 테스트용 — 실응답 모양에 종목코드·현재가만 바꿔 넣는다."""
+    return _quote_with_rows([{**_listed_row(), "stck_shrn_iscd": stock_code, "stck_prpr": price}])
+
+
 @pytest.mark.parametrize(
-    ("text", "expected"),
-    [
-        ('{"output": {"stck_prpr": "68900"}}', 68900),
-        ('[{"STCK_PRPR": "68,900"}]', 68900),
-        ('{"rt_cd": "0", "output": {"stck_prpr": 68900}}', 68900),
-        ("- 현재가 stck_prpr: 68,900", 68900),
-    ],
+    ("fixture", "stock_code", "expected"),
+    [("005930_listed", "005930", 223500), ("000300_trading_halted", "000300", 4200)],
 )
-def test_current_price_is_read_from_the_quote(text, expected):
-    assert parse_current_price(text) == expected
+def test_current_price_is_read_from_the_real_quote(fixture, stock_code, expected):
+    """실응답의 현재가는 안쪽 ``data``(JSON 문자열) 속에 있다.
+
+    뮤테이션: 바깥 JSON에서 키를 찾던 #381 이전 파서로 되돌리거나, ``_quote_rows``가 안쪽
+    ``data`` 문자열을 파싱하지 않게 하면 두 행 모두 ``None``이라 red다. 이전 파서는 실응답을
+    못 읽어 단가 있는 주문을 전부 거부하고 있었다.
+    """
+    assert parse_current_price(_quote_fixture(fixture), stock_code=stock_code) == expected
+
+
+@pytest.mark.parametrize(
+    "fixture", ["999999_unknown_code", "error_missing_argument", "error_kis_rejected"]
+)
+def test_real_unreadable_quotes_are_none(fixture):
+    """존재하지 않는 종목코드는 0으로 채운 행, 인자 오류는 ``success: false``, KIS 거절은 텍스트다.
+
+    실응답 모양을 고정하는 회귀 테스트다. ``999999_unknown_code``는 ``stck_shrn_iscd`` 부재와
+    현재가 0 두 겹으로 걸러져 한쪽만 빼서는 red가 되지 않는다 — 각 겹은
+    ``test_quote_row_of_another_stock_is_not_the_reference``와
+    ``test_zero_or_blank_current_price_is_none``이 따로 잡는다.
+    """
+    assert parse_current_price(_quote_fixture(fixture), stock_code="999999") is None
+
+
+def test_quote_row_of_another_stock_is_not_the_reference():
+    """조회한 종목이 아닌 행의 현재가로 괴리를 재지 않는다.
+
+    뮤테이션: ``stck_shrn_iscd`` 대조를 빼면 005930 응답이 000660의 기준가로 읽혀 red.
+    """
+    assert parse_current_price(_quote_fixture("005930_listed"), stock_code="000660") is None
+
+
+def test_quote_with_several_rows_is_none():
+    """행이 여럿이면 어느 행이 이 종목인지 고를 근거가 없다 — 첫 행을 집지 않는다.
+
+    뮤테이션: 행 개수 검사(``len(rows) != 1``)를 빼고 첫 행을 쓰게 하면 red.
+    """
+    other = {**_listed_row(), "stck_shrn_iscd": "005930", "stck_prpr": "100"}
+
+    assert parse_current_price(_quote_with_rows([_listed_row(), other]), stock_code="005930") is None
 
 
 @pytest.mark.parametrize(
@@ -122,15 +191,25 @@ def test_current_price_is_read_from_the_quote(text, expected):
     [
         "",
         '{"error": "mcp_call_failed", "detail": "stck_prpr"}',
-        '{"output": {}}',
-        '{"output": {"stck_prpr": "0"}}',
-        '{"output": {"stck_prpr": "-"}}',
+        # 이전 파서가 추정해 읽던 모양 — 실응답이 아니므로 더는 현재가가 아니다.
+        '{"output": {"stck_prpr": "68900", "stck_shrn_iscd": "005930"}}',
+        "- 현재가 stck_prpr: 68,900",
         "조회 결과가 없습니다.",
     ],
 )
 def test_unreadable_quote_is_none_not_zero(text):
-    """0이나 오류를 현재가로 읽으면 괴리 계산이 무너진다 — 못 읽은 것은 ``None``이다."""
-    assert parse_current_price(text) is None
+    """0이나 오류를 현재가로 읽으면 괴리 계산이 무너진다 — 못 읽은 것은 ``None``이다.
+
+    뮤테이션: ``parse_current_price``를 #381 이전의 관대한 탐색(JSON 어느 깊이든 키 탐색 +
+    텍스트 정규식)으로 되돌리면 ``output`` 행과 텍스트 행이 68900으로 읽혀 red.
+    """
+    assert parse_current_price(text, stock_code="005930") is None
+
+
+@pytest.mark.parametrize("price", ["0", "-", ""])
+def test_zero_or_blank_current_price_is_none(price):
+    """뮤테이션: ``number <= 0`` 거르기를 빼면 ``0``·빈 값 행이 red."""
+    assert parse_current_price(quote_text(price=price), stock_code="005930") is None
 
 
 def test_unit_price_fields_are_judged_by_suffix_and_zero_is_market():
@@ -195,7 +274,7 @@ class _RemoteKis:
 
     def __init__(self) -> None:
         self.calls: list[dict] = []
-        self.quote = '{"rt_cd": "0", "output": {"stck_prpr": "68900"}}'
+        self.quote = quote_text("005930", "68900")
 
     async def __call__(self, **kwargs):
         self.calls.append(kwargs)
@@ -285,8 +364,12 @@ class TestKisOrderPriceGapGuard:
 
     @pytest.mark.parametrize(
         "quote",
-        ['{"error": "mcp_call_failed", "tool": "domestic_stock"}', '{"rt_cd": "0", "output": {}}'],
-        ids=["quote_call_failed", "quote_without_current_price"],
+        [
+            '{"error": "mcp_call_failed", "tool": "domestic_stock"}',
+            _quote_fixture("error_kis_rejected"),
+            quote_text("005930", "0"),
+        ],
+        ids=["quote_call_failed", "quote_rejected_by_kis", "quote_without_current_price"],
     )
     async def test_unverifiable_current_price_blocks_the_order(
         self, remote, mapping_box, ledger, quote

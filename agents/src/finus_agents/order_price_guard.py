@@ -91,13 +91,12 @@ _DEFAULT_ENV_DV = "demo"
 
 _PRICE_TEXT_RE = re.compile(r"\d+(?:\.\d+)?")
 # 기준 현재가를 읽는 자리 — parse_current_price가 쓴다. Kis Trading MCP ``inquire_price``의
-# 응답 모양은 실호출로 확인하지 못했고 저장소에 응답 샘플도 없어 키 탐색을 관대하게 뒀다.
-# 모의투자 계정으로 실응답을 받아 테스트 픽스처로 고정하고 파서를 좁히는 일은 #381이다.
-# 틀려도 결과는 거부(fail-closed)이지 우회가 아니다.
+# 응답 모양은 모의투자 계정 실호출로 확인해 ``agents/tests/fixtures/kis_trading_mcp_inquire_price/``
+# 에 고정했다(#381). 모양은 :func:`parse_current_price` docstring에 적었다.
 _CURRENT_PRICE_KEY = "stck_prpr"
-_CURRENT_PRICE_TEXT_RE = re.compile(
-    r"""["']?stck_prpr["']?\s*[:=]\s*["']?([\d,]+(?:\.\d+)?)""", re.IGNORECASE
-)
+# 행이 어느 종목인지 알려 주는 필드. 정상 종목·거래정지 종목 응답에는 조회한 종목코드가
+# 그대로 실리고, 존재하지 않는 종목코드 응답에는 이 필드가 없다(현재가도 "0").
+_STOCK_CODE_KEY = "stck_shrn_iscd"
 
 
 def max_price_gap_ratio() -> float:
@@ -185,51 +184,69 @@ def order_unit_prices(params: Mapping[str, Any]) -> tuple[list[PriceField], list
     return prices, unreadable
 
 
-def _find_key(node: Any, key: str) -> Any:
-    if isinstance(node, dict):
-        for name, value in node.items():
-            if isinstance(name, str) and name.lower() == key:
-                return value
-        for value in node.values():
-            found = _find_key(value, key)
-            if found is not None:
-                return found
-    elif isinstance(node, list):
-        for item in node:
-            found = _find_key(item, key)
-            if found is not None:
-                return found
-    return None
+def _quote_rows(text: str) -> list[Any] | None:
+    """``inquire_price`` 응답의 봉투를 벗겨 KIS ``output`` 행 목록을 꺼낸다. 아니면 ``None``.
+
+    봉투는 두 겹이고 안쪽 ``data``는 JSON **문자열**이다(DataFrame을 레코드 JSON으로 직렬화한
+    것). 바깥 JSON만 파싱해 키를 찾으면 ``stck_prpr``는 문자열 안에 묻혀 보이지 않는다.
+    """
+    try:
+        envelope: Any = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(envelope, dict) or envelope.get("ok") is not True:
+        return None
+    result = envelope.get("data")
+    # 파이썬 예외(인자 누락 등)는 ``success: false`` + ``error``로 온다.
+    if not isinstance(result, dict) or result.get("success") is not True:
+        return None
+    payload = result.get("data")
+    if not isinstance(payload, str):
+        return None
+    try:
+        rows: Any = json.loads(payload)
+    except json.JSONDecodeError:
+        # KIS가 거절한 호출(rt_cd≠0)은 ``success: true``인 채로 ``data``에 "Error in
+        # response: … msg_cd : OPSQ2001 …" 같은 사람용 텍스트가 온다 — 현재가가 아니다.
+        return None
+    return rows if isinstance(rows, list) else None
 
 
-def parse_current_price(text: str) -> float | None:
-    """현재가 조회 응답에서 ``stck_prpr``를 읽는다. 읽지 못하면 ``None``.
+def parse_current_price(text: str, *, stock_code: str) -> float | None:
+    """현재가 조회 응답에서 *stock_code*의 ``stck_prpr``를 읽는다. 읽지 못하면 ``None``.
 
-    Kis Trading MCP의 응답 모양을 이 저장소가 통제하지 못하므로 JSON이면 키를 어느 깊이에서든
-    찾고, JSON이 아니면 ``stck_prpr: 68900`` 꼴의 텍스트를 찾는다. 오류 JSON
-    (``{"error": ...}``)은 현재가가 아니다. 0 이하는 "공짜"가 아니라 "못 읽었다"다 —
-    backend ``parse_current_price``와 같은 판정이다.
+    Kis Trading MCP ``domestic_stock`` ``inquire_price``의 실응답(모의투자 계정, #381):
 
-    어느 쪽이든 읽지 못하면 호출자는 주문을 보내지 않는다. 모양을 잘못 짐작한 대가는
-    거부(관측 가능한 실패)이지 우회가 아니다.
+    ``{"ok": true, "data": {"success": true, "api_type": "inquire_price", "params": {…},
+    …, "data": "[{\\"stck_prpr\\": \\"223500\\", …, \\"stck_shrn_iscd\\": \\"005930\\", …}]\\n"}}``
+
+    안쪽 ``data``는 행이 하나인 JSON 배열 **문자열**이다. 그래서 다음을 모두 만족할 때만
+    현재가로 읽는다. 하나라도 어긋나면 모양을 모르는 응답이다.
+
+    - 바깥 ``ok``와 안쪽 ``success``가 ``true``다(래퍼 오류 JSON ``{"error": …}``, 인자 오류
+      ``success: false``는 아니다).
+    - 안쪽 ``data``가 JSON 배열이고 행이 **정확히 하나**다(KIS 거절 텍스트, 빈 결과, 여러 행은
+      아니다 — 여러 행이면 어느 행이 이 종목인지 고를 근거가 없다).
+    - 그 행의 ``stck_shrn_iscd``가 조회한 *stock_code*와 같다. 다른 종목의 현재가로 괴리를
+      재지 않는다. 존재하지 않는 종목코드 응답에는 이 필드가 없다.
+    - ``stck_prpr``가 0보다 크다. 0은 "공짜"가 아니라 "못 읽었다"다 — backend
+      ``parse_current_price``와 같은 판정이다.
+
+    거래정지 종목은 마지막 체결가가 ``stck_prpr``로 오므로(``iscd_stat_cls_code=58``) 그
+    값으로 괴리를 잰다. 주문 가능 여부는 KIS가 판정한다.
+
+    읽지 못하면 호출자는 주문을 보내지 않는다. 모양이 바뀌었을 때의 대가는 거부(관측 가능한
+    실패)이지 우회가 아니다.
     """
     if not text:
         return None
-    try:
-        parsed: Any = json.loads(text)
-    except (json.JSONDecodeError, TypeError):
-        parsed = None
-
-    if isinstance(parsed, dict) and "error" in parsed:
+    rows = _quote_rows(text)
+    if rows is None or len(rows) != 1 or not isinstance(rows[0], dict):
         return None
-    if parsed is not None:
-        raw = _find_key(parsed, _CURRENT_PRICE_KEY)
-    else:
-        match = _CURRENT_PRICE_TEXT_RE.search(text)
-        raw = match.group(1) if match else None
-    if raw is None:
+    row = rows[0]
+    if str(row.get(_STOCK_CODE_KEY, "")).strip().upper() != stock_code.strip().upper():
         return None
-    number = _as_price(raw)
+    number = _as_price(row.get(_CURRENT_PRICE_KEY))
     if number is None or number <= 0:
         return None
     return number
@@ -359,7 +376,8 @@ async def check_order_price_gap(
         # 원주문을 가리키는 호출(정정)에 "PDNO를 넣으라"고 안내하면 틀린다 — 국내주식 정정취소
         # TR에는 그 필드가 없어, MCP가 인자를 거부하거나 원주문과 무관하게 LLM이 고른 종목의
         # 현재가로 괴리를 재게 된다(PR #379 리뷰). 원주문 조회로 종목을 찾는 대신 거부한다 —
-        # 그 조회 응답도 실측하지 않은 모양이라(#381) 종목을 잘못 짚으면 통과 쪽으로 무너진다.
+        # 원주문 조회 응답은 실측하지 않은 모양이라(#381은 현재가 조회만 실측했다) 종목을 잘못
+        # 짚으면 통과 쪽으로 무너진다.
         if _param(params, _ORIGINAL_ORDER_FIELD):
             return _unverifiable("amend_stock_code_unknown")
         return _unverifiable("stock_code_missing")
@@ -371,7 +389,7 @@ async def check_order_price_gap(
         logger.exception("지정가 괴리 검증용 현재가 조회가 예외로 끝났습니다 (PDNO=%s)", stock_code)
         return _unverifiable("current_price_unavailable")
 
-    reference = parse_current_price(quote)
+    reference = parse_current_price(quote, stock_code=stock_code)
     if reference is None:
         logger.warning(
             "현재가 조회 응답에서 stck_prpr를 읽지 못했습니다 (PDNO=%s): %s",

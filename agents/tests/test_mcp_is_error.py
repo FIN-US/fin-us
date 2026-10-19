@@ -344,9 +344,15 @@ async def test_remote_is_error_quote_is_not_read_as_a_current_price(remote_serve
     """지정가 괴리 가드의 현재가 조회도 같은 경로다 — ``isError`` 본문에 가격 모양의 텍스트가
     있어도 현재가로 읽히지 않는다(읽지 못하면 주문을 거부하는 fail-closed 쪽으로 떨어진다).
 
-    뮤테이션: ``isError`` 분기를 지우면 ``stck_prpr: 68900``이 현재가로 읽힌다.
+    본문은 실응답 픽스처(#381) 그대로다 — 정상 응답과 똑같은 본문이어도 ``isError``면 현재가가
+    아니다.
+
+    뮤테이션: ``isError`` 분기를 지우면 본문의 ``stck_prpr``(223500)가 현재가로 읽힌다.
     """
-    remote_server.results["domestic_stock"] = _error("조회 실패 (직전 캐시 stck_prpr: 68900)")
+    quote = (
+        Path(__file__).resolve().parent / "fixtures" / "kis_trading_mcp_inquire_price" / "005930_listed.json"
+    ).read_text(encoding="utf-8")
+    remote_server.results["domestic_stock"] = _error(quote)
 
     text = await finus_api._mcp_call_tool_remote(
         transport="streamable-http",
@@ -356,7 +362,7 @@ async def test_remote_is_error_quote_is_not_read_as_a_current_price(remote_serve
         timeout_sec=10.0,
     )
 
-    assert parse_current_price(text) is None
+    assert parse_current_price(text, stock_code="005930") is None
 
 
 # ---- 전제 계약: Node MCP 서버들이 실패를 isError로 돌려준다 ----
