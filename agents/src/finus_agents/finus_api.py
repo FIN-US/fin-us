@@ -594,6 +594,16 @@ def _sse_connect_timeout(operation_timeout: float) -> float:
     return min(_SSE_CONNECT_CAP, max(_SSE_CONNECT_FLOOR, operation_timeout * 0.25))
 
 
+# KIS Trading MCP 접근 토큰. 서버가 SSE·HTTP 모드에서 MCP_ACCESS_TOKEN을 필수로 요구하고
+# 같은 값을 Bearer 헤더로 확인한다. 비어 있으면 헤더를 싣지 않는다(토큰 없는 구버전 서버).
+KIS_TRADING_MCP_TOKEN_ENV = "FINUS_KIS_TRADING_MCP_TOKEN"
+
+
+def _kis_trading_mcp_headers() -> dict[str, str]:
+    token = os.getenv(KIS_TRADING_MCP_TOKEN_ENV, "").strip()
+    return {"Authorization": f"Bearer {token}"} if token else {}
+
+
 # Kis 계열 원격 MCP 한 곳에 대한 초기화된 ClientSession을 컨텍스트로 제공합니다.
 @asynccontextmanager
 async def _remote_mcp_session(
@@ -603,13 +613,16 @@ async def _remote_mcp_session(
     operation_timeout: float,
 ):
     conn = _sse_connect_timeout(operation_timeout)
+    headers = _kis_trading_mcp_headers()
     if transport == "sse":
-        async with sse_client(url=url, timeout=conn, sse_read_timeout=operation_timeout) as (read, write):
+        async with sse_client(
+            url=url, headers=headers, timeout=conn, sse_read_timeout=operation_timeout,
+        ) as (read, write):
             async with ClientSession(read, write) as session:
                 await session.initialize()
                 yield session
         return
-    async with httpx.AsyncClient() as http_client:
+    async with httpx.AsyncClient(headers=headers) as http_client:
         async with streamable_http_client(url=url, http_client=http_client) as (read, write, _get_sid):
             async with ClientSession(read, write) as session:
                 await session.initialize()
