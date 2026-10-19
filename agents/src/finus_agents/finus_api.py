@@ -348,7 +348,9 @@ def _record_to_ledger(tool_name: str, result: str) -> None:
     )
 
 
-def _record_and_mask(tool_name: str, result: str) -> str:
+def _record_and_mask(
+    tool_name: str, result: str, *, kis_api: tuple[str, str] | None = None,
+) -> str:
     """원장에는 **원문**을 기록하고, 에이전트에게는 마스킹된 결과를 돌려준다 (#231).
 
     도구 하나가 결과를 반환하는 자리는 예외 없이 여기를 지난다 — 그래야 새 도구가
@@ -374,7 +376,7 @@ def _record_and_mask(tool_name: str, result: str) -> str:
     이 함수는 종전과 동일하게 동작한다.
     """
     _record_to_ledger(tool_name, result)
-    return mask_tool_result(tool_name, result)
+    return mask_tool_result(tool_name, result, kis_api=kis_api)
 
 
 # Remote MCP / doc 한도
@@ -1486,7 +1488,9 @@ async def _call_kis_mcp_and_record(
     """
     resolved = await _resolve_stock_name_for_quote(tool_name, arguments, config)
     if isinstance(resolved, str):
-        return _record_and_mask(_KIS_BALANCE_LEDGER_NAME, resolved)
+        return _record_and_mask(
+            _KIS_BALANCE_LEDGER_NAME, resolved, kis_api=("domestic_stock", "find_stock_code"),
+        )
     arguments = resolved
     result = await _order_price_gap_rejection(tool_name, arguments, config)
     if result is None:
@@ -1497,7 +1501,8 @@ async def _call_kis_mcp_and_record(
             arguments=arguments,
             timeout_sec=config.timeout_sec,
         )
-    return _record_and_mask(_KIS_BALANCE_LEDGER_NAME, result)
+    kis_api = (tool_name, str(arguments.get("api_type", "")).strip())
+    return _record_and_mask(_KIS_BALANCE_LEDGER_NAME, result, kis_api=kis_api)
 
 
 async def _build_kis_mcp_description(doc: str, config: FinusAccountBalanceConfig) -> str:
