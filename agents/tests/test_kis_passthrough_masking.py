@@ -55,18 +55,21 @@ def _balance_rows():
     return inner["output1"][0], inner["output2"][0]
 
 
-def test_balance_amounts_and_quantities_do_not_reach_the_llm(box):
+def _digits_left(observation: str) -> list[str]:
+    """자리표시자를 뺀 결과에 남은 2자리 이상 숫자."""
+    return re.findall(r"\d{2,}", pii_guard._SCOPED_PLACEHOLDER_RE.sub("", observation))
+
+
+def test_balance_leaves_no_numbers_but_the_stock_code(box):
+    """검사 대상을 구현의 판정 함수로 고르지 않는다 — 결과 본문에 남은 숫자를 직접 센다."""
     observation = mask_tool_result(KIS_PASSTHROUGH_TOOL, _BALANCE, kis_api=_BALANCE_API)
 
-    holding, summary = _balance_rows()
+    assert _digits_left(json.loads(observation)["data"]["data"]) == ["005930"]
     masked_holding, masked_summary = (_inner(observation)["output1"][0], _inner(observation)["output2"][0])
-    for row, masked in ((holding, masked_holding), (summary, masked_summary)):
-        for key, value in row.items():
-            if re.fullmatch(r"\d+(\.\d+)?", value) and float(value) != 0 and pii_guard._kis_value_kind(key):
-                assert masked[key] != value, key
-                assert box[masked[key]].replace(",", "") == value, key
-    assert masked_summary["dnca_tot_amt"].startswith("<AMOUNT_")
+    assert box[masked_summary["dnca_tot_amt"]] == "4,817,263"
     assert masked_holding["hldg_qty"].startswith("<QTY_")
+    # 마디 없이 붙은 수량 필드도 수량이다 — 주문 인자로 되돌릴 때 종류 검사를 통과해야 한다.
+    assert masked_holding["thdt_buyqty"].startswith("<QTY_")
 
 
 def test_identifiers_dates_and_zeros_stay_readable(box):
@@ -151,3 +154,75 @@ async def test_call_path_passes_the_kis_api_to_masking(box, remote, api_type, ra
     )
 
     assert (observation != raw) is masked
+
+
+# ---- 정상 봉투가 아닌 결과 (PR #432 리뷰) ----
+
+_ACCOUNT_NO = "73519024"
+_CASH = "4817263"
+
+
+@pytest.mark.parametrize("result", [
+    # 서버 실패 봉투: 본문 없이 되비친 인자와 stderr만 온다.
+    json.dumps({"ok": True, "data": {"success": False, "params": {"cano": _ACCOUNT_NO, "acnt_prdt_cd": "01"},
+                                     "error": f"Traceback ... dnca {_CASH}"}}),
+    json.dumps({"ok": False, "error": f"API 실행 중 오류: cano={_ACCOUNT_NO} cash {_CASH}"}),
+    # 래퍼 isError 경로: 봉투 원문이 detail 문자열에 실린다.
+    json.dumps({"error": "mcp_tool_error", "detail": json.dumps(
+        {"ok": True, "data": {"params": {"cano": _ACCOUNT_NO}, "data": json.dumps([{"dnca_tot_amt": _CASH}])}})}),
+    # JSON이 아닌 결과, 글자에 붙은 숫자
+    f"Error: account {_ACCOUNT_NO} KRW{_CASH}",
+    # JSON number 값
+    json.dumps({"ok": True, "data": {"data": [{"dnca_tot_amt": int(_CASH)}]}}),
+    # 단위·공백이 섞인 문자열 값
+    json.dumps({"ok": True, "data": {"data": [{"memo": f"{int(_CASH):,} 원", "acct": f"계좌 {_ACCOUNT_NO}"}]}}),
+])
+def test_non_standard_results_do_not_leak(box, result):
+    observation = mask_tool_result(KIS_PASSTHROUGH_TOOL, result, kis_api=_BALANCE_API)
+
+    assert _ACCOUNT_NO not in observation
+    assert _CASH not in observation.replace(",", "")
+
+
+def test_wrapper_hint_text_stays_readable(box):
+    """래퍼가 쓴 안내 문구는 숫자가 있어도 가리지 않는다."""
+    hint = "최대 50페이지까지 조회합니다."
+    observation = mask_tool_result(KIS_PASSTHROUGH_TOOL, json.dumps({"error": "x", "hint": hint}, ensure_ascii=False))
+
+    assert json.loads(observation)["hint"] == hint
+
+
+def test_order_identifiers_keep_their_leading_zeros(box):
+    """주문번호·지점번호·종목번호는 번호다. 가리지 않고, 콤마를 넣어 망가뜨리지도 않는다."""
+    body = [{"odno": "0000117057", "orgn_odno": "0000117001", "ord_gno_brno": "06010",
+             "ovrs_pdno": "00700", "ord_qty": "10", "tot_ccld_amt": "2235000"}]
+    result = json.dumps({"ok": True, "data": {"data": json.dumps(body)}})
+
+    row = _inner(mask_tool_result(KIS_PASSTHROUGH_TOOL, result, kis_api=("domestic_stock", "inquire_daily_ccld")))[0]
+
+    assert (row["odno"], row["orgn_odno"], row["ord_gno_brno"], row["ovrs_pdno"]) == (
+        "0000117057", "0000117001", "06010", "00700")
+    assert box[row["tot_ccld_amt"]] == "2,235,000"
+
+
+def test_masked_quantity_and_price_restore_into_order_params(box):
+    """잔고에서 본 수량·현재가 자리표시자를 주문 인자로 되돌리면 KIS가 받는 숫자가 된다(#338)."""
+    observation = mask_tool_result(KIS_PASSTHROUGH_TOOL, _BALANCE, kis_api=_BALANCE_API)
+    holding = _inner(observation)["output1"][0]
+
+    restored, rejections = pii_guard.restore_params_for_kis(
+        {"PDNO": "005930", "ORD_QTY": holding["thdt_buyqty"], "ORD_UNPR": holding["prpr"]},
+        tool_name="domestic_stock", api_type="order_cash",
+    )
+
+    assert rejections == []
+    assert restored == {"PDNO": "005930", "ORD_QTY": "3", "ORD_UNPR": "223500"}
+
+
+def test_unknown_number_with_leading_zeros_restores_verbatim(box):
+    """모르는 필드라 가리지만, 앞자리가 0인 값은 번호일 수 있어 콤마 없이 원문으로 되돌린다."""
+    result = json.dumps({"ok": True, "data": {"data": json.dumps([{"rsvn_ord_seq": "00700"}])}})
+
+    row = _inner(mask_tool_result(KIS_PASSTHROUGH_TOOL, result, kis_api=("domestic_stock", "order_resv_ccnl")))[0]
+
+    assert box[row["rsvn_ord_seq"]] == "00700"

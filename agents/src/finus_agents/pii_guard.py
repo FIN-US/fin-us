@@ -139,14 +139,27 @@ PUBLIC_KIS_QUOTE_APIS: frozenset[tuple[str, str]] = frozenset(
 )
 
 # KIS 응답은 영문 키와 단위 없는 숫자(``"dnca_tot_amt": "10000000"``)라 ``mask_pii``의
-# 금액 인식기("원"·한글 라벨 전제)에 걸리지 않는다. 그래서 JSON을 풀어 **숫자 값 전부를**
-# 키 기준으로 가린다. 남기는 것은 계좌와 무관한 식별자·날짜뿐이다.
-_KIS_KEEP_SUFFIXES = ("iscd", "cd", "dt", "date", "tmd", "time")
-_KIS_KEEP_KEYS = frozenset({"pdno"})
+# 금액 인식기("원"·한글 라벨 전제)에 걸리지 않는다. 그래서 응답 JSON을 풀어 숫자를 키
+# 기준으로 가리고, 키로 판정할 수 없는 문자열(오류 메시지·stderr) 안의 숫자도 가린다.
+# 남기는 것은 계좌와 무관한 식별자·날짜·0, 그리고 아래 메타데이터 키뿐이다.
+#
+# 봉투 모양에 기대지 않는다. 실패하면 서버는 본문 없이 ``error``(stderr)와 되비친 인자만
+# 돌려주고, 래퍼의 isError 경로는 봉투 원문을 ``detail`` 문자열에 싣는다 — 정상 봉투만
+# 거르면 이런 결과가 평문으로 나간다(PR #432 리뷰). JSON으로 읽히지 않으면 전체를 텍스트로
+# 보고 숫자를 모두 가린다.
+_KIS_KEEP_SUFFIXES = frozenset({
+    "iscd", "cd", "dt", "date", "tmd", "time",  # 종목·구분 코드, 날짜·시각
+    "pdno", "odno", "brno", "orgno",            # 종목번호·주문번호·지점번호 (앞자리 0이 의미 있다)
+})
 _KIS_ACCOUNT_KEYS = frozenset({"cano", "acnt_prdt_cd", "acnt_no"})
+# 서버 봉투의 메타데이터와 이 래퍼가 쓰는 안내 문구. 숫자가 있어도 계좌와 무관하다.
+_KIS_META_KEYS = frozenset({
+    "ok", "success", "api_type", "message", "execution_time", "temp_dir", "venv_used",
+    "cleanup_success", "tool", "tool_name", "hint",
+})
 _KIS_NUMERIC_VALUE_RE = re.compile(r"[+-]?\d[\d,]*(?:\.\d+)?")
-# JSON으로 읽지 못한 본문에 남은 숫자(오류 메시지 등). 계좌 TR 응답이므로 모두 가린다.
-_KIS_BARE_NUMBER_RE = re.compile(r"(?<![\w.<])[+-]?\d[\d,]*(?:\.\d+)?(?![\w>])")
+# 키를 모르는 텍스트 속 숫자. 글자에 붙은 숫자("KRW4817263")도 잡는다.
+_KIS_TEXT_NUMBER_RE = re.compile(r"(?<![\d.,])\d[\d,]*(?:\.\d+)?")
 
 
 def _kis_value_kind(key: str) -> str | None:
@@ -154,45 +167,98 @@ def _kis_value_kind(key: str) -> str | None:
     key = key.strip().lower()
     if key in _KIS_ACCOUNT_KEYS:
         return "ACCOUNT"
-    if key in _KIS_KEEP_KEYS or key.rsplit("_", 1)[-1] in _KIS_KEEP_SUFFIXES:
+    if key.rsplit("_", 1)[-1] in _KIS_KEEP_SUFFIXES:
         return None
-    return "QTY" if _expected_kind(key) == "QTY" else "AMOUNT"
+    # ``thdt_buyqty``처럼 마디 없이 붙은 수량 필드도 있다. 주문 인자(*_QTY)로 되돌릴 때
+    # 종류 검사(_expected_kind)를 통과하려면 QTY여야 한다.
+    return "QTY" if key.endswith("qty") else "AMOUNT"
 
 
-def _readable_number(value: str) -> str:
-    """자리표시자가 복원될 때 사용자에게 보일 표기. 정수부에 천 단위 콤마를 넣는다.
+def _readable_number(kind: str, value: str) -> str:
+    """자리표시자가 복원될 때 사용자에게 보일 표기. 금액·수량은 천 단위 콤마를 넣는다.
 
     KIS 원값(``"10000000"``)을 그대로 두면 답변에 콤마 없는 숫자가 나간다. KIS 인자로
-    되돌릴 때는 ``_as_kis_number``가 콤마를 벗긴다.
+    되돌릴 때는 ``_as_kis_number``가 콤마를 벗긴다. 계좌번호와 앞자리가 0인 값은 번호라
+    원문 그대로 둔다.
     """
+    digits = value.lstrip("+-")
+    if kind == "ACCOUNT" or (digits.startswith("0") and len(digits) > 1 and "." not in digits):
+        return value
     sign = value[0] if value[0] in "+-" else ""
-    whole, dot, frac = value.lstrip("+-").replace(",", "").partition(".")
+    whole, dot, frac = digits.replace(",", "").partition(".")
     return f"{sign}{int(whole):,}{dot}{frac}"
 
 
-def _mask_kis_payload(
-    text: str, counter: _Counter, mapping: dict[str, str], *, account_only: bool = False,
-) -> str:
-    """KIS 응답 본문(JSON 문자열, 앞에 오류 텍스트가 붙을 수 있다)의 숫자를 가린다.
+class _KisMasker:
+    """KIS 응답 하나를 거르는 동안의 자리표시자 발급기."""
 
-    *account_only*면 계좌번호 필드만 가린다 — 서버가 되비치는 요청 인자용이다.
-    """
+    def __init__(self, counter: _Counter, mapping: dict[str, str]) -> None:
+        self._counter = counter
+        self._mapping = mapping
 
-    def placeholder(kind: str, original: str) -> str:
-        ph = counter.next_placeholder(kind)
-        mapping[ph] = original
+    def _placeholder(self, kind: str, original: str) -> str:
+        ph = self._counter.next_placeholder(kind)
+        self._mapping[ph] = original
         return ph
 
-    def walk(node: Any, key: str = "") -> Any:
+    def text(self, chunk: str) -> str:
+        """키를 모르는 텍스트의 숫자를 모두 가린다. 이미 있는 자리표시자는 건너뛴다.
+
+        ``mask_pii``를 먼저 건다 — 계좌번호(``12345678-01``)·"원" 금액·"주" 수량을 제 종류로
+        가리게 하고, 남은 맨 숫자만 아래에서 금액으로 가린다.
+        """
+        chunk, recognized = mask_pii(chunk)
+        self._mapping.update(recognized)
+
+        def sub(part: str) -> str:
+            return _KIS_TEXT_NUMBER_RE.sub(lambda m: self._placeholder("AMOUNT", m.group(0)), part)
+
+        out, pos = [], 0
+        for match in _SCOPED_PLACEHOLDER_RE.finditer(chunk):
+            out += [sub(chunk[pos:match.start()]), match.group(0)]
+            pos = match.end()
+        out.append(sub(chunk[pos:]))
+        return "".join(out)
+
+    def payload(self, chunk: str) -> str:
+        """JSON 본문(앞에 오류 텍스트가 붙을 수 있다)이나 텍스트를 거른다."""
+        starts = [i for i in (chunk.find("{"), chunk.find("[")) if i >= 0]
+        if starts:
+            start = min(starts)
+            try:
+                body = json.loads(chunk[start:])
+            except ValueError:
+                pass
+            else:
+                return self.text(chunk[:start]) + json.dumps(self.walk(body), ensure_ascii=False)
+        return self.text(chunk)
+
+    def walk(self, node: Any, key: str = "", *, account_only: bool = False) -> Any:
+        """JSON 값을 키 기준으로 거른다.
+
+        *account_only*는 서버가 되비치는 요청 인자(``params``)용이다. 계좌번호를 자동으로 채우는
+        TR이 있어 계좌 필드만 가리고, 나머지(조회 구분 코드 등)는 에이전트가 읽게 둔다.
+        """
         if isinstance(node, dict):
-            return {k: walk(v, str(k)) for k, v in node.items()}
+            masked: dict[str, Any] = {}
+            for k, v in node.items():
+                name = str(k)
+                if name in _KIS_META_KEYS:
+                    masked[k] = v
+                elif name == "params" and isinstance(v, dict):
+                    masked[k] = self.walk(v, account_only=True)
+                else:
+                    masked[k] = self.walk(v, name, account_only=account_only)
+            return masked
         if isinstance(node, list):
-            return [walk(v, key) for v in node]
+            return [self.walk(v, key, account_only=account_only) for v in node]
         if isinstance(node, bool) or node is None:
             return node
         value = str(node).strip()
         if not _KIS_NUMERIC_VALUE_RE.fullmatch(value):
-            return node
+            if account_only or not isinstance(node, str):
+                return node
+            return self.payload(node)
         kind = _kis_value_kind(key)
         if account_only and kind != "ACCOUNT":
             return node
@@ -200,48 +266,19 @@ def _mask_kis_payload(
         # 판단을 하려면 읽혀야 한다.
         if kind is None or float(value.replace(",", "")) == 0:
             return node
-        return placeholder(kind, value if kind == "ACCOUNT" else _readable_number(value))
-
-    def bare(chunk: str) -> str:
-        return _KIS_BARE_NUMBER_RE.sub(lambda m: placeholder("AMOUNT", m.group(0)), chunk)
-
-    starts = [i for i in (text.find("{"), text.find("[")) if i >= 0]
-    if not starts:
-        return bare(text)
-    start = min(starts)
-    try:
-        body = json.loads(text[start:])
-    except ValueError:
-        return bare(text)
-    return bare(text[:start]) + json.dumps(walk(body), ensure_ascii=False)
+        return self._placeholder(kind, _readable_number(kind, value))
 
 
 def _mask_kis_passthrough(result: str, counter: _Counter, mapping: dict[str, str]) -> str:
-    """pass-through 응답 봉투(``{"ok", "data": {..., "data": <본문>}}``)의 본문을 가린다.
-
-    봉투로 읽히지 않는 결과(래퍼의 오류 JSON 등)는 그대로 돌려준다 — 이후 ``mask_pii``가
-    한 번 더 거른다.
-    """
+    """KIS pass-through 결과 전체를 거른다. JSON이 아니면 텍스트로 보고 숫자를 모두 가린다."""
+    masker = _KisMasker(counter, mapping)
     try:
-        envelope = json.loads(result)
+        parsed = json.loads(result)
     except ValueError:
-        return result
-    data = envelope.get("data") if isinstance(envelope, dict) else None
-    if not isinstance(data, dict) or "data" not in data:
-        return result
-    # 서버가 되비치는 요청 인자. 계좌번호를 자동으로 채우는 TR이 있어 같은 규칙으로 거른다.
-    if isinstance(data.get("params"), dict):
-        data["params"] = json.loads(
-            _mask_kis_payload(
-                json.dumps(data["params"], ensure_ascii=False), counter, mapping, account_only=True,
-            )
-        )
-    inner = data["data"]
-    if isinstance(inner, str):
-        data["data"] = _mask_kis_payload(inner, counter, mapping)
-    else:
-        data["data"] = json.loads(_mask_kis_payload(json.dumps(inner, ensure_ascii=False), counter, mapping))
-    return json.dumps(envelope, ensure_ascii=False)
+        return masker.text(result)
+    if not isinstance(parsed, (dict, list)):
+        return masker.text(result)
+    return json.dumps(masker.walk(parsed), ensure_ascii=False)
 
 
 # 자리표시자 형식은 pii_mask._PLACEHOLDER_RE와 같지만 **scope를 캡처**한다 — 위
@@ -266,8 +303,8 @@ def mask_tool_result(
     대상이 아니면 *result*를 그대로 돌려준다.
 
     KIS pass-through(:data:`KIS_PASSTHROUGH_TOOL`)는 *kis_api*(``(KIS 도구, api_type)``)로
-    갈린다. :data:`PUBLIC_KIS_QUOTE_APIS`면 원문 그대로, 그 밖(모름 포함)이면 응답 본문의
-    숫자를 키 기준으로 전부 가린 뒤 ``mask_pii``를 한 번 더 건다 (#430).
+    갈린다. :data:`PUBLIC_KIS_QUOTE_APIS`면 원문 그대로, 그 밖(모름 포함)이면 결과 전체의
+    숫자를 키 기준으로 가린다. 키를 모르는 텍스트에는 ``mask_pii``와 맨 숫자 마스킹을 건다 (#430).
 
     박스가 없으면(ContextVar를 물려받지 못한 스레드풀 등 — ``_record_to_ledger``가
     같은 상황을 ERROR로 남긴다) **마스킹은 그대로 하고** 매핑만 버린다. 유출을 막는
@@ -290,13 +327,13 @@ def mask_tool_result(
         return result
 
     try:
-        mapping: dict[str, str] = {}
         if tool_name == KIS_PASSTHROUGH_TOOL:
-            result_for_text = _mask_kis_passthrough(result, _Counter(), mapping)
+            # 키를 모르는 텍스트에는 _KisMasker가 mask_pii를 이미 건다. 결과 전체에 한 번 더
+            # 걸면 남겨 둔 10자리 주문번호(odno)가 계좌번호 모양이라 다시 가려진다.
+            mapping: dict[str, str] = {}
+            masked = _mask_kis_passthrough(result, _Counter(), mapping)
         else:
-            result_for_text = result
-        masked, text_mapping = mask_pii(result_for_text)
-        mapping.update(text_mapping)
+            masked, mapping = mask_pii(result)
     except Exception:
         logger.exception("도구 결과 마스킹 실패 — 원문 대신 오류를 돌려줍니다 (%s)", tool_name)
         return json.dumps(
