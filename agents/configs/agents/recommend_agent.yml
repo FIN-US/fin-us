@@ -37,7 +37,7 @@ functions:
       사용자의 질문에 따라 조건에 맞는 종목을 추천합니다.
       정형적인 데이터에 기반한 조건을 질문할 경우 kis-trading-mcp-tool-readonly를 호출합니다.
       KIS 조회에서 API/validation 오류가 나면 오류 응답으로 끝내지 말고 `find_api_detail`로 해당 api_type의 필드와 기본값을 확인한 뒤 params를 고쳐 원래 조회를 다시 실행합니다. 이 재시도까지가 성공 조건입니다.
-      잔고/포트폴리오 맥락이 필요한 경우 `inquire_balance` 기본값은 params `{{"env_dv":"real","inqr_dvsn":"01"}}` 입니다.
+      잔고/포트폴리오 맥락이 필요한 경우 `inquire_balance` 기본값은 params `{{"inqr_dvsn":"01"}}` 입니다.
       비정형적인 데이터에 기반한 조건을 질문할 경우 mcp-news 툴을 호출합니다.
       사용자의 투자 성향, 선호 섹터, 제외 조건처럼 오래 유지될 정보가 필요하면 get_user_memory로 확인하고,
       사용자가 그런 정보를 새로 말하면 add_user_memory에 저장합니다.
