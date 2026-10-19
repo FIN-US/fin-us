@@ -65,7 +65,7 @@ from collections.abc import Mapping
 from contextvars import ContextVar
 from typing import Any, NamedTuple
 
-from .pii_mask import _FALLBACK_LABEL, mask_pii
+from .pii_mask import _FALLBACK_LABEL, _Counter, mask_pii
 
 logger = logging.getLogger(__name__)
 # 마스킹 전후 비교 로그 스위치 — backend/core/config.py의 같은 이름 env와 짝이다(#395).
@@ -88,19 +88,10 @@ PII_MAPPING: ContextVar[dict[str, str] | None] = ContextVar("PII_MAPPING", defau
 # 계좌 자격증명으로 조회한 데이터를 돌려주는 도구들 — 결과가 LLM 컨텍스트에 들어가기
 # 전에 마스킹한다. finus_api.py가 원장에 쓰는 도구 이름과 같은 문자열이어야 한다.
 #
-# **왜 이 목록이 도구 단위이고 api_type 단위가 아닌가 (fail-closed)**
-#
-# ``finus_account_balance``는 Kis Trading MCP pass-through라, 같은 도구가 잔고
-# (``inquire_balance``)와 시세(``inquire_price``)를 모두 서비스한다. api_type으로
-# 갈라 시세만 마스킹에서 빼면 "계좌 계열 TR 목록"을 이쪽에서 관리해야 하는데, 그
-# 목록의 출처는 **외부 MCP 서버**(upstream ``open-trading-api``)라 이 저장소가 통제하지
-# 못한다. 새 TR이 추가될 때마다 목록에서 빠지고, 빠진 항목은 조용한 유출이 된다.
-# 그래서 도구 단위로 전부 마스킹한다 — 새 TR의 기본값은 "마스킹됨"이다.
-#
-# 감수하는 비용: 시세(현재가·호가·차트)도 자리표시자로 나가므로 LLM은 절대 가격 수준을
-# 근거로 판단할 수 없다. 이는 #230이 (a) 방식을 택하며 이미 감수하고 문서화한 한계와
-# **같은 종류의** 비용이고, 왕복이 무손실이라 **사용자가 보는 최종 값은 원값 그대로**다.
-# 품질 저하가 실제로 관측되면 api_type 면제 목록을 별도 이슈로 검토한다.
+# **도구 단위가 기본이다 (fail-closed).** ``finus_account_balance``는 Kis Trading MCP
+# pass-through라 한 도구가 잔고(``inquire_balance``)와 시세(``inquire_price``)를 모두
+# 서비스한다. TR 목록의 출처가 외부 MCP 서버라, 모르는 TR은 계좌 TR로 보고 가린다.
+# 예외는 정확한 이름으로 둔 공개 시세 목록(:data:`PUBLIC_KIS_QUOTE_APIS`) 하나다(#430).
 #
 # 목록에 없는 도구(뉴스·공시·실적)는 마스킹하지 않는다. 공개 정보이고, 기사 본문의
 # 금액까지 자리표시자로 바꾸면 얻는 것 없이 분석만 망가진다.
@@ -125,6 +116,171 @@ MASKED_TOOLS: frozenset[str] = frozenset({
 # 목록에도 넣어 둔다 — 오류 경로(`diary_api_http_error`의 `detail`은 backend 422 응답에
 # 실린 요청 본문을 그대로 담을 수 있다)까지 한 번에 덮는 fail-closed 쪽이다.
 
+# ---------------------------------------------------------------------------
+# KIS Trading MCP pass-through 응답 (#430)
+# ---------------------------------------------------------------------------
+
+# KIS pass-through의 원장 이름. finus_api._KIS_BALANCE_LEDGER_NAME과 같은 문자열이다.
+KIS_PASSTHROUGH_TOOL = "finus_account_balance"
+
+# 계좌 자격증명과 무관한 공개 시세 TR. 응답에 개인 정보가 없으므로 마스킹하지 않는다 — 시세를
+# 가리면 지정가 판단·종목 비교가 망가지고, 10자리 상장주식수가 계좌번호로 오인돼 가려진다.
+# **정확한 이름만 둔다(fail-closed).** 목록 밖의 TR은 계좌 TR로 보고 아래 키 기준 마스킹을
+# 건다. 접두사로 넓히면 ``inquire_ccnl``(체결가 시세)을 넣으려다 ``inquire_daily_ccld``
+# (계좌 체결내역)가 딸려 들어오는 식의 사고가 난다.
+PUBLIC_KIS_QUOTE_APIS: frozenset[tuple[str, str]] = frozenset(
+    ("domestic_stock", api_type)
+    for api_type in (
+        "inquire_price", "inquire_price_2", "inquire_ccnl", "inquire_daily_price",
+        "inquire_asking_price_exp_ccn", "inquire_investor", "inquire_member",
+        "inquire_daily_itemchartprice", "inquire_time_itemchartprice",
+        "inquire_time_itemconclusion", "find_stock_code", "find_api_detail",
+    )
+)
+
+# KIS 응답은 영문 키와 단위 없는 숫자(``"dnca_tot_amt": "10000000"``)라 ``mask_pii``의
+# 금액 인식기("원"·한글 라벨 전제)에 걸리지 않는다. 그래서 응답 JSON을 풀어 숫자를 키
+# 기준으로 가리고, 키로 판정할 수 없는 문자열(오류 메시지·stderr) 안의 숫자도 가린다.
+# 남기는 것은 계좌와 무관한 식별자·날짜·0, 그리고 아래 메타데이터 키뿐이다.
+#
+# 봉투 모양에 기대지 않는다. 실패하면 서버는 본문 없이 ``error``(stderr)와 되비친 인자만
+# 돌려주고, 래퍼의 isError 경로는 봉투 원문을 ``detail`` 문자열에 싣는다 — 정상 봉투만
+# 거르면 이런 결과가 평문으로 나간다(PR #432 리뷰). JSON으로 읽히지 않으면 전체를 텍스트로
+# 보고 숫자를 모두 가린다.
+_KIS_KEEP_SUFFIXES = frozenset({
+    "iscd", "cd", "dt", "date", "tmd", "time",  # 종목·구분 코드, 날짜·시각
+    "pdno", "odno", "brno", "orgno",            # 종목번호·주문번호·지점번호 (앞자리 0이 의미 있다)
+})
+_KIS_ACCOUNT_KEYS = frozenset({"cano", "acnt_prdt_cd", "acnt_no"})
+# 서버 봉투의 메타데이터와 이 래퍼가 쓰는 안내 문구. 숫자가 있어도 계좌와 무관하다.
+_KIS_META_KEYS = frozenset({
+    "ok", "success", "api_type", "message", "execution_time", "temp_dir", "venv_used",
+    "cleanup_success", "tool", "tool_name", "hint",
+})
+_KIS_NUMERIC_VALUE_RE = re.compile(r"[+-]?\d[\d,]*(?:\.\d+)?")
+# 키를 모르는 텍스트 속 숫자. 글자에 붙은 숫자("KRW4817263")도 잡는다.
+_KIS_TEXT_NUMBER_RE = re.compile(r"(?<![\d.,])\d[\d,]*(?:\.\d+)?")
+
+
+def _kis_value_kind(key: str) -> str | None:
+    """KIS 응답 필드 *key*의 숫자 값에 쓸 자리표시자 종류. 남길 필드면 ``None``."""
+    key = key.strip().lower()
+    if key in _KIS_ACCOUNT_KEYS:
+        return "ACCOUNT"
+    if key.rsplit("_", 1)[-1] in _KIS_KEEP_SUFFIXES:
+        return None
+    # ``thdt_buyqty``처럼 마디 없이 붙은 수량 필드도 있다. 주문 인자(*_QTY)로 되돌릴 때
+    # 종류 검사(_expected_kind)를 통과하려면 QTY여야 한다.
+    return "QTY" if key.endswith("qty") else "AMOUNT"
+
+
+def _readable_number(kind: str, value: str) -> str:
+    """자리표시자가 복원될 때 사용자에게 보일 표기. 금액·수량은 천 단위 콤마를 넣는다.
+
+    KIS 원값(``"10000000"``)을 그대로 두면 답변에 콤마 없는 숫자가 나간다. KIS 인자로
+    되돌릴 때는 ``_as_kis_number``가 콤마를 벗긴다. 계좌번호와 앞자리가 0인 값은 번호라
+    원문 그대로 둔다.
+    """
+    digits = value.lstrip("+-")
+    if kind == "ACCOUNT" or (digits.startswith("0") and len(digits) > 1 and "." not in digits):
+        return value
+    sign = value[0] if value[0] in "+-" else ""
+    whole, dot, frac = digits.replace(",", "").partition(".")
+    return f"{sign}{int(whole):,}{dot}{frac}"
+
+
+class _KisMasker:
+    """KIS 응답 하나를 거르는 동안의 자리표시자 발급기."""
+
+    def __init__(self, counter: _Counter, mapping: dict[str, str]) -> None:
+        self._counter = counter
+        self._mapping = mapping
+
+    def _placeholder(self, kind: str, original: str) -> str:
+        ph = self._counter.next_placeholder(kind)
+        self._mapping[ph] = original
+        return ph
+
+    def text(self, chunk: str) -> str:
+        """키를 모르는 텍스트의 숫자를 모두 가린다. 이미 있는 자리표시자는 건너뛴다.
+
+        ``mask_pii``를 먼저 건다 — 계좌번호(``12345678-01``)·"원" 금액·"주" 수량을 제 종류로
+        가리게 하고, 남은 맨 숫자만 아래에서 금액으로 가린다.
+        """
+        chunk, recognized = mask_pii(chunk)
+        self._mapping.update(recognized)
+
+        def sub(part: str) -> str:
+            return _KIS_TEXT_NUMBER_RE.sub(lambda m: self._placeholder("AMOUNT", m.group(0)), part)
+
+        out, pos = [], 0
+        for match in _SCOPED_PLACEHOLDER_RE.finditer(chunk):
+            out += [sub(chunk[pos:match.start()]), match.group(0)]
+            pos = match.end()
+        out.append(sub(chunk[pos:]))
+        return "".join(out)
+
+    def payload(self, chunk: str) -> str:
+        """JSON 본문(앞에 오류 텍스트가 붙을 수 있다)이나 텍스트를 거른다."""
+        starts = [i for i in (chunk.find("{"), chunk.find("[")) if i >= 0]
+        if starts:
+            start = min(starts)
+            try:
+                body = json.loads(chunk[start:])
+            except ValueError:
+                pass
+            else:
+                return self.text(chunk[:start]) + json.dumps(self.walk(body), ensure_ascii=False)
+        return self.text(chunk)
+
+    def walk(self, node: Any, key: str = "", *, account_only: bool = False) -> Any:
+        """JSON 값을 키 기준으로 거른다.
+
+        *account_only*는 서버가 되비치는 요청 인자(``params``)용이다. 계좌번호를 자동으로 채우는
+        TR이 있어 계좌 필드만 가리고, 나머지(조회 구분 코드 등)는 에이전트가 읽게 둔다.
+        """
+        if isinstance(node, dict):
+            masked: dict[str, Any] = {}
+            for k, v in node.items():
+                name = str(k)
+                if name in _KIS_META_KEYS:
+                    masked[k] = v
+                elif name == "params" and isinstance(v, dict):
+                    masked[k] = self.walk(v, account_only=True)
+                else:
+                    masked[k] = self.walk(v, name, account_only=account_only)
+            return masked
+        if isinstance(node, list):
+            return [self.walk(v, key, account_only=account_only) for v in node]
+        if isinstance(node, bool) or node is None:
+            return node
+        value = str(node).strip()
+        if not _KIS_NUMERIC_VALUE_RE.fullmatch(value):
+            if account_only or not isinstance(node, str):
+                return node
+            return self.payload(node)
+        kind = _kis_value_kind(key)
+        if account_only and kind != "ACCOUNT":
+            return node
+        # 0은 가리지 않는다. 개인을 드러내지 않고, 에이전트가 "보유 종목 없음" 같은
+        # 판단을 하려면 읽혀야 한다.
+        if kind is None or float(value.replace(",", "")) == 0:
+            return node
+        return self._placeholder(kind, _readable_number(kind, value))
+
+
+def _mask_kis_passthrough(result: str, counter: _Counter, mapping: dict[str, str]) -> str:
+    """KIS pass-through 결과 전체를 거른다. JSON이 아니면 텍스트로 보고 숫자를 모두 가린다."""
+    masker = _KisMasker(counter, mapping)
+    try:
+        parsed = json.loads(result)
+    except ValueError:
+        return masker.text(result)
+    if not isinstance(parsed, (dict, list)):
+        return masker.text(result)
+    return json.dumps(masker.walk(parsed), ensure_ascii=False)
+
+
 # 자리표시자 형식은 pii_mask._PLACEHOLDER_RE와 같지만 **scope를 캡처**한다 — 위
 # docstring의 "자기가 만든 것만" 판정에 필요하다. 얼터네이션을 같은 출처
 # (_FALLBACK_LABEL)에서 조립하므로 종류가 늘어도 두 정규식이 함께 따라간다.
@@ -139,10 +295,16 @@ def install_mapping_box() -> dict[str, str]:
     return {}
 
 
-def mask_tool_result(tool_name: str, result: str) -> str:
+def mask_tool_result(
+    tool_name: str, result: str, *, kis_api: tuple[str, str] | None = None,
+) -> str:
     """*tool_name*이 마스킹 대상이면 *result*를 마스킹하고 매핑을 박스에 누적한다.
 
     대상이 아니면 *result*를 그대로 돌려준다.
+
+    KIS pass-through(:data:`KIS_PASSTHROUGH_TOOL`)는 *kis_api*(``(KIS 도구, api_type)``)로
+    갈린다. :data:`PUBLIC_KIS_QUOTE_APIS`면 원문 그대로, 그 밖(모름 포함)이면 결과 전체의
+    숫자를 키 기준으로 가린다. 키를 모르는 텍스트에는 ``mask_pii``와 맨 숫자 마스킹을 건다 (#430).
 
     박스가 없으면(ContextVar를 물려받지 못한 스레드풀 등 — ``_record_to_ledger``가
     같은 상황을 ERROR로 남긴다) **마스킹은 그대로 하고** 매핑만 버린다. 유출을 막는
@@ -161,9 +323,17 @@ def mask_tool_result(tool_name: str, result: str) -> str:
     """
     if tool_name not in MASKED_TOOLS:
         return result
+    if tool_name == KIS_PASSTHROUGH_TOOL and kis_api in PUBLIC_KIS_QUOTE_APIS:
+        return result
 
     try:
-        masked, mapping = mask_pii(result)
+        if tool_name == KIS_PASSTHROUGH_TOOL:
+            # 키를 모르는 텍스트에는 _KisMasker가 mask_pii를 이미 건다. 결과 전체에 한 번 더
+            # 걸면 남겨 둔 10자리 주문번호(odno)가 계좌번호 모양이라 다시 가려진다.
+            mapping: dict[str, str] = {}
+            masked = _mask_kis_passthrough(result, _Counter(), mapping)
+        else:
+            masked, mapping = mask_pii(result)
     except Exception:
         logger.exception("도구 결과 마스킹 실패 — 원문 대신 오류를 돌려줍니다 (%s)", tool_name)
         return json.dumps(

@@ -248,14 +248,15 @@ class TestReadonlyWrapper:
                 finus_api.KisTradingMcpCallInput(tool_name=tool_name, api_type=api_type, params={})
             )
 
-    @pytest.mark.parametrize("api_type", ["volume_rank", "intgr_margin", "find_stock_code"])
+    @pytest.mark.parametrize("api_type", ["volume_rank", "intgr_margin", "inquire_daily_ccld"])
     async def test_newly_allowed_tr_reaches_kis_and_its_result_is_masked(
         self, remote, mapping_box, ledger, api_type
     ):
         """새로 연 조회가 KIS까지 가고, 결과는 LLM 컨텍스트로 가기 전에 마스킹된다.
 
-        마스킹은 api_type이 아니라 원장 키(``finus_account_balance``) 단위다 — 새 TR도
-        기본값이 "마스킹됨"이라는 전제를 여기서 확인한다.
+        마스킹은 원장 키(``finus_account_balance``) 단위이고, 정확한 이름으로 둔 공개 시세
+        목록(``pii_guard.PUBLIC_KIS_QUOTE_APIS``)만 예외다(#430) — 새 TR도 기본값이
+        "마스킹됨"이라는 전제를 여기서 확인한다.
 
         뮤테이션: 래퍼가 ``_is_readonly_api_type``에 넘기는 tool_name을 빈 문자열로 바꾸면
         호출이 막혀 red. ``_call_kis_mcp_and_record``가 ``_record_and_mask`` 대신 원문을
