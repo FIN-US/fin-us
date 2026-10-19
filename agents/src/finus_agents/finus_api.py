@@ -1195,7 +1195,7 @@ _KIS_TRADING_TOOL_GUIDE = """
 - 잔고/포트폴리오 `api_type="inquire_balance"`: 서버가 흔한 필수값을 기본 채웁니다. 직접 넣을 때 예시는
   `{"inqr_dvsn":"01","afhr_flpr_yn":"N","unpr_dvsn":"01","fund_sttl_icld_yn":"N","fncg_amt_auto_rdpt_yn":"N","prcs_dvsn":"01"}` 입니다.
 - 투자계좌자산현황 `api_type="inquire_account_balance"`는 모의투자에서 지원되지 않습니다. `inqr_dvsn_1`은 기본 `""`이며 `"00"`을 추측해서 넣지 마세요.
-- 현재가 조회 `api_type="inquire_price"`의 국내 주식 기본값은 `{"fid_cond_mrkt_div_code":"J","fid_input_iscd":"종목코드"}` 입니다.
+- 현재가 조회는 `{"api_type":"inquire_price","params":{"stock_name":"삼성전자"}}`처럼 종목명만 넣어 한 번에 부르세요. 이 래퍼가 종목코드를 찾아 채웁니다(호가·체결·일별시세·투자자 등 종목 단위 시세도 같음). `find_stock_code`를 먼저 부를 필요가 없고, 종목코드만으로 답을 끝내지 마세요.
 - `env_dv`(모의/실전)는 이 래퍼가 배포 설정에 맞춰 채웁니다. 직접 고르지 마세요.
 - 알 수 없는 필드, INVALID INPUT, 필드 크기 오류, 필수 파라미터 오류가 나오면 실패로 끝내지 말고 `api_type="find_api_detail"`을 호출해 해당 `api_type`의 필드를 확인한 뒤 같은 사용자 요청을 다시 실행하세요.
 - 성공 조건은 사용자가 요청한 데이터 조회가 정상 Observation으로 돌아오고, 그 Observation을 근거로 최종 답변하는 것입니다.
@@ -1422,6 +1422,55 @@ async def _order_price_gap_rejection(
     )
 
 
+# 종목 하나의 시세를 fid_input_iscd(종목코드)로 받는 국내주식 TR. Kis Trading MCP의 종목명 자동
+# 변환은 pdno만 채우므로 이 TR들은 종목명으로 부를 수 없다. 에이전트가 종목코드를 먼저 찾고
+# 그 결과만으로 답을 끝내는 일이 잦아, 래퍼가 종목명을 받아 코드로 바꿔 한 번에 조회한다.
+# 순위·업종 TR은 fid_input_iscd에 시장 코드를 넣으므로 넣지 않는다.
+_STOCK_CODE_QUOTE_APIS = frozenset({
+    "inquire_price", "inquire_price_2", "inquire_ccnl", "inquire_daily_price",
+    "inquire_asking_price_exp_ccn", "inquire_investor", "inquire_member",
+    "inquire_daily_itemchartprice", "inquire_time_itemchartprice", "inquire_time_itemconclusion",
+})
+_STOCK_NAME_PARAMS = ("stock_name", "stock_name_kr", "korean_name", "company_name")
+
+
+async def _resolve_stock_name_for_quote(
+    tool_name: str,
+    arguments: McpCallArguments,
+    config: FinusAccountBalanceConfig,
+) -> McpCallArguments | str:
+    """시세 TR에 종목명만 있으면 find_stock_code로 fid_input_iscd를 채운다.
+
+    대상이 아니면 arguments를 그대로, 종목을 찾지 못하면 find_stock_code 응답 원문을 돌려준다.
+    """
+    params = arguments.get("params")
+    if (
+        tool_name != "domestic_stock"
+        or str(arguments.get("api_type", "")).strip() not in _STOCK_CODE_QUOTE_APIS
+        or not isinstance(params, dict)
+        or str(params.get("fid_input_iscd", "")).strip()
+    ):
+        return arguments
+    name = next((str(params[k]).strip() for k in _STOCK_NAME_PARAMS if str(params.get(k, "")).strip()), "")
+    if not name:
+        return arguments
+    found = await _mcp_call_tool_remote(
+        transport=config.mcp_transport,
+        url=config.mcp_url,
+        tool_name="domestic_stock",
+        arguments={"api_type": "find_stock_code", "params": {"stock_name": name}},
+        timeout_sec=config.timeout_sec,
+    )
+    try:
+        code = str(json.loads(found)["data"]["stock_code"]).strip()
+    except (ValueError, KeyError, TypeError):
+        return found
+    if not code:
+        return found
+    rest = {k: v for k, v in params.items() if k not in _STOCK_NAME_PARAMS}
+    return {**arguments, "params": {"fid_cond_mrkt_div_code": "J", **rest, "fid_input_iscd": code}}
+
+
 async def _call_kis_mcp_and_record(
     tool_name: str,
     arguments: McpCallArguments,
@@ -1435,6 +1484,10 @@ async def _call_kis_mcp_and_record(
     지정가 괴리 가드(#365)도 여기 건다. KIS로 나가는 호출이 예외 없이 이 자리를 지나므로,
     래퍼가 늘어도 가드만 빠지는 일이 생기지 않는다.
     """
+    resolved = await _resolve_stock_name_for_quote(tool_name, arguments, config)
+    if isinstance(resolved, str):
+        return _record_and_mask(_KIS_BALANCE_LEDGER_NAME, resolved)
+    arguments = resolved
     result = await _order_price_gap_rejection(tool_name, arguments, config)
     if result is None:
         result = await _mcp_call_tool_remote(
