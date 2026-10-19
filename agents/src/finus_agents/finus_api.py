@@ -594,6 +594,16 @@ def _sse_connect_timeout(operation_timeout: float) -> float:
     return min(_SSE_CONNECT_CAP, max(_SSE_CONNECT_FLOOR, operation_timeout * 0.25))
 
 
+# KIS Trading MCP 접근 토큰. 서버가 SSE·HTTP 모드에서 MCP_ACCESS_TOKEN을 필수로 요구하고
+# 같은 값을 Bearer 헤더로 확인한다. 비어 있으면 헤더를 싣지 않는다(토큰 없는 구버전 서버).
+KIS_TRADING_MCP_TOKEN_ENV = "FINUS_KIS_TRADING_MCP_TOKEN"
+
+
+def _kis_trading_mcp_headers() -> dict[str, str]:
+    token = os.getenv(KIS_TRADING_MCP_TOKEN_ENV, "").strip()
+    return {"Authorization": f"Bearer {token}"} if token else {}
+
+
 # Kis 계열 원격 MCP 한 곳에 대한 초기화된 ClientSession을 컨텍스트로 제공합니다.
 @asynccontextmanager
 async def _remote_mcp_session(
@@ -603,13 +613,16 @@ async def _remote_mcp_session(
     operation_timeout: float,
 ):
     conn = _sse_connect_timeout(operation_timeout)
+    headers = _kis_trading_mcp_headers()
     if transport == "sse":
-        async with sse_client(url=url, timeout=conn, sse_read_timeout=operation_timeout) as (read, write):
+        async with sse_client(
+            url=url, headers=headers, timeout=conn, sse_read_timeout=operation_timeout,
+        ) as (read, write):
             async with ClientSession(read, write) as session:
                 await session.initialize()
                 yield session
         return
-    async with httpx.AsyncClient() as http_client:
+    async with httpx.AsyncClient(headers=headers) as http_client:
         async with streamable_http_client(url=url, http_client=http_client) as (read, write, _get_sid):
             async with ClientSession(read, write) as session:
                 await session.initialize()
@@ -1057,12 +1070,36 @@ class FinusAccountBalanceConfig(FunctionBaseConfig, name="finus_account_balance"
         return self
 
 
+def _deployment_env_dv() -> str | None:
+    """배포의 KIS 환경을 Kis Trading MCP ``env_dv`` 값으로 돌려준다. KIS_URL이 없으면 None.
+
+    mcp/trading과 같은 기준(KIS_URL에 ``openapivts``가 있으면 모의투자)이다. 모의 키만 둔
+    배포에서 ``env_dv="real"``로 부르면 서버가 실전 인증을 시도해 토큰 발급부터 실패한다.
+    """
+    url = os.getenv("KIS_URL", "").strip()
+    if not url:
+        return None
+    return "demo" if "openapivts" in url else "real"
+
+
+def _pin_env_dv(params: dict[str, Any]) -> dict[str, Any]:
+    """``env_dv``를 에이전트가 고르지 못하게 배포 환경으로 채운다.
+
+    서버는 ``env_dv``로 모의/실전 인증을 고른 뒤, 그 키를 받지 않는 TR에는 넘기지 않는다
+    (tools/base.py). 그래서 없을 때 넣어도 안전하고, 넣지 않으면 실전 배포에서도 모의 인증을 탄다.
+    """
+    env_dv = _deployment_env_dv()
+    if env_dv is None:
+        return params
+    return {**params, "env_dv": env_dv}
+
+
 def _adjust_domestic_stock_params(api_type: str, params: dict[str, Any]) -> dict[str, Any]:
     """Kis Trading MCP / KIS TR별로 흔한 잘못된 인자만 보정(그 외는 MCP·공식 문서 그대로)."""
     out = dict(params)
     api = (api_type or "").strip().lower()
     if api == "inquire_balance":
-        out.setdefault("env_dv", "real")
+        out.setdefault("env_dv", _deployment_env_dv() or "real")
         out.setdefault("inqr_dvsn", "01")
         out.setdefault("afhr_flpr_yn", "N")
         out.setdefault("unpr_dvsn", "01")
@@ -1070,8 +1107,6 @@ def _adjust_domestic_stock_params(api_type: str, params: dict[str, Any]) -> dict
         out.setdefault("fncg_amt_auto_rdpt_yn", "N")
         out.setdefault("prcs_dvsn", "01")
     if api == "inquire_account_balance":
-        # MCP Python 래퍼가 env_dv 키워드를 받지 않음(TypeError).
-        out.pop("env_dv", None)
         # 공식 예제는 inqr_dvsn_1 기본 "". LLM이 자주 넣는 "00"은 OPSQ2002 INVALID INPUT_FILED_SIZE 유발.
         if str(out.get("inqr_dvsn_1", "")).strip() == "00":
             out["inqr_dvsn_1"] = ""
@@ -1148,6 +1183,7 @@ def _prepare_kis_trading_mcp_call(
 
     if tool_name == "domestic_stock":
         params = _adjust_domestic_stock_params(str(api_type).strip(), params)
+    params = _pin_env_dv(params)
     return tool_name, {"api_type": str(api_type).strip(), "params": params}
 
 
@@ -1157,9 +1193,10 @@ _KIS_TRADING_TOOL_GUIDE = """
 - ReAct 형식: `Action Input:` 한 줄에는 JSON만 두세요. JSON 뒤에 같은 줄·바로 다음 줄에 설명을 붙이면 도구 입력이 깨질 수 있습니다. 설명은 Observation 이후 또는 `Final Answer:` 에 쓰세요.
 - 국내 주식 기본 tool_name은 `domestic_stock`입니다.
 - 잔고/포트폴리오 `api_type="inquire_balance"`: 서버가 흔한 필수값을 기본 채웁니다. 직접 넣을 때 예시는
-  `{"env_dv":"real","inqr_dvsn":"01","afhr_flpr_yn":"N","unpr_dvsn":"01","fund_sttl_icld_yn":"N","fncg_amt_auto_rdpt_yn":"N","prcs_dvsn":"01"}` 입니다.
-- 투자계좌자산현황 `api_type="inquire_account_balance"`는 MCP 래퍼 제약상 `env_dv`를 넣지 마세요. `inqr_dvsn_1`은 기본 `""`이며 `"00"`을 추측해서 넣지 마세요.
-- 현재가 조회 `api_type="inquire_price"`의 국내 주식 기본값은 `{"fid_cond_mrkt_div_code":"J","fid_input_iscd":"종목코드","env_dv":"real"}` 입니다.
+  `{"inqr_dvsn":"01","afhr_flpr_yn":"N","unpr_dvsn":"01","fund_sttl_icld_yn":"N","fncg_amt_auto_rdpt_yn":"N","prcs_dvsn":"01"}` 입니다.
+- 투자계좌자산현황 `api_type="inquire_account_balance"`는 모의투자에서 지원되지 않습니다. `inqr_dvsn_1`은 기본 `""`이며 `"00"`을 추측해서 넣지 마세요.
+- 현재가 조회 `api_type="inquire_price"`의 국내 주식 기본값은 `{"fid_cond_mrkt_div_code":"J","fid_input_iscd":"종목코드"}` 입니다.
+- `env_dv`(모의/실전)는 이 래퍼가 배포 설정에 맞춰 채웁니다. 직접 고르지 마세요.
 - 알 수 없는 필드, INVALID INPUT, 필드 크기 오류, 필수 파라미터 오류가 나오면 실패로 끝내지 말고 `api_type="find_api_detail"`을 호출해 해당 `api_type`의 필드를 확인한 뒤 같은 사용자 요청을 다시 실행하세요.
 - 성공 조건은 사용자가 요청한 데이터 조회가 정상 Observation으로 돌아오고, 그 Observation을 근거로 최종 답변하는 것입니다.
 """.strip()
@@ -2050,7 +2087,7 @@ async def finus_account_balance(config: FinusAccountBalanceConfig, _builder: Bui
 
         Defaults:
         - ``inquire_balance``: 서버가 ``env_dv``·``inqr_dvsn`` 및 TR 필수 필드(``afhr_flpr_yn`` 등)를 기본 채움.
-        - ``inquire_account_balance``: omit ``env_dv``; keep ``inqr_dvsn_1`` empty unless ``find_api_detail`` says otherwise.
+        - ``inquire_account_balance``: not available in paper trading; keep ``inqr_dvsn_1`` empty unless ``find_api_detail`` says otherwise.
 
         Self-correction:
         On API/validation errors, call ``find_api_detail`` for the failed ``api_type``, fix ``params``, and retry before

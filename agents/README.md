@@ -39,7 +39,7 @@ agents/
 
 ## 외부 의존
 
-- **KIS Trading MCP 서버**: 에이전트의 계좌·시세 조회 도구(`kis-trading-mcp-tool-readonly`)가 사용. [open-trading-api](https://github.com/koreainvestment/open-trading-api)의 `MCP/Kis Trading MCP`를 포트 3300으로 실행 (기본 3000에서 변경 필요). 주소는 `.env`의 `FINUS_KIS_TRADING_MCP_URL`.
+- **KIS Trading MCP 서버**: 에이전트의 계좌·시세 조회 도구(`kis-trading-mcp-tool-readonly`)가 사용. [open-trading-api](https://github.com/koreainvestment/open-trading-api)의 `MCP/Kis Trading MCP`를 포트 3300으로 실행 (기본 3000에서 변경 필요). 서버에 준 `MCP_ACCESS_TOKEN`을 `.env`의 `FINUS_KIS_TRADING_MCP_TOKEN`에 같은 값으로 넣음. 주소는 `FINUS_KIS_TRADING_MCP_URL`로 변경 가능.
 - **mcp/**: 뉴스·공시·잔고 도구는 저장소의 `mcp/` 서버를 stdio로 직접 실행.
 
 ## 알아둘 규칙

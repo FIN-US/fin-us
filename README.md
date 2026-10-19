@@ -75,7 +75,7 @@ fin-us/
 - Docker / Docker Compose
 - Node.js & npm
 - [uv](https://docs.astral.sh/uv/)
-- [KIS Trading MCP](https://github.com/koreainvestment/open-trading-api) 서버 (포트 3300): 에이전트의 계좌·시세 조회용
+- [KIS Trading MCP](https://github.com/koreainvestment/open-trading-api) 서버 (포트 3300): 에이전트의 계좌·시세 조회용. 서버에 준 `MCP_ACCESS_TOKEN`을 `.env`의 `FINUS_KIS_TRADING_MCP_TOKEN`에 입력
 
 | API 키 | 용도 |
 | :--- | :--- |

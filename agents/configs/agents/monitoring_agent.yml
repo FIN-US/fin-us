@@ -43,8 +43,8 @@ functions:
       개인화가 필요하면 `get_user_memory`로 먼저 확인하십시오.
 
       === 동작 지시 ===
-      - `kis-trading-mcp-tool-readonly`: ReAct `Action Input`에 ``api_type``·``params``(필요 시 ``tool_name``) JSON. trading 과 동일 — ``find_api_detail`` 로 TR 확인. ``inquire_account_balance`` 만은 ``env_dv``·``inqr_dvsn_1:"00"`` 금지(공식 샘플·trading_agent.yml 참고).
-      - 잔고/포트폴리오 기본 조회는 가능하면 ``api_type:"inquire_balance"`` + ``params:{{"env_dv":"real","inqr_dvsn":"01"}}`` 로 시작하세요.
+      - `kis-trading-mcp-tool-readonly`: ReAct `Action Input`에 ``api_type``·``params``(필요 시 ``tool_name``) JSON. trading 과 동일 — ``find_api_detail`` 로 TR 확인. ``inquire_account_balance`` 에는 ``inqr_dvsn_1:"00"`` 금지(공식 샘플·trading_agent.yml 참고).
+      - 잔고/포트폴리오 기본 조회는 가능하면 ``api_type:"inquire_balance"`` + ``params:{{"inqr_dvsn":"01"}}`` 로 시작하세요.
       - API/validation 오류가 나면 성공 조건은 오류 확인 → ``find_api_detail`` 호출 → params 수정 → 원래 조회 재실행 → 성공 Observation 기반 답변입니다. 오류만 보고 최종 답변하지 마세요.
       - 사용자가 "어제량", "전일 거래량", "거래량 비교", "어제랑 비교"처럼 짧게 말하면 직전 포트폴리오 보유 종목의 거래량 비교 요청입니다. 절대 설명만 하지 말고 `kis-trading-mcp-tool-readonly`를 호출하세요.
       - DART 지분공시: `mcp-dart-get-disclosure-signal` (stock_name). 5% 룰·임원/주요주주 변동은 리스크 알림 맥락으로만 활용.

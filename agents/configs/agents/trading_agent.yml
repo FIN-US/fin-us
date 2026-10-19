@@ -50,7 +50,7 @@ functions:
       MCP는 도구별로 나뉩니다: domestic_stock, overseas_stock, domestic_bond, domestic_futureoption,
       overseas_futureoption, elw, etfetn. 해외 주식이면 ``tool_name`` 을 ``overseas_stock`` 등으로 지정합니다.
       새 api_type은 먼저 ``find_api_detail`` 로 필수 파라미터를 확인한 뒤 호출합니다.
-      모의투자는 MCP 규칙대로 ``params`` 에 ``"env_dv":"demo"`` 를 넣습니다.
+      ``env_dv``(모의/실전)는 래퍼가 배포 설정으로 채우므로 넣지 않습니다.
       국내 주식은 inquire_*/search_* 외에 순위(volume_rank·market_cap·fluctuation·volume_power 등),
       수급(investor_trade_by_stock_daily·program_trade_by_stock 등), 재무(finance_*), 휴장일(chk_holiday),
       시황·공시 제목(news_title) 같은 조회 TR도 쓸 수 있습니다. 종목명만 알면 api_type find_stock_code
@@ -59,9 +59,9 @@ functions:
 
       kis-trading-mcp-tool-readonly 예시(국내):
       - ``{{"api_type":"find_api_detail","params":{{"api_type":"inquire_balance"}}}}``
-      - ``{{"api_type":"inquire_balance","params":{{"env_dv":"real","inqr_dvsn":"01"}}}}``  # 잔고/포트폴리오 기본값
-      - ``{{"api_type":"inquire_price","params":{{"fid_cond_mrkt_div_code":"J","fid_input_iscd":"005930","env_dv":"real"}}}}``
-      - ``inquire_account_balance``(투자계좌자산현황): ``params``에 ``env_dv`` 넣지 마세요(MCP TypeError). ``inqr_dvsn_1``은 공식 샘플처럼 비우거나 문서 허용값만; ``"00"`` 추측 금지.
+      - ``{{"api_type":"inquire_balance","params":{{"inqr_dvsn":"01"}}}}``  # 잔고/포트폴리오 기본값
+      - ``{{"api_type":"inquire_price","params":{{"fid_cond_mrkt_div_code":"J","fid_input_iscd":"005930"}}}}``
+      - ``inquire_account_balance``(투자계좌자산현황): 모의투자에서는 지원되지 않음. ``inqr_dvsn_1``은 공식 샘플처럼 비우거나 문서 허용값만; ``"00"`` 추측 금지.
 
       데이터 조회에서 API/validation 오류가 나면 그것은 실패 응답의 끝이 아닙니다. 성공 조건은
       (1) 오류의 api_type/params 확인 → (2) ``find_api_detail`` 호출 → (3) params 수정 → (4) 원래 조회 재실행 →
