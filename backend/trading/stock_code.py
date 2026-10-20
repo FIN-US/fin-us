@@ -360,8 +360,17 @@ def _looks_like_stock_code(stock: str) -> bool:
 #
 # 그래서 판정 근거는 응답이 아니라 비교 대상 마스터 항목의 증권그룹구분코드
 # (scrt_grp_cls_code)다. EN(ETN)인 항목만 "Q를 뗀 6자"를 같은 종목으로 인정한다. 응답 코드에
-# Q를 붙여 추측하지 않는다 — 6자 숫자 응답만으로는 ETN인지 알 수 없다. 보낸 그대로의
+# Q를 붙여 추측하지 않는다 — 6자 숫자 응답만으로는 ETN인지 알 수 없으므로, 숫자 6자 마스터
+# 항목과 비교할 때 응답을 ETN으로 오인하는 쪽(Q를 붙이는 쪽)은 막는다. 보낸 그대로의
 # 형태도 계속 인정한다(실전 서버·실현손익 TR 응답 형태는 실측하지 못했다).
+#
+# 막지 못하는 방향: 비교 대상이 ETN일 때, 마스터 밖 상품(예: ELW)이 그 ETN의 숫자부와 같은
+# 6자 숫자를 쓰면 그 응답 행도 같은 종목으로 잡힌다. 응답에 상품군 값이 없어 가를 수 없다.
+# ELW 등의 코드 대역이 ETN 숫자부와 실제로 겹치는지는 확인하지 못했다.
+#
+# 비교 전에 양쪽을 strip·대문자로 맞춘다(kis-pdno.js와 같은 정규화). 종목코드는 대문자와
+# 숫자만 쓰고 공백이 없어 서로 다른 코드가 합쳐지지 않으며, parse_snapshot이 이전부터
+# 대소문자를 무시해 비교하던 동작을 유지한다.
 #
 # 두 계층의 일치는 mcp/trading/tests/fixtures/kis_response_pdno_policy.json 공유 판정표가
 # 고정한다(kis-pdno.test.js / test_stock_code.py).
@@ -371,14 +380,16 @@ _ETN_CODE_RE = re.compile(r"\AQ[0-9]{6}\Z")
 
 def kis_response_pdno_matches(pdno: str, code: str, security_group: str | None) -> bool:
     """응답 pdno가 마스터 항목(code, security_group)과 같은 종목인가 — 순수 판정."""
-    if not pdno:
+    value = (pdno or "").strip().upper()
+    master = (code or "").strip().upper()
+    if not value:
         return False
-    if pdno == code:
+    if value == master:
         return True
     return (
         security_group == ETN_SECURITY_GROUP
-        and bool(_ETN_CODE_RE.match(code or ""))
-        and pdno == code[1:]
+        and bool(_ETN_CODE_RE.match(master))
+        and value == master[1:]
     )
 
 
@@ -405,7 +416,7 @@ def _load_master_security_groups():
             raise ValueError("종목마스터에서 코드를 하나도 읽지 못했습니다")
     except Exception as exc:
         logger.warning(
-            "종목마스터 증권그룹 로드 실패, 응답 종목코드는 완전일치로만 비교합니다: path=%s, error=%s",
+            "종목마스터 증권그룹 로드 실패, ETN 코드의 응답 대조를 판정할 수 없습니다: path=%s, error=%s",
             path,
             exc,
         )
@@ -419,9 +430,24 @@ def response_pdno_matches_stock_code(pdno: str, stock_code: str) -> bool:
     """KIS 조회 응답의 pdno가 마스터 종목코드 stock_code와 같은 종목인가.
 
     stock_code의 증권그룹은 종목마스터에서 찾는다. 마스터를 못 읽거나 마스터에 없는 코드면
-    그룹을 모르므로 완전일치로만 판정한다(ETN의 Q 없는 응답 행을 놓치는 쪽).
+    그룹을 모르므로 완전일치로만 판정한다(ETN의 Q 없는 응답 행을 놓치는 쪽). 그 결과를
+    "보유 없음"으로 읽으면 안 되는 호출처는 먼저 :func:`response_pdno_match_undecidable`로
+    판정 가능 여부를 확인해야 한다.
     """
     code = (stock_code or "").strip().upper()
     groups = _load_master_security_groups()
     group = groups.get(code) if isinstance(groups, dict) else None
-    return kis_response_pdno_matches((pdno or "").strip().upper(), code, group)
+    return kis_response_pdno_matches(pdno, code, group)
+
+
+def response_pdno_match_undecidable(stock_code: str) -> bool:
+    """stock_code가 ETN 모양(Q+숫자 6자)인데 마스터에서 증권그룹을 확인할 수 없는가.
+
+    이때 :func:`response_pdno_matches_stock_code`는 Q 없는 응답 행을 놓칠 수 있다 — 응답만으로는
+    ETN인지 알 수 없어, 그룹을 모르면 "못 찾음"과 "없음"을 가를 수 없다.
+    """
+    code = (stock_code or "").strip().upper()
+    if not _ETN_CODE_RE.match(code):
+        return False
+    groups = _load_master_security_groups()
+    return not isinstance(groups, dict) or code not in groups

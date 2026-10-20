@@ -68,6 +68,41 @@
     {
       "master_code": "Q530116",
       "scrt_grp_cls_code": "EN",
+      "response_pdno": " 530116 ",
+      "matches": true,
+      "note": "정규화: 양쪽을 trim·대문자로 맞춘 뒤 비교한다. 종목코드에는 공백이 없어 trim이 다른 코드를 합치지 않는다."
+    },
+    {
+      "master_code": "Q530116",
+      "scrt_grp_cls_code": "EN",
+      "response_pdno": "q530116",
+      "matches": true,
+      "note": "정규화: 대소문자를 무시한다. 종목코드는 대문자만 쓰고, backend parse_snapshot이 이전부터 대소문자를 무시해 비교했다."
+    },
+    {
+      "master_code": "00088K",
+      "scrt_grp_cls_code": "ST",
+      "response_pdno": "00088k",
+      "matches": true,
+      "note": "정규화: 영숫자 코드도 대소문자를 무시한다."
+    },
+    {
+      "master_code": "005930",
+      "scrt_grp_cls_code": "ST",
+      "response_pdno": " q005930",
+      "matches": false,
+      "note": "정규화가 Q 규칙을 넓히지 않는다 — 숫자 6자 항목은 Q가 붙은 응답과 맞지 않는다."
+    },
+    {
+      "master_code": "Q530116",
+      "scrt_grp_cls_code": "EN",
+      "response_pdno": "   ",
+      "matches": false,
+      "note": "공백뿐인 pdno는 빈 값과 같다."
+    },
+    {
+      "master_code": "Q530116",
+      "scrt_grp_cls_code": "EN",
       "response_pdno": "",
       "matches": false,
       "note": "빈 pdno는 어떤 종목과도 맞지 않는다."

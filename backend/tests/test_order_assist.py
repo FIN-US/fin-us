@@ -494,6 +494,31 @@ def test_parse_snapshot_finds_etn_holding_whose_balance_pdno_lacks_q(stock_code,
     assert snapshot.holding_qty == expected_qty
 
 
+def test_parse_snapshot_stops_on_etn_when_master_groups_cannot_be_read(monkeypatch, tmp_path):
+    """마스터를 못 읽으면 ETN 보유 행을 못 찾은 것을 0주로 읽지 않고 멈춘다(#433, fail-closed)."""
+    from backend.trading import stock_code as stock_code_module
+
+    monkeypatch.setattr(stock_code_module, "_TRADING_MCP_DIR", tmp_path)  # stocks.json 없음
+
+    snapshot, error = parse_snapshot(QUOTE_TEXT, ETN_BALANCE_TEXT, ORDERABLE_TEXT, "Q530116")
+
+    assert snapshot is None
+    assert "ETN" in error
+
+
+def test_parse_snapshot_without_master_still_reads_non_etn_codes(monkeypatch, tmp_path):
+    """fail-closed는 ETN 모양 코드에만 건다. 숫자·영숫자 6자는 응답이 보낸 그대로라 그룹이 필요 없다."""
+    from backend.trading import stock_code as stock_code_module
+
+    monkeypatch.setattr(stock_code_module, "_TRADING_MCP_DIR", tmp_path)
+
+    snapshot, error = parse_snapshot(QUOTE_TEXT, ETN_BALANCE_TEXT, ORDERABLE_TEXT, "00088K")
+
+    assert error == ""
+    assert snapshot is not None
+    assert snapshot.holding_qty == 1
+
+
 @pytest.mark.parametrize(
     "quote,balance,orderable,expected",
     [
