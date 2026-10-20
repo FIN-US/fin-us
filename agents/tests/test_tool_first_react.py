@@ -35,6 +35,11 @@ class _ScriptedChatModel(BaseChatModel):
     honors_tool_choice: bool = True
     # 강제 호출 중 앞에서 이 횟수만큼은 인자 JSON이 깨진 응답(invalid_tool_calls)을 돌려준다
     invalid_forced_calls: int = 0
+    # 그다음 이 횟수만큼은 JSON은 온전하지만 도구가 받지 않는 인자(empty_args)로 도구를 고른다 (#436)
+    empty_forced_calls: int = 0
+    empty_args: dict[str, Any] = Field(default_factory=dict)
+    # 정상 강제 호출의 인자
+    forced_args: dict[str, Any] = Field(default_factory=lambda: {"stock_name": "삼성전자"})
     calls: list[dict[str, Any]] = Field(default_factory=list)
 
     @property
@@ -55,9 +60,13 @@ class _ScriptedChatModel(BaseChatModel):
                 {"name": kwargs["tools"][0], "args": '{"stock_name": "삼성', "id": "call_0",
                  "error": "Function arguments are not valid JSON", "type": "invalid_tool_call"},
             ])
+        elif forced and self.forced_calls() <= self.invalid_forced_calls + self.empty_forced_calls:
+            message = AIMessage(content="", tool_calls=[
+                {"name": kwargs["tools"][0], "args": dict(self.empty_args), "id": "call_empty"},
+            ])
         elif forced:
             message = AIMessage(content="", tool_calls=[
-                {"name": kwargs["tools"][0], "args": {"stock_name": "삼성전자"}, "id": "call_1"},
+                {"name": kwargs["tools"][0], "args": dict(self.forced_args), "id": "call_1"},
             ])
         elif any(NEWS_OBSERVATION in str(m.content) for m in messages):
             message = AIMessage(content="Thought: I now know the final answer\nFinal Answer: 뉴스 요약")
@@ -174,6 +183,211 @@ async def test_falls_back_after_repeated_invalid_tool_arguments(caplog):
     assert llm.forced_calls() == FIRST_TURN_MAX_ATTEMPTS
     assert state.final_answer == "조회 결과가 없어 답할 수 없습니다."
     assert any("계속 유효하지 않아" in r.getMessage() for r in caplog.records)
+
+
+async def test_retries_forced_call_when_arguments_fail_tool_schema(caplog):
+    """#436: JSON은 온전하지만 도구 스키마가 받지 않는 인자({})로 고른 강제 호출은 실행하지 않고 다시 강제한다.
+
+    뮤테이션: ``agent_node``에서 ``_schema_rejection`` 결과를 무시하면 {} 호출이 그대로 실행돼
+    도구 검증 오류만 돌아가고 called==[] 로 red.
+    """
+    called: list[str] = []
+    news, memory = _tools(called)
+    llm = _ScriptedChatModel(empty_forced_calls=1)
+
+    with caplog.at_level(logging.WARNING, logger="finus_agents.tool_first_react"):
+        state = await _run(ToolFirstReActAgentGraph, llm, (news, memory), first_turn_tools=[news])
+
+    assert called == ["news:삼성전자"]
+    assert state.final_answer == "뉴스 요약"
+    assert llm.forced_calls() == 2
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("도구에 맞지 않는다" in m and "stock_name" in m for m in messages)
+
+
+async def test_executes_last_schema_rejected_call_instead_of_falling_back(caplog):
+    """리뷰 지적 4: 마지막 시도까지 거부되면 폴백(#394: 도구 없이 답함) 대신 그 호출을 실행해
+    오류를 Observation으로 남긴다.
+
+    뮤테이션: 마지막 시도에서도 ``continue``하면(폴백) scratchpad가 비어 red.
+    """
+    from finus_agents.tool_first_react import FIRST_TURN_MAX_ATTEMPTS
+
+    called: list[str] = []
+    news, memory = _tools(called)
+    llm = _ScriptedChatModel(empty_forced_calls=FIRST_TURN_MAX_ATTEMPTS)
+
+    with caplog.at_level(logging.WARNING, logger="finus_agents.tool_first_react"):
+        state = await _run(ToolFirstReActAgentGraph, llm, (news, memory), first_turn_tools=[news])
+
+    assert llm.forced_calls() == FIRST_TURN_MAX_ATTEMPTS
+    assert [(a.tool, a.tool_input) for a in state.agent_scratchpad] == [("mcp-news-get-market-news", "{}")]
+    assert called == []  # 도구 검증에서 실패했다 — 실행 결과는 오류 Observation이다
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("상한이라 그대로 실행한다" in m for m in messages)
+    assert not any("계속 유효하지 않아" in m for m in messages)
+
+
+async def test_schema_rejection_and_invalid_json_share_the_attempt_cap(caplog):
+    """리뷰 지적 5(c): 첫 시도는 인자 JSON 깨짐, 두 번째는 스키마 거부 — 상한(2)을 함께 써서
+    세 번째 강제 호출은 없고, 마지막 거부 호출은 실행된다.
+
+    뮤테이션: 스키마 거부가 시도 횟수를 따로 세면 forced_calls가 3이 되어 red.
+    """
+    from finus_agents.tool_first_react import FIRST_TURN_MAX_ATTEMPTS
+
+    called: list[str] = []
+    news, memory = _tools(called)
+    llm = _ScriptedChatModel(invalid_forced_calls=1, empty_forced_calls=1)
+
+    with caplog.at_level(logging.WARNING, logger="finus_agents.tool_first_react"):
+        state = await _run(ToolFirstReActAgentGraph, llm, (news, memory), first_turn_tools=[news])
+
+    assert FIRST_TURN_MAX_ATTEMPTS == 2
+    assert llm.forced_calls() == 2
+    assert [a.tool_input for a in state.agent_scratchpad] == ["{}"]
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("인자를 파싱하지 못했다" in m and "1/2" in m for m in messages)
+    assert any("도구에 맞지 않는다" in m and "2/2" in m for m in messages)
+
+
+async def test_precheck_exception_does_not_block_the_forced_call(caplog):
+    """리뷰 지적 3: 사전 검사가 ValidationError 밖의 예외를 내면 막지 않고 실행에 맡긴다."""
+    from langchain_core.tools import StructuredTool
+    from pydantic import BaseModel
+
+    class _Input(BaseModel):
+        stock_name: str = ""
+
+        def forced_call_rejection(self):
+            raise RuntimeError("사전 검사 버그")
+
+    called: list[str] = []
+
+    async def news(**kwargs) -> str:
+        called.append(f"news:{kwargs.get('stock_name')}")
+        return NEWS_OBSERVATION
+
+    tool_ = StructuredTool.from_function(coroutine=news, name="mcp-news-get-market-news",
+                                         description="뉴스", args_schema=_Input)
+    _, memory = _tools([])
+    llm = _ScriptedChatModel()
+
+    with caplog.at_level(logging.WARNING, logger="finus_agents.tool_first_react"):
+        state = await _run(ToolFirstReActAgentGraph, llm, (tool_, memory), first_turn_tools=[tool_])
+
+    assert called == ["news:삼성전자"]
+    assert llm.forced_calls() == 1
+    assert state.final_answer == "뉴스 요약"
+    assert any("검사 없이 실행한다" in r.getMessage() for r in caplog.records)
+
+
+# --- KIS 래퍼 실물로 (#436) -------------------------------------------------------------------
+
+
+@pytest.fixture
+def kis_ledger(monkeypatch):
+    """실제 조회 전용 KIS 래퍼를 LangChain 도구로 감싸고, 원장을 붙인다. MCP 원격 호출은 대역."""
+    from finus_agents import finus_api
+
+    remote_calls: list[dict] = []
+
+    async def fake_remote(**kwargs):
+        remote_calls.append(kwargs)
+        return '{"output": {"stck_prpr": "216000"}}'
+
+    monkeypatch.setattr(finus_api, "_mcp_call_tool_remote", fake_remote)
+    monkeypatch.setenv("FINUS_SKIP_MCP_LIST_TOOLS", "1")
+    ledger = finus_api.DataToolLedger()
+    token = finus_api.DATA_TOOL_LEDGER.set(ledger)
+    try:
+        yield ledger, remote_calls
+    finally:
+        finus_api.DATA_TOOL_LEDGER.reset(token)
+
+
+async def _kis_tool():
+    """NAT ``langchain_tool_wrapper``와 같이 래퍼 입력 스키마를 args_schema로 쓰는 도구."""
+    from langchain_core.tools import StructuredTool
+
+    from finus_agents import finus_api
+
+    config = finus_api.FinusAccountBalanceReadonlyConfig(trading_tool_name="domestic_stock")
+    gen = finus_api.finus_account_balance_readonly(config, None)
+    info = await gen.__aenter__()
+
+    async def kis(**kwargs) -> str:
+        return await info.single_fn(finus_api.KisTradingMcpCallInput(**kwargs))
+
+    return StructuredTool.from_function(coroutine=kis, name="kis-trading-mcp-tool-readonly",
+                                        description="KIS", args_schema=finus_api.KisTradingMcpCallInput), gen
+
+
+@pytest.mark.parametrize("empty_args", [{}, {"tool_input": '{"params": {}}'}], ids=["missing_arguments", "missing_api_type"])
+async def test_kis_tool_forced_without_api_type_is_retried_not_executed(kis_ledger, empty_args):
+    """#436 실측 경로: 강제 첫 턴이 KIS 조회 도구를 api_type 없이 골랐다. 입력 스키마는 이를 받으므로
+    사전 검사(``forced_call_rejection``)만이 가려낼 수 있다. 래퍼의 두 오류 갈래 모두 다시 강제한다.
+
+    뮤테이션: ``KisTradingMcpCallInput.forced_call_rejection``이 늘 None이면 첫 {} 호출이 실행돼
+    원장에 ok=False 기록이 생겨 red.
+    """
+    ledger, remote_calls = kis_ledger
+    kis_tool, gen = await _kis_tool()
+    _, memory = _tools([])
+    llm = _ScriptedChatModel(empty_forced_calls=1, empty_args=empty_args,
+                             forced_args={"api_type": "inquire_balance", "params": {"inqr_dvsn": "01"}})
+    try:
+        await _run(ToolFirstReActAgentGraph, llm, (kis_tool, memory), first_turn_tools=[kis_tool])
+    finally:
+        await gen.__aexit__(None, None, None)
+
+    assert llm.forced_calls() == 2
+    assert [c["arguments"]["api_type"] for c in remote_calls] == ["inquire_balance"]
+    assert [(r.tool_name, r.ok) for r in ledger.records] == [("finus_account_balance", True)]
+
+
+class _TextActionModel(BaseChatModel):
+    """도구 강제 없이 텍스트 ReAct로 KIS 도구를 {}로 부르고, Observation을 받으면 끝낸다."""
+
+    calls: int = 0
+
+    @property
+    def _llm_type(self) -> str:
+        return "text-action"
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:
+        self.calls += 1
+        if any("kis_mcp_missing_arguments" in str(m.content) for m in messages):
+            text = "Thought: I now know the final answer\nFinal Answer: 조회 실패"
+        else:
+            text = "Thought: 조회한다\nAction: kis-trading-mcp-tool-readonly\nAction Input: {}"
+        return ChatResult(generations=[ChatGeneration(message=AIMessage(content=text))])
+
+
+async def test_kis_call_without_api_type_outside_forced_turn_reaches_wrapper_and_ledger(kis_ledger):
+    """리뷰 지적 2·5(b): 강제 턴 밖(텍스트 ReAct)의 {} 호출은 입력 스키마에서 막히지 않고 래퍼까지
+    가서, main과 같이 원장에 ``finus_account_balance ok=False``로 남고 ``tools_used`` 각주에 실패로 보인다.
+
+    뮤테이션: api_type 필수 판정을 입력 스키마 검증(model_validator)으로 옮기면 래퍼에 닿지 않아
+    원장이 비어 red.
+    """
+    from finus_agents.finus_api import ReasoningTrace
+    from finus_agents.finus_api import ToolUse
+
+    ledger, remote_calls = kis_ledger
+    kis_tool, gen = await _kis_tool()
+    _, memory = _tools([])
+    try:
+        state = await _run(ReActAgentGraph, _TextActionModel(), (kis_tool, memory))
+    finally:
+        await gen.__aexit__(None, None, None)
+
+    assert remote_calls == []
+    assert [(r.tool_name, r.ok) for r in ledger.records] == [("finus_account_balance", False)]
+    assert "kis_mcp_missing_arguments" in str(state.tool_responses[0].content)
+    trace = ReasoningTrace()
+    trace.record_ledger_tools(ledger)
+    assert trace.tools_used == [ToolUse("finus_account_balance", ok=False)]
 
 
 def test_graph_kwargs_cover_vendor_graph_signature():
