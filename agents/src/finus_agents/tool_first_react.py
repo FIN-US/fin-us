@@ -16,13 +16,20 @@
 
 강제 대상은 ``first_turn_tool_names``로 좁힌다. 메모리 도구처럼 데이터를 만들지 않는
 도구를 넣으면 모델이 그것으로 "도구 호출"을 채우고 끝낼 수 있다.
+
+강제는 도구를 고르게 할 뿐 인자까지 보장하지 않는다. 모델은 가끔 KIS 도구를 ``{}``로
+골랐고(#436), 그 호출은 오류만 돌려받은 뒤 재조회 없이 시세 없는 답으로 끝났다. 그래서
+강제 호출의 인자는 실행 전에 그 도구의 입력 스키마로 검증하고, 거부되면 인자 JSON이 깨진
+경우와 같이 강제를 다시 시도한다.
 """
 
 import json
 import logging
 
 from langchain_core.agents import AgentAction
+from pydantic import BaseModel
 from pydantic import Field
+from pydantic import ValidationError
 from pydantic import model_validator
 
 from nat.builder.builder import Builder
@@ -60,6 +67,24 @@ class ToolFirstReActAgentGraph(ReActAgentGraph):
             parallel_tool_calls=False,  # 벤더 tool_node는 한 턴에 도구 하나만 실행한다
         )
 
+    def _schema_rejection(self, call: dict) -> str | None:
+        """강제 호출의 인자를 고른 도구의 입력 스키마로 검증하고, 거부되면 그 사유를 돌려준다.
+
+        ``tool_choice="required"``는 도구를 **고르게** 할 뿐 인자가 쓸 만한지는 보장하지 않는다.
+        스키마의 필드가 전부 선택이면 ``{}``도 API 수준에서는 유효한 호출이라, 도구 쪽 검증만이
+        그런 호출을 가려낼 수 있다. 실행 전에 같은 검증을 돌려, 실행해 봐야 오류뿐인 호출을 막는다.
+        """
+        tool = self.tools_dict.get(call.get("name"))
+        schema = getattr(tool, "args_schema", None)
+        if not (isinstance(schema, type) and issubclass(schema, BaseModel)):
+            return None
+        try:
+            schema.model_validate(call.get("args") or {})
+        except ValidationError as exc:
+            reasons = "; ".join(f"{'.'.join(map(str, e['loc'])) or '(입력)'}: {e['msg']}" for e in exc.errors())
+            return f"{call.get('name')}: {reasons}"
+        return None
+
     async def agent_node(self, state: ReActGraphState):
         # 이미 도구를 부른 뒤이거나 입력이 비었으면(벤더가 NO_INPUT 응답을 만든다) 벤더 경로.
         if state.agent_scratchpad or not state.messages or not str(state.messages[-1].content).strip():
@@ -70,7 +95,20 @@ class ToolFirstReActAgentGraph(ReActAgentGraph):
             # 벤더 _call_llm/_stream_llm을 쓰지 않는다 — 둘 다 응답을 content만으로 재조립해 tool_calls를 버린다.
             output = await self.first_turn_agent.ainvoke(inputs, config=self._runnable_config)
             if output.tool_calls:
-                break
+                rejection = self._schema_rejection(output.tool_calls[0])
+                if rejection is None:
+                    break
+                # JSON은 온전하지만 도구 스키마가 받지 않는 인자다(#436: KIS 도구를 {}로 고름).
+                # 이대로 실행하면 도구가 오류만 돌려주고, 모델은 그 오류를 보고 재조회 없이 답을
+                # 끝냈다. invalid_tool_calls와 같은 모델의 일회성 실수로 보고 다시 강제한다.
+                logger.warning(
+                    "%s 강제 도구 호출의 인자가 도구 스키마에 맞지 않는다 (시도 %d/%d): %s",
+                    AGENT_LOG_PREFIX,
+                    attempt,
+                    FIRST_TURN_MAX_ATTEMPTS,
+                    rejection,
+                )
+                continue
             if not output.invalid_tool_calls:
                 # tool_choice를 무시하는 공급자(OpenAI 호환 프록시 등)다. 여기서 막으면 에이전트가
                 # 아예 답하지 못하므로 벤더 경로로 넘기되, #394 증상이 조용히 재발하지 않게 남긴다.

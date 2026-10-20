@@ -35,6 +35,10 @@ class _ScriptedChatModel(BaseChatModel):
     honors_tool_choice: bool = True
     # 강제 호출 중 앞에서 이 횟수만큼은 인자 JSON이 깨진 응답(invalid_tool_calls)을 돌려준다
     invalid_forced_calls: int = 0
+    # 그다음 이 횟수만큼은 JSON은 온전하지만 도구 스키마가 받지 않는 인자({})로 도구를 고른다 (#436)
+    empty_forced_calls: int = 0
+    # 정상 강제 호출의 인자
+    forced_args: dict[str, Any] = Field(default_factory=lambda: {"stock_name": "삼성전자"})
     calls: list[dict[str, Any]] = Field(default_factory=list)
 
     @property
@@ -55,9 +59,13 @@ class _ScriptedChatModel(BaseChatModel):
                 {"name": kwargs["tools"][0], "args": '{"stock_name": "삼성', "id": "call_0",
                  "error": "Function arguments are not valid JSON", "type": "invalid_tool_call"},
             ])
+        elif forced and self.forced_calls() <= self.invalid_forced_calls + self.empty_forced_calls:
+            message = AIMessage(content="", tool_calls=[
+                {"name": kwargs["tools"][0], "args": {}, "id": "call_empty"},
+            ])
         elif forced:
             message = AIMessage(content="", tool_calls=[
-                {"name": kwargs["tools"][0], "args": {"stock_name": "삼성전자"}, "id": "call_1"},
+                {"name": kwargs["tools"][0], "args": dict(self.forced_args), "id": "call_1"},
             ])
         elif any(NEWS_OBSERVATION in str(m.content) for m in messages):
             message = AIMessage(content="Thought: I now know the final answer\nFinal Answer: 뉴스 요약")
@@ -174,6 +182,73 @@ async def test_falls_back_after_repeated_invalid_tool_arguments(caplog):
     assert llm.forced_calls() == FIRST_TURN_MAX_ATTEMPTS
     assert state.final_answer == "조회 결과가 없어 답할 수 없습니다."
     assert any("계속 유효하지 않아" in r.getMessage() for r in caplog.records)
+
+
+async def test_retries_forced_call_when_arguments_fail_tool_schema(caplog):
+    """#436: JSON은 온전하지만 도구 스키마가 받지 않는 인자({})로 고른 강제 호출은 실행하지 않고 다시 강제한다.
+
+    뮤테이션: ``agent_node``의 ``_schema_rejection`` 검사를 지우면 {} 호출이 그대로 실행돼 도구 검증
+    오류만 돌아가고 called==[] 로 red.
+    """
+    called: list[str] = []
+    news, memory = _tools(called)
+    llm = _ScriptedChatModel(empty_forced_calls=1)
+
+    with caplog.at_level(logging.WARNING, logger="finus_agents.tool_first_react"):
+        state = await _run(ToolFirstReActAgentGraph, llm, (news, memory), first_turn_tools=[news])
+
+    assert called == ["news:삼성전자"]
+    assert state.final_answer == "뉴스 요약"
+    assert llm.forced_calls() == 2
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("스키마에 맞지 않는다" in m and "stock_name" in m for m in messages)
+
+
+async def test_falls_back_after_repeated_schema_rejected_arguments(caplog):
+    """스키마 거부도 재시도 상한을 공유한다 — 계속 거부되면 실행하지 않고 벤더 경로로 넘긴다."""
+    from finus_agents.tool_first_react import FIRST_TURN_MAX_ATTEMPTS
+
+    called: list[str] = []
+    news, memory = _tools(called)
+    llm = _ScriptedChatModel(empty_forced_calls=FIRST_TURN_MAX_ATTEMPTS)
+
+    with caplog.at_level(logging.WARNING, logger="finus_agents.tool_first_react"):
+        state = await _run(ToolFirstReActAgentGraph, llm, (news, memory), first_turn_tools=[news])
+
+    assert called == []
+    assert llm.forced_calls() == FIRST_TURN_MAX_ATTEMPTS
+    assert state.final_answer == "조회 결과가 없어 답할 수 없습니다."
+    assert any("계속 유효하지 않아" in r.getMessage() for r in caplog.records)
+
+
+async def test_kis_tool_forced_with_empty_arguments_is_retried_not_executed():
+    """#436 실측 경로: 강제 첫 턴이 KIS 조회 도구를 {}로 골랐다. 입력 스키마가 {}를 받아 주면
+    강제 루프는 그 호출을 가려낼 수 없고, 래퍼는 MCP를 부르지 못한 채 kis_mcp_missing_arguments만 돌려준다.
+
+    뮤테이션: ``KisTradingMcpCallInput._require_api_type``를 지우면 {} 호출이 그대로 실행돼
+    received가 [None, ...]이 되어 red.
+    """
+    from langchain_core.tools import StructuredTool
+
+    from finus_agents.finus_api import KisTradingMcpCallInput
+
+    received: list[dict[str, Any]] = []
+
+    async def kis(**kwargs) -> str:
+        received.append(kwargs)
+        return NEWS_OBSERVATION
+
+    kis_tool = StructuredTool.from_function(coroutine=kis, name="kis-trading-mcp-tool-readonly",
+                                            description="KIS", args_schema=KisTradingMcpCallInput)
+    _, memory = _tools([])
+    llm = _ScriptedChatModel(empty_forced_calls=1,
+                             forced_args={"api_type": "inquire_price", "params": {"stock_name": "삼성전자"}})
+
+    state = await _run(ToolFirstReActAgentGraph, llm, (kis_tool, memory), first_turn_tools=[kis_tool])
+
+    assert llm.forced_calls() == 2
+    assert [call.get("api_type") for call in received] == ["inquire_price"]
+    assert state.final_answer == "뉴스 요약"
 
 
 def test_graph_kwargs_cover_vendor_graph_signature():

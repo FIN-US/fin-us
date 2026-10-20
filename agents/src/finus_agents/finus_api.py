@@ -989,6 +989,31 @@ class KisTradingMcpCallInput(BaseModel):
             return parsed
         return data
 
+    @model_validator(mode="after")
+    def _require_api_type(self) -> "KisTradingMcpCallInput":
+        """``api_type``을 어디에서도 찾을 수 없는 입력은 유효한 호출이 아니다 (#436).
+
+        필드가 전부 선택이라 JSON 스키마만 보면 ``{}``도 유효한 인자다. 첫 턴 강제
+        호출(``tool_choice="required"``)에서 모델이 실제로 ``{}``를 골랐고, 그러면 MCP를
+        부르지도 못한 채 오류만 돌아갔다. 판정은 :func:`_prepare_kis_trading_mcp_call`이
+        ``kis_mcp_missing_arguments``를 내는 조건과 같은 함수로 해, 두 판정이 갈라지지 않게 한다
+        (빈 문자열 ``api_type``도 없는 것으로 본다).
+        이렇게 입력 단계에서 거부해야 첫 턴 강제 루프가 이 호출을 "인자가 잘못된 호출"로 보고
+        다시 강제할 수 있다(:mod:`finus_agents.tool_first_react`).
+        """
+        kw: dict[str, Any] = {}
+        if self.api_type is not None and str(self.api_type).strip():
+            kw["api_type"] = self.api_type
+        ti = self.tool_input if self.tool_input is not None else ""
+        if not _coerce_api_type_params_payload(ti, kw):
+            raise ValueError(
+                "api_type이 없어 KIS를 호출하지 않았습니다. 사용자 질문에 맞는 api_type과 params를 넣어 "
+                "다시 호출하세요. 현재가는 "
+                '{"api_type":"inquire_price","params":{"stock_name":"종목명"}}, '
+                '잔고는 {"api_type":"inquire_balance","params":{"inqr_dvsn":"01"}} 형식입니다.'
+            )
+        return self
+
 
 def _coerce_api_type_params_payload(tool_input: Any, kwargs: dict[str, Any]) -> McpCallArguments | None:
     nested = kwargs.get("tool_input")
