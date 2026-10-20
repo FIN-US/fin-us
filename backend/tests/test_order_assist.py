@@ -459,6 +459,66 @@ def test_parse_snapshot_reports_zero_holdings_for_an_unheld_stock():
     assert snapshot.holding_qty == 0
 
 
+# 2026-10-20 모의투자 실측 잔고 행(mcp/trading/tests/fixtures/kis_response_pdno_policy.json)을
+# balance.js formatBalanceReport()의 줄 모양으로 옮긴 것. ETN은 Q530116으로 샀는데 pdno가
+# 530116으로 왔다(#433).
+ETN_BALANCE_TEXT = """[계좌 잔고 현황]
+- 총 평가금액: 20,000,000원
+- 순자산금액: 20,000,000원
+- 예수금: 6,000,000원
+
+[보유 종목 리스트]
+- 삼성 인버스 2X 나스닥 100 TR ETN (530116) · 1주
+  평단가 4,375원 → 평가금액 4,385원
+  손익 +10원 · 수익률 +0.23%
+
+- 한화3우B (00088K) · 1주
+  평단가 31,800원 → 평가금액 31,600원
+  손익 -200원 · 수익률 -0.63%
+"""
+
+
+@pytest.mark.parametrize(
+    "stock_code, expected_qty",
+    [
+        ("Q530116", 1),  # 마스터 EN — Q 없는 응답 행이 이 종목이다
+        ("00088K", 1),  # 신형우선주는 응답이 보낸 코드 그대로다
+        ("Q500035", 0),  # 다른 ETN — Q를 뗀 숫자가 달라 맞지 않는다
+    ],
+)
+def test_parse_snapshot_finds_etn_holding_whose_balance_pdno_lacks_q(stock_code, expected_qty):
+    snapshot, error = parse_snapshot(QUOTE_TEXT, ETN_BALANCE_TEXT, ORDERABLE_TEXT, stock_code)
+
+    assert error == ""
+    assert snapshot is not None
+    assert snapshot.holding_qty == expected_qty
+
+
+def test_parse_snapshot_stops_on_etn_when_master_groups_cannot_be_read(monkeypatch, tmp_path):
+    """마스터를 못 읽으면 ETN 보유 행을 못 찾은 것을 0주로 읽지 않고 멈춘다(#433, fail-closed)."""
+    from backend.trading import stock_code as stock_code_module
+
+    monkeypatch.setattr(stock_code_module, "_TRADING_MCP_DIR", tmp_path)  # stocks.json 없음
+
+    snapshot, error = parse_snapshot(QUOTE_TEXT, ETN_BALANCE_TEXT, ORDERABLE_TEXT, "Q530116")
+
+    assert snapshot is None
+    assert "ETN" in error
+
+
+def test_parse_snapshot_without_master_still_reads_non_etn_codes(monkeypatch, tmp_path):
+    """fail-closed는 ETN 모양 코드에만 건다. 숫자·영숫자 6자는 응답이 보낸 그대로라 그룹이 필요 없다."""
+    from backend.trading import stock_code as stock_code_module
+
+    monkeypatch.setattr(stock_code_module, "_TRADING_MCP_DIR", tmp_path)
+
+    snapshot, error = parse_snapshot(QUOTE_TEXT, ETN_BALANCE_TEXT, ORDERABLE_TEXT, "00088K")
+
+    assert error == ""
+    assert snapshot is not None
+    assert snapshot.holding_qty == 1
+
+
 @pytest.mark.parametrize(
     "quote,balance,orderable,expected",
     [

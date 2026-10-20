@@ -74,6 +74,8 @@ from backend.trading.stock_code import (
     _STOCK_CODE_EXTRACT_RE,
     extract_stock_name,
     is_orderable_stock_code_strict,
+    response_pdno_match_undecidable,
+    response_pdno_matches_stock_code,
 )
 from backend.core.timeutil import KST
 from backend.trading.orders import (
@@ -505,9 +507,16 @@ def parse_snapshot(
     if total_value is None or total_value <= 0:
         return None, "총 평가금액을 확인하지 못해 진행하지 않았습니다."
 
+    # 잔고 응답의 ETN pdno는 Q가 빠져 온다(#433). 지금은 check_orderable_code(strict,
+    # 숫자 6~7자)가 ETN을 이 앞에서 막지만, 열리면 보유 행을 못 찾은 것이 "관측된 0주"로
+    # 둔갑해 BUY 비중 한도가 기존 보유분을 빼먹는다. 그래서 ETN 모양 코드인데 마스터에서
+    # 증권그룹을 확인할 수 없으면 보유량을 정하지 않고 멈춘다(fail-closed).
+    if response_pdno_match_undecidable(stock_code):
+        return None, "종목마스터에서 ETN 여부를 확인하지 못해 보유량을 판정할 수 없어 진행하지 않았습니다."
+
     holding_qty = 0
     for holding in _parse_balance_holdings(balance_text):
-        if holding.code.upper() == stock_code.upper():
+        if response_pdno_matches_stock_code(holding.code, stock_code):
             holding_qty = holding.quantity
             break
 

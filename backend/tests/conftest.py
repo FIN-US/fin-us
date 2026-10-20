@@ -135,11 +135,17 @@ def _clear_master_code_cache():
     # 그대로 물려받아 실제 마스터 대조를 건너뛰게 된다.
     # _master_codes_cache_path는 _master_codes_cache가 None이면 어차피 무시되지만
     # (첫 조건에서 단락 평가), 둘을 짝으로 리셋해 상태를 명확히 남긴다.
+    # #433: 증권그룹 캐시(_master_groups_cache)도 같은 이유로 함께 비운다 — 로드 실패를
+    # 물려받으면 다음 테스트의 ETN 보유 판정이 fail-closed로 바뀐다.
     stock_code._master_codes_cache = None
     stock_code._master_codes_cache_path = None
+    stock_code._master_groups_cache = None
+    stock_code._master_groups_cache_path = None
     yield
     stock_code._master_codes_cache = None
     stock_code._master_codes_cache_path = None
+    stock_code._master_groups_cache = None
+    stock_code._master_groups_cache_path = None
 
 
 @pytest.fixture(autouse=True)
