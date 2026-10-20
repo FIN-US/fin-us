@@ -136,13 +136,13 @@ PUBLIC_KIS_QUOTE_APIS: frozenset[tuple[str, str]] = frozenset(
         "inquire_daily_itemchartprice", "inquire_time_itemchartprice",
         "inquire_time_itemconclusion", "find_stock_code", "find_api_detail",
         # 시장 전체 순위(#435). 계좌 TR처럼 가리면 순위 목록의 가격이 전부 자리표시자가 되어, 모델이
-        # 가격을 보지 못한 채 "30만원 이하" 같은 조건을 단정했다. 넷 다 open-trading-api
+        # 가격을 보지 못한 채 "30만원 이하" 같은 조건을 단정했다. 에이전트가 실제로 부른 것만 넣었고, 셋 다 open-trading-api
         # examples_llm/domestic_stock 소스로 확인했다: 입력은 FID_* 시장·화면·가격 조건뿐이고
         # (CANO·ACNT_PRDT_CD·USER_ID 없음) 응답은 종목별 시세 행이다.
         "market_cap",    # GET /uapi/domestic-stock/v1/ranking/market-cap, FHPST01740000 (시가총액 상위)
         "volume_rank",   # GET /uapi/domestic-stock/v1/quotations/volume-rank, FHPST01710000 (거래량 순위)
         "fluctuation",   # GET /uapi/domestic-stock/v1/ranking/fluctuation, FHPST01700000 (등락률 순위)
-        "volume_power",  # GET /uapi/domestic-stock/v1/ranking/volume-power, FHPST01680000 (체결강도 상위)
+        # volume_power(체결강도 상위)는 같은 모양이지만 실측에서 쓰이지 않아 넣지 않았다 — 목록 밖은 가린다.
         # search_stock_info(상품기본조회, CTPF1002R)는 넣지 않았다. 입력은 PDNO·PRDT_TYPE_CD뿐이지만
         # TR ID가 시세 계열(F·H)이 아니라 계좌·상품 계열(C…R)이라 판단이 애매하다.
     )

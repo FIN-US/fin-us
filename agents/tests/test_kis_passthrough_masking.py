@@ -156,8 +156,19 @@ def test_no_tr_that_takes_an_account_or_user_id_is_a_public_quote():
 
 def test_ranking_quotes_used_by_agents_pass_through():
     """#435: 에이전트가 실제로 쓰는 시장 순위 TR은 가리지 않는다 — 가리면 순위 목록의 가격이 사라진다."""
-    for api_type in ("market_cap", "volume_rank", "fluctuation", "volume_power"):
+    for api_type in ("market_cap", "volume_rank", "fluctuation"):
         assert ("domestic_stock", api_type) in PUBLIC_KIS_QUOTE_APIS
+
+
+def test_ranking_tr_not_used_by_agents_stays_masked(box):
+    """실제로 쓰이지 않은 순위 TR(volume_power)은 목록 밖이라 계좌 TR처럼 가린다(fail-closed).
+
+    뮤테이션: 목록에 ``volume_power``를 다시 넣으면 red.
+    """
+    assert ("domestic_stock", "volume_power") not in PUBLIC_KIS_QUOTE_APIS
+    observation = mask_tool_result(KIS_PASSTHROUGH_TOOL, _BALANCE, kis_api=("domestic_stock", "volume_power"))
+
+    assert "4817263" not in observation
 
 
 def test_numbers_in_error_text_before_json_are_masked(box):
