@@ -82,6 +82,34 @@ def test_verdict_table_covers_the_upstream_snapshot_without_ambiguity():
     assert set(_WRITE_TRS) == _EXPECTED_WRITE_TRS
 
 
+def _verdict_generator():
+    import importlib.util
+
+    path = Path(__file__).resolve().parents[1] / "scripts" / "kis_tr_verdicts.py"
+    spec = importlib.util.spec_from_file_location("kis_tr_verdicts", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize(("src", "expected"), [
+    ("def f(cano: str, acnt_prdt_cd: str):", "CANO"),
+    ("def f(acnt_prdt_cd: str):", "ACNT_PRDT_CD"),
+    ("def f(user_id: str):", "USER_ID"),
+    ("def f(my_htsid: str):", "MY_HTSID"),
+    # 서버의 동적 매핑 규칙 (\w+)=\w*\.(my_\w+) — 인자 이름과 무관하게 서버 env 값으로 채운다
+    ("result = f(inqr_acct=trenv.my_acct)", "INQR_ACCT"),
+    ("def f(fid_input_iscd: str, fid_cond_mrkt_div_code: str):", None),
+])
+def test_account_input_follows_the_server_injection_rule(src: str, expected: str | None):
+    """판정표의 계좌 입력 판정은 Kis Trading MCP 서버가 계좌·사용자 값을 주입하는 규칙과 같다
+    (``tools/base.py``: 고정 매핑 cano·acnt_prdt_cd·my_htsid·user_id + 동적 매핑).
+
+    뮤테이션: ``_account_input``을 CANO·USER_ID만 보던 이전 판정으로 되돌리면 red.
+    """
+    assert _verdict_generator()._account_input(src) == expected
+
+
 # ---------------------------------------------------------------------------
 # (a) 조회 TR은 허용 / (b) 쓰기·웹소켓·임의 쓰기형은 차단
 # ---------------------------------------------------------------------------

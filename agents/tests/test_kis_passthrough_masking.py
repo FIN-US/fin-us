@@ -97,9 +97,11 @@ def test_masked_balance_round_trips_to_the_user(box):
     assert unmask_response(f"예수금은 {placeholder}원입니다.") == "예수금은 4,817,263원입니다."
 
 
-@pytest.mark.parametrize("kis_api", [None, ("domestic_stock", "some_future_tr"), ("overseas_stock", "inquire_price")])
+@pytest.mark.parametrize("kis_api", [None, ("domestic_stock", "some_future_tr"), ("overseas_stock", "inquire_price"),
+                                     ("domestic_stock", "inquire_balance")])
 def test_unknown_or_unlisted_api_is_masked(box, kis_api):
-    """목록 밖은 계좌 TR로 본다(fail-closed). 해외 시세도 목록에 넣기 전까지는 가린다."""
+    """목록 밖은 계좌 TR로 본다(fail-closed). 해외 시세도 목록에 넣기 전까지는 가린다.
+    목록에 들어갈 일 없는 계좌 TR(``inquire_balance``)로 일반 경로를 함께 본다."""
     observation = mask_tool_result(KIS_PASSTHROUGH_TOOL, _BALANCE, kis_api=kis_api)
 
     assert "4817263" not in observation
@@ -154,21 +156,22 @@ def test_no_tr_that_takes_an_account_or_user_id_is_a_public_quote():
     assert not {("domestic_stock", api) for api in with_account} & PUBLIC_KIS_QUOTE_APIS
 
 
-def test_ranking_quotes_used_by_agents_pass_through():
-    """#435: 에이전트가 실제로 쓰는 시장 순위 TR은 가리지 않는다 — 가리면 순위 목록의 가격이 사라진다."""
-    for api_type in ("market_cap", "volume_rank", "fluctuation"):
-        assert ("domestic_stock", api_type) in PUBLIC_KIS_QUOTE_APIS
+_MARKET_CAP_ROWS = json.dumps({"ok": True, "data": {"success": True, "api_type": "market_cap", "data": json.dumps([
+    {"hts_kor_isnm": "삼성전자", "mksc_shrn_iscd": "005930", "stck_prpr": "209750",
+     "lstn_stcn": "5846278608", "stck_avls": "12262569"},
+])}}, ensure_ascii=False)
 
 
-def test_ranking_tr_not_used_by_agents_stays_masked(box):
-    """실제로 쓰이지 않은 순위 TR(volume_power)은 목록 밖이라 계좌 TR처럼 가린다(fail-closed).
+def test_market_ranking_rows_pass_through_with_prices(box):
+    """#435: 시가총액 순위 결과는 가격·상장주식수·시가총액을 그대로 보여 준다. 가리면 모델이 가격을
+    보지 못한 채 "30만원 이하" 같은 조건을 단정했다.
 
-    뮤테이션: 목록에 ``volume_power``를 다시 넣으면 red.
+    뮤테이션: 목록에서 ``market_cap``을 빼면 숫자가 자리표시자가 되어 red.
     """
-    assert ("domestic_stock", "volume_power") not in PUBLIC_KIS_QUOTE_APIS
-    observation = mask_tool_result(KIS_PASSTHROUGH_TOOL, _BALANCE, kis_api=("domestic_stock", "volume_power"))
+    observation = mask_tool_result(KIS_PASSTHROUGH_TOOL, _MARKET_CAP_ROWS, kis_api=("domestic_stock", "market_cap"))
 
-    assert "4817263" not in observation
+    assert observation == _MARKET_CAP_ROWS
+    assert box == {}
 
 
 def test_numbers_in_error_text_before_json_are_masked(box):
