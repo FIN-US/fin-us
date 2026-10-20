@@ -989,30 +989,20 @@ class KisTradingMcpCallInput(BaseModel):
             return parsed
         return data
 
-    @model_validator(mode="after")
-    def _require_api_type(self) -> "KisTradingMcpCallInput":
-        """``api_type``을 어디에서도 찾을 수 없는 입력은 유효한 호출이 아니다 (#436).
+    def forced_call_rejection(self) -> str | None:
+        """실행해 봐야 오류뿐인 입력이면 그 사유를, 아니면 None을 돌려준다 (#436).
 
-        필드가 전부 선택이라 JSON 스키마만 보면 ``{}``도 유효한 인자다. 첫 턴 강제
-        호출(``tool_choice="required"``)에서 모델이 실제로 ``{}``를 골랐고, 그러면 MCP를
-        부르지도 못한 채 오류만 돌아갔다. 판정은 :func:`_prepare_kis_trading_mcp_call`이
-        ``kis_mcp_missing_arguments``를 내는 조건과 같은 함수로 해, 두 판정이 갈라지지 않게 한다
-        (빈 문자열 ``api_type``도 없는 것으로 본다).
-        이렇게 입력 단계에서 거부해야 첫 턴 강제 루프가 이 호출을 "인자가 잘못된 호출"로 보고
-        다시 강제할 수 있다(:mod:`finus_agents.tool_first_react`).
+        첫 턴 강제 루프(:mod:`finus_agents.tool_first_react`)가 실행 **전에** 부르는 도구별
+        사전 검사다. 입력 스키마 검증으로 두지 않는 이유: 그러면 강제 턴 밖(텍스트 ReAct)의
+        같은 호출이 래퍼에 닿기 전에 막혀, 원장에 실패가 남지 않고 ``tools_used`` 각주에서
+        사라진다(#344는 그 각주로 이 문제를 찾았다). 판정은 :func:`_prepare_kis_trading_mcp_call`의
+        api_type 오류 두 갈래(``kis_mcp_missing_arguments``·``kis_mcp_missing_api_type``)와
+        같은 함수(:func:`_kis_call_payload`)로 한다.
         """
-        kw: dict[str, Any] = {}
-        if self.api_type is not None and str(self.api_type).strip():
-            kw["api_type"] = self.api_type
-        ti = self.tool_input if self.tool_input is not None else ""
-        if not _coerce_api_type_params_payload(ti, kw):
-            raise ValueError(
-                "api_type이 없어 KIS를 호출하지 않았습니다. 사용자 질문에 맞는 api_type과 params를 넣어 "
-                "다시 호출하세요. 현재가는 "
-                '{"api_type":"inquire_price","params":{"stock_name":"종목명"}}, '
-                '잔고는 {"api_type":"inquire_balance","params":{"inqr_dvsn":"01"}} 형식입니다.'
-            )
-        return self
+        payload, error = _kis_call_payload(self)
+        if error is None:
+            return None
+        return f"{error}: api_type이 없습니다 (받은 키: {sorted((payload or {}).keys())})"
 
 
 def _coerce_api_type_params_payload(tool_input: Any, kwargs: dict[str, Any]) -> McpCallArguments | None:
@@ -1140,10 +1130,13 @@ def _adjust_domestic_stock_params(api_type: str, params: dict[str, Any]) -> dict
     return out
 
 
-def _prepare_kis_trading_mcp_call(
-    inp: KisTradingMcpCallInput,
-    config: FinusAccountBalanceConfig,
-) -> str | tuple[str, McpCallArguments]:
+def _kis_call_payload(inp: KisTradingMcpCallInput) -> tuple[McpCallArguments | None, str | None]:
+    """입력에서 MCP 인자 묶음을 꺼내고, api_type이 없으면 래퍼가 낼 오류 코드를 함께 돌려준다.
+
+    :func:`_prepare_kis_trading_mcp_call`과 첫 턴 강제 루프의 사전 검사
+    (:meth:`KisTradingMcpCallInput.forced_call_rejection`, #436)가 이 함수 하나를 같이 쓴다.
+    둘이 갈라지면 래퍼가 오류만 돌려줄 호출을 강제 루프가 그대로 실행한다.
+    """
     kw: dict[str, Any] = {}
     if inp.api_type is not None:
         kw["api_type"] = inp.api_type
@@ -1152,6 +1145,19 @@ def _prepare_kis_trading_mcp_call(
     ti = inp.tool_input if inp.tool_input is not None else ""
     blob = _coerce_api_type_params_payload(ti, kw)
     if not blob:
+        return None, "kis_mcp_missing_arguments"
+    api_type = blob.get("api_type")
+    if api_type is None or str(api_type).strip() == "":
+        return blob, "kis_mcp_missing_api_type"
+    return blob, None
+
+
+def _prepare_kis_trading_mcp_call(
+    inp: KisTradingMcpCallInput,
+    config: FinusAccountBalanceConfig,
+) -> str | tuple[str, McpCallArguments]:
+    blob, missing = _kis_call_payload(inp)
+    if missing == "kis_mcp_missing_arguments":
         return _err_json(
             "kis_mcp_missing_arguments",
             hint='Provide api_type and params, e.g. {"api_type":"find_api_detail","params":{"api_type":"inquire_balance"}}',
@@ -1171,9 +1177,9 @@ def _prepare_kis_trading_mcp_call(
             "kis_tool_name_missing",
             hint="Pass tool_name in Action Input or set trading_tool_name in YAML (see MCP list_tools).",
         )
-    api_type = blob.get("api_type")
-    if api_type is None or str(api_type).strip() == "":
+    if missing == "kis_mcp_missing_api_type":
         return _err_json("kis_mcp_missing_api_type", tool=tool_name, blob_keys=list(blob.keys()))
+    api_type = blob["api_type"]
     raw_params = blob.get("params")
     params: dict[str, Any] = raw_params if isinstance(raw_params, dict) else {}
 
