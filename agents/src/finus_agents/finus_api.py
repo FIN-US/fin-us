@@ -1221,6 +1221,12 @@ def _prepare_kis_trading_mcp_call(
 
 
 # KIS Trading MCP 도구 가이드
+# 시가총액 단위(억원)의 출처는 upstream 문서가 아니라 실측 검산이다(2026-10-20, 모의투자, #435).
+# upstream은 필드 이름만 준다(chk_inquire_price.py 'hts_avls': 'HTS 시가총액', chk_market_cap.py
+# 'stck_avls': '시가 총액'). 검산식은 lstn_stcn × stck_prpr ÷ 1억 = 시가총액 필드이고 정확히 일치했다:
+#   inquire_price 삼성전자 5,846,278,608 × 213,500 ÷ 1억 = 12,481,805 = hts_avls
+#   market_cap 상위 5종목(삼성전자·SK하이닉스·삼성전자우·SK스퀘어·LG에너지솔루션) 모두 비율 1.0000,
+#   예: SK하이닉스 730,492,365 × 1,211,000 ÷ 1억 = 8,846,263 = stck_avls
 _KIS_TRADING_TOOL_GUIDE = """
 ### Fin-Us KIS 호출 규칙
 - ReAct 형식: `Action Input:` 한 줄에는 JSON만 두세요. JSON 뒤에 같은 줄·바로 다음 줄에 설명을 붙이면 도구 입력이 깨질 수 있습니다. 설명은 Observation 이후 또는 `Final Answer:` 에 쓰세요.
@@ -1230,6 +1236,7 @@ _KIS_TRADING_TOOL_GUIDE = """
 - 투자계좌자산현황 `api_type="inquire_account_balance"`는 모의투자에서 지원되지 않습니다. `inqr_dvsn_1`은 기본 `""`이며 `"00"`을 추측해서 넣지 마세요.
 - 현재가 조회는 `{"api_type":"inquire_price","params":{"stock_name":"삼성전자"}}`처럼 종목명만 넣어 한 번에 부르세요. 이 래퍼가 종목코드를 찾아 채웁니다(호가·체결·일별시세·투자자 등 종목 단위 시세도 같음). `find_stock_code`를 먼저 부를 필요가 없고, 종목코드만으로 답을 끝내지 마세요.
 - `env_dv`(모의/실전)는 이 래퍼가 배포 설정에 맞춰 채웁니다. 직접 고르지 마세요.
+- 시가총액 필드는 억원 단위입니다: 시세(`inquire_price` 등)의 `hts_avls`, 시가총액 순위(`market_cap`)의 `stck_avls`. 상장주식수 `lstn_stcn` × 현재가 ÷ 1억과 같습니다. 예: `12481805`는 약 1,248조원입니다.
 - 알 수 없는 필드, INVALID INPUT, 필드 크기 오류, 필수 파라미터 오류가 나오면 실패로 끝내지 말고 `api_type="find_api_detail"`을 호출해 해당 `api_type`의 필드를 확인한 뒤 같은 사용자 요청을 다시 실행하세요.
 - 성공 조건은 사용자가 요청한 데이터 조회가 정상 Observation으로 돌아오고, 그 Observation을 근거로 최종 답변하는 것입니다.
 """.strip()
@@ -1688,7 +1695,9 @@ async def finus_earnings_report(config: FinusEarningsReportConfig, _builder: Bui
     doc = (
         "Fin-Us mcp-dart stdio MCP: OpenDART 공식 API 실적 리포트 "
         "(매출·영업이익·순이익 YoY). stock_name 예: 삼성전자, 005930. "
-        "period 선택 예: 2025Q1, 2025Q2, 2025Q3, 2025FY. DART_API_KEY 필요."
+        "period 선택 예: 2025Q1, 2025Q2, 2025Q3, 2025FY. period를 생략하면 오늘(한국 시간) 기준 공시 기한이 "
+        "지난 가장 최근 분기를 조회하므로, '최근 분기' 실적은 period를 생략한다(공시 전인 이번 분기를 지정하면 "
+        "데이터가 없다). DART_API_KEY 필요."
     )
 
     async def get_earnings_report(stock_name: str, period: str | None = None) -> str:

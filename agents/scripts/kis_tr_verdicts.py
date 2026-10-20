@@ -23,7 +23,8 @@
    시작)은 조회 전용 — 이면 ``read``다.
 4. 위 어디에도 들지 않으면 ``ambiguous``다. 허용하지 않는다(fail-closed). 지금은 0건이다.
 
-``account_input``은 그 TR이 계좌번호(``CANO``)나 HTS ID(``USER_ID``)를 입력으로 받는지다.
+``account_input``은 그 TR이 계좌번호(``CANO``)·계좌상품코드(``ACNT_PRDT_CD``)·HTS ID
+(``USER_ID``·``MY_HTSID``) 등 서버가 주입하는 값을 입력으로 받는지다(규칙은 ``_account_input``).
 Kis Trading MCP가 서버 env로 채우는 값이라, 이런 조회는 **이 계좌·이 사용자**의 데이터를
 돌려준다. 허용 범위를 넓힐 때 PR 본문에 따로 적는 목록의 근거다.
 """
@@ -47,11 +48,21 @@ def _tr_kind(tr_id: str) -> str:
     return "unknown"
 
 
+# Kis Trading MCP 서버(``MCP/Kis Trading MCP/tools/base.py``)가 서버 env로 강제 주입하는 인자와
+# 같은 규칙이다: 고정 매핑 4종(cano·acnt_prdt_cd·my_htsid·user_id)과, 예제 소스에서 찾는 동적 매핑
+# ``(\w+)=\w*\.(my_\w+)``(``_extract_trenv_params_from_example``). 판정이 서버보다 좁으면 서버가
+# 계좌·사용자 값을 채우는 TR을 "계좌 입력 없음"으로 잘못 적는다.
+_SERVER_INJECTED_PARAMS = ("cano", "user_id", "acnt_prdt_cd", "my_htsid")
+_SERVER_TRENV_PATTERN = re.compile(r"(\w+)=\w*\.(my_\w+)")
+
+
 def _account_input(src: str) -> str | None:
-    if re.search(r"\bCANO\b\s*[:=]", src, re.IGNORECASE):
-        return "CANO"
-    if re.search(r"\bUSER_ID\b\s*[:=]", src, re.IGNORECASE):
-        return "USER_ID"
+    for name in _SERVER_INJECTED_PARAMS:
+        if re.search(rf"\b{name}\b\s*[:=]", src, re.IGNORECASE):
+            return name.upper()
+    dynamic = _SERVER_TRENV_PATTERN.search(src)
+    if dynamic:
+        return dynamic.group(1).upper()
     return None
 
 

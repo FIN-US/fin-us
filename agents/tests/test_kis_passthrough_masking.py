@@ -97,9 +97,11 @@ def test_masked_balance_round_trips_to_the_user(box):
     assert unmask_response(f"예수금은 {placeholder}원입니다.") == "예수금은 4,817,263원입니다."
 
 
-@pytest.mark.parametrize("kis_api", [None, ("domestic_stock", "some_future_tr"), ("overseas_stock", "inquire_price")])
+@pytest.mark.parametrize("kis_api", [None, ("domestic_stock", "some_future_tr"), ("overseas_stock", "inquire_price"),
+                                     ("domestic_stock", "inquire_balance")])
 def test_unknown_or_unlisted_api_is_masked(box, kis_api):
-    """목록 밖은 계좌 TR로 본다(fail-closed). 해외 시세도 목록에 넣기 전까지는 가린다."""
+    """목록 밖은 계좌 TR로 본다(fail-closed). 해외 시세도 목록에 넣기 전까지는 가린다.
+    목록에 들어갈 일 없는 계좌 TR(``inquire_balance``)로 일반 경로를 함께 본다."""
     observation = mask_tool_result(KIS_PASSTHROUGH_TOOL, _BALANCE, kis_api=kis_api)
 
     assert "4817263" not in observation
@@ -118,6 +120,58 @@ def test_account_execution_history_is_not_a_public_quote():
     """``inquire_ccnl``(체결가 시세)과 ``inquire_daily_ccld``(계좌 체결내역)는 다른 TR이다."""
     assert ("domestic_stock", "inquire_ccnl") in PUBLIC_KIS_QUOTE_APIS
     assert ("domestic_stock", "inquire_daily_ccld") not in PUBLIC_KIS_QUOTE_APIS
+
+
+def _tr_verdicts() -> dict[str, dict]:
+    import json
+    from pathlib import Path
+
+    path = Path(__file__).parent / "fixtures" / "kis_domestic_stock_tr_verdicts.json"
+    return {row["api_type"]: row for row in json.loads(path.read_text(encoding="utf-8"))["trs"]}
+
+
+def test_public_quote_list_holds_only_market_data_trs_without_account_input():
+    """공개 시세 목록의 TR은 판정표(upstream 소스)에서 조회이고, 계좌번호·HTS ID를 받지 않으며,
+    TR ID가 전부 시세 계열(F·H)이다. ``find_*``는 KIS TR이 아니라 MCP 특수 api_type이다.
+
+    뮤테이션: 목록에 ``inquire_daily_ccld``·``search_stock_info``(CTPF1002R)·``intstock_stocklist_by_group``
+    (USER_ID)을 넣으면 red.
+    """
+    verdicts = _tr_verdicts()
+    for tool, api_type in PUBLIC_KIS_QUOTE_APIS:
+        assert tool == "domestic_stock"
+        if api_type in {"find_stock_code", "find_api_detail"}:
+            continue
+        row = verdicts[api_type]
+        assert row["verdict"] == "read", api_type
+        assert row["account_input"] is None, api_type
+        assert all(tr_id[0] in "FH" for tr_id in row["tr_ids"]), (api_type, row["tr_ids"])
+
+
+def test_no_tr_that_takes_an_account_or_user_id_is_a_public_quote():
+    """판정표에서 계좌번호(CANO)·HTS ID(USER_ID)를 입력으로 받는 TR은 하나도 공개 시세 목록에 없다."""
+    with_account = {api for api, row in _tr_verdicts().items() if row["account_input"]}
+
+    assert with_account, "판정표에서 계좌 입력 TR을 하나도 찾지 못했다 — 검사가 공허하다"
+    assert not {("domestic_stock", api) for api in with_account} & PUBLIC_KIS_QUOTE_APIS
+
+
+_MARKET_CAP_ROWS = json.dumps({"ok": True, "data": {"success": True, "api_type": "market_cap", "data": json.dumps([
+    {"hts_kor_isnm": "삼성전자", "mksc_shrn_iscd": "005930", "stck_prpr": "209750",
+     "lstn_stcn": "5846278608", "stck_avls": "12262569"},
+])}}, ensure_ascii=False)
+
+
+def test_market_ranking_rows_pass_through_with_prices(box):
+    """#435: 시가총액 순위 결과는 가격·상장주식수·시가총액을 그대로 보여 준다. 가리면 모델이 가격을
+    보지 못한 채 "30만원 이하" 같은 조건을 단정했다.
+
+    뮤테이션: 목록에서 ``market_cap``을 빼면 숫자가 자리표시자가 되어 red.
+    """
+    observation = mask_tool_result(KIS_PASSTHROUGH_TOOL, _MARKET_CAP_ROWS, kis_api=("domestic_stock", "market_cap"))
+
+    assert observation == _MARKET_CAP_ROWS
+    assert box == {}
 
 
 def test_numbers_in_error_text_before_json_are_masked(box):
