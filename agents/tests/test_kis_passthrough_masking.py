@@ -120,6 +120,46 @@ def test_account_execution_history_is_not_a_public_quote():
     assert ("domestic_stock", "inquire_daily_ccld") not in PUBLIC_KIS_QUOTE_APIS
 
 
+def _tr_verdicts() -> dict[str, dict]:
+    import json
+    from pathlib import Path
+
+    path = Path(__file__).parent / "fixtures" / "kis_domestic_stock_tr_verdicts.json"
+    return {row["api_type"]: row for row in json.loads(path.read_text(encoding="utf-8"))["trs"]}
+
+
+def test_public_quote_list_holds_only_market_data_trs_without_account_input():
+    """공개 시세 목록의 TR은 판정표(upstream 소스)에서 조회이고, 계좌번호·HTS ID를 받지 않으며,
+    TR ID가 전부 시세 계열(F·H)이다. ``find_*``는 KIS TR이 아니라 MCP 특수 api_type이다.
+
+    뮤테이션: 목록에 ``inquire_daily_ccld``·``search_stock_info``(CTPF1002R)·``intstock_stocklist_by_group``
+    (USER_ID)을 넣으면 red.
+    """
+    verdicts = _tr_verdicts()
+    for tool, api_type in PUBLIC_KIS_QUOTE_APIS:
+        assert tool == "domestic_stock"
+        if api_type in {"find_stock_code", "find_api_detail"}:
+            continue
+        row = verdicts[api_type]
+        assert row["verdict"] == "read", api_type
+        assert row["account_input"] is None, api_type
+        assert all(tr_id[0] in "FH" for tr_id in row["tr_ids"]), (api_type, row["tr_ids"])
+
+
+def test_no_tr_that_takes_an_account_or_user_id_is_a_public_quote():
+    """판정표에서 계좌번호(CANO)·HTS ID(USER_ID)를 입력으로 받는 TR은 하나도 공개 시세 목록에 없다."""
+    with_account = {api for api, row in _tr_verdicts().items() if row["account_input"]}
+
+    assert with_account, "판정표에서 계좌 입력 TR을 하나도 찾지 못했다 — 검사가 공허하다"
+    assert not {("domestic_stock", api) for api in with_account} & PUBLIC_KIS_QUOTE_APIS
+
+
+def test_ranking_quotes_used_by_agents_pass_through():
+    """#435: 에이전트가 실제로 쓰는 시장 순위 TR은 가리지 않는다 — 가리면 순위 목록의 가격이 사라진다."""
+    for api_type in ("market_cap", "volume_rank", "fluctuation", "volume_power"):
+        assert ("domestic_stock", api_type) in PUBLIC_KIS_QUOTE_APIS
+
+
 def test_numbers_in_error_text_before_json_are_masked(box):
     """KIS 거절 응답은 본문 앞에 오류 텍스트가 붙는다. 그 안의 숫자도 가린다."""
     envelope = json.loads(_BALANCE)

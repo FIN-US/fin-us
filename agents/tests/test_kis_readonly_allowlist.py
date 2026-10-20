@@ -248,7 +248,8 @@ class TestReadonlyWrapper:
                 finus_api.KisTradingMcpCallInput(tool_name=tool_name, api_type=api_type, params={})
             )
 
-    @pytest.mark.parametrize("api_type", ["volume_rank", "intgr_margin", "inquire_daily_ccld"])
+    # volume_rank는 #435에서 공개 시세 목록으로 옮겼다. 목록 밖의 순위 TR(disparity)로 같은 전제를 본다.
+    @pytest.mark.parametrize("api_type", ["disparity", "intgr_margin", "inquire_daily_ccld"])
     async def test_newly_allowed_tr_reaches_kis_and_its_result_is_masked(
         self, remote, mapping_box, ledger, api_type
     ):
