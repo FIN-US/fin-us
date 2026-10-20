@@ -753,3 +753,45 @@ def test_no_master_name_is_shadowed_by_looks_like_stock_code():
         "다음 마스터 이름·별칭이 _looks_like_stock_code에 종목코드로 오인됩니다 "
         f"(이름, 오인된 이름이 속한 실제 코드): {shadowed}"
     )
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# KIS 조회 응답 pdno ↔ 마스터 코드 (#433) — 공유 판정표
+# ──────────────────────────────────────────────────────────────────────────
+# mcp/trading/tests/kis-pdno.test.js와 같은 파일을 읽는다. 규칙이 JS(kis-pdno.js)와
+# Python(stock_code.kis_response_pdno_matches)에 복제돼 있어 한쪽만 바꾸면 그쪽 스위트가 red가 된다.
+_PDNO_FIXTURE = json.loads(
+    (
+        Path(__file__).resolve().parents[2]
+        / "mcp" / "trading" / "tests" / "fixtures" / "kis_response_pdno_policy.json"
+    ).read_text(encoding="utf-8")
+)
+
+
+@pytest.mark.parametrize(
+    "case",
+    _PDNO_FIXTURE["cases"],
+    ids=[
+        f"{c['master_code']}-{c['scrt_grp_cls_code']}-{c['response_pdno'] or 'empty'}"
+        for c in _PDNO_FIXTURE["cases"]
+    ],
+)
+def test_kis_response_pdno_policy_table(case):
+    assert stock_code.kis_response_pdno_matches(
+        case["response_pdno"], case["master_code"], case["scrt_grp_cls_code"]
+    ) is case["matches"], case["note"]
+
+
+@pytest.mark.parametrize(
+    "sample",
+    _PDNO_FIXTURE["responses"],
+    ids=[f"{s['tr_id']}-{s['sent_code']}-{i}" for i, s in enumerate(_PDNO_FIXTURE["responses"])],
+)
+def test_measured_response_pdno_matches_only_the_sent_master_code(sample):
+    """실측 응답 행은 실제 마스터에서 보낸 코드의 항목 하나하고만 맞는다."""
+    stocks = json.loads(_STOCKS_JSON_PATH.read_text(encoding="utf-8"))
+    pdno = sample["row"]["pdno"]
+
+    matched = [s["code"] for s in stocks if stock_code.response_pdno_matches_stock_code(pdno, s["code"])]
+
+    assert matched == [sample["sent_code"]]

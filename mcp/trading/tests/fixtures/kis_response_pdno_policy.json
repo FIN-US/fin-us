@@ -1,0 +1,108 @@
+{
+  "_comment": "이슈 #433: KIS 조회 응답의 pdno를 종목마스터 항목과 맞대는 규칙의 공유 판정표입니다. mcp/trading/kis-pdno.js의 kisResponsePdnoMatches()와 backend/trading/stock_code.py의 kis_response_pdno_matches()가 같은 규칙의 두 복제본이라, 두 스위트(mcp/trading/tests/kis-pdno.test.js, backend/tests/test_stock_code.py)가 이 표를 각자 읽어 같은 판정을 내는지 확인합니다. 판정 근거는 응답이 아니라 마스터 항목의 scrt_grp_cls_code입니다 — 응답에는 상품군을 알려 주는 값이 없습니다(잔고 output1에는 상품유형 필드가 없고, 주문체결 output1의 prdt_type_cd는 모든 행이 빈 문자열이었습니다).",
+  "_observed": "2026-10-20 모의투자(openapivts) 실측. 잔고 VTTC8434R, 일별 주문체결 VTTC0081R. ETN은 Q를 붙여 주문했고 두 응답 모두 pdno에서 Q가 빠졌다. 신형우선주는 보낸 코드 그대로 왔다. 실현손익 TTTC8494R은 모의투자 미지원(EGW02006)이라, 실전 서버 응답과 함께 형태를 확인하지 못했다. 응답 행은 계좌번호·주문번호·지점번호를 뺀 실측값이다.",
+  "cases": [
+    {
+      "master_code": "Q530116",
+      "scrt_grp_cls_code": "EN",
+      "response_pdno": "530116",
+      "matches": true,
+      "note": "ETN. 잔고·주문체결 응답 실측 형태(Q 없음)."
+    },
+    {
+      "master_code": "Q530116",
+      "scrt_grp_cls_code": "EN",
+      "response_pdno": "Q530116",
+      "matches": true,
+      "note": "ETN을 보낸 그대로의 형태. 실전 서버·실현손익 TR 응답은 실측하지 못해 이 형태도 인정한다."
+    },
+    {
+      "master_code": "Q530116",
+      "scrt_grp_cls_code": "EN",
+      "response_pdno": "530117",
+      "matches": false,
+      "note": "숫자가 다른 코드는 Q 규칙으로도 맞지 않는다."
+    },
+    {
+      "master_code": "Q530116",
+      "scrt_grp_cls_code": "ST",
+      "response_pdno": "530116",
+      "matches": false,
+      "note": "근거는 코드 모양이 아니라 마스터의 증권그룹이다. EN이 아니면 Q를 뗀 형태를 인정하지 않는다."
+    },
+    {
+      "master_code": "530116",
+      "scrt_grp_cls_code": "ST",
+      "response_pdno": "530116",
+      "matches": true,
+      "note": "숫자 6자 주식은 그대로 비교한다(가상의 코드 — 같은 숫자의 ETN이 있어도 이 항목은 자기 코드로만 맞는다)."
+    },
+    {
+      "master_code": "530116",
+      "scrt_grp_cls_code": "ST",
+      "response_pdno": "Q530116",
+      "matches": false,
+      "note": "응답에 Q가 붙어 있다고 숫자 6자 마스터 항목과 맞추지 않는다 — 접두사를 떼어 추측하지 않는다."
+    },
+    {
+      "master_code": "00088K",
+      "scrt_grp_cls_code": "ST",
+      "response_pdno": "00088K",
+      "matches": true,
+      "note": "신형우선주. 잔고·주문체결 응답이 보낸 코드 그대로였다."
+    },
+    {
+      "master_code": "005930",
+      "scrt_grp_cls_code": "ST",
+      "response_pdno": "005930",
+      "matches": true,
+      "note": "대조군 숫자 6자."
+    },
+    {
+      "master_code": "F70100034",
+      "scrt_grp_cls_code": "BC",
+      "response_pdno": "70100034",
+      "matches": false,
+      "note": "9자 펀드의 접두사가 빠진다는 관측은 없다(모의투자 주문 불가로 응답을 못 봤다). 근거 없이 넓히지 않는다."
+    },
+    {
+      "master_code": "Q530116",
+      "scrt_grp_cls_code": "EN",
+      "response_pdno": "",
+      "matches": false,
+      "note": "빈 pdno는 어떤 종목과도 맞지 않는다."
+    }
+  ],
+  "responses": [
+    {
+      "tr_id": "VTTC8434R",
+      "sent_code": "Q530116",
+      "row": {"pdno": "530116", "prdt_name": "삼성 인버스 2X 나스닥 100 TR ETN", "trad_dvsn_name": "현금", "bfdy_buy_qty": "0", "bfdy_sll_qty": "0", "thdt_buyqty": "1", "thdt_sll_qty": "0", "hldg_qty": "1", "ord_psbl_qty": "1", "pchs_avg_pric": "4375.0000", "pchs_amt": "4375", "prpr": "4385", "evlu_amt": "4385", "evlu_pfls_amt": "10", "evlu_pfls_rt": "0.23", "evlu_erng_rt": "0.22857143", "loan_dt": "", "loan_amt": "0", "stln_slng_chgs": "0", "expd_dt": "", "fltt_rt": "0.92000000", "bfdy_cprs_icdc": "40", "item_mgna_rt_name": "100%", "grta_rt_name": "", "sbst_pric": "0", "stck_loan_unpr": "0.0000"}
+    },
+    {
+      "tr_id": "VTTC8434R",
+      "sent_code": "00088K",
+      "row": {"pdno": "00088K", "prdt_name": "한화3우B", "trad_dvsn_name": "현금", "bfdy_buy_qty": "0", "bfdy_sll_qty": "0", "thdt_buyqty": "1", "thdt_sll_qty": "0", "hldg_qty": "1", "ord_psbl_qty": "1", "pchs_avg_pric": "31800.0000", "pchs_amt": "31800", "prpr": "31600", "evlu_amt": "31600", "evlu_pfls_amt": "-200", "evlu_pfls_rt": "-0.63", "evlu_erng_rt": "-0.62893082", "loan_dt": "", "loan_amt": "0", "stln_slng_chgs": "0", "expd_dt": "", "fltt_rt": "-4.96000000", "bfdy_cprs_icdc": "1650", "item_mgna_rt_name": "100%", "grta_rt_name": "", "sbst_pric": "0", "stck_loan_unpr": "0.0000"}
+    },
+    {
+      "tr_id": "VTTC0081R",
+      "sent_code": "Q530116",
+      "row": {"pdno": "530116", "prdt_name": "삼성 인버스 2X 나스닥 100 TR ETN", "sll_buy_dvsn_cd_name": "매수", "ord_dvsn_name": "보통가", "ord_qty": "1", "ord_unpr": "4400", "tot_ccld_qty": "1", "rmn_qty": "0", "avg_prvs": "4375", "cncl_yn": "N", "prdt_type_cd": "", "excg_id_dvsn_cd": "KRX"}
+    },
+    {
+      "tr_id": "VTTC0081R",
+      "sent_code": "Q530116",
+      "row": {"pdno": "530116", "prdt_name": "삼성 인버스 2X 나스닥 100 TR ETN", "sll_buy_dvsn_cd_name": "매도", "ord_dvsn_name": "보통가", "ord_qty": "1", "ord_unpr": "4360", "tot_ccld_qty": "1", "rmn_qty": "0", "avg_prvs": "4370", "cncl_yn": "N", "prdt_type_cd": "", "excg_id_dvsn_cd": "KRX"}
+    },
+    {
+      "tr_id": "VTTC0081R",
+      "sent_code": "Q500035",
+      "row": {"pdno": "500035", "prdt_name": "신한 레버리지 미국달러 선물 ETN", "sll_buy_dvsn_cd_name": "매수", "ord_dvsn_name": "시장가", "ord_qty": "1", "ord_unpr": "0", "tot_ccld_qty": "0", "rmn_qty": "0", "avg_prvs": "0", "cncl_yn": "N", "prdt_type_cd": "", "excg_id_dvsn_cd": "KRX"}
+    },
+    {
+      "tr_id": "VTTC0081R",
+      "sent_code": "00088K",
+      "row": {"pdno": "00088K", "prdt_name": "한화3우B", "sll_buy_dvsn_cd_name": "매수", "ord_dvsn_name": "보통가", "ord_qty": "1", "ord_unpr": "32000", "tot_ccld_qty": "1", "rmn_qty": "0", "avg_prvs": "31800", "cncl_yn": "N", "prdt_type_cd": "", "excg_id_dvsn_cd": "KRX"}
+    }
+  ]
+}

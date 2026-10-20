@@ -348,3 +348,80 @@ def _looks_like_stock_code(stock: str) -> bool:
     """
     value = stock.strip().upper()
     return bool(_STOCK_CODE_RE.match(value)) and _has_code_digit(value)
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# KIS 조회 응답 pdno ↔ 종목마스터 코드 (#433) — mcp/trading/kis-pdno.js의 복제본
+# ──────────────────────────────────────────────────────────────────────────
+# 2026-10-20 모의투자 실측: ETN을 `Q530116`으로 주문하면 잔고(inquire-balance) output1과
+# 일별 주문체결(inquire-daily-ccld) output1의 pdno가 `530116`(Q 없음)으로 온다. 신형우선주
+# (`00088K`)·숫자 6자는 보낸 그대로 온다. 응답에는 상품군을 알려 주는 값이 없다(잔고
+# output1에 상품유형 필드가 없고, 주문체결 output1의 prdt_type_cd는 빈 문자열이었다).
+#
+# 그래서 판정 근거는 응답이 아니라 비교 대상 마스터 항목의 증권그룹구분코드
+# (scrt_grp_cls_code)다. EN(ETN)인 항목만 "Q를 뗀 6자"를 같은 종목으로 인정한다. 응답 코드에
+# Q를 붙여 추측하지 않는다 — 6자 숫자 응답만으로는 ETN인지 알 수 없다. 보낸 그대로의
+# 형태도 계속 인정한다(실전 서버·실현손익 TR 응답 형태는 실측하지 못했다).
+#
+# 두 계층의 일치는 mcp/trading/tests/fixtures/kis_response_pdno_policy.json 공유 판정표가
+# 고정한다(kis-pdno.test.js / test_stock_code.py).
+ETN_SECURITY_GROUP = "EN"
+_ETN_CODE_RE = re.compile(r"\AQ[0-9]{6}\Z")
+
+
+def kis_response_pdno_matches(pdno: str, code: str, security_group: str | None) -> bool:
+    """응답 pdno가 마스터 항목(code, security_group)과 같은 종목인가 — 순수 판정."""
+    if not pdno:
+        return False
+    if pdno == code:
+        return True
+    return (
+        security_group == ETN_SECURITY_GROUP
+        and bool(_ETN_CODE_RE.match(code or ""))
+        and pdno == code[1:]
+    )
+
+
+# code → scrt_grp_cls_code. _load_master_codes와 같은 지연 로딩·경로별 캐시 규칙을 쓰되,
+# 기존 코드 집합 캐시의 계약(frozenset)을 바꾸지 않으려고 따로 둔다.
+_master_groups_cache: object = None
+_master_groups_cache_path: Path | None = None
+
+
+def _load_master_security_groups():
+    """종목마스터의 코드별 증권그룹을 읽는다. 실패하면 _MASTER_LOAD_FAILED."""
+    global _master_groups_cache, _master_groups_cache_path
+    path = _master_stocks_path(_TRADING_MCP_DIR)
+    if _master_groups_cache is not None and _master_groups_cache_path == path:
+        return _master_groups_cache
+    try:
+        stocks = json.loads(path.read_text(encoding="utf-8"))
+        groups = {
+            str(stock["code"]).upper(): stock.get("scrt_grp_cls_code")
+            for stock in stocks
+            if isinstance(stock, dict) and stock.get("code")
+        }
+        if not groups:
+            raise ValueError("종목마스터에서 코드를 하나도 읽지 못했습니다")
+    except Exception as exc:
+        logger.warning(
+            "종목마스터 증권그룹 로드 실패, 응답 종목코드는 완전일치로만 비교합니다: path=%s, error=%s",
+            path,
+            exc,
+        )
+        groups = _MASTER_LOAD_FAILED
+    _master_groups_cache = groups
+    _master_groups_cache_path = path
+    return groups
+
+
+def response_pdno_matches_stock_code(pdno: str, stock_code: str) -> bool:
+    """KIS 조회 응답의 pdno가 마스터 종목코드 stock_code와 같은 종목인가.
+
+    stock_code의 증권그룹은 종목마스터에서 찾는다. 마스터를 못 읽거나 마스터에 없는 코드면
+    그룹을 모르므로 완전일치로만 판정한다(ETN의 Q 없는 응답 행을 놓치는 쪽).
+    """
+    code = (stock_code or "").strip().upper()
+    groups = _load_master_security_groups()
+    group = groups.get(code) if isinstance(groups, dict) else None
+    return kis_response_pdno_matches((pdno or "").strip().upper(), code, group)

@@ -22,6 +22,7 @@ import {
   isPaperTradingKisUrl,
 } from "./formatters.js";
 import { kisOrderPost } from "./kis-client.js";
+import { dailyCcldPdnoParam, kisResponsePdnoMatches } from "./kis-pdno.js";
 import { formatKisRequestLog, maskLongDigitRuns, readKisRequestLogEnv } from "./kis-rate-limit.js";
 import {
   OrderDedupStore,
@@ -617,13 +618,16 @@ async function getTodayDailyOrders({
   ccld_dvsn: ccldDvsn = "00",
   sll_buy_dvsn: sllBuyDvsn = "00",
 } = {}) {
+  let stock = null;
   let stockCode = "";
   let stockLabel = "";
   if (stockName) {
-    const stock = resolveStock(stockName);
-    stockCode = stock.code;
+    stock = resolveStock(stockName);
+    stockCode = dailyCcldPdnoParam(stock);
     stockLabel = stock.name;
   }
+  // ETN은 서버 필터 대신 받은 행을 직접 거른다(#433, kis-pdno.js의 dailyCcldPdnoParam 주석).
+  const filterLocally = Boolean(stock) && stockCode !== stock.code;
 
   const normalizedCcld = String(ccldDvsn || "00").trim();
   const normalizedSide = String(sllBuyDvsn || "00").trim();
@@ -641,6 +645,15 @@ async function getTodayDailyOrders({
     sllBuyDvsn: normalizedSide,
   });
 
+  if (filterLocally) {
+    // 전체 조회의 output2 집계는 다른 종목까지 합친 값이라 이 종목의 집계로 내보내지 않는다.
+    return formatDailyOrderCcldReport({
+      ...result,
+      rows: result.rows.filter((row) => kisResponsePdnoMatches(row.pdno, stock)),
+      summary: null,
+      stockLabel,
+    });
+  }
   return formatDailyOrderCcldReport({ ...result, stockLabel });
 }
 
@@ -709,7 +722,8 @@ async function getBalanceRlzPl({
   if (stockName) {
     const stock = resolveStock(stockName);
     stockLabel = stock.name;
-    rows = rows.filter((row) => row.pdno === stock.code || row.prdt_name === stock.name);
+    // ETN은 응답 pdno에 Q가 빠져 오므로 코드 비교는 kisResponsePdnoMatches로 한다(#433).
+    rows = rows.filter((row) => kisResponsePdnoMatches(row.pdno, stock) || row.prdt_name === stock.name);
   }
 
   return formatBalanceRlzPlReport({ ...result, rows, stockLabel });
