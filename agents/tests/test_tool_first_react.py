@@ -390,6 +390,154 @@ async def test_kis_call_without_api_type_outside_forced_turn_reaches_wrapper_and
     assert trace.tools_used == [ToolUse("finus_account_balance", ok=False)]
 
 
+class _TwoLookupChatModel(BaseChatModel):
+    """#435의 실측 행동을 흉내 낸다: 조회가 두 번 필요한 질문에서 첫 Observation을 받은 뒤,
+    도구가 API로 바인딩돼 있으면 남은 종목을 조회하고, 텍스트 ReAct만 열려 있으면
+    "두 번째 종목은 조회하지 않았다"는 Final Answer로 끝낸다."""
+
+    stocks: tuple[str, ...] = ("삼성전자", "SK하이닉스")
+    calls: list[dict[str, Any]] = Field(default_factory=list)
+
+    @property
+    def _llm_type(self) -> str:
+        return "scripted-two-lookup"
+
+    def bind_tools(self, tools, **kwargs):
+        return self.bind(tools=[t.name for t in tools], **kwargs)
+
+    def _generate(self, messages: list[BaseMessage], stop=None, run_manager=None, **kwargs) -> ChatResult:
+        self.calls.append(kwargs)
+        seen = [s for s in self.stocks if any(f"{s} 뉴스 OBS" in str(m.content) for m in messages[2:])]
+        missing = [s for s in self.stocks if s not in seen]
+        if "tools" in kwargs and missing:
+            message = AIMessage(content="", tool_calls=[
+                {"name": "mcp-news-get-market-news", "args": {"stock_name": missing[0]}, "id": f"call_{len(seen)}"},
+            ])
+        elif missing:
+            message = AIMessage(content=f"Thought: I now know the final answer\nFinal Answer: {missing[0]}는 조회하지 않아 비교할 수 없습니다.")
+        else:
+            message = AIMessage(content="Thought: I now know the final answer\nFinal Answer: 두 종목 비교 완료")
+        return ChatResult(generations=[ChatGeneration(message=message)])
+
+
+def _per_stock_news_tools(called: list[str]):
+    @tool("mcp-news-get-market-news")
+    def news(stock_name: str) -> str:
+        """종목 뉴스"""
+        called.append(stock_name)
+        return f"{stock_name} 뉴스 OBS"
+
+    @tool("get_user_memory")
+    def memory(note: str = "") -> str:
+        """메모리"""
+        return "memory disabled"
+
+    return news, memory
+
+
+async def test_vendor_text_turn_after_first_observation_stops_at_one_lookup():
+    """대조군: 첫 턴만 강제하고 이후 턴을 텍스트 ReAct(도구 미바인딩)로 두면 #435가 재현된다.
+
+    대역이 증상을 재현한다는 확인이다 — 이것이 초록이 아니면 아래 테스트는 아무것도 증명하지 않는다.
+    """
+    called: list[str] = []
+    news, memory = _per_stock_news_tools(called)
+    llm = _TwoLookupChatModel()
+    graph = ToolFirstReActAgentGraph(llm=llm, prompt=_prompt([news, memory]), tools=[news, memory],
+                                     raise_on_parsing_failure=False, first_turn_tools=[news])
+    graph.agent = graph.agent.first | llm  # 수정 전처럼 이후 턴에 도구를 바인딩하지 않는다
+    compiled = await graph.build_graph()
+
+    state = ReActGraphState(**await compiled.ainvoke(
+        ReActGraphState(messages=[HumanMessage(content="삼성전자와 SK하이닉스 뉴스 비교해줘")]),
+        config={"recursion_limit": 12}))
+
+    assert called == ["삼성전자"]
+    assert state.final_answer == "SK하이닉스는 조회하지 않아 비교할 수 없습니다."
+
+
+async def test_turns_after_first_observation_keep_tools_bound_and_reach_every_lookup():
+    """#435: Observation 뒤의 턴도 도구를 API로 바인딩(강제 없이)해, 두 번째 조회까지 하고 답한다.
+
+    뮤테이션: ``__init__``의 ``self.agent`` 재바인딩을 지우면 called==["삼성전자"]로 red.
+    ``_stream_llm`` 재정의를 지우면(벤더가 tool_calls를 버림) 두 번째 조회가 빈 응답이 되어 red.
+    """
+    called: list[str] = []
+    news, memory = _per_stock_news_tools(called)
+    llm = _TwoLookupChatModel()
+    graph = await ToolFirstReActAgentGraph(llm=llm, prompt=_prompt([news, memory]), tools=[news, memory],
+                                           raise_on_parsing_failure=False, first_turn_tools=[news]).build_graph()
+
+    state = ReActGraphState(**await graph.ainvoke(
+        ReActGraphState(messages=[HumanMessage(content="삼성전자와 SK하이닉스 뉴스 비교해줘")]),
+        config={"recursion_limit": 12}))
+
+    assert called == ["삼성전자", "SK하이닉스"]
+    assert state.final_answer == "두 종목 비교 완료"
+    forced, *rest = llm.calls
+    assert forced["tool_choice"] == "required"
+    # 이후 턴: 강제하지 않고(답할 수 있으면 끝내야 한다) 데이터 도구만 API로 연다 — 메모리·쓰기 도구는 텍스트로만
+    assert rest and all("tool_choice" not in call for call in rest)
+    assert all(call["tools"] == ["mcp-news-get-market-news"] for call in rest)
+    assert all(call["parallel_tool_calls"] is False for call in rest)
+    # 두 번째 조회는 텍스트 ReAct로 옮겨져 scratchpad에 남는다 — 다음 턴의 모델이 무엇을 불렀는지 본다
+    assert state.agent_scratchpad[1].log == (
+        'Thought: 요청에 답하려면 데이터를 조회한다.\nAction: mcp-news-get-market-news\n'
+        'Action Input: {"stock_name":"SK하이닉스"}')
+
+
+async def test_scratchpad_keeps_only_arguments_the_tool_schema_accepts():
+    """#435 실측: 모델이 뉴스 도구 인자에 지어낸 기사(``articles``)를 실었다. 도구는 스키마 밖 필드를
+    버리지만, 그대로 Action Input에 남기면 다음 턴의 답에 지어낸 기사가 섞인다.
+
+    뮤테이션: ``_stream_llm``에서 ``_call_with_schema_args``를 빼면 log에 articles가 남아 red.
+    """
+    called: list[str] = []
+    news, memory = _per_stock_news_tools(called)
+
+    class _Fabricating(_TwoLookupChatModel):
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+            result = super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
+            message = result.generations[0].message
+            for call in message.tool_calls:
+                call["args"] = {**call["args"], "articles": [{"title": "지어낸 기사"}]}
+            return result
+
+    graph = await ToolFirstReActAgentGraph(llm=_Fabricating(), prompt=_prompt([news, memory]), tools=[news, memory],
+                                           raise_on_parsing_failure=False, first_turn_tools=[news]).build_graph()
+    state = ReActGraphState(**await graph.ainvoke(
+        ReActGraphState(messages=[HumanMessage(content="삼성전자와 SK하이닉스 뉴스 비교해줘")]),
+        config={"recursion_limit": 12}))
+
+    assert called == ["삼성전자", "SK하이닉스"]
+    assert all("지어낸 기사" not in step.log and "지어낸 기사" not in step.tool_input
+               for step in state.agent_scratchpad)
+
+
+@pytest.mark.parametrize(("content", "thought"), [
+    ("", "요청에 답하려면 데이터를 조회한다."),
+    ("SK하이닉스도\n조회한다.", "SK하이닉스도 조회한다."),
+    # 파서 키워드가 든 본문은 Thought로 옮기면 Action/Final Answer로 오인된다
+    ("Final Answer: 끝", "요청에 답하려면 데이터를 조회한다."),
+    ("Action: x", "요청에 답하려면 데이터를 조회한다."),
+])
+def test_native_tool_call_round_trips_through_vendor_parser(content: str, thought: str):
+    """도구 호출을 옮긴 텍스트는 벤더 파서가 같은 도구·인자로 읽는다(한글·중첩 JSON 포함)."""
+    import json
+
+    from nat.plugins.langchain.agent.react_agent.output_parser import ReActOutputParser
+
+    from finus_agents.tool_first_react import react_text_for_tool_call
+
+    args = {"tool_name": "domestic_stock", "api_type": "inquire_price", "params": {"stock_name": "SK하이닉스"}}
+    text = react_text_for_tool_call(content, {"name": "kis-trading-mcp-tool-readonly", "args": args})
+    action = ReActOutputParser().parse(text)
+
+    assert text.startswith(f"Thought: {thought}\n")
+    assert action.tool == "kis-trading-mcp-tool-readonly"
+    assert json.loads(action.tool_input) == args
+
+
 def test_graph_kwargs_cover_vendor_graph_signature():
     """NAT를 올려 ``ReActAgentGraph.__init__``에 인자가 생기거나 사라지면 여기서 드러난다.
 

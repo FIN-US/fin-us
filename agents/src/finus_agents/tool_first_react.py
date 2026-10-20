@@ -8,8 +8,7 @@
 통과시키므로, 사용자에게는 도구를 한 번도 부르지 않은 거절만 돌아갔다.
 
 그래서 **scratchpad가 빈 첫 턴**만 ``tool_choice="required"``로 도구를 바인딩해 호출한다.
-도구 호출은 모델의 선택이 아니라 API 계약이 되고, 이후 턴(Observation을 받은 뒤)은 벤더의
-텍스트 ReAct를 그대로 탄다. 강제 턴은 벤더 LLM 호출 헬퍼를 거치지 않고 runnable을 직접
+도구 호출은 모델의 선택이 아니라 API 계약이 된다(이후 턴은 아래 #435 참고). 강제 턴은 벤더 LLM 호출 헬퍼를 거치지 않고 runnable을 직접
 ``ainvoke``한다: ``_stream_llm``은 청크의 ``content``만 이어 붙이고 ``_call_llm``은
 ``AIMessage(content=...)``로 다시 만들어, 둘 다 ``tool_calls``를 버린다
 (``use_native_tool_calling: true``가 빈 응답으로 끝나던 원인이기도 하다).
@@ -22,12 +21,25 @@
 강제 호출의 인자는 실행 전에 그 도구의 입력 스키마와 도구별 사전 검사로 확인하고, 거부되면
 인자 JSON이 깨진 경우와 같이 강제를 다시 시도한다. 마지막 시도까지 거부되면 폴백하지 않고
 그 호출을 실행한다 — 오류가 Observation으로 모델에 가고 원장에 실패가 남는다.
+
+**Observation을 받은 뒤의 턴도 도구를 API로 바인딩한다 (#435).** 같은 모델은 텍스트 ReAct만
+열려 있는 턴에서 두 번째 조회를 거의 하지 않는다 — 첫 Observation 직후의 입력을 그대로 두고
+LLM만 반복 호출한 실측에서, 도구 없이(텍스트 ReAct) 부르면 "삼성전자·SK하이닉스 중 더 싼 쪽"이
+6번 중 5번 ``Final Answer``("SK하이닉스는 조회하지 않아 비교할 수 없다")로 끝났고, 같은 입력에
+도구만 바인딩하면 8번 모두 SK하이닉스를 조회했다. 그래서 이후 턴은 ``tool_choice``를 강제하지
+않고(``auto`` — 답할 수 있으면 끝내야 한다) 첫 턴과 같은 데이터 도구를 바인딩한다(쓰기·메모리 도구는
+지금처럼 텍스트 ReAct로만 고른다). 모델이 고른 도구 호출은
+``_stream_llm``에서 정규 텍스트 ReAct(``Thought``/``Action``/``Action Input``)로 바꿔 벤더 파서·
+scratchpad·재시도 경로를 그대로 탄다. 벤더 ``_stream_llm``은 ``tool_calls``를 버리므로 여기서
+바꿔 끼운다(벤더 ``use_native_tool_calling: true``가 쓸모없던 이유와 같다).
 """
 
 import json
 import logging
+import re
 
 from langchain_core.agents import AgentAction
+from langchain_core.messages import AIMessage
 from pydantic import BaseModel
 from pydantic import Field
 from pydantic import ValidationError
@@ -55,19 +67,92 @@ logger = logging.getLogger(__name__)
 # 응답(_schema_rejection)이 이 상한을 함께 쓴다.
 FIRST_TURN_MAX_ATTEMPTS = 2
 
+# 모델이 도구 호출과 함께 낸 본문을 Thought로 옮길 때, 이 키워드가 있으면 벤더 파서가 본문을
+# Action/Final Answer로 오인한다. 그런 본문은 버리고 기본 Thought를 쓴다.
+_REACT_KEYWORD_RE = re.compile(r"(action|input|observation|final\s+answer)\s*\d*\s*:", re.IGNORECASE)
+_DEFAULT_THOUGHT = "요청에 답하려면 데이터를 조회한다."
+
+
+def react_text_for_tool_call(content: object, call: dict) -> str:
+    """네이티브 도구 호출 하나를 벤더 파서가 읽는 텍스트 ReAct 한 단계로 옮긴다.
+
+    이 텍스트는 다음 턴의 scratchpad에 모델 발화로 다시 들어간다. 어떤 도구를 어떤 인자로
+    불렀는지가 남아야 모델이 같은 조회를 되풀이하지 않고 남은 조회로 넘어간다.
+    """
+    thought = content.strip() if isinstance(content, str) else ""
+    if not thought or _REACT_KEYWORD_RE.search(thought):
+        thought = _DEFAULT_THOUGHT
+    thought = " ".join(thought.split())
+    tool_input = json.dumps(call.get("args") or {}, ensure_ascii=False, separators=(",", ":"))
+    return f"Thought: {thought}\nAction: {call['name']}\nAction Input: {tool_input}"
+
 
 class ToolFirstReActAgentGraph(ReActAgentGraph):
-    """첫 턴만 도구 호출을 강제하고 나머지는 벤더 ReAct 그래프에 맡긴다."""
+    """첫 턴은 도구 호출을 강제하고, 이후 턴은 도구를 바인딩한 채(강제 없이) 벤더 ReAct 그래프에 맡긴다."""
 
     def __init__(self, *, first_turn_tools, **kwargs):
         super().__init__(**kwargs)
         # 벤더 __init__이 만든 self.agent는 (tools/tool_names를 채운 프롬프트) | LLM이다.
         # 같은 프롬프트를 쓰고 LLM 바인딩만 바꿔 끼워, 강제 턴이 보는 지시가 평소 턴과 갈라지지 않게 한다.
-        self.first_turn_agent = self.agent.first | self.llm.bind_tools(
+        prompt = self.agent.first
+        # 벤더가 붙인 정지 시퀀스(gpt-5 계열이 아닌 모델의 "Observation:")는 이후 턴에도 유지한다.
+        vendor_bind = dict(getattr(self.agent.last, "kwargs", None) or {})
+        if "tools" in vendor_bind:
+            raise ValueError("finus_tool_first_react_agent는 도구를 직접 바인딩한다 — use_native_tool_calling은 false로 둔다")
+        self.first_turn_agent = prompt | self.llm.bind_tools(
             first_turn_tools,
             tool_choice="required",
             parallel_tool_calls=False,  # 벤더 tool_node는 한 턴에 도구 하나만 실행한다
         )
+        # #435: Observation 뒤의 턴. 강제하지 않되(답할 수 있으면 끝낸다) 데이터 도구를 API로 열어 둔다.
+        # 쓰기·메모리 도구는 API로 열지 않는다 — 일지 저장처럼 부수효과가 있는 도구는 지금처럼 모델이
+        # 텍스트 ReAct로 명시적으로 고를 때만 나간다(diary_agent.yml 주석과 같은 원칙). 프롬프트의 도구
+        # 목록은 그대로라 텍스트로는 여전히 고를 수 있다.
+        # 벤더 agent_node가 self.agent를 부르므로 이것을 바꿔 끼우고, tool_calls는 _stream_llm에서 받는다.
+        self.agent = prompt | self.llm.bind_tools(
+            first_turn_tools,
+            parallel_tool_calls=False,
+            **vendor_bind,
+        )
+
+    def _call_with_schema_args(self, call: dict) -> dict:
+        """도구 호출의 인자에서 그 도구의 입력 스키마에 없는 필드를 걷어낸 사본을 돌려준다.
+
+        실측(#435)에서 모델은 뉴스 도구를 ``{"stock_name": ..., "success": true, "articles": [지어낸 기사]}``
+        로 불렀다. 도구는 스키마 밖의 필드를 버리고 실제 뉴스를 돌려줬지만, 지어낸 기사가 Action Input으로
+        scratchpad에 남아 다음 턴의 답에 그대로 섞였다. scratchpad에는 도구가 실제로 받는 인자만 남긴다.
+        스키마가 추가 필드를 받는 도구(``extra="allow"``)이거나 스키마를 알 수 없으면 그대로 둔다.
+        """
+        tool = self.tools_dict.get(call.get("name"))
+        schema = getattr(tool, "args_schema", None)
+        args = call.get("args") or {}
+        if not (isinstance(schema, type) and issubclass(schema, BaseModel)) or not isinstance(args, dict):
+            return call
+        if schema.model_config.get("extra") == "allow":
+            return call
+        kept = {key: value for key, value in args.items() if key in schema.model_fields}
+        if kept != args:
+            logger.warning("%s 도구 %s 호출에서 스키마 밖의 인자를 버렸다: %s", AGENT_LOG_PREFIX, call.get("name"),
+                           sorted(set(args) - set(kept)))
+        return {**call, "args": kept}
+
+    async def _stream_llm(self, runnable, inputs):
+        """벤더 ``_stream_llm``을 대신한다 — 도구 호출을 버리지 않고 텍스트 ReAct로 옮긴다.
+
+        벤더 구현은 스트림 청크의 ``content``만 이어 붙여 ``tool_calls``를 잃는다. 여기서는 응답을
+        통째로 받아, 도구 호출이 있으면 :func:`react_text_for_tool_call`의 텍스트를 본문으로 돌려준다.
+        그 뒤의 파싱·scratchpad 기록·도구 실행은 벤더 경로 그대로다.
+        """
+        output = await runnable.ainvoke(inputs, config=self._runnable_config)
+        additional_kwargs = {}
+        reasoning = (output.additional_kwargs or {}).get("reasoning_content")
+        if reasoning:
+            additional_kwargs["reasoning_content"] = reasoning
+        if output.tool_calls:
+            content = react_text_for_tool_call(output.content, self._call_with_schema_args(output.tool_calls[0]))
+        else:
+            content = output.content if isinstance(output.content, str) else ""
+        return AIMessage(content=content, additional_kwargs=additional_kwargs)
 
     def _schema_rejection(self, call: dict) -> str | None:
         """강제 호출의 인자가 고른 도구에서 오류만 낼 것이면 그 사유를, 아니면 None을 돌려준다.
@@ -142,16 +227,14 @@ class ToolFirstReActAgentGraph(ReActAgentGraph):
             logger.warning("%s 강제 도구 호출이 계속 유효하지 않아 텍스트 ReAct로 폴백한다 (#394)", AGENT_LOG_PREFIX)
             return await super().agent_node(state)
 
-        call = output.tool_calls[0]
-        tool_input = json.dumps(call.get("args") or {}, ensure_ascii=False)
-        thought = str(output.content).strip() or "요청에 답하려면 먼저 데이터를 조회한다."
+        call = self._call_with_schema_args(output.tool_calls[0])
         # 다음 턴의 scratchpad에 이 log가 모델 발화로 들어간다. 텍스트 ReAct 형식으로 남겨야
         # 모델이 이어지는 턴에서도 같은 형식(Action/Final Answer)을 따른다.
         state.agent_scratchpad += [
             AgentAction(
                 tool=call["name"],
-                tool_input=tool_input,
-                log=f"Thought: {thought}\nAction: {call['name']}\nAction Input: {tool_input}",
+                tool_input=json.dumps(call.get("args") or {}, ensure_ascii=False),
+                log=react_text_for_tool_call(output.content, call),
             )
         ]
         return state
