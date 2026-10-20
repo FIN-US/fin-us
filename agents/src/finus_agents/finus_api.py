@@ -1688,7 +1688,9 @@ async def finus_earnings_report(config: FinusEarningsReportConfig, _builder: Bui
     doc = (
         "Fin-Us mcp-dart stdio MCP: OpenDART 공식 API 실적 리포트 "
         "(매출·영업이익·순이익 YoY). stock_name 예: 삼성전자, 005930. "
-        "period 선택 예: 2025Q1, 2025Q2, 2025Q3, 2025FY. DART_API_KEY 필요."
+        "period 선택 예: 2025Q1, 2025Q2, 2025Q3, 2025FY. period를 생략하면 오늘(한국 시간) 기준 공시 기한이 "
+        "지난 가장 최근 분기를 조회하므로, '최근 분기' 실적은 period를 생략한다(공시 전인 이번 분기를 지정하면 "
+        "데이터가 없다). DART_API_KEY 필요."
     )
 
     async def get_earnings_report(stock_name: str, period: str | None = None) -> str:

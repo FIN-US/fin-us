@@ -28,18 +28,31 @@ LLM만 반복 호출한 실측에서, 도구 없이(텍스트 ReAct) 부르면 "
 6번 중 5번 ``Final Answer``("SK하이닉스는 조회하지 않아 비교할 수 없다")로 끝났고, 같은 입력에
 도구만 바인딩하면 8번 모두 SK하이닉스를 조회했다. 그래서 이후 턴은 ``tool_choice``를 강제하지
 않고(``auto`` — 답할 수 있으면 끝내야 한다) 첫 턴과 같은 데이터 도구를 바인딩한다(쓰기·메모리 도구는
-지금처럼 텍스트 ReAct로만 고른다). 모델이 고른 도구 호출은
-``_stream_llm``에서 정규 텍스트 ReAct(``Thought``/``Action``/``Action Input``)로 바꿔 벤더 파서·
-scratchpad·재시도 경로를 그대로 탄다. 벤더 ``_stream_llm``은 ``tool_calls``를 버리므로 여기서
-바꿔 끼운다(벤더 ``use_native_tool_calling: true``가 쓸모없던 이유와 같다).
+지금처럼 텍스트 ReAct로만 고른다). 벤더 ``_stream_llm``은 ``tool_calls``를 버리므로 바꿔 끼운다
+(벤더 ``use_native_tool_calling: true``가 쓸모없던 이유와 같다). 모델이 고른 도구 호출은 벤더 파서에
+자리표시자만 넘기고 파싱 뒤에 실제 인자로 되돌린다 — 인자를 텍스트로 옮기면 값 안의 파서 키워드에
+깨진다. 그래서 이후 턴도 벤더의 재시도·직답 수용·scratchpad 경로를 그대로 탄다. 첫 턴 강제가 텍스트
+ReAct로 폴백할 때도 같은 바인딩을 쓴다.
+
+**모든 턴에 오늘 날짜(한국 시간)를 넣는다 (#440).** 이후 턴이 조회를 이어가자, 날짜를 모르는 모델이
+기간 인자를 지어내 틀린 수치를 단정했다(52주 최고가를 2024년 한 해로 조회). 날짜는 프롬프트를 포맷할
+때마다 시계에서 읽는다.
 """
 
 import json
 import logging
 import re
+from collections.abc import Callable
+from contextvars import ContextVar
+from datetime import datetime
+from datetime import timedelta
+from datetime import timezone
 
 from langchain_core.agents import AgentAction
 from langchain_core.messages import AIMessage
+from langchain_core.messages import HumanMessage
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.prompts import SystemMessagePromptTemplate
 from pydantic import BaseModel
 from pydantic import Field
 from pydantic import ValidationError
@@ -72,6 +85,50 @@ FIRST_TURN_MAX_ATTEMPTS = 2
 _REACT_KEYWORD_RE = re.compile(r"(action|input|observation|final\s+answer)\s*\d*\s*:", re.IGNORECASE)
 _DEFAULT_THOUGHT = "요청에 답하려면 데이터를 조회한다."
 
+# 이후 턴에서 인자 JSON이 깨진 도구 호출(invalid_tool_calls)을 다시 요청하는 횟수 상한(첫 응답 포함).
+FOLLOWUP_MAX_ATTEMPTS = 2
+_INVALID_TOOL_JSON_RETRY = (
+    "직전 도구 호출({name})의 인자 JSON이 깨져 도구를 실행하지 못했습니다({error}). "
+    "같은 도구를 올바른 JSON 인자로 다시 호출하세요."
+)
+
+# ---- 오늘 날짜 주입 (#440) ----
+# 에이전트 입력 어디에도 오늘 날짜가 없어, 기간이 필요한 조회에서 모델이 날짜를 지어냈다(52주 최고가를
+# 2024년 한 해나 1년 전 하루로 조회). 한국 시간은 서머타임이 없어 고정 오프셋으로 충분하다.
+KST = timezone(timedelta(hours=9), "KST")
+_WEEKDAYS_KO = "월화수목금토일"
+TODAY_PROMPT = (
+    "오늘 날짜(한국 시간): {finus_today}. 오늘·어제·최근·52주·이번 분기처럼 날짜나 기간이 필요한 조회는 "
+    "이 날짜를 기준으로 인자를 정하세요."
+)
+
+
+def kst_today_text(now: datetime) -> str:
+    """*now*를 한국 시간 날짜와 요일로 적는다. 예: ``2026-10-20(화)``."""
+    day = now.astimezone(KST)
+    return f"{day:%Y-%m-%d}({_WEEKDAYS_KO[day.weekday()]})"
+
+
+def _system_clock() -> datetime:
+    return datetime.now(KST)
+
+
+def prompt_with_today(prompt: ChatPromptTemplate, clock: Callable[[], datetime]) -> ChatPromptTemplate:
+    """시스템 프롬프트 바로 뒤에 오늘 날짜 시스템 메시지를 넣는다.
+
+    날짜는 partial **함수**로 넣어 프롬프트를 포맷할 때마다(=LLM을 부를 때마다) *clock*을 읽는다.
+    문자열로 넣으면 워크플로를 빌드한 날짜에 굳어, 장기 실행 서버가 다음 날부터 어제 날짜를 준다.
+    """
+    date_message = SystemMessagePromptTemplate.from_template(TODAY_PROMPT)
+    with_date = ChatPromptTemplate.from_messages([prompt.messages[0], date_message, *prompt.messages[1:]])
+    return with_date.partial(**prompt.partial_variables, finus_today=lambda: kst_today_text(clock()))
+
+
+# 이후 턴의 네이티브 도구 호출을 벤더 파서에 넘길 때 쓰는 자리표시자 상자.
+# 인자를 텍스트로 옮기면 값 안의 " observation"·"Final Answer:" 같은 문자열에 파서가 깨진다. 그래서 파서에는
+# 이 상자의 키만 Action Input으로 넘기고, 파싱 뒤 agent_node가 실제 인자로 되돌린다.
+_NATIVE_CALLS: ContextVar[dict[str, tuple[dict, object]] | None] = ContextVar("finus_native_tool_calls", default=None)
+
 
 def react_text_for_tool_call(content: object, call: dict) -> str:
     """네이티브 도구 호출 하나를 벤더 파서가 읽는 텍스트 ReAct 한 단계로 옮긴다.
@@ -90,11 +147,13 @@ def react_text_for_tool_call(content: object, call: dict) -> str:
 class ToolFirstReActAgentGraph(ReActAgentGraph):
     """첫 턴은 도구 호출을 강제하고, 이후 턴은 도구를 바인딩한 채(강제 없이) 벤더 ReAct 그래프에 맡긴다."""
 
-    def __init__(self, *, first_turn_tools, **kwargs):
+    def __init__(self, *, first_turn_tools, clock: Callable[[], datetime] | None = None, **kwargs):
         super().__init__(**kwargs)
         # 벤더 __init__이 만든 self.agent는 (tools/tool_names를 채운 프롬프트) | LLM이다.
         # 같은 프롬프트를 쓰고 LLM 바인딩만 바꿔 끼워, 강제 턴이 보는 지시가 평소 턴과 갈라지지 않게 한다.
-        prompt = self.agent.first
+        # 오늘 날짜(#440)는 이 프롬프트에 넣는다 — 강제 첫 턴·이후 턴·폴백이 모두 이 프롬프트를 지나므로
+        # 진입 경로(라우터 브랜치, 성향 브랜치, CLI)와 무관하게 모든 ReAct 턴이 같은 날짜를 본다.
+        prompt = prompt_with_today(self.agent.first, clock or _system_clock)
         # 벤더가 붙인 정지 시퀀스(gpt-5 계열이 아닌 모델의 "Observation:")는 이후 턴에도 유지한다.
         vendor_bind = dict(getattr(self.agent.last, "kwargs", None) or {})
         if "tools" in vendor_bind:
@@ -136,23 +195,85 @@ class ToolFirstReActAgentGraph(ReActAgentGraph):
                            sorted(set(args) - set(kept)))
         return {**call, "args": kept}
 
+    async def _invoke_retrying_broken_tool_json(self, runnable, inputs):
+        """LLM을 부르고, 인자 JSON이 깨진 도구 호출만 돌아오면 그 사실을 알려 다시 부른다.
+
+        langchain_openai는 인자 JSON을 파싱하지 못한 호출을 ``invalid_tool_calls``로 빼고 ``tool_calls``를
+        비운다. 그대로 두면 본문이 빈 응답이 되고, 벤더 재시도는 "답할 수 없으면 Final Answer로 답하라"를
+        덧붙여 남은 조회 없이 끝난다. 첫 턴(#394)과 같이 모델의 일회성 실수로 보고, 무엇이 깨졌는지를
+        scratchpad에 덧붙여 같은 도구를 다시 부르게 한다.
+        """
+        for attempt in range(1, FOLLOWUP_MAX_ATTEMPTS + 1):
+            output = await runnable.ainvoke(inputs, config=self._runnable_config)
+            if output.tool_calls or not output.invalid_tool_calls:
+                return output
+            bad = output.invalid_tool_calls[0]
+            logger.warning(
+                "%s 도구 호출의 인자를 파싱하지 못했다 (시도 %d/%d%s): %s",
+                AGENT_LOG_PREFIX,
+                attempt,
+                FOLLOWUP_MAX_ATTEMPTS,
+                ", 상한이라 벤더 재시도로 넘긴다" if attempt == FOLLOWUP_MAX_ATTEMPTS else "",
+                [(call.get("name"), call.get("error")) for call in output.invalid_tool_calls],
+            )
+            inputs = {
+                **inputs,
+                "agent_scratchpad": [
+                    *(inputs.get("agent_scratchpad") or []),
+                    AIMessage(content=f"Action: {bad.get('name')}\nAction Input: {bad.get('args')}"),
+                    HumanMessage(content=_INVALID_TOOL_JSON_RETRY.format(name=bad.get("name"), error=bad.get("error"))),
+                ],
+            }
+        return output
+
     async def _stream_llm(self, runnable, inputs):
-        """벤더 ``_stream_llm``을 대신한다 — 도구 호출을 버리지 않고 텍스트 ReAct로 옮긴다.
+        """벤더 ``_stream_llm``을 대신한다 — 도구 호출을 버리지 않고 벤더 파서에 넘긴다.
 
         벤더 구현은 스트림 청크의 ``content``만 이어 붙여 ``tool_calls``를 잃는다. 여기서는 응답을
-        통째로 받아, 도구 호출이 있으면 :func:`react_text_for_tool_call`의 텍스트를 본문으로 돌려준다.
-        그 뒤의 파싱·scratchpad 기록·도구 실행은 벤더 경로 그대로다.
+        통째로 받아, 도구 호출이 있으면 그 호출을 :data:`_NATIVE_CALLS` 상자에 맡기고 상자의 키를
+        Action Input으로 쓴 텍스트를 돌려준다. 실제 인자는 :meth:`_vendor_agent_node`가 파싱 뒤에 되돌린다.
         """
-        output = await runnable.ainvoke(inputs, config=self._runnable_config)
+        output = await self._invoke_retrying_broken_tool_json(runnable, inputs)
         additional_kwargs = {}
         reasoning = (output.additional_kwargs or {}).get("reasoning_content")
         if reasoning:
             additional_kwargs["reasoning_content"] = reasoning
-        if output.tool_calls:
-            content = react_text_for_tool_call(output.content, self._call_with_schema_args(output.tool_calls[0]))
-        else:
+        if not output.tool_calls:
             content = output.content if isinstance(output.content, str) else ""
+            return AIMessage(content=content, additional_kwargs=additional_kwargs)
+        if len(output.tool_calls) > 1:
+            # parallel_tool_calls=False라도 공급자가 여러 개를 줄 수 있다. 벤더 tool_node는 하나만 실행한다.
+            logger.warning("%s 도구 호출 %d개 중 첫 번째만 실행한다 — 버린 호출: %s", AGENT_LOG_PREFIX,
+                           len(output.tool_calls), [call.get("name") for call in output.tool_calls[1:]])
+        call = self._call_with_schema_args(output.tool_calls[0])
+        box = _NATIVE_CALLS.get()
+        if box is None:
+            # 상자 없이 불린 경우(이 클래스 밖의 호출자) — 텍스트로 옮긴다.
+            return AIMessage(content=react_text_for_tool_call(output.content, call), additional_kwargs=additional_kwargs)
+        key = f"finus-native-call-{len(box) + 1}"
+        box[key] = (call, output.content)
+        content = f"Thought: {_DEFAULT_THOUGHT}\nAction: {call['name']}\nAction Input: {key}"
         return AIMessage(content=content, additional_kwargs=additional_kwargs)
+
+    async def _vendor_agent_node(self, state: ReActGraphState):
+        """벤더 ``agent_node``를 돌리고, 네이티브 도구 호출의 자리표시자를 실제 인자로 되돌린다."""
+        box: dict[str, tuple[dict, object]] = {}
+        token = _NATIVE_CALLS.set(box)
+        try:
+            state = await super().agent_node(state)
+        finally:
+            _NATIVE_CALLS.reset(token)
+        if box and state.agent_scratchpad:
+            last = state.agent_scratchpad[-1]
+            key = str(last.tool_input).strip()
+            if key in box:
+                call, content = box[key]
+                state.agent_scratchpad[-1] = AgentAction(
+                    tool=call["name"],
+                    tool_input=json.dumps(call.get("args") or {}, ensure_ascii=False),
+                    log=react_text_for_tool_call(content, call),
+                )
+        return state
 
     def _schema_rejection(self, call: dict) -> str | None:
         """강제 호출의 인자가 고른 도구에서 오류만 낼 것이면 그 사유를, 아니면 None을 돌려준다.
@@ -183,7 +304,7 @@ class ToolFirstReActAgentGraph(ReActAgentGraph):
     async def agent_node(self, state: ReActGraphState):
         # 이미 도구를 부른 뒤이거나 입력이 비었으면(벤더가 NO_INPUT 응답을 만든다) 벤더 경로.
         if state.agent_scratchpad or not state.messages or not str(state.messages[-1].content).strip():
-            return await super().agent_node(state)
+            return await self._vendor_agent_node(state)
 
         inputs = {"question": str(state.messages[-1].content), "chat_history": self._get_chat_history(state.messages)}
         for attempt in range(1, FIRST_TURN_MAX_ATTEMPTS + 1):
@@ -213,7 +334,7 @@ class ToolFirstReActAgentGraph(ReActAgentGraph):
                     "%s tool_choice=required 응답에 도구 호출이 없어 텍스트 ReAct로 폴백한다 (#394)",
                     AGENT_LOG_PREFIX,
                 )
-                return await super().agent_node(state)
+                return await self._vendor_agent_node(state)
             # 도구는 골랐지만 인자 JSON이 깨져 langchain_openai가 invalid_tool_calls로 뺐다.
             # 공급자 문제가 아니라 모델의 일회성 실수이므로 강제 호출을 다시 시도한다.
             logger.warning(
@@ -225,7 +346,7 @@ class ToolFirstReActAgentGraph(ReActAgentGraph):
             )
         else:
             logger.warning("%s 강제 도구 호출이 계속 유효하지 않아 텍스트 ReAct로 폴백한다 (#394)", AGENT_LOG_PREFIX)
-            return await super().agent_node(state)
+            return await self._vendor_agent_node(state)
 
         call = self._call_with_schema_args(output.tool_calls[0])
         # 다음 턴의 scratchpad에 이 log가 모델 발화로 들어간다. 텍스트 ReAct 형식으로 남겨야
@@ -241,12 +362,16 @@ class ToolFirstReActAgentGraph(ReActAgentGraph):
 
 
 class FinusToolFirstReActAgentConfig(ReActAgentWorkflowConfig, name="finus_tool_first_react_agent"):
-    """벤더 ``react_agent`` 설정 + 첫 턴에 강제로 고를 도구 목록."""
+    """벤더 ``react_agent`` 설정 + API로 바인딩할 데이터 도구 목록."""
 
     first_turn_tool_names: list[FunctionRef] = Field(
         ...,
         min_length=1,
-        description="첫 턴에 tool_choice=required로 바인딩할 도구. tool_names의 부분집합이어야 한다.",
+        description=(
+            "API(bind_tools)로 여는 데이터 조회 도구. 첫 턴에는 tool_choice=required로 이 중 하나를 강제하고, "
+            "Observation 뒤의 턴에도 강제 없이 이 도구들을 API로 연다(#435). tool_names의 부분집합이어야 하며 "
+            "쓰기·메모리 도구는 넣을 수 없다 — 그런 도구는 텍스트 ReAct로만 고른다."
+        ),
     )
 
     @model_validator(mode="after")
@@ -256,6 +381,31 @@ class FinusToolFirstReActAgentConfig(ReActAgentWorkflowConfig, name="finus_tool_
         if stray:
             raise ValueError(f"first_turn_tool_names는 tool_names에 있어야 합니다: {stray}")
         return self
+
+
+def non_data_tool_config_types() -> tuple[type, ...]:
+    """API로 열면 안 되는 도구의 설정 타입: 외부 상태를 바꾸는 쓰기 도구와 데이터를 만들지 않는 메모리 도구.
+
+    이름이 아니라 타입으로 가린다 — 설정 파일에서 도구 이름은 바꿔 붙일 수 있지만 타입은 구현을 가리킨다.
+    """
+    from finus_agents.agents import FinusMemoryDisabledConfig
+    from finus_agents.finus_api import FinusSaveDiaryConfig
+    from finus_agents.user_memory import FinusUserMemoryAddRefusedConfig
+    from finus_agents.user_memory import FinusUserMemoryGetConfig
+
+    return (FinusSaveDiaryConfig, FinusMemoryDisabledConfig, FinusUserMemoryAddRefusedConfig, FinusUserMemoryGetConfig)
+
+
+def reject_non_data_api_tools(tool_names, get_function_config) -> None:
+    """``first_turn_tool_names``에 쓰기·메모리 도구가 있으면 빌드를 멈춘다(설정 실수 시 fail-closed).
+
+    이 집합은 첫 턴 강제와 이후 턴 API 바인딩에 쓰인다. 쓰기 도구가 들어가면 사용자가 요청하지 않은
+    저장이 API 경로로 나갈 수 있고, 메모리 도구가 들어가면 조회 없이 강제 호출을 채울 수 있다.
+    """
+    banned = non_data_tool_config_types()
+    offending = sorted(str(name) for name in tool_names if isinstance(get_function_config(name), banned))
+    if offending:
+        raise ValueError(f"first_turn_tool_names에 쓰기·메모리 도구를 넣을 수 없습니다: {offending}")
 
 
 def graph_kwargs(config: ReActAgentWorkflowConfig, *, llm, prompt, tools) -> dict:
@@ -296,6 +446,7 @@ async def finus_tool_first_react_agent(config: FinusToolFirstReActAgentConfig, b
     tools = await builder.get_tools(tool_names=config.tool_names, wrapper_type=LLMFrameworkEnum.LANGCHAIN)
     if not tools:
         raise ValueError(f"No tools specified for ReAct Agent '{config.llm_name}'")
+    reject_non_data_api_tools(config.first_turn_tool_names, builder.get_function_config)
     wanted = {str(name) for name in config.first_turn_tool_names}
     first_turn_tools = [tool for tool in tools if tool.name in wanted]
     missing = wanted - {tool.name for tool in first_turn_tools}
