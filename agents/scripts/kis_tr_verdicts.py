@@ -14,7 +14,8 @@
     # 이미 받아 둔 체크아웃에서 재생성(examples_llm, "MCP/Kis Trading MCP/configs"가 있어야 한다)
     python agents/scripts/kis_tr_verdicts.py open-trading-api > agents/tests/fixtures/kis_domestic_stock_tr_verdicts.json
 
-    # drift 검사 — upstream main으로 다시 판정해 고정 판정표와 다르면 종료 코드 1 (#442)
+    # drift 검사 — upstream main으로 다시 판정해 고정 판정표와 다르면 종료 코드 1,
+    # upstream을 받지 못하면(네트워크·HTTP 오류) 종료 코드 2 (#442)
     python agents/scripts/kis_tr_verdicts.py --check main [--out fresh.json]
 
 **왜 drift 검사가 필요한가 (#442).** Kis Trading MCP 서버는 예제 버전을 고정할 수 없다. 서버는
@@ -52,6 +53,8 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -147,15 +150,33 @@ def render(table: dict) -> str:
 # upstream 받기 (네트워크) — git 없이 서버가 받는 것과 같은 raw 파일을 받는다
 # ---------------------------------------------------------------------------
 
+_HTTP_ATTEMPTS = 3
+_HTTP_BACKOFF_SECONDS = 2.0
+# 다시 보내도 결과가 같은 응답 — 없는 ref·경로(404), 잘못된 ref(422). 재시도하지 않는다.
+_HTTP_NO_RETRY = frozenset({404, 422})
+_sleep = time.sleep  # 테스트가 바꿔 끼운다
+
+
 def _http_get(url: str) -> bytes:
-    headers = {"User-Agent": "fin-us-kis-tr-verdicts"}
+    """``url``을 받는다. 일시 오류(연결 실패·타임아웃·5xx 등)는 백오프하며 최대 3번 시도한다."""
+    request = urllib.request.Request(url, headers={"User-Agent": "fin-us-kis-tr-verdicts"})
     token = os.environ.get("GITHUB_TOKEN")
     # 토큰은 API 호출(레이트 리밋 완화)에만 싣는다. raw 호스트에는 보내지 않는다.
+    # unredirected 헤더라 리다이렉트된 요청(다른 호스트일 수 있다)에는 실리지 않는다.
     if token and url.startswith("https://api.github.com/"):
-        headers["Authorization"] = f"Bearer {token}"
-    request = urllib.request.Request(url, headers=headers)
-    with urllib.request.urlopen(request, timeout=30) as response:  # noqa: S310 — 고정된 https 호스트
-        return response.read()
+        request.add_unredirected_header("Authorization", f"Bearer {token}")
+    for attempt in range(1, _HTTP_ATTEMPTS + 1):
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:  # noqa: S310 — 고정된 https 호스트
+                return response.read()
+        except urllib.error.HTTPError as exc:
+            if exc.code in _HTTP_NO_RETRY or attempt == _HTTP_ATTEMPTS:
+                raise
+        except (urllib.error.URLError, TimeoutError, ConnectionError):
+            if attempt == _HTTP_ATTEMPTS:
+                raise
+        _sleep(_HTTP_BACKOFF_SECONDS * attempt)
+    raise AssertionError("도달하지 않는다")
 
 
 def fetch_upstream(ref: str, dest: Path) -> str:
@@ -279,7 +300,13 @@ def main(argv: list[str]) -> int:
 
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
-        sha = fetch_upstream(args.fetch or args.check, root)
+        # 받기 실패(네트워크·HTTP 오류·응답 모양)는 drift가 아니다 — 종료 코드 2로 가른다.
+        # 워크플로 로그에서 "upstream이 바뀌었다"와 "GitHub에 닿지 못했다"를 헷갈리지 않게 한다.
+        try:
+            sha = fetch_upstream(args.fetch or args.check, root)
+        except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:  # URLError·HTTPError·JSON 오류 포함
+            print(f"upstream 받기 실패: {type(exc).__name__}: {exc}", file=sys.stderr)
+            return 2
         if args.fetch:
             sys.stdout.write(render(build(root, commit=sha)))
             return 0

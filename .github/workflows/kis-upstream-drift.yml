@@ -25,6 +25,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # 이 잡은 push하지 않는다. 토큰을 .git/config에 남기지 않는다.
+          persist-credentials: false
 
       - name: uv 설치 (자체 캐시 활성화)
         uses: astral-sh/setup-uv@v3
@@ -42,6 +45,7 @@ jobs:
         env:
           # GitHub API 레이트 리밋 완화용. 스크립트는 api.github.com 요청에만 싣는다.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # 종료 코드: 1 = drift(판정표·공개 시세 목록을 고쳐야 한다), 2 = upstream 받기 실패(일시 오류면 재실행).
         run: uv run --project agents python agents/scripts/kis_tr_verdicts.py --check main --out kis_tr_verdicts_upstream_main.json
 
       # 실패하면 다시 만든 판정표를 올려 둔다 — 고정 판정표와 내려받아 diff하면 바로 갱신 PR을 만들 수 있다.

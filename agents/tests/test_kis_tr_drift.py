@@ -9,6 +9,7 @@ Kis Trading MCP 서버는 도구 호출마다 upstream ``main``의 예제를 받
 import copy
 import importlib.util
 import json
+import urllib.error
 from pathlib import Path
 
 import pytest
@@ -191,3 +192,143 @@ def test_check_fails_when_server_config_points_elsewhere(gen, tmp_path):
     _, problems = gen.check(root, "a" * 40, pinned, _PUBLIC)
 
     assert len(problems) == 1 and problems[0].startswith("[서버 설정] inquire_price: github_url")
+
+
+# ---------------------------------------------------------------------------
+# 종료 코드 — drift(1)와 upstream 받기 실패(2)를 가른다
+# ---------------------------------------------------------------------------
+
+def _install_fake_fetch(gen, monkeypatch, tmp_path, sources: dict[str, str]):
+    """``fetch_upstream``을 가짜 트리 복사로 바꾸고, 고정 판정표를 원래 트리에서 만든다."""
+    pinned_root = _fake_upstream(tmp_path / "pinned", {"inquire_price": _QUOTE_SRC, "inquire_balance": _BALANCE_SRC})
+    pinned_path = tmp_path / "pinned.json"
+    pinned_path.write_text(gen.render(gen.build(pinned_root, commit="a" * 40)), encoding="utf-8")
+    monkeypatch.setattr(gen, "_PINNED_TABLE", pinned_path)
+    monkeypatch.setattr(gen, "_public_quote_apis", lambda: _PUBLIC)
+
+    def fake_fetch(ref, dest):
+        _fake_upstream(dest, sources)
+        return "b" * 40
+
+    monkeypatch.setattr(gen, "fetch_upstream", fake_fetch)
+
+
+def test_main_exits_0_without_drift(gen, monkeypatch, tmp_path):
+    _install_fake_fetch(gen, monkeypatch, tmp_path, {"inquire_price": _QUOTE_SRC, "inquire_balance": _BALANCE_SRC})
+
+    assert gen.main(["--check", "main"]) == 0
+
+
+def test_main_exits_1_on_drift(gen, monkeypatch, tmp_path, capsys):
+    _install_fake_fetch(gen, monkeypatch, tmp_path, {"inquire_price": _QUOTE_SRC_WITH_ACCOUNT,
+                                                     "inquire_balance": _BALANCE_SRC})
+
+    assert gen.main(["--check", "main"]) == 1
+    assert "[개인정보 경계] inquire_price" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("error", [
+    urllib.error.URLError("연결 거부"),
+    urllib.error.HTTPError("https://api.github.com/x", 404, "Not Found", None, None),
+    TimeoutError("timed out"),
+    json.JSONDecodeError("Expecting value", "", 0),
+])
+def test_main_exits_2_when_upstream_cannot_be_fetched(gen, monkeypatch, capsys, error):
+    """받기 실패는 drift(1)가 아니라 2다 — "upstream이 바뀌었다"와 "닿지 못했다"를 가른다.
+
+    뮤테이션: ``main``의 받기 실패 처리를 지우면 예외가 그대로 올라와 red, ``return 1``로 바꾸면 red.
+    """
+    def broken_fetch(ref, dest):
+        raise error
+
+    monkeypatch.setattr(gen, "fetch_upstream", broken_fetch)
+
+    assert gen.main(["--check", "main"]) == 2
+    assert "upstream 받기 실패" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# HTTP 재시도
+# ---------------------------------------------------------------------------
+
+class _Response:
+    def __init__(self, body: bytes):
+        self._body = body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def read(self):
+        return self._body
+
+
+def _scripted_urlopen(monkeypatch, gen, outcomes: list):
+    calls = []
+
+    def urlopen(request, timeout):
+        calls.append(request)
+        outcome = outcomes[len(calls) - 1]
+        if isinstance(outcome, Exception):
+            raise outcome
+        return _Response(outcome)
+
+    monkeypatch.setattr(gen.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(gen, "_sleep", lambda seconds: None)
+    return calls
+
+
+def _http_error(code: int) -> urllib.error.HTTPError:
+    return urllib.error.HTTPError("https://raw.githubusercontent.com/x", code, "err", None, None)
+
+
+@pytest.mark.parametrize("transient", [_http_error(503), urllib.error.URLError("reset"), TimeoutError("t")])
+def test_http_get_retries_transient_errors(gen, monkeypatch, transient):
+    """일시 오류는 다시 시도해 세 번째에 성공하면 그 응답을 돌려준다.
+
+    뮤테이션: ``_HTTP_ATTEMPTS``를 1로 줄이면 red.
+    """
+    calls = _scripted_urlopen(monkeypatch, gen, [transient, transient, b"ok"])
+
+    assert gen._http_get("https://raw.githubusercontent.com/x") == b"ok"
+    assert len(calls) == 3
+
+
+def test_http_get_gives_up_after_three_attempts(gen, monkeypatch):
+    calls = _scripted_urlopen(monkeypatch, gen, [_http_error(502)] * 5)
+
+    with pytest.raises(urllib.error.HTTPError):
+        gen._http_get("https://raw.githubusercontent.com/x")
+    assert len(calls) == 3
+
+
+@pytest.mark.parametrize("code", [404, 422])
+def test_http_get_does_not_retry_not_found_or_bad_ref(gen, monkeypatch, code):
+    """없는 경로(404)·잘못된 ref(422)는 다시 보내도 같다 — 한 번만 보낸다.
+
+    뮤테이션: ``_HTTP_NO_RETRY``를 비우면 red.
+    """
+    calls = _scripted_urlopen(monkeypatch, gen, [_http_error(code)] * 3)
+
+    with pytest.raises(urllib.error.HTTPError):
+        gen._http_get("https://raw.githubusercontent.com/x")
+    assert len(calls) == 1
+
+
+def test_token_goes_only_to_the_api_host_and_not_through_redirects(gen, monkeypatch):
+    """토큰은 api.github.com 요청에만, 리다이렉트로 넘어가지 않는 헤더로 싣는다.
+
+    뮤테이션: ``add_unredirected_header``를 ``add_header``로 바꾸면 red.
+    """
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+    calls = _scripted_urlopen(monkeypatch, gen, [b"{}", b"x"])
+
+    gen._http_get("https://api.github.com/repos/x")
+    gen._http_get("https://raw.githubusercontent.com/x")
+
+    api, raw = calls
+    assert api.unredirected_hdrs.get("Authorization") == "Bearer test-token"
+    assert "Authorization" not in api.headers
+    assert not raw.has_header("Authorization")
