@@ -1227,6 +1227,15 @@ def _prepare_kis_trading_mcp_call(
 #   inquire_price 삼성전자 5,846,278,608 × 213,500 ÷ 1억 = 12,481,805 = hts_avls
 #   market_cap 상위 5종목(삼성전자·SK하이닉스·삼성전자우·SK스퀘어·LG에너지솔루션) 모두 비율 1.0000,
 #   예: SK하이닉스 730,492,365 × 1,211,000 ÷ 1억 = 8,846,263 = stck_avls
+#
+# 순위 TR 가격 범위(#441)는 upstream 문서가 근거다. Kis Trading MCP configs/domestic_stock.json이
+# find_api_detail로 내주는 설명은 market_cap·volume_power가 "입력값 없을때 전체 (가격 ~)"/"(~ 가격)",
+# volume_rank가 "(가격 ~, …)"/"(~ 가격, …)", fluctuation이 "(하한가)"/"(상한가)"뿐이라, 모델이
+# "30만원 이하"를 fid_input_price_1=300000(하한)으로 넣어 30만원 이상만 받은 일이 있었다. 방향은
+# upstream 예제 호출값으로 확정했다(open-trading-api 2077773a 기준): examples_user/domestic_stock/domestic_stock_examples.py의
+# market_cap(fid_input_price_1="50000", fid_input_price_2="1000000"), examples_llm의
+# volume_rank·fluctuation docstring 예시(fid_input_price_1="0", fid_input_price_2="1000000").
+# 위 네 TR이 MCP 설정에서 가격 범위 인자를 가진 순위 TR 전부다.
 _KIS_TRADING_TOOL_GUIDE = """
 ### Fin-Us KIS 호출 규칙
 - ReAct 형식: `Action Input:` 한 줄에는 JSON만 두세요. JSON 뒤에 같은 줄·바로 다음 줄에 설명을 붙이면 도구 입력이 깨질 수 있습니다. 설명은 Observation 이후 또는 `Final Answer:` 에 쓰세요.
@@ -1237,6 +1246,7 @@ _KIS_TRADING_TOOL_GUIDE = """
 - 현재가 조회는 `{"api_type":"inquire_price","params":{"stock_name":"삼성전자"}}`처럼 종목명만 넣어 한 번에 부르세요. 이 래퍼가 종목코드를 찾아 채웁니다(호가·체결·일별시세·투자자 등 종목 단위 시세도 같음). `find_stock_code`를 먼저 부를 필요가 없고, 종목코드만으로 답을 끝내지 마세요.
 - `env_dv`(모의/실전)는 이 래퍼가 배포 설정에 맞춰 채웁니다. 직접 고르지 마세요.
 - 시가총액 필드는 억원 단위입니다: 시세(`inquire_price` 등)의 `hts_avls`, 시가총액 순위(`market_cap`)의 `stck_avls`. 상장주식수 `lstn_stcn` × 현재가 ÷ 1억과 같습니다. 예: `12481805`는 약 1,248조원입니다.
+- 순위 조회(`market_cap`·`volume_rank`·`fluctuation`·`volume_power`)의 가격 범위: `fid_input_price_1`은 하한(이 가격 이상), `fid_input_price_2`는 상한(이 가격 이하)이고 단위는 원입니다. 비우면 그쪽 제한이 없습니다. 예: 5만원 이상 100만원 이하는 `"fid_input_price_1":"50000","fid_input_price_2":"1000000"`, 상한만 두려면 `fid_input_price_1`을 비우고 `fid_input_price_2`에만 넣습니다. `find_api_detail`의 `(가격 ~)`는 하한, `(~ 가격)`은 상한이라는 뜻이고, `fluctuation`의 "하한가·상한가"도 가격제한폭이 아니라 이 범위입니다. `fid_vol_cnt`는 최소 거래량(이 거래량 이상)입니다.
 - 알 수 없는 필드, INVALID INPUT, 필드 크기 오류, 필수 파라미터 오류가 나오면 실패로 끝내지 말고 `api_type="find_api_detail"`을 호출해 해당 `api_type`의 필드를 확인한 뒤 같은 사용자 요청을 다시 실행하세요.
 - 성공 조건은 사용자가 요청한 데이터 조회가 정상 Observation으로 돌아오고, 그 Observation을 근거로 최종 답변하는 것입니다.
 """.strip()
