@@ -1,4 +1,4 @@
-"""upstream 국내주식 TR 판정표를 다시 만든다 (#380).
+"""upstream 국내주식 TR 판정표를 다시 만들고, upstream ``main``과 어긋났는지 검사한다 (#380, #442).
 
 조회 전용 래퍼(``finus_account_balance_readonly``)의 국내주식 허용 목록
 (``finus_api._READONLY_DOMESTIC_STOCK_API_EXACT``)은 이 판정표의 ``read`` 행에서 나온다.
@@ -8,9 +8,23 @@
 
 사용법::
 
-    git clone --depth 1 --filter=blob:none --sparse https://github.com/koreainvestment/open-trading-api
-    git -C open-trading-api sparse-checkout set examples_llm "MCP/Kis Trading MCP/configs"
+    # 판정표 재생성 — upstream을 HTTP로 받는다(git clone 불필요). ref는 브랜치·태그·커밋.
+    python agents/scripts/kis_tr_verdicts.py --fetch main > agents/tests/fixtures/kis_domestic_stock_tr_verdicts.json
+
+    # 이미 받아 둔 체크아웃에서 재생성(examples_llm, "MCP/Kis Trading MCP/configs"가 있어야 한다)
     python agents/scripts/kis_tr_verdicts.py open-trading-api > agents/tests/fixtures/kis_domestic_stock_tr_verdicts.json
+
+    # drift 검사 — upstream main으로 다시 판정해 고정 판정표와 다르면 종료 코드 1 (#442)
+    python agents/scripts/kis_tr_verdicts.py --check main [--out fresh.json]
+
+**왜 drift 검사가 필요한가 (#442).** Kis Trading MCP 서버는 예제 버전을 고정할 수 없다. 서버는
+도구 호출마다 ``configs/<도구>.json``의 ``github_url``(``.../tree/main/examples_llm/...``)을
+raw URL로 바꿔 예제를 받아 실행하고(``tools/base.py``의 ``_download_api_code``), ``kis_auth.py``도
+``main`` 고정 URL로 받는다. 설정 파일은 이미지 빌드 때 ``COPY``로 구워지고, 브랜치·커밋을 바꾸는
+환경변수나 로컬 예제 경로 옵션은 없다. 그래서 판정표의 ``upstream_commit``은 서버가 실제로
+실행하는 코드를 보증하지 못한다. ``--check``가 그 간격을 메운다: upstream ``main``에서 공개 시세
+TR이 계좌 입력을 새로 받게 되면, 그 TR이 ``pii_guard.PUBLIC_KIS_QUOTE_APIS``에 있어 마스킹 없이
+외부 LLM으로 나가기 전에 이 검사가 빨개진다(``.github/workflows/kis-upstream-drift.yml``).
 
 판정 규칙 — 전부 upstream 소스에서 기계적으로 읽는다. 사람이 이름을 보고 고르지 않는다.
 
@@ -31,13 +45,24 @@ Kis Trading MCP가 서버 env로 채우는 값이라, 이런 조회는 **이 계
 
 from __future__ import annotations
 
+import argparse
 import json
+import os
 import re
 import subprocess
 import sys
+import tempfile
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
 _TOOL = "domestic_stock"
+_REPO = "koreainvestment/open-trading-api"
+_EXAMPLES_DIR = f"examples_llm/{_TOOL}"
+_CONFIG_PATH = f"MCP/Kis Trading MCP/configs/{_TOOL}.json"
+_PINNED_TABLE = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "kis_domestic_stock_tr_verdicts.json"
+# Kis Trading MCP의 특수 api_type — KIS TR이 아니라 예제 디렉터리·판정표에 없다(``tools/base.py``).
+_SPECIAL_API_TYPES = frozenset({"find_stock_code", "find_api_detail"})
 
 
 def _tr_kind(tr_id: str) -> str:
@@ -66,9 +91,9 @@ def _account_input(src: str) -> str | None:
     return None
 
 
-def build(root: Path) -> dict:
-    ex_dir = root / "examples_llm" / _TOOL
-    config_path = root / "MCP" / "Kis Trading MCP" / "configs" / f"{_TOOL}.json"
+def build(root: Path, commit: str | None = None) -> dict:
+    ex_dir = root / _EXAMPLES_DIR
+    config_path = root / _CONFIG_PATH
     mcp_apis = json.loads(config_path.read_text(encoding="utf-8"))["apis"]
     rows = []
     for tr_dir in sorted(p for p in ex_dir.iterdir() if p.is_dir()):
@@ -96,9 +121,10 @@ def build(root: Path) -> dict:
             "in_mcp_config": name in mcp_apis,
             "title": banner.group(1).strip() if banner else "",
         })
-    commit = subprocess.run(
-        ["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True, check=False
-    ).stdout.strip()
+    if commit is None:
+        commit = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True, check=False
+        ).stdout.strip()
     return {
         "_meta": {
             "source": "koreainvestment/open-trading-api examples_llm/domestic_stock",
@@ -117,6 +143,164 @@ def render(table: dict) -> str:
     return f'{{\n  "_meta": {meta},\n  "trs": [\n    {rows}\n  ]\n}}\n'
 
 
-if __name__ == "__main__":
+# ---------------------------------------------------------------------------
+# upstream 받기 (네트워크) — git 없이 서버가 받는 것과 같은 raw 파일을 받는다
+# ---------------------------------------------------------------------------
+
+def _http_get(url: str) -> bytes:
+    headers = {"User-Agent": "fin-us-kis-tr-verdicts"}
+    token = os.environ.get("GITHUB_TOKEN")
+    # 토큰은 API 호출(레이트 리밋 완화)에만 싣는다. raw 호스트에는 보내지 않는다.
+    if token and url.startswith("https://api.github.com/"):
+        headers["Authorization"] = f"Bearer {token}"
+    request = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(request, timeout=30) as response:  # noqa: S310 — 고정된 https 호스트
+        return response.read()
+
+
+def fetch_upstream(ref: str, dest: Path) -> str:
+    """``ref``를 커밋 SHA로 풀고, 그 커밋의 국내주식 예제와 MCP 설정을 ``dest``에 받는다.
+
+    브랜치 이름이 아니라 SHA로 받는다 — 받는 도중 ``main``이 움직여도 한 커밋의 파일만 섞인다.
+    """
+    sha = _http_get(f"https://api.github.com/repos/{_REPO}/commits/{urllib.parse.quote(ref)}").decode()
+    sha = json.loads(sha)["sha"]
+    listing = json.loads(_http_get(
+        f"https://api.github.com/repos/{_REPO}/contents/{_EXAMPLES_DIR}?ref={sha}"
+    ))
+    names = sorted(entry["name"] for entry in listing if entry["type"] == "dir")
+    if not names:
+        raise RuntimeError(f"upstream {sha}에서 {_EXAMPLES_DIR} 예제를 하나도 찾지 못했다")
+    raw = f"https://raw.githubusercontent.com/{_REPO}/{sha}"
+    for name in names:
+        path = dest / _EXAMPLES_DIR / name / f"{name}.py"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(_http_get(f"{raw}/{_EXAMPLES_DIR}/{name}/{name}.py"))
+    config = dest / _CONFIG_PATH
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_bytes(_http_get(f"{raw}/{urllib.parse.quote(_CONFIG_PATH)}"))
+    return sha
+
+
+# ---------------------------------------------------------------------------
+# drift 판정 (오프라인) — 테스트가 이 함수들을 직접 부른다
+# ---------------------------------------------------------------------------
+
+def diff_tables(pinned: dict, fresh: dict) -> list[str]:
+    """두 판정표의 행 차이를 사람이 읽는 줄로 돌려준다. ``upstream_commit``은 비교하지 않는다."""
+    old = {r["api_type"]: r for r in pinned["trs"]}
+    new = {r["api_type"]: r for r in fresh["trs"]}
+    lines = [f"추가된 TR: {name} {new[name]}" for name in sorted(new.keys() - old.keys())]
+    lines += [f"사라진 TR: {name}" for name in sorted(old.keys() - new.keys())]
+    for name in sorted(old.keys() & new.keys()):
+        for field in sorted(old[name].keys() | new[name].keys()):
+            before, after = old[name].get(field), new[name].get(field)
+            if before != after:
+                lines.append(f"바뀐 TR: {name}.{field}: {before!r} -> {after!r}")
+    before_n = pinned["_meta"].get("mcp_config_api_types")
+    after_n = fresh["_meta"].get("mcp_config_api_types")
+    if before_n != after_n:
+        lines.append(f"MCP 설정 api 수: {before_n} -> {after_n}")
+    return lines
+
+
+def public_quote_violations(table: dict, public_apis: frozenset[tuple[str, str]]) -> list[str]:
+    """공개 시세 목록(마스킹 예외)의 TR이 판정표에서 공개 시세가 아니면 그 이유를 돌려준다.
+
+    공개 시세의 조건: 판정표에 있고, ``read``이고, 서버가 계좌·사용자 값을 주입하는 입력이 없고,
+    TR ID가 전부 시세·정보 계열(F·H)이다. 하나라도 어긋나면 그 TR의 응답은 계좌 데이터일 수 있어
+    마스킹 예외로 둘 수 없다.
+    """
+    rows = {r["api_type"]: r for r in table["trs"]}
+    problems = []
+    for tool, api_type in sorted(public_apis):
+        if tool != _TOOL:
+            problems.append(f"{tool}/{api_type}: 판정표는 {_TOOL}만 다룬다 — 근거 없는 공개 시세")
+            continue
+        if api_type in _SPECIAL_API_TYPES:
+            continue
+        row = rows.get(api_type)
+        if row is None:
+            problems.append(f"{api_type}: 판정표(upstream 예제)에 없다")
+            continue
+        if row["verdict"] != "read":
+            problems.append(f"{api_type}: 판정이 read가 아니다 ({row['verdict']})")
+        if row["account_input"]:
+            problems.append(f"{api_type}: 계좌·사용자 입력을 받는다 ({row['account_input']})")
+        non_quote = [t for t in row["tr_ids"] if t[0] not in "FH"]
+        if non_quote:
+            problems.append(f"{api_type}: 시세 계열(F·H)이 아닌 TR ID가 있다 {non_quote}")
+    return problems
+
+
+def config_url_mismatches(root: Path) -> list[str]:
+    """서버 설정의 ``github_url``이 판정한 예제 경로(``.../tree/main/examples_llm/domestic_stock/<api>``)를
+    가리키는지 본다. 다른 경로·브랜치를 가리키면 판정표가 서버가 실행하는 파일을 본 것이 아니다."""
+    apis = json.loads((root / _CONFIG_PATH).read_text(encoding="utf-8"))["apis"]
+    problems = []
+    for api_type, info in sorted(apis.items()):
+        if api_type in _SPECIAL_API_TYPES:
+            continue
+        expected = f"https://github.com/{_REPO}/tree/main/{_EXAMPLES_DIR}/{api_type}"
+        url = info.get("github_url")
+        if url != expected:
+            problems.append(f"{api_type}: github_url {url!r} (기대 {expected!r})")
+    return problems
+
+
+def check(root: Path, sha: str, pinned: dict, public_apis: frozenset[tuple[str, str]]) -> tuple[dict, list[str]]:
+    """받아 둔 upstream으로 판정표를 다시 만들어 고정 판정표·공개 시세 목록과 대조한다."""
+    fresh = build(root, commit=sha)
+    problems = [f"[개인정보 경계] {p}" for p in public_quote_violations(fresh, public_apis)]
+    problems += [f"[서버 설정] {p}" for p in config_url_mismatches(root)]
+    problems += [f"[판정표 drift] {p}" for p in diff_tables(pinned, fresh)]
+    return fresh, problems
+
+
+def _public_quote_apis() -> frozenset[tuple[str, str]]:
+    from finus_agents.pii_guard import PUBLIC_KIS_QUOTE_APIS
+
+    return PUBLIC_KIS_QUOTE_APIS
+
+
+def main(argv: list[str]) -> int:
     sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
-    sys.stdout.write(render(build(Path(sys.argv[1]))))
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("root", nargs="?", type=Path, help="받아 둔 open-trading-api 체크아웃")
+    mode.add_argument("--fetch", metavar="REF", help="upstream REF를 받아 판정표를 stdout에 쓴다")
+    mode.add_argument("--check", metavar="REF", help="upstream REF로 다시 판정해 고정 판정표와 대조한다")
+    parser.add_argument("--out", type=Path, help="--check: 다시 만든 판정표를 이 경로에 쓴다")
+    args = parser.parse_args(argv)
+
+    if args.root is not None:
+        sys.stdout.write(render(build(args.root)))
+        return 0
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        sha = fetch_upstream(args.fetch or args.check, root)
+        if args.fetch:
+            sys.stdout.write(render(build(root, commit=sha)))
+            return 0
+        pinned = json.loads(_PINNED_TABLE.read_text(encoding="utf-8"))
+        fresh, problems = check(root, sha, pinned, _public_quote_apis())
+    if args.out:
+        args.out.write_text(render(fresh), encoding="utf-8")
+    pinned_sha = pinned["_meta"]["upstream_commit"]
+    if not problems:
+        print(f"upstream {sha}: 고정 판정표({pinned_sha})와 같다")
+        return 0
+    print(f"upstream {sha}가 고정 판정표({pinned_sha})와 다르다 — {len(problems)}건")
+    for line in problems:
+        print(f"  {line}")
+    print(
+        "\n조치: [개인정보 경계]가 있으면 그 TR을 pii_guard.PUBLIC_KIS_QUOTE_APIS에서 먼저 뺀다(fail-closed).\n"
+        "그다음 `python agents/scripts/kis_tr_verdicts.py --fetch main > "
+        "agents/tests/fixtures/kis_domestic_stock_tr_verdicts.json`로 판정표를 다시 만들고 테스트를 맞춘다."
+    )
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

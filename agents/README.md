@@ -25,7 +25,7 @@ agents/
 ├── scripts/
 │   ├── run.sh                로컬 실행
 │   ├── patch_vendor.py       NAT 라이브러리 패치 (Docker 빌드·로컬 실행 공용)
-│   └── kis_tr_verdicts.py    KIS 조회 허용 목록 판정표 재생성
+│   └── kis_tr_verdicts.py    KIS 조회 허용 목록 판정표 재생성·upstream drift 검사
 └── tests/
 ```
 
@@ -40,6 +40,7 @@ agents/
 ## 외부 의존
 
 - **KIS Trading MCP 서버**: 에이전트의 계좌·시세 조회 도구(`kis-trading-mcp-tool-readonly`)가 사용. [open-trading-api](https://github.com/koreainvestment/open-trading-api)의 `MCP/Kis Trading MCP`를 포트 3300으로 실행 (기본 3000에서 변경 필요). 서버에 준 `MCP_ACCESS_TOKEN`을 `.env`의 `FINUS_KIS_TRADING_MCP_TOKEN`에 같은 값으로 넣음. 주소는 `FINUS_KIS_TRADING_MCP_URL`로 변경 가능.
+  - 서버는 도구 호출마다 open-trading-api `main`의 `examples_llm` 예제를 받아 실행하고, 예제 버전을 고정하는 설정(환경변수·로컬 예제 경로)이 없다(`tools/base.py`의 `_download_api_code`, `configs/*.json`의 `github_url`이 `tree/main` 고정). 판정표(`tests/fixtures/kis_domestic_stock_tr_verdicts.json`)는 특정 upstream 커밋 기준이므로 `.github/workflows/kis-upstream-drift.yml`이 매일 upstream `main`으로 다시 판정해 어긋나면 실패한다. 실패하면 `pii_guard.PUBLIC_KIS_QUOTE_APIS`에서 문제 TR을 먼저 빼고 `python agents/scripts/kis_tr_verdicts.py --fetch main`으로 판정표를 다시 만든다(#442).
 - **mcp/**: 뉴스·공시·잔고 도구는 저장소의 `mcp/` 서버를 stdio로 직접 실행.
 
 ## 알아둘 규칙

@@ -1,0 +1,54 @@
+name: KIS upstream 판정표 drift
+
+# Kis Trading MCP 서버는 도구 호출마다 open-trading-api `main`의 examples_llm 예제를 받아 실행하고,
+# 버전을 고정하는 설정이 없다(서버 tools/base.py의 _download_api_code, configs/*.json의 github_url이
+# tree/main 고정). fin-us의 TR 판정표(agents/tests/fixtures/kis_domestic_stock_tr_verdicts.json)와
+# 그에 기대는 readonly 허용 목록·공개 시세 목록(pii_guard.PUBLIC_KIS_QUOTE_APIS)은 특정 커밋 기준이라,
+# upstream이 공개 시세 TR에 계좌 입력을 붙이면 마스킹 없이 외부 LLM으로 나갈 수 있다(#442).
+# 이 잡이 upstream main으로 판정표를 다시 만들어 고정 판정표와 다르면 실패한다.
+#
+# 네트워크(GitHub API·raw)가 필요하고 결과가 upstream에 달려 있어 PR CI(ci.yml)와 분리한다 —
+# 관련 없는 PR이 upstream 변경으로 빨개지지 않게 한다. 판정·대조 로직 자체는 오프라인 테스트
+# (agents/tests/test_kis_tr_drift.py)가 PR CI에서 본다.
+on:
+  schedule:
+    # 매일 00:17 UTC(09:17 KST). 정각을 피해 스케줄 지연을 줄인다.
+    - cron: '17 0 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  drift:
+    name: upstream main 판정표 대조
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: uv 설치 (자체 캐시 활성화)
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Python 3.13 설치
+        run: uv python install 3.13
+
+      # 공개 시세 목록을 finus_agents.pii_guard에서 그대로 읽는다 — 목록 사본을 따로 두지 않는다.
+      - name: agents 의존성 동기화
+        run: uv sync --project agents
+
+      - name: upstream main으로 다시 판정해 대조
+        env:
+          # GitHub API 레이트 리밋 완화용. 스크립트는 api.github.com 요청에만 싣는다.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: uv run --project agents python agents/scripts/kis_tr_verdicts.py --check main --out kis_tr_verdicts_upstream_main.json
+
+      # 실패하면 다시 만든 판정표를 올려 둔다 — 고정 판정표와 내려받아 diff하면 바로 갱신 PR을 만들 수 있다.
+      - name: 다시 만든 판정표 업로드
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kis-tr-verdicts-upstream-main
+          path: kis_tr_verdicts_upstream_main.json
+          if-no-files-found: ignore
