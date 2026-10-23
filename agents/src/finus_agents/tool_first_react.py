@@ -34,6 +34,16 @@ LLM만 반복 호출한 실측에서, 도구 없이(텍스트 ReAct) 부르면 "
 깨진다. 그래서 이후 턴도 벤더의 재시도·직답 수용·scratchpad 경로를 그대로 탄다. 첫 턴 강제가 텍스트
 ReAct로 폴백할 때도 같은 바인딩을 쓴다.
 
+**강제 첫 턴은 여러 조회를 한 번에 계획하게 하고, 계획한 조회를 차례로 모두 실행한다 (#443).** 뉴스와 현재가를
+함께 묻는 질문에서 첫 턴은 ``parallel_tool_calls=False``라 하나만 고를 수 있었고 매번 뉴스를 골랐다(8/8).
+뉴스 Observation을 받은 뒤의 턴은 도구가 바인딩돼 있어도 현재가를 3~4/10만 조회했다 — 나머지는 현재가를 빠뜨리거나
+기사 본문에 실린 장중 가격을 현재가로 옮겼다. 같은 질문을 같은 첫 턴 입력에 ``parallel_tool_calls=True``로 부르면
+뉴스와 현재가를 함께 골랐고(24/24, 질문 3종), 뉴스만 묻는 질문은 뉴스 하나만 골랐다(16/16). 그래서 첫 턴의 호출
+여러 개를 받아, 첫 번째는 바로 실행하고 나머지는 :class:`ToolFirstGraphState`의 ``planned_tool_calls``에 두었다가
+LLM을 다시 부르지 않고 하나씩 실행한다. 벤더 tool_node는 그대로 한 번에 하나씩 실행하므로 원장·scratchpad·
+Observation 경로는 같다. 같은 호출은 한 번만 두고, 상한(:data:`FIRST_TURN_MAX_PLANNED_CALLS`)을 넘는 호출은
+경고를 남기고 버린다(남은 조회는 이후 턴에서 고를 수 있다).
+
 **모든 턴에 오늘 날짜(한국 시간)를 넣는다 (#440).** 이후 턴이 조회를 이어가자, 날짜를 모르는 모델이
 기간 인자를 지어내 틀린 수치를 단정했다(52주 최고가를 2024년 한 해로 조회). 날짜는 프롬프트를 포맷할
 때마다 시계에서 읽는다.
@@ -84,6 +94,10 @@ FIRST_TURN_MAX_ATTEMPTS = 2
 # Action/Final Answer로 오인한다. 그런 본문은 버리고 기본 Thought를 쓴다.
 _REACT_KEYWORD_RE = re.compile(r"(action|input|observation|final\s+answer)\s*\d*\s*:", re.IGNORECASE)
 _DEFAULT_THOUGHT = "요청에 답하려면 데이터를 조회한다."
+
+# 강제 첫 턴에 모델이 한 번에 계획한 조회를 실행하는 상한(#443). 질문 하나가 여러 종목·여러 데이터를
+# 묻는 정도면 충분하고, 그 이상은 모델의 과잉 계획으로 보고 버린다 — 정말 필요하면 이후 턴에서 다시 고른다.
+FIRST_TURN_MAX_PLANNED_CALLS = 4
 
 # 이후 턴에서 인자 JSON이 깨진 도구 호출(invalid_tool_calls)을 다시 요청하는 횟수 상한(첫 응답 포함).
 FOLLOWUP_MAX_ATTEMPTS = 2
@@ -144,6 +158,12 @@ def react_text_for_tool_call(content: object, call: dict) -> str:
     return f"Thought: {thought}\nAction: {call['name']}\nAction Input: {tool_input}"
 
 
+class ToolFirstGraphState(ReActGraphState):
+    """벤더 상태 + 강제 첫 턴이 계획했지만 아직 실행하지 않은 도구 호출 (#443)."""
+
+    planned_tool_calls: list[AgentAction] = Field(default_factory=list)
+
+
 class ToolFirstReActAgentGraph(ReActAgentGraph):
     """첫 턴은 도구 호출을 강제하고, 이후 턴은 도구를 바인딩한 채(강제 없이) 벤더 ReAct 그래프에 맡긴다."""
 
@@ -161,7 +181,9 @@ class ToolFirstReActAgentGraph(ReActAgentGraph):
         self.first_turn_agent = prompt | self.llm.bind_tools(
             first_turn_tools,
             tool_choice="required",
-            parallel_tool_calls=False,  # 벤더 tool_node는 한 턴에 도구 하나만 실행한다
+            # #443: 질문이 묻는 조회를 한 번에 계획하게 한다. 벤더 tool_node는 한 번에 하나만 실행하므로
+            # 두 번째부터는 planned_tool_calls에 두고 agent_node가 하나씩 꺼낸다.
+            parallel_tool_calls=True,
         )
         # #435: Observation 뒤의 턴. 강제하지 않되(답할 수 있으면 끝낸다) 데이터 도구를 API로 열어 둔다.
         # 쓰기·메모리 도구는 API로 열지 않는다 — 일지 저장처럼 부수효과가 있는 도구는 지금처럼 모델이
@@ -301,7 +323,43 @@ class ToolFirstReActAgentGraph(ReActAgentGraph):
             return None
         return f"{call.get('name')}: {reason}" if reason else None
 
-    async def agent_node(self, state: ReActGraphState):
+    def _planned_actions(self, output) -> list[AgentAction]:
+        """강제 첫 턴 응답의 도구 호출들을 실행 순서대로 AgentAction으로 옮긴다 (#443).
+
+        스키마 밖 인자는 걷어내고(#435), 걷어낸 뒤 같은 호출은 한 번만 남기며, 상한을 넘는 호출은 경고와 함께
+        버린다. 모델 본문(Thought)은 첫 호출에만 붙인다 — 나머지는 모델 발화가 아니라 계획의 연속이다.
+        """
+        actions: list[AgentAction] = []
+        seen: set[str] = set()
+        dropped: list[str] = []
+        for call in output.tool_calls:
+            call = self._call_with_schema_args(call)
+            tool_input = json.dumps(call.get("args") or {}, ensure_ascii=False)
+            key = f"{call['name']}\n{tool_input}"
+            if key in seen:
+                continue
+            seen.add(key)
+            if len(actions) >= FIRST_TURN_MAX_PLANNED_CALLS:
+                dropped.append(call["name"])
+                continue
+            actions.append(AgentAction(
+                tool=call["name"],
+                tool_input=tool_input,
+                log=react_text_for_tool_call(output.content if not actions else "", call),
+            ))
+        if dropped:
+            logger.warning("%s 강제 첫 턴의 도구 호출이 상한(%d)을 넘어 버렸다: %s", AGENT_LOG_PREFIX,
+                           FIRST_TURN_MAX_PLANNED_CALLS, dropped)
+        return actions
+
+    async def agent_node(self, state: ToolFirstGraphState):
+        # 타입 표기가 동작을 정한다: LangGraph는 노드 함수의 상태 타입 표기를 그 노드의 입력 스키마로 읽어
+        # 그래프 채널에 더한다. 그래서 벤더 build_graph(ReActGraphState) 그대로 planned_tool_calls가 턴 사이에
+        # 남는다. ReActGraphState로 바꿔 적으면 이 노드가 그 필드 없는 상태를 받아 실패한다.
+        # 강제 첫 턴이 계획한 조회가 남았으면 LLM을 부르지 않고 다음 조회를 낸다(#443).
+        if getattr(state, "planned_tool_calls", None):
+            state.agent_scratchpad += [state.planned_tool_calls.pop(0)]
+            return state
         # 이미 도구를 부른 뒤이거나 입력이 비었으면(벤더가 NO_INPUT 응답을 만든다) 벤더 경로.
         if state.agent_scratchpad or not state.messages or not str(state.messages[-1].content).strip():
             return await self._vendor_agent_node(state)
@@ -311,7 +369,8 @@ class ToolFirstReActAgentGraph(ReActAgentGraph):
             # 벤더 _call_llm/_stream_llm을 쓰지 않는다 — 둘 다 응답을 content만으로 재조립해 tool_calls를 버린다.
             output = await self.first_turn_agent.ainvoke(inputs, config=self._runnable_config)
             if output.tool_calls:
-                rejection = self._schema_rejection(output.tool_calls[0])
+                # 계획한 호출 중 하나라도 오류만 낼 인자면 계획 전체를 다시 강제한다(#443).
+                rejection = next(filter(None, map(self._schema_rejection, output.tool_calls)), None)
                 # JSON은 온전하지만 도구가 오류만 낼 인자다(#436: KIS 도구를 {}로 고름). 그대로
                 # 실행하면 모델은 그 오류를 보고 재조회 없이 답을 끝냈다 — 다시 강제한다.
                 # 마지막 시도면 실행한다: 폴백하면 도구 없이 답하고(#394) 원장에도 남지 않는다.
@@ -348,16 +407,11 @@ class ToolFirstReActAgentGraph(ReActAgentGraph):
             logger.warning("%s 강제 도구 호출이 계속 유효하지 않아 텍스트 ReAct로 폴백한다 (#394)", AGENT_LOG_PREFIX)
             return await self._vendor_agent_node(state)
 
-        call = self._call_with_schema_args(output.tool_calls[0])
-        # 다음 턴의 scratchpad에 이 log가 모델 발화로 들어간다. 텍스트 ReAct 형식으로 남겨야
+        # 다음 턴의 scratchpad에 각 log가 모델 발화로 들어간다. 텍스트 ReAct 형식으로 남겨야
         # 모델이 이어지는 턴에서도 같은 형식(Action/Final Answer)을 따른다.
-        state.agent_scratchpad += [
-            AgentAction(
-                tool=call["name"],
-                tool_input=json.dumps(call.get("args") or {}, ensure_ascii=False),
-                log=react_text_for_tool_call(output.content, call),
-            )
-        ]
+        first, *rest = self._planned_actions(output)
+        state.agent_scratchpad += [first]
+        state.planned_tool_calls = rest
         return state
 
 
@@ -368,7 +422,7 @@ class FinusToolFirstReActAgentConfig(ReActAgentWorkflowConfig, name="finus_tool_
         ...,
         min_length=1,
         description=(
-            "API(bind_tools)로 여는 데이터 조회 도구. 첫 턴에는 tool_choice=required로 이 중 하나를 강제하고, "
+            "API(bind_tools)로 여는 데이터 조회 도구. 첫 턴에는 tool_choice=required로 이 중 하나 이상을 강제하고(여러 개면 차례로 실행, #443), "
             "Observation 뒤의 턴에도 강제 없이 이 도구들을 API로 연다(#435). tool_names의 부분집합이어야 하며 "
             "쓰기·메모리 도구는 넣을 수 없다 — 그런 도구는 텍스트 ReAct로만 고른다."
         ),

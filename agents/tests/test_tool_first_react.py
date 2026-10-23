@@ -127,7 +127,8 @@ async def test_first_turn_forces_a_data_tool_then_answers_from_its_observation()
     assert state.final_answer == "뉴스 요약"
     forced, *rest = llm.calls
     assert forced["tool_choice"] == "required"
-    assert forced["parallel_tool_calls"] is False
+    # #443: 첫 턴은 여러 조회를 한 번에 계획할 수 있다(차례로 실행된다)
+    assert forced["parallel_tool_calls"] is True
     # 메모리 도구처럼 first_turn_tools에 없는 도구로는 강제 호출을 채울 수 없다
     assert forced["tools"] == ["mcp-news-get-market-news"]
     # Observation을 받은 뒤의 턴은 강제하지 않는다
@@ -715,6 +716,163 @@ def test_followup_binding_keeps_vendor_stop_sequence_for_non_gpt5_models():
 
     assert graph.agent.last.kwargs["stop"] == ["Observation:"]
     assert graph.agent.last.kwargs["parallel_tool_calls"] is False
+
+
+# --- #443: 강제 첫 턴이 계획한 여러 조회 ------------------------------------------------------------
+
+NEWS_AND_PRICE = "삼성전자 최근 뉴스랑 현재가 같이 알려줘"
+
+
+class _NewsAndPriceModel(BaseChatModel):
+    """#443 실측 행동을 흉내 낸다.
+
+    - 강제 첫 턴: ``parallel_tool_calls=True``면 뉴스와 현재가를 함께 고르고(실측 24/24), 아니면 뉴스 하나만
+      고른다(실측 8/8). ``planned``로 고를 호출 목록을 바꿀 수 있다.
+    - 뉴스 Observation만 받은 이후 턴: 현재가를 조회하지 않고 기사 속 가격으로 답한다(실측의 실패 경로).
+    - 두 Observation을 모두 받으면 둘을 합쳐 답한다.
+    """
+
+    planned: list[dict[str, Any]] | None = None
+    calls: list[dict[str, Any]] = Field(default_factory=list)
+
+    @property
+    def _llm_type(self) -> str:
+        return "scripted-news-and-price"
+
+    def bind_tools(self, tools, **kwargs):
+        return self.bind(tools=[t.name for t in tools], **kwargs)
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:
+        self.calls.append(kwargs)
+        if kwargs.get("tool_choice") == "required":
+            news = {"name": "mcp-news-get-market-news", "args": {"stock_name": "삼성전자"}, "id": "n"}
+            price = {"name": "kis-trading-mcp-tool-readonly", "args": {"stock_name": "삼성전자"}, "id": "p"}
+            planned = self.planned if self.planned is not None else [news, price]
+            tool_calls = planned if kwargs.get("parallel_tool_calls") else planned[:1]
+            return ChatResult(generations=[ChatGeneration(message=AIMessage(content="", tool_calls=tool_calls))])
+        text = " ".join(str(m.content) for m in messages[2:])
+        if "현재가 OBS" in text:
+            answer = "뉴스와 현재가 216,000원"
+        else:
+            answer = "뉴스 요약(기사 속 가격 21만4750원)"
+        return ChatResult(generations=[ChatGeneration(message=AIMessage(
+            content=f"Thought: I now know the final answer\nFinal Answer: {answer}"))])
+
+
+def _news_and_price_tools(called: list[str]):
+    @tool("mcp-news-get-market-news")
+    def news(stock_name: str) -> str:
+        """종목 뉴스"""
+        called.append(f"news:{stock_name}")
+        return f"{stock_name} 뉴스 OBS"
+
+    @tool("kis-trading-mcp-tool-readonly")
+    def price(stock_name: str) -> str:
+        """시세"""
+        called.append(f"price:{stock_name}")
+        return f"{stock_name} 현재가 OBS"
+
+    @tool("get_user_memory")
+    def memory(note: str = "") -> str:
+        """메모리"""
+        return "memory disabled"
+
+    return news, price, memory
+
+
+async def _ask_news_and_price(llm, called) -> ReActGraphState:
+    news, price, memory = _news_and_price_tools(called)
+    graph = ToolFirstReActAgentGraph(llm=llm, prompt=_prompt([news, price, memory]), tools=[news, price, memory],
+                                     raise_on_parsing_failure=False, first_turn_tools=[news, price])
+    return await _ask(graph, NEWS_AND_PRICE)
+
+
+async def test_news_only_first_turn_answers_without_current_price():
+    """대조군: 첫 턴이 하나만 고를 수 있으면(수정 전 ``parallel_tool_calls=False``) 대역이 #443을 재현한다.
+
+    이것이 초록이 아니면 아래 테스트는 아무것도 증명하지 않는다.
+    """
+    called: list[str] = []
+    news, price, memory = _news_and_price_tools(called)
+    llm = _NewsAndPriceModel()
+    graph = ToolFirstReActAgentGraph(llm=llm, prompt=_prompt([news, price, memory]), tools=[news, price, memory],
+                                     raise_on_parsing_failure=False, first_turn_tools=[news, price])
+    graph.first_turn_agent = graph.first_turn_agent.first | llm.bind_tools(
+        [news, price], tool_choice="required", parallel_tool_calls=False)
+
+    state = await _ask(graph, NEWS_AND_PRICE)
+
+    assert called == ["news:삼성전자"]
+    assert state.final_answer == "뉴스 요약(기사 속 가격 21만4750원)"
+
+
+async def test_first_turn_runs_every_planned_lookup_before_answering():
+    """#443: 강제 첫 턴이 뉴스와 현재가를 함께 고르면 둘 다 실행한 뒤 답한다. 계획한 두 번째 조회는
+    LLM을 다시 부르지 않고 실행한다(강제 1회 + 답 1회).
+
+    뮤테이션: 첫 턴을 ``parallel_tool_calls=False``로 되돌리면 called==["news:삼성전자"]로 red.
+    ``agent_node``가 ``planned_tool_calls``를 꺼내지 않으면(첫 호출만 실행) 역시 red.
+    ``agent_node``의 상태 타입 표기를 ReActGraphState로 바꾸면 계획을 담을 채널이 없어 red.
+    """
+    called: list[str] = []
+    llm = _NewsAndPriceModel()
+
+    state = await _ask_news_and_price(llm, called)
+
+    assert called == ["news:삼성전자", "price:삼성전자"]
+    assert state.final_answer == "뉴스와 현재가 216,000원"
+    assert len(llm.calls) == 2
+    # 두 조회 모두 텍스트 ReAct로 scratchpad에 남아, 답하는 턴의 모델이 무엇을 불렀는지 본다
+    assert [step.log.splitlines()[1] for step in state.agent_scratchpad] == [
+        "Action: mcp-news-get-market-news", "Action: kis-trading-mcp-tool-readonly"]
+
+
+async def test_first_turn_plan_drops_duplicates_and_caps_extra_calls(caplog):
+    """같은 호출은 한 번만, 상한을 넘는 호출은 경고와 함께 버린다 — 모델의 과잉 계획이 조회를 폭증시키지 않는다.
+
+    뮤테이션: 중복 제거를 빼면 news:삼성전자가 두 번 실행돼 red. 상한을 빼면 다섯 종목이 모두 실행돼 red.
+    """
+    from finus_agents.tool_first_react import FIRST_TURN_MAX_PLANNED_CALLS
+
+    stocks = ["삼성전자", "삼성전자", "SK하이닉스", "NAVER", "카카오", "LG전자"]
+    planned = [{"name": "mcp-news-get-market-news", "args": {"stock_name": s}, "id": f"c{i}"}
+               for i, s in enumerate(stocks)]
+    called: list[str] = []
+
+    with caplog.at_level(logging.WARNING, logger="finus_agents.tool_first_react"):
+        await _ask_news_and_price(_NewsAndPriceModel(planned=planned), called)
+
+    assert FIRST_TURN_MAX_PLANNED_CALLS == 4
+    assert called == ["news:삼성전자", "news:SK하이닉스", "news:NAVER", "news:카카오"]
+    assert any("상한(4)을 넘어 버렸다" in r.getMessage() for r in caplog.records)
+
+
+async def test_first_turn_plan_is_reforced_when_any_planned_call_has_unusable_arguments(caplog):
+    """#436의 사전 검사는 계획한 호출 전부에 적용한다. 두 번째 호출의 인자가 도구에 맞지 않으면 계획 전체를
+    다시 강제한다.
+
+    뮤테이션: ``_schema_rejection``을 첫 호출에만 적용하면 강제가 1회로 끝나고 {} 호출이 실행돼 red.
+    """
+    news_call = {"name": "mcp-news-get-market-news", "args": {"stock_name": "삼성전자"}, "id": "n"}
+    good = {"name": "kis-trading-mcp-tool-readonly", "args": {"stock_name": "삼성전자"}, "id": "p"}
+    bad = {**good, "args": {}}
+
+    class _BadSecondOnce(_NewsAndPriceModel):
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+            forced_before = sum(1 for c in self.calls if c.get("tool_choice") == "required")
+            self.planned = [news_call, bad] if forced_before == 0 else [news_call, good]
+            return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
+
+    called: list[str] = []
+    llm = _BadSecondOnce()
+
+    with caplog.at_level(logging.WARNING, logger="finus_agents.tool_first_react"):
+        state = await _ask_news_and_price(llm, called)
+
+    assert sum(1 for c in llm.calls if c.get("tool_choice") == "required") == 2
+    assert called == ["news:삼성전자", "price:삼성전자"]
+    assert state.final_answer == "뉴스와 현재가 216,000원"
+    assert any("도구에 맞지 않는다" in r.getMessage() for r in caplog.records)
 
 
 def test_native_tool_calling_config_is_rejected():
