@@ -49,6 +49,7 @@ Observation 경로는 같다. 같은 호출은 한 번만 두고, 상한(:data:`
 때마다 시계에서 읽는다.
 """
 
+import asyncio
 import json
 import logging
 import re
@@ -98,6 +99,9 @@ _DEFAULT_THOUGHT = "요청에 답하려면 데이터를 조회한다."
 # 강제 첫 턴에 모델이 한 번에 계획한 조회를 실행하는 상한(#443). 질문 하나가 여러 종목·여러 데이터를
 # 묻는 정도면 충분하고, 그 이상은 모델의 과잉 계획으로 보고 버린다 — 정말 필요하면 이후 턴에서 다시 고른다.
 FIRST_TURN_MAX_PLANNED_CALLS = 4
+# 계획한 조회는 LLM 왕복 없이 이어서 나간다. 같은 도구가 연달아 오면(예: 두 종목 현재가) 이 간격을 둔다 —
+# KIS 모의투자는 초당 약 2건이고 래퍼에 유량 제어가 없다(EGW00201). 도구가 바뀌면 다른 서버라 기다리지 않는다.
+PLANNED_SAME_TOOL_INTERVAL_SEC = 0.6
 
 # 이후 턴에서 인자 JSON이 깨진 도구 호출(invalid_tool_calls)을 다시 요청하는 횟수 상한(첫 응답 포함).
 FOLLOWUP_MAX_ATTEMPTS = 2
@@ -335,7 +339,8 @@ class ToolFirstReActAgentGraph(ReActAgentGraph):
         for call in output.tool_calls:
             call = self._call_with_schema_args(call)
             tool_input = json.dumps(call.get("args") or {}, ensure_ascii=False)
-            key = f"{call['name']}\n{tool_input}"
+            # 인자 순서만 다른 호출도 같은 호출로 본다.
+            key = f"{call['name']}\n{json.dumps(call.get('args') or {}, ensure_ascii=False, sort_keys=True)}"
             if key in seen:
                 continue
             seen.add(key)
@@ -358,7 +363,10 @@ class ToolFirstReActAgentGraph(ReActAgentGraph):
         # 남는다. ReActGraphState로 바꿔 적으면 이 노드가 그 필드 없는 상태를 받아 실패한다.
         # 강제 첫 턴이 계획한 조회가 남았으면 LLM을 부르지 않고 다음 조회를 낸다(#443).
         if getattr(state, "planned_tool_calls", None):
-            state.agent_scratchpad += [state.planned_tool_calls.pop(0)]
+            action = state.planned_tool_calls.pop(0)
+            if state.agent_scratchpad and state.agent_scratchpad[-1].tool == action.tool:
+                await asyncio.sleep(PLANNED_SAME_TOOL_INTERVAL_SEC)
+            state.agent_scratchpad += [action]
             return state
         # 이미 도구를 부른 뒤이거나 입력이 비었으면(벤더가 NO_INPUT 응답을 만든다) 벤더 경로.
         if state.agent_scratchpad or not state.messages or not str(state.messages[-1].content).strip():

@@ -847,6 +847,59 @@ async def test_first_turn_plan_drops_duplicates_and_caps_extra_calls(caplog):
     assert any("상한(4)을 넘어 버렸다" in r.getMessage() for r in caplog.records)
 
 
+async def test_planned_calls_to_the_same_tool_are_spaced_but_tool_changes_are_not(monkeypatch):
+    """계획한 조회는 LLM 왕복 없이 이어서 나가므로, 같은 도구(KIS 등)가 연달아 오면 간격을 둔다(PR 리뷰).
+
+    뮤테이션: 간격을 빼면 sleeps==[]로 red. 도구가 바뀔 때도 기다리게 하면 sleeps가 3개가 돼 red.
+    """
+    from finus_agents import tool_first_react
+
+    sleeps: list[float] = []
+
+    async def fake_sleep(sec):
+        sleeps.append(sec)
+
+    monkeypatch.setattr(tool_first_react.asyncio, "sleep", fake_sleep)
+    price = {"name": "kis-trading-mcp-tool-readonly", "id": "p"}
+    planned = [
+        {"name": "mcp-news-get-market-news", "args": {"stock_name": "삼성전자"}, "id": "n"},
+        {**price, "args": {"stock_name": "삼성전자"}, "id": "p1"},
+        {**price, "args": {"stock_name": "SK하이닉스"}, "id": "p2"},
+    ]
+    called: list[str] = []
+
+    await _ask_news_and_price(_NewsAndPriceModel(planned=planned), called)
+
+    assert called == ["news:삼성전자", "price:삼성전자", "price:SK하이닉스"]
+    assert sleeps == [tool_first_react.PLANNED_SAME_TOOL_INTERVAL_SEC]
+
+
+async def test_first_turn_plan_dedup_ignores_argument_order():
+    """인자 순서만 다른 같은 호출은 한 번만 실행한다.
+
+    뮤테이션: 중복 키에서 sort_keys를 빼면 같은 뉴스 조회가 두 번 실행돼 red.
+    """
+    @tool("mcp-news-get-market-news")
+    def news(stock_name: str, limit: int = 3) -> str:
+        """종목 뉴스"""
+        called.append(f"news:{stock_name}:{limit}")
+        return f"{stock_name} 뉴스 OBS"
+
+    called: list[str] = []
+    planned = [
+        {"name": "mcp-news-get-market-news", "args": {"stock_name": "삼성전자", "limit": 5}, "id": "a"},
+        {"name": "mcp-news-get-market-news", "args": {"limit": 5, "stock_name": "삼성전자"}, "id": "b"},
+    ]
+    _, price, memory = _news_and_price_tools(called)
+    graph = ToolFirstReActAgentGraph(llm=_NewsAndPriceModel(planned=planned), prompt=_prompt([news, price, memory]),
+                                     tools=[news, price, memory], raise_on_parsing_failure=False,
+                                     first_turn_tools=[news, price])
+
+    await _ask(graph, NEWS_AND_PRICE)
+
+    assert called == ["news:삼성전자:5"]
+
+
 async def test_first_turn_plan_is_reforced_when_any_planned_call_has_unusable_arguments(caplog):
     """#436의 사전 검사는 계획한 호출 전부에 적용한다. 두 번째 호출의 인자가 도구에 맞지 않으면 계획 전체를
     다시 강제한다.
