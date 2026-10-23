@@ -1521,6 +1521,158 @@ async def _resolve_stock_name_for_quote(
     return {**arguments, "params": {"fid_cond_mrkt_div_code": "J", **rest, "fid_input_iscd": code}}
 
 
+# Kis Trading MCP 봉투 안에 묻힌 실패를 래퍼 오류 JSON으로 바꿀 때의 오류 코드 (#446).
+_KIS_API_FAILED = "kis_api_failed"
+
+# KIS가 거절한 호출을 upstream 예제가 표준출력에 찍는 두 형식(open-trading-api examples_llm/kis_auth.py).
+# - HTTP 200 + rt_cd≠0: ``APIResp.printError`` →
+#   "Error in response:  200  url= …\nrt_cd :  2 / msg_cd :  OPSQ2002 / msg1 :  ERROR INVALID …"
+# - HTTP 오류(유량 초과 EGW00201 등): ``APIRespError.printError`` →
+#   'Error Code : 500 | {"rt_cd":"1","msg1":"초당 거래건수를 초과하였습니다.","msg_cd":"EGW00201",…}'
+_KIS_RESPONSE_ERROR_RE = re.compile(
+    r"Error in response:.*?rt_cd\s*:\s*(?P<rt_cd>\S*)\s*/\s*msg_cd\s*:\s*(?P<msg_cd>\S*)\s*/\s*msg1\s*:[ \t]*(?P<msg1>[^\n]*)",
+    re.S,
+)
+_KIS_HTTP_ERROR_RE = re.compile(r"^Error Code\s*:\s*(?P<status>\d+)\s*\|\s*(?P<body>[^\n]*)", re.M)
+# 오류 detail에서 뺄 서버 봉투 메타데이터 — 실패 사유와 무관하고 Observation만 길게 만든다.
+_KIS_ENVELOPE_NOISE_KEYS = frozenset({"message", "execution_time", "temp_dir", "venv_used", "cleanup_success"})
+
+_KIS_API_FAILED_HINT = (
+    "이 호출은 실패했고 데이터가 없습니다. 이 결과를 근거로 답하지 마세요. 입력값 오류(INVALID·필드 크기·"
+    "필수값·인자 누락)면 api_type=\"find_api_detail\"로 해당 api_type의 필드 설명을 확인해 값을 고친 뒤 "
+    "같은 요청을 다시 호출하세요. 초당 거래건수 초과(EGW00201)면 잠시 뒤 같은 호출을 한 번 더 하세요."
+)
+
+
+def _kis_rejection(text: str) -> dict[str, str] | None:
+    """서버 봉투의 ``data`` 텍스트에서 KIS 거절 사유를 꺼낸다. 거절 표지가 없으면 ``None``."""
+    m = _KIS_RESPONSE_ERROR_RE.search(text)
+    if m:
+        return {"rt_cd": m["rt_cd"], "msg_cd": m["msg_cd"], "msg1": m["msg1"].strip()}
+    m = _KIS_HTTP_ERROR_RE.search(text)
+    if not m:
+        return None
+    found = {"http_status": m["status"]}
+    try:
+        body = json.loads(m["body"])
+    except ValueError:
+        return {**found, "msg1": m["body"].strip()}
+    if isinstance(body, dict):
+        found.update({k: str(body[k]) for k in ("rt_cd", "msg_cd", "msg1") if k in body})
+    return found
+
+
+def _kis_envelope_failure(tool_name: str, api_type: str, result: str) -> str | None:
+    """Kis Trading MCP가 성공 모양으로 감싼 실패를 래퍼 오류 JSON으로 바꾼다. 실패가 아니면 ``None``.
+
+    서버(open-trading-api ``MCP/Kis Trading MCP/tools/base.py``)는 실패를 MCP ``isError``로 올리지
+    않고 정상 응답 ``{"ok": …, "data": …}``로 돌려준다. 원장은 ``{"error"`` 접두어만 실패로 읽으므로
+    (:func:`_is_ok_tool_result`) 아래 셋이 모두 ``ok=True``·``produced_rows=True``로 남았다. 도구 강제
+    게이트는 그 기록을 "도구로 확인했다"로 보고 수치 답변을 통과시킨다 (#446).
+
+    - ``{"ok": false, "error": …}`` — 서버가 인자 구조·api_type·종목명을 거부했다.
+    - ``data.success == false`` — 예제 함수 실행이 예외로 끝났다(인자 누락 ``TypeError`` 등).
+    - ``data.success == true``인데 ``data.data``에 KIS 거절 표지가 있다 — 서버는 예제 프로세스의 종료
+      코드만 보므로, KIS가 rt_cd≠0으로 거절해도 예제가 오류를 출력하고 빈 DataFrame을 돌려주면
+      성공이다(``ERROR INVALID INPUT_FILED_SIZE``·``EGW00201`` 유량 초과 등). 모든 TR 예제가 같은
+      ``kis_auth`` 출력 형식을 쓰므로 특정 TR이 아니라 이 경로를 지나는 KIS 호출 전부의 문제다.
+
+    봉투 원문(서버 메타데이터만 뺀 것)은 ``detail``에 객체로 남긴다 — 에이전트가 사유와 자기가 보낸
+    인자를 읽어 고칠 수 있고, 마스킹(:func:`~finus_agents.pii_guard.mask_tool_result`)은 키 기준으로
+    그대로 적용된다. 거절 표지가 있으면 앞 페이지 데이터가 섞여 있어도 실패로 본다 — 일부만 받은
+    결과를 "확인했다"로 기록하지 않는 fail-closed 쪽이다.
+
+    ``find_api_detail``·``find_stock_code`` 성공 응답은 ``data``에 ``success`` 키가 없어 손대지 않는다.
+    """
+    try:
+        envelope = json.loads(result)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(envelope, dict) or "ok" not in envelope:
+        return None
+    if envelope.get("ok") is not True:
+        detail = {k: v for k, v in envelope.items() if k != "ok"}
+        return _err_json(
+            _KIS_API_FAILED, tool=tool_name, api_type=api_type, reason="mcp_rejected",
+            hint=_KIS_API_FAILED_HINT, detail=detail,
+        )
+    inner = envelope.get("data")
+    if not isinstance(inner, dict) or "success" not in inner:
+        return None
+    detail = {k: v for k, v in inner.items() if k not in _KIS_ENVELOPE_NOISE_KEYS}
+    if inner.get("success") is not True:
+        return _err_json(
+            _KIS_API_FAILED, tool=tool_name, api_type=api_type, reason="call_failed",
+            hint=_KIS_API_FAILED_HINT, detail=detail,
+        )
+    payload = inner.get("data")
+    rejection = _kis_rejection(payload) if isinstance(payload, str) else None
+    if rejection is None:
+        return None
+    return _err_json(
+        _KIS_API_FAILED, tool=tool_name, api_type=api_type, reason="kis_rejected",
+        **rejection, hint=_KIS_API_FAILED_HINT, detail=detail,
+    )
+
+
+# upstream ``find_api_detail`` 설명 중 KIS 규격과 어긋나 호출을 실패시키는 것의 정정 (#446).
+#
+# Kis Trading MCP는 ``configs/domestic_stock.json``의 설명을 그대로 내준다. 등락률 순위
+# ``fluctuation``의 ``fid_rank_sort_cls_code``는 "(0000: 등락률순)"이라 모델이 매번 "0000"을 넣었고,
+# KIS는 ``OPSQ2002 ERROR INVALID INPUT_FILED_SIZE [FID_RANK_SORT_CLS_CODE] [4]``로 거절했다(PR #445
+# 실측 C5: 거절 15건 전부 직전에 이 설명을 읽은 호출). 정정 값의 근거는 KIS 공식 명세다 — open-trading-api
+# ``legacy/postman/실전계좌_POSTMAN_샘플코드_v2.6.json``의 FHPST01700000 ``fid_rank_sort_cls_code``
+# "0:상승율순 1:하락율순 2:시가대비상승율 3:시가대비하락율 4:변동율"과 upstream 점검 예제
+# ``examples_llm/domestic_stock/fluctuation/chk_fluctuation.py``의 호출값 ``"0"``. 같은 upstream의
+# ``fluctuation.py`` docstring 예시(``"0000"``)와 configs 설명이 틀렸다(2077773 기준).
+# 실측(2026-10-23 모의투자): ``"0"``은 30행, ``"0000"``은 OPSQ2002.
+#
+# 설명만 바꾸고 인자를 몰래 고치지는 않는다 — 고쳐 보내면 모델은 자기가 무엇을 보냈는지 모른 채
+# 다른 정렬(하락률 등)을 고를 수단도 잃는다. upstream이 설명을 고쳐도 이 정정은 같은 뜻이라 해가 없다.
+_KIS_PARAM_DESCRIPTION_FIXES: dict[tuple[str, str], dict[str, str]] = {
+    ("domestic_stock", "fluctuation"): {
+        "fid_rank_sort_cls_code": (
+            "순위 정렬 구분 코드, 한 자리 (0:상승율순 1:하락율순 2:시가대비상승율 3:시가대비하락율 "
+            "4:변동율). \"0000\"처럼 네 자리를 넣으면 KIS가 OPSQ2002 필드 크기 오류로 거절한다"
+        ),
+    },
+}
+
+
+def _correct_find_api_detail(tool_name: str, arguments: McpCallArguments, result: str) -> str:
+    """``find_api_detail`` 응답의 필드 설명을 :data:`_KIS_PARAM_DESCRIPTION_FIXES`로 정정한다.
+
+    대상이 아니거나 응답 모양이 예상과 다르면 원문을 그대로 돌려준다.
+    """
+    if str(arguments.get("api_type", "")).strip() != "find_api_detail":
+        return result
+    try:
+        envelope = json.loads(result)
+        described = envelope["data"]["params"]
+        target = str(envelope["data"]["api_type"]).strip()
+    except (TypeError, ValueError, KeyError):
+        return result
+    fixes = _KIS_PARAM_DESCRIPTION_FIXES.get((tool_name, target))
+    if not fixes or not isinstance(described, dict):
+        return result
+    changed = False
+    for name, description in fixes.items():
+        spec = described.get(name)
+        if isinstance(spec, dict) and spec.get("description") != description:
+            spec["description"] = description
+            changed = True
+    return json.dumps(envelope, ensure_ascii=False) if changed else result
+
+
+def _kis_observation(tool_name: str, arguments: McpCallArguments, result: str) -> str:
+    """KIS 호출 결과를 원장·에이전트에 넘기기 전에 정규화한다 — 묻힌 실패를 오류 JSON으로, 틀린 설명을 정정으로."""
+    api_type = str(arguments.get("api_type", "")).strip()
+    failure = _kis_envelope_failure(tool_name, api_type, result)
+    if failure is not None:
+        return failure
+    return _correct_find_api_detail(tool_name, arguments, result)
+
+
 async def _call_kis_mcp_and_record(
     tool_name: str,
     arguments: McpCallArguments,
@@ -1532,23 +1684,26 @@ async def _call_kis_mcp_and_record(
     중복 구현하는 것을 이 헬퍼 한 곳으로 모은다.
 
     지정가 괴리 가드(#365)도 여기 건다. KIS로 나가는 호출이 예외 없이 이 자리를 지나므로,
-    래퍼가 늘어도 가드만 빠지는 일이 생기지 않는다.
+    래퍼가 늘어도 가드만 빠지는 일이 생기지 않는다. 같은 이유로 서버 봉투에 묻힌 실패를
+    오류 JSON으로 바꾸는 정규화(:func:`_kis_observation`, #446)도 여기서 건다.
     """
     resolved = await _resolve_stock_name_for_quote(tool_name, arguments, config)
     if isinstance(resolved, str):
+        lookup = {"api_type": "find_stock_code"}
         return _record_and_mask(
-            _KIS_BALANCE_LEDGER_NAME, resolved, kis_api=("domestic_stock", "find_stock_code"),
+            _KIS_BALANCE_LEDGER_NAME, _kis_observation("domestic_stock", lookup, resolved),
+            kis_api=("domestic_stock", "find_stock_code"),
         )
     arguments = resolved
     result = await _order_price_gap_rejection(tool_name, arguments, config)
     if result is None:
-        result = await _mcp_call_tool_remote(
+        result = _kis_observation(tool_name, arguments, await _mcp_call_tool_remote(
             transport=config.mcp_transport,
             url=config.mcp_url,
             tool_name=tool_name,
             arguments=arguments,
             timeout_sec=config.timeout_sec,
-        )
+        ))
     kis_api = (tool_name, str(arguments.get("api_type", "")).strip())
     return _record_and_mask(_KIS_BALANCE_LEDGER_NAME, result, kis_api=kis_api)
 

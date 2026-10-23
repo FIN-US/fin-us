@@ -166,6 +166,8 @@ _KIS_ACCOUNT_KEYS = frozenset({"cano", "acnt_prdt_cd", "acnt_no"})
 _KIS_META_KEYS = frozenset({
     "ok", "success", "api_type", "message", "execution_time", "temp_dir", "venv_used",
     "cleanup_success", "tool", "tool_name", "hint",
+    # 래퍼가 서버 봉투에 묻힌 실패를 오류 JSON으로 바꿀 때 붙이는 분류·HTTP 상태 (finus_api, #446).
+    "reason", "http_status",
 })
 _KIS_NUMERIC_VALUE_RE = re.compile(r"[+-]?\d[\d,]*(?:\.\d+)?")
 # 키를 모르는 텍스트 속 숫자. 글자에 붙은 숫자("KRW4817263")도 잡는다.
