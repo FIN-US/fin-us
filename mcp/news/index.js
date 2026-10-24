@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import { pickStockNews } from "./relevance.js";
 
 // Redirect console.log to console.error to prevent breaking MCP JSON-RPC on stdout
 console.log = console.error;
@@ -41,6 +42,8 @@ const NAVER_NEWS_ENDPOINT = "https://openapi.naver.com/v1/search/news.json";
 const NAVER_CLIENT_ID = process.env.NAVER_CLIENT_ID;
 const NAVER_CLIENT_SECRET = process.env.NAVER_CLIENT_SECRET;
 const DEFAULT_DISPLAY_COUNT = 3;
+// 최신 기사 중 종목을 다루는 기사를 고를 후보 수(#448). 네이버 API 상한은 100이다.
+const CANDIDATE_COUNT = 30;
 const REQUEST_TIMEOUT_MS = 8000;
 
 const server = new McpServer({ name: "news-tool", version: "1.0.0" });
@@ -61,9 +64,12 @@ function decodeHtml(text) {
     .trim();
 }
 
+function decodeNewsItem(item) {
+  return { ...item, title: decodeHtml(item.title), description: decodeHtml(item.description) };
+}
+
 function formatNewsItem(item) {
-  const title = decodeHtml(item.title);
-  const description = decodeHtml(item.description);
+  const { title, description } = item;
   const pubDate = decodeHtml(item.pubDate);
   const link = item.link || item.originallink || "";
 
@@ -80,7 +86,7 @@ async function fetchMarketNews(stockName) {
 
   const url = new URL(NAVER_NEWS_ENDPOINT);
   url.searchParams.set("query", `${stockName} 주식`);
-  url.searchParams.set("display", String(DEFAULT_DISPLAY_COUNT));
+  url.searchParams.set("display", String(CANDIDATE_COUNT));
   url.searchParams.set("start", "1");
   url.searchParams.set("sort", "date");
 
@@ -103,7 +109,8 @@ async function fetchMarketNews(stockName) {
     }
 
     const items = Array.isArray(payload.items) ? payload.items : [];
-    const news = items.map(formatNewsItem).filter(Boolean).slice(0, DEFAULT_DISPLAY_COUNT);
+    const picked = pickStockNews(items.map(decodeNewsItem), stockName, DEFAULT_DISPLAY_COUNT);
+    const news = picked.map(formatNewsItem).filter(Boolean);
     return news.length > 0 ? news.join("\n") : `'${stockName}'에 대한 뉴스를 찾지 못했습니다.`;
   } finally {
     clearTimeout(timeout);
