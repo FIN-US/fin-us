@@ -195,6 +195,48 @@ def test_check_fails_when_server_config_points_elsewhere(gen, tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# find_api_detail 설명 정정 표의 upstream 원문 대조 (#446)
+# ---------------------------------------------------------------------------
+
+def _with_description(root: Path, api_type: str, param: str, description: str) -> None:
+    config = root / "MCP" / "Kis Trading MCP" / "configs" / "domestic_stock.json"
+    data = json.loads(config.read_text(encoding="utf-8"))
+    data["apis"][api_type]["params"] = {param: {"name": param, "description": description}}
+    config.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+
+@pytest.mark.parametrize(("upstream_text", "flagged"), [
+    ("순위 정렬 구분 코드 (0000: 등락률순)", False),
+    ("순위 정렬 구분 코드 (0:상승율순 1:하락율순)", True),
+])
+def test_check_flags_when_upstream_changes_a_corrected_description(gen, tmp_path, upstream_text, flagged):
+    """upstream이 정정 대상 설명을 바꾸면 [설명 정정]으로 알린다. 그대로면 조용하다.
+
+    뮤테이션: ``check``에서 ``description_fix_mismatches`` 줄을 지우면 ``flagged=True`` 쪽 red.
+    """
+    from finus_agents.finus_api import _KIS_PARAM_DESCRIPTION_FIXES
+
+    root = _fake_upstream(tmp_path, {"fluctuation": _QUOTE_SRC.replace("inquire_price", "fluctuation")})
+    _with_description(root, "fluctuation", "fid_rank_sort_cls_code", upstream_text)
+    pinned = gen.build(root, commit="a" * 40)
+
+    _, problems = gen.check(root, "a" * 40, pinned, frozenset(), _KIS_PARAM_DESCRIPTION_FIXES)
+
+    assert any(p.startswith("[설명 정정] fluctuation.fid_rank_sort_cls_code") for p in problems) is flagged
+
+
+def test_main_passes_the_wrapper_description_fixes_to_check(gen, monkeypatch, tmp_path, capsys):
+    """``--check``는 래퍼의 정정 표를 대조에 넘긴다 — 원문이 없는 설정이면 [설명 정정]이 뜬다."""
+    _install_fake_fetch(gen, monkeypatch, tmp_path, {"inquire_price": _QUOTE_SRC, "inquire_balance": _BALANCE_SRC})
+    monkeypatch.setattr(gen, "_description_fixes", lambda: {("domestic_stock", "inquire_price"): {
+        "fid_input_iscd": type("Fix", (), {"upstream": "종목코드"})(),
+    }})
+
+    assert gen.main(["--check", "main"]) == 1
+    assert "[설명 정정] inquire_price.fid_input_iscd" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
 # 종료 코드 — drift(1)와 upstream 받기 실패(2)를 가른다
 # ---------------------------------------------------------------------------
 
@@ -205,6 +247,8 @@ def _install_fake_fetch(gen, monkeypatch, tmp_path, sources: dict[str, str]):
     pinned_path.write_text(gen.render(gen.build(pinned_root, commit="a" * 40)), encoding="utf-8")
     monkeypatch.setattr(gen, "_PINNED_TABLE", pinned_path)
     monkeypatch.setattr(gen, "_public_quote_apis", lambda: _PUBLIC)
+    # 가짜 설정에는 필드 설명이 없다. 설명 정정 대조는 아래 전용 테스트가 본다.
+    monkeypatch.setattr(gen, "_description_fixes", lambda: {})
 
     def fake_fetch(ref, dest):
         _fake_upstream(dest, sources)

@@ -26,6 +26,8 @@ raw URL로 바꿔 예제를 받아 실행하고(``tools/base.py``의 ``_download
 실행하는 코드를 보증하지 못한다. ``--check``가 그 간격을 메운다: upstream ``main``에서 공개 시세
 TR이 계좌 입력을 새로 받게 되면, 그 TR이 ``pii_guard.PUBLIC_KIS_QUOTE_APIS``에 있어 마스킹 없이
 외부 LLM으로 나가기 전에 이 검사가 빨개진다(``.github/workflows/kis-upstream-drift.yml``).
+같은 검사가 래퍼의 ``find_api_detail`` 설명 정정 표(``finus_api._KIS_PARAM_DESCRIPTION_FIXES``, #446)에
+적어 둔 upstream 원문이 서버 설정에 아직 그대로인지도 대조한다(``[설명 정정]``).
 
 판정 규칙 — 전부 upstream 소스에서 기계적으로 읽는다. 사람이 이름을 보고 고르지 않는다.
 
@@ -269,12 +271,44 @@ def config_url_mismatches(root: Path) -> list[str]:
     return problems
 
 
-def check(root: Path, sha: str, pinned: dict, public_apis: frozenset[tuple[str, str]]) -> tuple[dict, list[str]]:
-    """받아 둔 upstream으로 판정표를 다시 만들어 고정 판정표·공개 시세 목록과 대조한다."""
+def description_fix_mismatches(root: Path, fixes: dict) -> list[str]:
+    """래퍼의 ``find_api_detail`` 설명 정정 표(``finus_api._KIS_PARAM_DESCRIPTION_FIXES``, #446)가
+    바로잡는다고 기록한 upstream 원문이 서버 설정에 아직 그대로 있는지 본다.
+
+    원문이 바뀌면 래퍼는 정정을 멈추고 경고만 남긴다(fail-safe). 이 검사는 그 사실을 사람에게
+    알린다 — upstream이 설명을 고쳤으면 정정 항목을 지우고, 다른 뜻으로 바꿨으면 정정을 다시 판단한다.
+    """
+    apis = json.loads((root / _CONFIG_PATH).read_text(encoding="utf-8"))["apis"]
+    problems = []
+    for (tool, api_type), params in sorted(fixes.items()):
+        if tool != _TOOL:
+            problems.append(f"{tool}/{api_type}: 이 검사는 {_TOOL} 설정만 받는다 — 대조하지 못했다")
+            continue
+        info = apis.get(api_type)
+        if info is None:
+            problems.append(f"{api_type}: 서버 설정에 없다")
+            continue
+        for name, fix in sorted(params.items()):
+            current = ((info.get("params") or {}).get(name) or {}).get("description")
+            if current != fix.upstream:
+                problems.append(f"{api_type}.{name}: upstream 설명 {current!r} (정정 표의 원문 {fix.upstream!r})")
+    return problems
+
+
+def check(
+    root: Path, sha: str, pinned: dict, public_apis: frozenset[tuple[str, str]],
+    description_fixes: dict | None = None,
+) -> tuple[dict, list[str]]:
+    """받아 둔 upstream으로 판정표를 다시 만들어 고정 판정표·공개 시세 목록과 대조한다.
+
+    *description_fixes*를 주면 설명 정정 표의 upstream 원문도 대조한다(``main``은 항상 준다).
+    """
     fresh = build(root, commit=sha)
     problems = [f"[개인정보 경계] {p}" for p in public_quote_violations(fresh, public_apis)]
     problems += [f"[서버 설정] {p}" for p in config_url_mismatches(root)]
     problems += [f"[판정표 drift] {p}" for p in diff_tables(pinned, fresh)]
+    if description_fixes is not None:
+        problems += [f"[설명 정정] {p}" for p in description_fix_mismatches(root, description_fixes)]
     return fresh, problems
 
 
@@ -282,6 +316,12 @@ def _public_quote_apis() -> frozenset[tuple[str, str]]:
     from finus_agents.pii_guard import PUBLIC_KIS_QUOTE_APIS
 
     return PUBLIC_KIS_QUOTE_APIS
+
+
+def _description_fixes() -> dict:
+    from finus_agents.finus_api import _KIS_PARAM_DESCRIPTION_FIXES
+
+    return _KIS_PARAM_DESCRIPTION_FIXES
 
 
 def main(argv: list[str]) -> int:
@@ -311,7 +351,7 @@ def main(argv: list[str]) -> int:
             sys.stdout.write(render(build(root, commit=sha)))
             return 0
         pinned = json.loads(_PINNED_TABLE.read_text(encoding="utf-8"))
-        fresh, problems = check(root, sha, pinned, _public_quote_apis())
+        fresh, problems = check(root, sha, pinned, _public_quote_apis(), _description_fixes())
     if args.out:
         args.out.write_text(render(fresh), encoding="utf-8")
     pinned_sha = pinned["_meta"]["upstream_commit"]
@@ -323,6 +363,8 @@ def main(argv: list[str]) -> int:
         print(f"  {line}")
     print(
         "\n조치: [개인정보 경계]가 있으면 그 TR을 pii_guard.PUBLIC_KIS_QUOTE_APIS에서 먼저 뺀다(fail-closed).\n"
+        "[설명 정정]이 있으면 finus_api._KIS_PARAM_DESCRIPTION_FIXES의 해당 항목을 upstream 새 설명에 맞춰 "
+        "지우거나 다시 판단한다(그동안 래퍼는 정정하지 않고 경고만 남긴다).\n"
         "그다음 `python agents/scripts/kis_tr_verdicts.py --fetch main > "
         "agents/tests/fixtures/kis_domestic_stock_tr_verdicts.json`로 판정표를 다시 만들고 테스트를 맞춘다."
     )

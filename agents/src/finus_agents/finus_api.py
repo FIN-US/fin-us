@@ -44,6 +44,9 @@ class DataToolRecord(NamedTuple):
     ok: bool          # True when the response contains non-error data
     produced_rows: bool  # True when ok and the response body is non-empty
     empty: bool = False  # True when ok=True but the result set is empty (빈 결과)
+    # 데이터가 아니라 메타데이터 조회(TR 스키마 find_api_detail·종목코드 find_stock_code, #446).
+    # 성공해도 produced_rows=False로 기록되고, 빈 결과 판정·각주에서 빠진다.
+    meta: bool = False
 
 
 # Tools that produce irreversible side effects (writes). When any of these appear in
@@ -63,8 +66,12 @@ class DataToolLedger:
 
     records: list[DataToolRecord] = field(default_factory=list)
 
-    def record(self, tool_name: str, *, ok: bool, produced_rows: bool, empty: bool = False) -> None:
-        self.records.append(DataToolRecord(tool_name=tool_name, ok=ok, produced_rows=produced_rows, empty=empty))
+    def record(
+        self, tool_name: str, *, ok: bool, produced_rows: bool, empty: bool = False, meta: bool = False,
+    ) -> None:
+        self.records.append(
+            DataToolRecord(tool_name=tool_name, ok=ok, produced_rows=produced_rows, empty=empty, meta=meta)
+        )
 
     def any_success(self) -> bool:
         """Return True if at least one tool call successfully produced data rows."""
@@ -84,8 +91,11 @@ class DataToolLedger:
         게이트가 트립됐을 때 이 메서드가 True이면 재시도가 무의미하다 —
         빈 결과는 두 번째 시도에서도 바뀌지 않는다. 재시도를 건너뛰고
         _EMPTY_RESULT_REJECTION을 즉시 반환한다.
+
+        메타데이터 조회(``meta``)는 읽기로 세지 않는다 (#446). 스키마·종목코드를 찾은 뒤 실제 조회가
+        빈 결과였다면 "빈 결과뿐"이 맞고, 스키마 조회만 했다면 데이터 조회는 하지 않은 것이다.
         """
-        reads = [r for r in self.records if r.tool_name not in _SIDE_EFFECT_TOOLS]
+        reads = [r for r in self.records if r.tool_name not in _SIDE_EFFECT_TOOLS and not r.meta]
         return bool(reads) and all(r.empty for r in reads)
 
 
@@ -210,8 +220,13 @@ class ReasoningTrace:
         흔한 경로다 — 1차에서 실패하거나 빈 결과였다가 2차에서 데이터를 얻으면,
         결국 그 데이터를 얻은 것이므로 각주도 그렇게 말해야 한다. 반대 방향으로
         내리지는 않는다: 한 번 얻은 데이터가 뒤 호출의 실패로 사라지지 않는다.
+
+        메타데이터 조회(``meta``, #446)는 싣지 않는다. 같은 원장 이름을 실제 KIS 조회와 나눠 쓰므로,
+        실으면 스키마 조회 성공이 뒤 조회의 실패를 덮어 각주가 "자료를 확인했다"고 말하게 된다.
         """
         for record in ledger.records:
+            if record.meta:
+                continue
             fresh = _tool_use_from_record(record)
             for index, seen in enumerate(self.tools_used):
                 if seen.name != fresh.name:
@@ -259,12 +274,16 @@ def _has_empty_result(tool_name: str, stripped: str) -> bool:
        summary object, "[계좌 집계]" is appended with real account numbers, so
        only the no-summary path is truly empty.
 
-    3. Documented MCP literals (_EMPTY_RESULT_LITERALS): exact substrings from
+    3. finus_account_balance (KIS pass-through, #446): the Kis Trading MCP success
+       envelope whose printed result has no rows (``Empty DataFrame``, ``[]``, or a
+       tuple object of empty lists) — see :func:`_kis_payload_has_no_rows`. Other
+       shapes return False.
+
+    4. Documented MCP literals (_EMPTY_RESULT_LITERALS): exact substrings from
        each MCP server's source code — not guessed patterns.
 
     Tools not covered here return False (conservative: do not block unknown
     formats) to avoid false positives on variable-shape responses such as
-    finus_account_balance (remote KIS, api_type-dependent) or
     finus_disclosure_signal (all-empty detection would require multi-section
     parsing) or finus_mcp_trading_get_balance (always contains account-level
     summary numbers even when no individual holdings are held).
@@ -287,11 +306,58 @@ def _has_empty_result(tool_name: str, stripped: str) -> bool:
     if tool_name == "finus_mcp_trading_balance_rlz_pl":
         return "보유 종목이 없습니다." in stripped and "[계좌 집계]" not in stripped
 
-    # --- 3. Documented literal markers from MCP source code ---
+    # --- 3. KIS pass-through: 정상 봉투인데 행이 없는 응답 (#446) ---
+    if tool_name == _KIS_BALANCE_LEDGER_NAME:
+        return _kis_payload_has_no_rows(stripped)
+
+    # --- 4. Documented literal markers from MCP source code ---
     literal = _EMPTY_RESULT_LITERALS.get(tool_name)
     if literal is not None:
         return literal in stripped
 
+    return False
+
+
+# 예제 함수가 행과 함께 표준출력에 찍는 진행 표지(upstream examples_llm, 연속 조회 "M"이면 Call Next).
+_KIS_PROGRESS_LINES = frozenset({"The End", "Call Next"})
+
+
+def _kis_payload_has_no_rows(stripped: str) -> bool:
+    """Kis Trading MCP 정상 봉투의 ``data``가 행 없는 결과인가 (#446).
+
+    서버 실행 템플릿(``tools/base.py``의 ``API_RUNNER_TEMPLATE``)은 결과를 이렇게 찍는다.
+
+    - 행이 있는 DataFrame → ``to_json(orient='records')`` (JSON 배열)
+    - 빈 DataFrame → ``str(df)`` = ``"Empty DataFrame\\nColumns: []\\nIndex: []"``
+    - DataFrame 튜플 → ``{"output1": [...], "output2": [...]}`` (빈 것은 ``[]``)
+
+    그래서 앞뒤 진행 표지를 뺀 본문이 비었거나, ``Empty DataFrame``만 있거나, JSON 배열·튜플
+    객체의 값이 전부 빈 배열이면 행이 없다. 그 밖의 모양(``find_api_detail``처럼 ``success`` 키가
+    없는 봉투, 읽지 못하는 텍스트)은 빈 결과로 보지 않는다 — 게이트를 막지 않는 보수적 쪽이다.
+    KIS 거절은 여기 오기 전에 오류 JSON으로 바뀐다(:func:`_kis_envelope_failure`).
+    """
+    try:
+        envelope = json.loads(stripped)
+    except ValueError:
+        return False
+    inner = envelope.get("data") if isinstance(envelope, dict) else None
+    if not isinstance(inner, dict) or inner.get("success") is not True or not isinstance(inner.get("data"), str):
+        return False
+    body = "\n".join(
+        line for line in inner["data"].splitlines() if line.strip() and line.strip() not in _KIS_PROGRESS_LINES
+    ).strip()
+    if not body:
+        return True
+    if body.startswith("Empty DataFrame"):
+        return "{" not in body and "[{" not in body
+    try:
+        parsed = json.loads(body)
+    except ValueError:
+        return False
+    if isinstance(parsed, list):
+        return not parsed
+    if isinstance(parsed, dict):
+        return bool(parsed) and all(isinstance(v, list) and not v for v in parsed.values())
     return False
 
 
@@ -306,7 +372,7 @@ def _is_ok_tool_result(result: str) -> bool:
     return bool(stripped) and not _ERROR_JSON_PREFIX_RE.match(stripped)
 
 
-def _record_to_ledger(tool_name: str, result: str) -> None:
+def _record_to_ledger(tool_name: str, result: str, *, kis_api: tuple[str, str] | None = None) -> None:
     """Record a completed data-tool call into the current context's ledger.
 
     Logs ERROR and returns without recording when the ledger box is None —
@@ -321,6 +387,11 @@ def _record_to_ledger(tool_name: str, result: str) -> None:
     internal name shows up instead of the Korean label — so the mismatch is
     caught by backend/tests/test_label_drift.py in CI (#282). Keep the name a
     literal or a module-level constant; that check reads it statically.
+
+    ``kis_api``(``(KIS 도구, api_type)``)가 메타데이터 조회(:data:`_KIS_META_API_TYPES`)면
+    성공해도 ``produced_rows=False``·``meta=True``로 남긴다 (#446). 스키마·종목코드 조회 성공이
+    "데이터를 확인했다"로 세지면 "find_api_detail → 실제 조회 실패 → 지어낸 수치" 흐름이 게이트를
+    통과한다.
     """
     ledger = DATA_TOOL_LEDGER.get()
     if ledger is None:
@@ -333,6 +404,9 @@ def _record_to_ledger(tool_name: str, result: str) -> None:
         return
     stripped = result.strip()
     ok = _is_ok_tool_result(stripped)
+    if kis_api is not None and kis_api[1] in _KIS_META_API_TYPES:
+        ledger.record(tool_name, ok=ok, produced_rows=False, meta=True)
+        return
     is_read = ok and tool_name not in _SIDE_EFFECT_TOOLS
     # empty: ok=True였지만 결과 집합이 비어 있음(#209 빈 결과 축)
     is_empty = is_read and _has_empty_result(tool_name, stripped)
@@ -375,7 +449,7 @@ def _record_and_mask(
     :func:`~finus_agents.pii_guard.mask_tool_result`가 원문을 그대로 돌려주므로
     이 함수는 종전과 동일하게 동작한다.
     """
-    _record_to_ledger(tool_name, result)
+    _record_to_ledger(tool_name, result, kis_api=kis_api)
     return mask_tool_result(tool_name, result, kis_api=kis_api)
 
 
@@ -1257,6 +1331,9 @@ _KIS_TRADING_TOOL_GUIDE = """
 # #205/#209 원장 판정 키 — finus_account_balance(전체 권한)와 readonly 래퍼 양쪽이 공유한다.
 # 변경 시 #205/#209 원장 판정 로직과 함께 반드시 동기화할 것.
 _KIS_BALANCE_LEDGER_NAME: str = "finus_account_balance"
+# Kis Trading MCP의 메타데이터 조회 api_type — KIS TR이 아니라 TR 스키마·종목 마스터를 읽는다(서버
+# tools/base.py의 _handle_find_api_detail·_handle_find_stock_code). 원장에 데이터 행으로 세지 않는다(#446).
+_KIS_META_API_TYPES: frozenset[str] = frozenset({"find_api_detail", "find_stock_code"})
 
 # 허용 목록(allowlist) 방식 — fail-closed: 목록에 없는 api_type은 기본 차단.
 #
@@ -1537,11 +1614,35 @@ _KIS_HTTP_ERROR_RE = re.compile(r"^Error Code\s*:\s*(?P<status>\d+)\s*\|\s*(?P<b
 # 오류 detail에서 뺄 서버 봉투 메타데이터 — 실패 사유와 무관하고 Observation만 길게 만든다.
 _KIS_ENVELOPE_NOISE_KEYS = frozenset({"message", "execution_time", "temp_dir", "venv_used", "cleanup_success"})
 
-_KIS_API_FAILED_HINT = (
-    "이 호출은 실패했고 데이터가 없습니다. 이 결과를 근거로 답하지 마세요. 입력값 오류(INVALID·필드 크기·"
-    "필수값·인자 누락)면 api_type=\"find_api_detail\"로 해당 api_type의 필드 설명을 확인해 값을 고친 뒤 "
-    "같은 요청을 다시 호출하세요. 초당 거래건수 초과(EGW00201)면 잠시 뒤 같은 호출을 한 번 더 하세요."
+# 실패 종류별 안내. 공통 머리말 뒤에 종류에 맞는 다음 행동 하나를 붙인다 — 종목을 못 찾은 실패에
+# find_api_detail을 권하면 모델이 스키마만 다시 읽고 같은 종목명으로 되풀이한다.
+_KIS_FAILED_PREFIX = "이 호출은 실패했고 데이터가 없습니다. 이 결과를 근거로 답하지 마세요. "
+_KIS_HINT_INPUT = (
+    "입력값 오류(INVALID·필드 크기·필수값·인자 누락)면 api_type=\"find_api_detail\"로 해당 api_type의 "
+    "필드 설명을 확인해 값을 고친 뒤 같은 요청을 다시 호출하세요."
 )
+_KIS_HINT_STOCK = (
+    "종목을 찾지 못했습니다. 종목명 철자·정식 명칭을 확인하고(suggestions가 있으면 그 후보를 쓰세요) "
+    "api_type=\"find_stock_code\"로 종목코드를 먼저 찾은 뒤 다시 호출하세요. find_api_detail은 도움이 되지 않습니다."
+)
+_KIS_HINT_UNSUPPORTED = (
+    "서버가 이 api_type이나 인자 구조를 받지 않았습니다. api_type 이름과 {\"api_type\": …, \"params\": {…}} "
+    "구조를 확인하고, 필요하면 api_type=\"find_api_detail\"로 확인한 뒤 다시 호출하세요."
+)
+_KIS_HINT_RATE = "초당 거래건수 초과입니다. 잠시 뒤 같은 호출을 한 번만 다시 하세요. 인자를 바꿀 필요는 없습니다."
+# KIS 유량 초과 메시지 코드. EGW00201=초당 거래건수 초과, EGW00215=초당 거래건수 초과(토큰 단위).
+_KIS_RATE_LIMIT_CODES = frozenset({"EGW00201", "EGW00215"})
+
+
+def _kis_failure_hint(reason: str, api_type: str, *, msg_cd: str = "", error: Any = None) -> str:
+    """실패 종류에 맞는 다음 행동 안내 (#446 리뷰)."""
+    if msg_cd in _KIS_RATE_LIMIT_CODES:
+        return _KIS_FAILED_PREFIX + _KIS_HINT_RATE
+    if api_type == "find_stock_code" or error == "STOCK_NOT_FOUND":
+        return _KIS_FAILED_PREFIX + _KIS_HINT_STOCK
+    if reason == "mcp_rejected":
+        return _KIS_FAILED_PREFIX + _KIS_HINT_UNSUPPORTED
+    return _KIS_FAILED_PREFIX + _KIS_HINT_INPUT
 
 
 def _kis_rejection(text: str) -> dict[str, str] | None:
@@ -1594,7 +1695,7 @@ def _kis_envelope_failure(tool_name: str, api_type: str, result: str) -> str | N
         detail = {k: v for k, v in envelope.items() if k != "ok"}
         return _err_json(
             _KIS_API_FAILED, tool=tool_name, api_type=api_type, reason="mcp_rejected",
-            hint=_KIS_API_FAILED_HINT, detail=detail,
+            hint=_kis_failure_hint("mcp_rejected", api_type, error=envelope.get("error")), detail=detail,
         )
     inner = envelope.get("data")
     if not isinstance(inner, dict) or "success" not in inner:
@@ -1603,15 +1704,15 @@ def _kis_envelope_failure(tool_name: str, api_type: str, result: str) -> str | N
     if inner.get("success") is not True:
         return _err_json(
             _KIS_API_FAILED, tool=tool_name, api_type=api_type, reason="call_failed",
-            hint=_KIS_API_FAILED_HINT, detail=detail,
+            hint=_kis_failure_hint("call_failed", api_type), detail=detail,
         )
     payload = inner.get("data")
     rejection = _kis_rejection(payload) if isinstance(payload, str) else None
     if rejection is None:
         return None
     return _err_json(
-        _KIS_API_FAILED, tool=tool_name, api_type=api_type, reason="kis_rejected",
-        **rejection, hint=_KIS_API_FAILED_HINT, detail=detail,
+        _KIS_API_FAILED, tool=tool_name, api_type=api_type, reason="kis_rejected", **rejection,
+        hint=_kis_failure_hint("kis_rejected", api_type, msg_cd=rejection.get("msg_cd", "")), detail=detail,
     )
 
 
@@ -1628,12 +1729,25 @@ def _kis_envelope_failure(tool_name: str, api_type: str, result: str) -> str | N
 # 실측(2026-10-23 모의투자): ``"0"``은 30행, ``"0000"``은 OPSQ2002.
 #
 # 설명만 바꾸고 인자를 몰래 고치지는 않는다 — 고쳐 보내면 모델은 자기가 무엇을 보냈는지 모른 채
-# 다른 정렬(하락률 등)을 고를 수단도 잃는다. upstream이 설명을 고쳐도 이 정정은 같은 뜻이라 해가 없다.
-_KIS_PARAM_DESCRIPTION_FIXES: dict[tuple[str, str], dict[str, str]] = {
+# 다른 정렬(하락률 등)을 고를 수단도 잃는다.
+#
+# **바로잡을 upstream 원문을 함께 적고, 원문이 그대로일 때만 바꾼다.** upstream이 설명을 고치거나
+# 바꾸면 이 정정이 새 설명을 덮어 옛 판단을 강요하게 된다. 원문이 다르면 원문을 그대로 두고 경고를
+# 남긴다. 같은 대조를 ``agents/scripts/kis_tr_verdicts.py --check``가 upstream ``main``의 configs로
+# 매일 한다(``description_fix_mismatches``).
+class KisDescriptionFix(NamedTuple):
+    upstream: str   # Kis Trading MCP configs/<도구>.json의 원문 — 이것과 같을 때만 바꾼다
+    corrected: str  # 에이전트에 보여 줄 설명
+
+
+_KIS_PARAM_DESCRIPTION_FIXES: dict[tuple[str, str], dict[str, KisDescriptionFix]] = {
     ("domestic_stock", "fluctuation"): {
-        "fid_rank_sort_cls_code": (
-            "순위 정렬 구분 코드, 한 자리 (0:상승율순 1:하락율순 2:시가대비상승율 3:시가대비하락율 "
-            "4:변동율). \"0000\"처럼 네 자리를 넣으면 KIS가 OPSQ2002 필드 크기 오류로 거절한다"
+        "fid_rank_sort_cls_code": KisDescriptionFix(
+            upstream="순위 정렬 구분 코드 (0000: 등락률순)",
+            corrected=(
+                "순위 정렬 구분 코드, 한 자리 (0:상승율순 1:하락율순 2:시가대비상승율 3:시가대비하락율 "
+                "4:변동율). \"0000\"처럼 네 자리를 넣으면 KIS가 OPSQ2002 필드 크기 오류로 거절한다"
+            ),
         ),
     },
 }
@@ -1642,7 +1756,8 @@ _KIS_PARAM_DESCRIPTION_FIXES: dict[tuple[str, str], dict[str, str]] = {
 def _correct_find_api_detail(tool_name: str, arguments: McpCallArguments, result: str) -> str:
     """``find_api_detail`` 응답의 필드 설명을 :data:`_KIS_PARAM_DESCRIPTION_FIXES`로 정정한다.
 
-    대상이 아니거나 응답 모양이 예상과 다르면 원문을 그대로 돌려준다.
+    대상이 아니거나 응답 모양이 예상과 다르면 원문을 그대로 돌려준다. 설명이 기록해 둔 upstream
+    원문과 다르면(upstream이 바꿨다) 정정하지 않고 경고를 남긴다.
     """
     if str(arguments.get("api_type", "")).strip() != "find_api_detail":
         return result
@@ -1656,11 +1771,20 @@ def _correct_find_api_detail(tool_name: str, arguments: McpCallArguments, result
     if not fixes or not isinstance(described, dict):
         return result
     changed = False
-    for name, description in fixes.items():
+    for name, fix in fixes.items():
         spec = described.get(name)
-        if isinstance(spec, dict) and spec.get("description") != description:
-            spec["description"] = description
+        if not isinstance(spec, dict):
+            continue
+        current = spec.get("description")
+        if current == fix.upstream:
+            spec["description"] = fix.corrected
             changed = True
+        elif current != fix.corrected:
+            logger.warning(
+                "find_api_detail 설명이 정정 표의 upstream 원문과 달라 정정하지 않았습니다 "
+                "(%s/%s.%s): 기록한 원문=%r, 받은 설명=%r — upstream이 바꿨는지 확인하고 정정 표를 고치세요",
+                tool_name, target, name, fix.upstream, current,
+            )
     return json.dumps(envelope, ensure_ascii=False) if changed else result
 
 
