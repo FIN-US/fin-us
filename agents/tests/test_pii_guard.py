@@ -618,6 +618,29 @@ class TestRestoreParamsForKis:
 
         assert [r.reason for r in rejections] == ["restored_value_is_not_a_number"]
 
+    @pytest.mark.parametrize("text", [
+        "예수금 ₩3,000,000",
+        "총자산 3.2M원",
+        "잔고 3 000 000원",
+        "잔고 3.000.000원",
+        "평가금액 3,000,000 KRW",
+    ])
+    def test_new_amount_formats_are_not_guessed_into_a_number(self, mapping_box, text):
+        """#453이 새로 가리는 금액 표기도 숫자로 추측하지 않고 거부한다(fail-closed).
+
+        ``_as_kis_number``는 ``원``과 콤마만 벗긴다. 통화 기호·라틴 크기·공백·점 구분을
+        벗기면 "3.2M원" -> "3.2", "3.000.000원" -> "3.0"처럼 **자릿수가 어긋난 단가**가
+        조용히 나갈 수 있어, 수사 표기와 같은 근거로 해석하지 않는다. 이 표기들은
+        #453 전에는 자리표시자가 되지 않아(평문 유출) 이 경로에 올 일이 없었다.
+        """
+        mask_tool_result("finus_list_diaries", text)
+        placeholder = next(iter(PII_MAPPING.get()))
+
+        restored, rejections = self._restore({"ORD_UNPR": placeholder})
+
+        assert [r.reason for r in rejections] == ["restored_value_is_not_a_number"]
+        assert restored["ORD_UNPR"] == placeholder
+
     def test_values_without_placeholders_pass_through_untouched(self, mapping_box):
         """정상 경로 — 에이전트가 종목코드·구분값을 직접 적는 호출은 그대로 통과한다."""
         params = {"PDNO": "005930", "ORD_DVSN": "00", "ORD_QTY": "10"}
