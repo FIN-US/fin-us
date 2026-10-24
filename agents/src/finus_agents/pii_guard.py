@@ -167,6 +167,13 @@ _KIS_META_KEYS = frozenset({
     "ok", "success", "api_type", "message", "execution_time", "temp_dir", "venv_used",
     "cleanup_success", "tool", "tool_name", "hint",
 })
+# 래퍼(finus_api._kis_envelope_failure, #446)가 만든 최상위 오류 객체에만 있는 분류·HTTP 상태 키.
+# 최상위에서만 건너뛴다 — KIS 응답 행 안의 같은 이름 필드(``{"reason": "12345678"}``)는 계속 가린다.
+_KIS_WRAPPER_ERROR_KEYS = frozenset({"reason", "http_status"})
+# KIS 메시지 코드(영문 대문자 접두 + 숫자: OPSQ2002, EGW00201, APBK0013 …). 이 모양인 ``msg_cd``만
+# 남긴다 — 텍스트 마스킹에 맡기면 ``OPSQ<AMOUNT_…>``가 되어 유량 초과와 입력 오류를 가를 수 없다.
+_KIS_MSG_CD_KEY = "msg_cd"
+_KIS_MSG_CODE_RE = re.compile(r"[A-Z]{2,8}\d{3,6}")
 _KIS_NUMERIC_VALUE_RE = re.compile(r"[+-]?\d[\d,]*(?:\.\d+)?")
 # 키를 모르는 텍스트 속 숫자. 글자에 붙은 숫자("KRW4817263")도 잡는다.
 _KIS_TEXT_NUMBER_RE = re.compile(r"(?<![\d.,])\d[\d,]*(?:\.\d+)?")
@@ -265,6 +272,8 @@ class _KisMasker:
         if isinstance(node, bool) or node is None:
             return node
         value = str(node).strip()
+        if key.strip().lower() == _KIS_MSG_CD_KEY and isinstance(node, str) and _KIS_MSG_CODE_RE.fullmatch(value):
+            return node
         if not _KIS_NUMERIC_VALUE_RE.fullmatch(value):
             if account_only or not isinstance(node, str):
                 return node
@@ -288,6 +297,11 @@ def _mask_kis_passthrough(result: str, counter: _Counter, mapping: dict[str, str
         return masker.text(result)
     if not isinstance(parsed, (dict, list)):
         return masker.text(result)
+    if isinstance(parsed, dict) and "error" in parsed:
+        # 래퍼 오류 객체: 분류 키만 최상위에서 남기고 나머지(detail 등)는 그대로 거른다.
+        kept = {k: parsed[k] for k in _KIS_WRAPPER_ERROR_KEYS if k in parsed}
+        rest = masker.walk({k: v for k, v in parsed.items() if k not in kept})
+        return json.dumps({k: kept.get(k, rest.get(k)) for k in parsed}, ensure_ascii=False)
     return json.dumps(masker.walk(parsed), ensure_ascii=False)
 
 
