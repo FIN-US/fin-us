@@ -45,7 +45,6 @@ _DEFAULT_CONVERSATION_ID = os.environ.get(
     "fin-us-default",
 ).strip()
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
-_KNOWN_STOCK_NAMES = ("삼성전자", "NAVER", "네이버")
 
 # ---- Tool enforcement gate (#152) ----
 
@@ -363,43 +362,6 @@ def chat_response_with_text(response: ChatResponse, text: str) -> ChatResponse:
     return response.model_copy(update={"choices": [choice.model_copy(update={"message": message}), *response.choices[1:]]})
 
 
-def _is_holdings_news_request(chat_request: ChatRequest) -> bool:
-    latest = latest_user_plain_text(chat_request.messages)
-    if any(word in latest for word in ("실적", "earnings", "분기보고서", "사업보고서")):
-        return False
-    wants_news = "뉴스" in latest or "뉴" in latest
-    refers_holdings = any(word in latest for word in ("보유", "포트폴리오", "종목", "보유종목"))
-    return wants_news and refers_holdings
-
-
-def _stock_names_from_context(chat_request: ChatRequest) -> list[str]:
-    text = "\n".join(message_content_text(message) for message in chat_request.messages)
-    names: list[str] = []
-    for name in _KNOWN_STOCK_NAMES:
-        normalized = "NAVER" if name == "네이버" else name
-        if name in text and normalized not in names:
-            names.append(normalized)
-    for match in re.finditer(r"(?:^|\n)\s*(?:[-*]|\d+[.)])\s*([가-힣A-Za-z][가-힣A-Za-z0-9&.\- ]{1,20})\s+\d+\s*주", text):
-        name = match.group(1).strip()
-        if name and name not in names:
-            names.append(name)
-    return names
-
-
-async def _holdings_news_answer(builder: Builder, chat_request: ChatRequest) -> str | None:
-    if not _is_holdings_news_request(chat_request):
-        return None
-    stock_names = _stock_names_from_context(chat_request)
-    if not stock_names:
-        return None
-    news_tool = await builder.get_function("mcp-news-get-market-news")
-    sections: list[str] = []
-    for stock_name in stock_names:
-        result = await news_tool.ainvoke(stock_name)
-        sections.append(f"## {stock_name}\n{chat_response_plain_text(result)}")
-    return "보유종목 관련 최신 뉴스입니다.\n\n" + "\n\n".join(sections)
-
-
 class FeBranchConfig(FunctionBaseConfig, name="fe_branch"):
     inner_function_name: str = Field(
         ...,
@@ -489,21 +451,6 @@ async def fe_branch(config: FeBranchConfig, builder: Builder):
 
     async def run_subagent(chat_request_or_message: ChatRequestOrMessage) -> str:
         chat_request = GlobalTypeConverter.get().convert(chat_request_or_message, to_type=ChatRequest)
-        if inner_name == "news_agent":
-            # Deterministic path: assembles tool output directly without going through
-            # _run_with_gate. A ledger box is still required so that _record_to_ledger
-            # inside the news tool does not log a spurious ERROR on every happy-path call.
-            ledger = DataToolLedger()
-            token = DATA_TOOL_LEDGER.set(ledger)
-            try:
-                direct = await _holdings_news_answer(builder, chat_request)
-            finally:
-                DATA_TOOL_LEDGER.reset(token)
-                # #260: 게이트를 거치지 않는 경로지만 도구는 실제로 실행됐다.
-                # 각주에서 이 뉴스 조회가 누락되지 않도록 여기서도 병합한다.
-                _trace_ledger_tools(ledger)
-            if direct is not None:
-                return direct
         inner = await builder.get_function(inner_name)
         query = _contextual_user_query(
             chat_request,
