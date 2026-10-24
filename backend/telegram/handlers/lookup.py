@@ -43,6 +43,19 @@ from backend.telegram.presentation import (
     sanitize_markdown,
 )
 
+# /earnings 판정 라벨 (#450). 판정은 LLM 답 첫 줄 맨 앞 토큰에서만 읽는다.
+_EARNINGS_VERDICT_LABELS = {"호재": "🟢 호재", "악재": "🔴 악재", "중립": "⚪ 중립"}
+_EARNINGS_NO_VERDICT = "❔ 판정 없음"
+# 맨 앞에 "판정:" 머리, 이미 붙은 판정 이모지, 괄호류를 허용하고, 토큰 바로 뒤는 줄 끝이나
+# 구분자여야 한다 — "호재와 악재 혼재"의 "호재와"는 판정 토큰이 아니다.
+_EARNINGS_VERDICT_HEAD = re.compile(
+    r"^(?:판정\s*[:：]\s*)?"
+    r"(?:[🟢🔴⚪]️?\s*)?"
+    r"[\[(【<]?(?P<verdict>호재|악재|중립)[\])】>]?"
+    r"(?=$|[\s:：\-–—,.·/|])"
+)
+_EARNINGS_VERDICT_NEGATION = re.compile(r"^[\s:：\-–—,.·/|]*(?:아님|아니)")
+
 
 class LookupCommands(HandlerBase):
     """조회 명령(/balance /quote /trend /watch /catalysts /earnings)과 시세 버튼."""
@@ -468,6 +481,8 @@ class LookupCommands(HandlerBase):
             "- 주요 뉴스 기반 정성적 코멘트\n"
             "- 다음 분기 전망\n"
             "첫 줄은 반드시 `호재`, `악재`, `중립` 중 하나의 판정과 한 줄 근거로 시작하라.\n"
+            "첫 줄 형식은 `판정: 한 줄 근거`다(예: `호재: 매출과 영업이익이 함께 증가`). "
+            "판정 낱말 앞에 다른 글자를 붙이지 말고, 첫 줄에 판정 낱말을 둘 이상 쓰지 말라.\n"
             "Markdown 문법(`#`, `**`, 표, 코드블록)을 쓰지 말고 Telegram에서 읽기 쉬운 일반 텍스트로 답하라.\n"
             "투자 조언은 단정하지 말고, 확인된 DART·뉴스 근거와 한계를 구분해 한국어로 답하라.",
         ]
@@ -479,29 +494,39 @@ class LookupCommands(HandlerBase):
         # 판정 접두어를 붙이려면 정리된 첫 줄을 봐야 해서 render보다 먼저 한 번 부른다 —
         # sanitize_markdown은 이미 정리된 문장에 다시 걸어도 같은 결과다.
         plain = sanitize_markdown(text)
-        verdict = self._earnings_verdict(plain)
-        if plain.startswith(("🟢 호재", "🔴 악재", "⚪ 중립")):
-            return plain
         lines = plain.splitlines()
         while lines and not lines[0].strip():
             lines.pop(0)
-        if lines:
-            first = lines[0].strip()
-            for label in ("호재", "악재", "중립"):
-                if first == label:
-                    lines = lines[1:]
-                    while lines and not lines[0].strip():
-                        lines.pop(0)
-                    body = "\n".join(lines).strip()
-                    return f"{verdict}\n{body}".strip()
-                if first.startswith(f"{label}:") or first.startswith(f"{label} -"):
-                    lines[0] = first.replace(label, verdict, 1)
-                    return "\n".join(lines).strip()
-        return f"{verdict}\n{plain}".strip()
+        if not lines:
+            return _EARNINGS_NO_VERDICT
+        verdict, rest = self._earnings_verdict(lines[0].strip())
+        if verdict is None:
+            # 판정을 못 읽었으면 라벨을 지어내지 않는다 — 예전에는 본문 어디든 "악재"가
+            # 있으면 악재, 없으면 중립으로 채워 근거 문장의 위험 요인이 판정을 뒤집었다 (#450).
+            return f"{_EARNINGS_NO_VERDICT}\n{plain.strip()}"
+        if not rest.strip():
+            # 첫 줄이 판정 낱말뿐이면 라벨 줄로 바꾸고 바로 뒤 빈 줄을 걷는다.
+            lines = lines[1:]
+            while lines and not lines[0].strip():
+                lines.pop(0)
+            body = "\n".join(lines).strip()
+            return f"{verdict}\n{body}".strip()
+        lines[0] = f"{verdict}{rest}"
+        return "\n".join(lines).strip()
 
-    def _earnings_verdict(self, text: str) -> str:
-        if "악재" in text:
-            return "🔴 악재"
-        if "호재" in text:
-            return "🟢 호재"
-        return "⚪ 중립"
+    def _earnings_verdict(self, first_line: str) -> tuple[str | None, str]:
+        """첫 줄 맨 앞의 판정 토큰만 읽어 (라벨, 토큰 뒤 나머지)를 돌려준다 (#450).
+
+        프롬프트가 근거와 한계를 함께 쓰라고 해 본문·첫 줄 근거에 반대 낱말이 흔히
+        섞인다("호재: 매출 증가, 다만 원가 상승은 악재 요인"). 그래서 본문 전체에서 낱말을
+        찾지 않고 첫 줄 맨 앞 토큰 하나만 판정으로 본다. 토큰 바로 뒤가 구분자·줄 끝이
+        아니면("호재와 악재 혼재", "악재로 보기 어렵다") 판정 낱말이 아니라 문장의 일부라
+        읽지 않고, "악재 아님"처럼 바로 부정하면 판정을 뒤집어 짐작하지 않고 None을 준다.
+        """
+        match = _EARNINGS_VERDICT_HEAD.match(first_line)
+        if match is None:
+            return None, first_line
+        rest = first_line[match.end():]
+        if _EARNINGS_VERDICT_NEGATION.match(rest):
+            return None, first_line
+        return _EARNINGS_VERDICT_LABELS[match.group("verdict")], rest
