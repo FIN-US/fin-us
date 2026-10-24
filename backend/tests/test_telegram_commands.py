@@ -937,7 +937,8 @@ async def test_earnings_command_combines_dart_news_and_nat_analysis():
     assert notifier.actions == ["typing"]
     # /earnings도 출력 계층을 지난다 — 본문이 자유 형식 LLM 텍스트인 유일한 명령이라
     # 마크다운 정리와 용어 각주가 특히 필요한 자리다 (#297 자가리뷰).
-    assert notifier.messages[-1].startswith("⚪ 중립\n실적 분석 응답")
+    # 판정 토큰이 없는 답이라 라벨을 지어내지 않는다 (#450).
+    assert notifier.messages[-1].startswith("❔ 판정 없음\n실적 분석 응답")
     assert "ℹ️ 실적: " in notifier.messages[-1]
 
 
@@ -978,6 +979,62 @@ async def test_earnings_command_sends_plain_text_with_verdict_emoji():
     assert "실적 요약" in message
     # 글머리표는 이 봇의 나열 표시로 통일된다(예전에는 이 명령만 "•"를 썼다).
     assert "- 매출: 전년 대비 증가" in message
+
+
+@pytest.mark.parametrize(
+    ("llm_text", "expected_first_line"),
+    [
+        # 혼재 문장: 첫 줄 근거·본문에 반대 낱말이 있어도 첫 줄 맨 앞 판정을 따른다.
+        ("호재 - 매출 증가\n다만 원가 상승은 악재 요인", "🟢 호재 - 매출 증가"),
+        ("호재: 매출 증가, 다만 원가 상승은 악재 요인", "🟢 호재: 매출 증가, 다만 원가 상승은 악재 요인"),
+        ("중립: 호재와 악재 혼재", "⚪ 중립: 호재와 악재 혼재"),
+        ("악재: 영업이익 감소\n수주 회복은 호재", "🔴 악재: 영업이익 감소"),
+        # 형식 흔들림: 마크다운, 판정 머리, 이미 붙은 이모지, 괄호, 판정 낱말만 있는 첫 줄.
+        ("**중립**: 증감 혼조\n신사업은 호재", "⚪ 중립: 증감 혼조"),
+        ("판정: 악재 - 적자 전환\n환율은 호재", "🔴 악재 - 적자 전환"),
+        ("🟢 호재: 매출 증가\n원가는 악재", "🟢 호재: 매출 증가"),
+        ("[중립] 데이터 부족\n악재 가능성", "⚪ 중립 데이터 부족"),
+        ("\n호재\n\n매출 증가, 악재 없음", "🟢 호재"),
+    ],
+)
+def test_earnings_verdict_reads_only_leading_token_of_first_line(llm_text, expected_first_line):
+    # #450: 예전 판정은 본문 어디든 "악재"가 있으면 악재로 뒤집혔다.
+    handler = TelegramCommandHandler(notifier=FakeNotifier())
+
+    formatted = handler._format_earnings_response(llm_text)
+
+    assert formatted.splitlines()[0] == expected_first_line
+
+
+@pytest.mark.parametrize(
+    "llm_text",
+    [
+        "실적 분석 응답",
+        # 첫 줄이 판정 낱말로 시작하지 않는다 — 본문에 낱말이 있어도 라벨로 쓰지 않는다.
+        "매출이 늘었지만 악재도 있다\n호재: 신제품",
+        # 판정 낱말이 문장의 일부일 뿐이다.
+        "호재와 악재가 혼재한다",
+        "악재로 보기는 어렵다",
+        # 부정 문맥: 바로 부정하면 반대 판정을 짐작하지 않는다.
+        "악재 아님: 일회성 비용",
+        "호재는 아니다",
+    ],
+)
+def test_earnings_verdict_marks_unreadable_verdict_without_inventing_label(llm_text):
+    handler = TelegramCommandHandler(notifier=FakeNotifier())
+
+    formatted = handler._format_earnings_response(llm_text)
+
+    lines = formatted.splitlines()
+    assert lines[0] == "❔ 판정 없음"
+    # 원문은 손대지 않고 그대로 아래에 둔다.
+    assert "\n".join(lines[1:]) == llm_text
+
+
+def test_earnings_verdict_empty_answer_has_no_label():
+    handler = TelegramCommandHandler(notifier=FakeNotifier())
+
+    assert handler._format_earnings_response("\n  \n") == "❔ 판정 없음"
 
 
 @pytest.mark.asyncio
