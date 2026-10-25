@@ -336,6 +336,38 @@ def truncate_end(text: str, max_chars: int) -> str:
     return text[: max_chars - 1].rstrip() + "…"
 
 
+# 가운데를 줄였다는 표지. 모델이 줄인 자리를 원문의 일부로 읽지 않게 말로 적는다.
+_MIDDLE_ELISION = " …(중략)… "
+# 앞부분 몫. 목록형 답(잔고·순위·종목별 뉴스)은 항목이 앞에서 시작하므로 앞을 더 남기고,
+# 끝에는 결론과 추가 제안("…비교해 드릴까요?")이 들어갈 만큼만 남긴다.
+_MIDDLE_HEAD_SHARE = 0.6
+
+
+def truncate_middle(text: str, max_chars: int) -> str:
+    """앞과 끝을 남기고 가운데를 줄여 *max_chars* 이내로 만든다 (#451).
+
+    직전 답을 가리키는 후속 질문은 두 곳을 본다 — "그중 두 번째 종목은?"은 앞쪽 목록을,
+    추가 제안에 대한 "응"은 답의 끝을 가리킨다. :func:`truncate_end`는 끝을 버리므로
+    후자가 항상 끊긴다.
+    """
+    if len(text) <= max_chars:
+        return text
+    available = max_chars - len(_MIDDLE_ELISION)
+    if available < 2:
+        return truncate_end(text, max_chars)
+    head = int(available * _MIDDLE_HEAD_SHARE)
+    tail = available - head
+    return text[:head].rstrip() + _MIDDLE_ELISION + text[len(text) - tail:].lstrip()
+
+
+def _last_assistant_index(messages: list[Message]) -> int | None:
+    """가장 뒤의 assistant 메시지 위치. 후속 질문이 가리키는 "직전 답"이다."""
+    for index in range(len(messages) - 1, -1, -1):
+        if messages[index].role == UserMessageContentRoleType.ASSISTANT:
+            return index
+    return None
+
+
 def chat_response_plain_text(result: ChatResponse | str) -> str:
     if isinstance(result, str):
         return result
@@ -388,25 +420,44 @@ class FeBranchConfig(FunctionBaseConfig, name="fe_branch"):
         default=180,
         ge=40,
         le=8000,
-        description="히스토리에서 assistant 한 메시지당 최대 문자 수. 긴 잔고 답변을 짧게 잘라 ReAct 입력 부담을 줄임.",
+        description="히스토리에서 직전 답보다 앞선 assistant 한 메시지당 최대 문자 수. 긴 잔고 답변을 짧게 잘라 ReAct 입력 부담을 줄임.",
+    )
+    # #451: 직전 답까지 180자로 자르면 "그중 두 번째 종목은?"(앞쪽 목록)과 추가 제안에 대한 "응"(답의 끝)이
+    # 둘 다 맥락을 잃는다. 후속 질문은 거의 항상 바로 앞 답을 가리키므로 그 한 건만 넉넉히 넘기고,
+    # 더 오래된 답은 위 180자를 그대로 둔다 — ReAct 입력은 루프의 매 LLM 호출마다 다시 실리므로
+    # 늘어나는 양을 한 건으로 묶어 비용 증가에 상한을 둔다. 넘치면 가운데를 줄인다(truncate_middle).
+    history_last_assistant_message_max_chars: int = Field(
+        default=1000,
+        ge=40,
+        le=8000,
+        description="현재 요청 바로 앞 assistant 답의 최대 문자 수. 넘으면 앞·끝을 남기고 가운데를 줄임(#451).",
     )
     history_transcript_max_chars: int = Field(
-        default=1200,
+        # 기본 4건(오래된 답 180 + 사용자 280 + 직전 답 1000 + 사용자 280)과 역할 표지가 들어가는 크기.
+        # 1200이면 직전 답이 길 때 앞선 메시지가 통째로 밀려난다.
+        default=2000,
         ge=200,
         le=500_000,
         description="[Recent conversation] 블록 전체 문자 상한. 초과 시 가장 오래된 메시지부터 제거.",
     )
 
 
-def _history_line_budget(
-    role: UserMessageContentRoleType,
+def _history_line(
+    message: Message,
     *,
+    is_last_assistant: bool,
     user_cap: int,
     assistant_cap: int,
-) -> int:
-    if role == UserMessageContentRoleType.ASSISTANT:
-        return assistant_cap
-    return user_cap
+    last_assistant_cap: int,
+) -> str:
+    text = message_content_text(message).strip()
+    if is_last_assistant:
+        body = truncate_middle(text, last_assistant_cap)
+    elif message.role == UserMessageContentRoleType.ASSISTANT:
+        body = truncate_end(text, assistant_cap)
+    else:
+        body = truncate_end(text, user_cap)
+    return f"{role_short_label(message.role)}: {body}"
 
 
 def _contextual_user_query(
@@ -415,17 +466,30 @@ def _contextual_user_query(
     user_message_max_chars: int,
     assistant_message_max_chars: int,
     transcript_max_chars: int,
+    last_assistant_message_max_chars: int,
 ) -> str:
+    """서브 에이전트(ReAct)에 넘길 질문을 최근 대화와 현재 요청으로 만든다.
+
+    히스토리는 transcript(SQLite)가 저장한 본문 그대로다 — 최상위
+    ``finus_reasoning_trace_agent``가 역치환하기 **전**의 응답을 저장하므로 계좌 금액·수량은
+    이전 턴의 자리표시자로 남아 있고, 이 함수는 그것을 되돌리지 않는다(#451).
+    """
     transcript_messages = [message for message in chat_request.messages if not is_memory_system_message(message)]
     recent = transcript_messages[-max_history_messages:]
     if len(recent) <= 1:
         return latest_user_plain_text(chat_request.messages)
 
     def render(msgs: list[Message]) -> str:
+        last_assistant = _last_assistant_index(msgs)
         return "\n".join(
-            f"{role_short_label(message.role)}: "
-            f"{truncate_end(message_content_text(message).strip(), _history_line_budget(message.role, user_cap=user_message_max_chars, assistant_cap=assistant_message_max_chars))}"
-            for message in msgs
+            _history_line(
+                message,
+                is_last_assistant=index == last_assistant,
+                user_cap=user_message_max_chars,
+                assistant_cap=assistant_message_max_chars,
+                last_assistant_cap=last_assistant_message_max_chars,
+            )
+            for index, message in enumerate(msgs)
         )
 
     history = render(recent)
@@ -458,6 +522,7 @@ async def fe_branch(config: FeBranchConfig, builder: Builder):
             config.history_message_max_chars,
             config.history_assistant_message_max_chars,
             config.history_transcript_max_chars,
+            config.history_last_assistant_message_max_chars,
         )
         return await _run_with_gate(
             inner=inner,
@@ -486,10 +551,18 @@ class FinusSupervisorAgentConfig(FunctionBaseConfig, name="finus_supervisor_agen
 def _format_history(messages: list[Message], max_msgs: int, per_msg_max: int) -> str:
     user_cap = min(per_msg_max * 2, 1200)
     recent = messages_without_memory(messages)[-max_msgs:]
+    # 직전 답은 같은 한도 안에서 끝을 남긴다(#451) — 추가 제안에 대한 "응"을 라우팅하려면
+    # 제안이 놓인 답의 끝이 보여야 한다. 한도를 늘리지 않으므로 라우팅 입력 길이는 그대로다.
+    last_assistant = _last_assistant_index(recent)
     lines = [
-        f"{role_short_label(m.role)}: "
-        f"{truncate_end(message_content_text(m).strip(), user_cap if m.role == UserMessageContentRoleType.USER else per_msg_max)}"
-        for m in recent
+        _history_line(
+            m,
+            is_last_assistant=index == last_assistant,
+            user_cap=user_cap,
+            assistant_cap=per_msg_max,
+            last_assistant_cap=per_msg_max,
+        )
+        for index, m in enumerate(recent)
     ]
     return "\n".join(lines)
 
