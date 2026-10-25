@@ -364,6 +364,9 @@ def build_handler(rt: dict[str, Any], level: str):
         headers = {"content-type": "application/json", "conversation-id": cid}
         if (uid := nat_user_id_for_conversation(cid)) is not None:
             headers["x-user-id"] = uid
+        # 사용자 발화 금액 헤더(#468) — HTTP 경로와 같은 헬퍼로 채운다. 구버전 backend면 없다.
+        if (amount_headers := getattr(llm, "nat_input_amount_headers", None)) is not None:
+            headers.update(amount_headers(user_msg))
         state = ContextState()
         attrs = RequestAttributes()
         attrs._request.headers = Headers(headers=headers)

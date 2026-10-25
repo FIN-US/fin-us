@@ -30,6 +30,10 @@ KIS MCP이므로 여기서도 되돌리는 것이 맞다 — 다만 무조건 �
 숫자가 되어 조용한 오주문이 가능해지므로, :func:`restore_params_for_kis`가 종류 검사를
 함께 건다. 근거는 그 함수의 docstring에 있다.
 
+조회 인자도 같은 함수가 되돌린다(#468). 순위 TR 가격 범위에 실린 **사용자 발화 금액** 자리표시자는
+backend가 같은 요청의 헤더로 보낸 상자(:data:`REQUEST_INPUT_AMOUNTS`)에서 원값을 찾고, 응답이 그 값을
+되비치면 :func:`mask_lookup_param_echo`가 다시 가린다. 외부 LLM은 여전히 자리표시자만 본다.
+
 ## ContextVar 방향성
 
 `DATA_TOOL_LEDGER`와 같은 제약을 받는다 — `ContextVar.set()`은 LangGraph의
@@ -63,6 +67,7 @@ import os
 import re
 from collections.abc import Mapping
 from contextvars import ContextVar
+from decimal import Decimal
 from typing import Any, NamedTuple
 
 from .pii_mask import _FALLBACK_LABEL, _Counter, mask_pii
@@ -79,6 +84,21 @@ if _DEBUG_LOG_ENABLED:
 # 요청 하나 동안 누적되는 {자리표시자: 원값} 박스. 최상위 에이전트가 심고 도구가 채운다.
 # None은 "박스가 없다"는 뜻이며, 그때의 동작은 mask_tool_result docstring 참고.
 PII_MAPPING: ContextVar[dict[str, str] | None] = ContextVar("PII_MAPPING", default=None)
+
+# 이 요청의 **사용자 발화**에서 backend가 가린 금액 {자리표시자: 원문} (#468). backend `llm_chat`이
+# 마스킹한 매핑 중 금액 종류만 :data:`INPUT_AMOUNTS_HEADER`로 실려 오고, 최상위 에이전트가
+# :func:`input_amounts_from_header`로 걸러 심는다. **조회 인자 복원 전용이다** — 응답 역치환
+# (:func:`unmask_response`)과 저장·주문 경로는 이 상자를 보지 않는다. 근거는
+# :func:`restore_params_for_kis`의 "조회 조건 인자" 절.
+REQUEST_INPUT_AMOUNTS: ContextVar[dict[str, str] | None] = ContextVar("REQUEST_INPUT_AMOUNTS", default=None)
+
+# backend `_llm_nat_chat`이 위 매핑을 싣는 HTTP 헤더. backend/ai/llm.py의 같은 이름 상수와 짝이다
+# (프로세스가 달라 import로 공유하지 않는다 — 자리표시자 정규식과 같은 제약).
+INPUT_AMOUNTS_HEADER = "x-finus-input-amounts"
+# 헤더 하나에 받는 상한. 사용자 발화 한 건의 금액 개수로는 넉넉하다. 넘으면 전부 버린다 —
+# 일부만 받으면 어느 것이 빠졌는지 모른 채 조회가 반쯤 맞게 나간다.
+_INPUT_AMOUNTS_MAX_ENTRIES = 32
+_INPUT_AMOUNT_MAX_CHARS = 64
 
 
 # ---------------------------------------------------------------------------
@@ -166,6 +186,9 @@ _KIS_ACCOUNT_KEYS = frozenset({"cano", "acnt_prdt_cd", "acnt_no"})
 _KIS_META_KEYS = frozenset({
     "ok", "success", "api_type", "message", "execution_time", "temp_dir", "venv_used",
     "cleanup_success", "tool", "tool_name", "hint",
+    # 자리표시자 복원 거부 목록(finus_api의 kis_param_placeholder_rejected) — 필드 이름과 사유 코드뿐이다.
+    # 가리면 "fid_input_price_2"의 "2"가 자리표시자가 되어 어느 인자가 막혔는지 읽을 수 없다(#468).
+    "rejected",
 })
 # 래퍼(finus_api._kis_envelope_failure, #446)가 만든 최상위 오류 객체에만 있는 분류·HTTP 상태 키.
 # 최상위에서만 건너뛴다 — KIS 응답 행 안의 같은 이름 필드(``{"reason": "12345678"}``)는 계속 가린다.
@@ -317,6 +340,43 @@ _SCOPED_PLACEHOLDER_RE = re.compile(
 def install_mapping_box() -> dict[str, str]:
     """요청 하나짜리 매핑 박스를 만들어 돌려준다. 호출자가 :data:`PII_MAPPING`에 심는다."""
     return {}
+
+
+def input_amounts_from_header(raw: str | None, user_text: str) -> dict[str, str]:
+    """:data:`INPUT_AMOUNTS_HEADER` 값을 이 요청의 사용자 발화 금액 매핑으로 거른다 (#468).
+
+    남기는 것은 **이번 요청의 최신 사용자 발화(*user_text*)에 실제로 나오는 금액 자리표시자**뿐이다.
+    헤더는 backend가 그 발화를 마스킹하며 만든 매핑이라 원래 그것만 담기지만, 여기서 다시 묶어 둔다 —
+    대화 기록에 남은 이전 턴의 자리표시자는 발화에 없으므로 복원 대상이 되지 않는다.
+
+    형식이 어긋나면(JSON 아님, 개수·길이 초과, 금액이 아닌 종류) 빈 매핑을 돌려준다. 그러면 조회
+    인자의 자리표시자는 ``no_mapping_in_this_request``로 거부된다 — 원값을 지어내지 않는 쪽이다.
+    로그에는 원값을 남기지 않는다.
+    """
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        logger.warning("%s 헤더가 JSON이 아니어서 버렸습니다", INPUT_AMOUNTS_HEADER)
+        return {}
+    if not isinstance(parsed, dict) or len(parsed) > _INPUT_AMOUNTS_MAX_ENTRIES:
+        logger.warning("%s 헤더 모양이 어긋나 버렸습니다", INPUT_AMOUNTS_HEADER)
+        return {}
+    present = {m.group(0) for m in _SCOPED_PLACEHOLDER_RE.finditer(user_text or "")}
+    amounts: dict[str, str] = {}
+    for placeholder, value in parsed.items():
+        match = _SCOPED_PLACEHOLDER_RE.fullmatch(str(placeholder))
+        if (
+            match is None or match.group(1) != "AMOUNT"
+            or not isinstance(value, str) or not value.strip()
+            or len(value) > _INPUT_AMOUNT_MAX_CHARS
+        ):
+            logger.warning("%s 헤더 항목 모양이 어긋나 헤더 전체를 버렸습니다", INPUT_AMOUNTS_HEADER)
+            return {}
+        if placeholder in present:
+            amounts[placeholder] = value
+    return amounts
 
 
 def mask_tool_result(
@@ -577,8 +637,156 @@ def _as_kis_number(value: str) -> str | None:
     return core
 
 
+# ---------------------------------------------------------------------------
+# 조회 조건 인자 (#468)
+# ---------------------------------------------------------------------------
+
+# 자리표시자를 받는 **조회** 인자 → 허용 종류. 주문 쪽(:data:`_PARAM_KIND_BY_SUFFIX`)과 달리 정확한
+# 이름만 둔다(fail-closed). 시장 전체 순위 TR(market_cap·volume_rank·fluctuation·volume_power)의
+# 가격 범위가 사용자 발화의 "30만원 이하" 같은 조건이 실리는 자리이고, 단위는 원이다
+# (finus_api._KIS_TRADING_TOOL_GUIDE의 #441 근거). 마지막 마디("1"·"2")로는 판정할 수 없어
+# 주문 표에 넣지 않았다 — 넣으면 ``*_1``·``*_2``로 끝나는 모든 필드가 금액을 받게 된다.
+# 갱신 책임: 다른 조회 TR의 금액 조건 인자를 쓰게 되면 여기에 이름을 더한다. 빠뜨리면 그 인자의
+# 자리표시자는 ``field_does_not_accept_placeholders``로 거부된다(관측 가능, 잘못된 값은 나가지 않는다).
+_LOOKUP_PARAM_KIND: dict[str, str] = {
+    "FID_INPUT_PRICE_1": "AMOUNT",  # 가격 하한(이 가격 이상)
+    "FID_INPUT_PRICE_2": "AMOUNT",  # 가격 상한(이 가격 이하)
+}
+
+# 원 표지. 앞표지 ₩·￦·KRW, 뒷표지 원·KRW·₩ — pii_mask의 _CUR_PREFIX·_CUR_SUFFIX와 같은 집합이다.
+_WON_PREFIX_RE = re.compile(r"^(?:[₩￦]|KRW)[ \t]?")
+_WON_SUFFIX_RE = re.compile(r"[ \t]?(?:원|KRW|[₩￦])$")
+# 자리 구분 없는 숫자 또는 3자리 콤마 마디. "30,0000"처럼 마디가 어긋난 콤마는 받지 않는다.
+_PLAIN_NUMBER_RE = re.compile(r"(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?")
+# 만 미만 자리의 한글 단위 체인: "3천", "1천5백", "3천500", "천"(=1천). 단위 앞 숫자는 한 자리다.
+_SUB_MAN_RE = re.compile(r"(?:([1-9])?천)?(?:([1-9])?백)?(?:([1-9])?십)?(\d{1,3})?")
+_BIG_UNITS = (("조", 10**12), ("억", 10**8), ("만", 10**4))
+
+
+def _sub_man_value(segment: str, *, allow_decimal: bool) -> Decimal | None:
+    """만 미만 자리 한 마디("30"·"1,800"·"1.5"·"3천500")의 값. 읽을 수 없으면 ``None``."""
+    if _PLAIN_NUMBER_RE.fullmatch(segment):
+        if "." in segment and not allow_decimal:
+            return None
+        return Decimal(segment.replace(",", ""))
+    match = _SUB_MAN_RE.fullmatch(segment)
+    if match is None or not any(u in segment for u in "천백십"):
+        return None
+    thousand, hundred, ten, tail = match.groups()
+    total, smallest = 0, None
+    for digit, unit, marker in ((thousand, 1000, "천"), (hundred, 100, "백"), (ten, 10, "십")):
+        if marker in segment:
+            total += int(digit or 1) * unit
+            smallest = unit
+    if tail is not None:
+        # "3천1500"처럼 꼬리가 마지막 단위 자릿수를 넘으면 어디에 붙는지 애매하다 — 거부한다.
+        if smallest is None or int(tail) >= smallest:
+            return None
+        total += int(tail)
+    return Decimal(total)
+
+
+def _as_kis_lookup_amount(value: str) -> str | None:
+    """조회 조건 금액 원문을 KIS 가격 인자(원 단위 정수 문자열)로 바꾼다. 애매하면 ``None`` (#468).
+
+    사용자 발화의 금액은 "30만원"처럼 한글 단위로 오는 일이 많아, 주문 쪽 :func:`_as_kis_number`
+    (``원``·콤마만 벗긴다)로는 대부분 거부된다. 그래서 **아라비아 숫자 + 만·억·조(와 천·백·십)**
+    표기만 해석한다:
+
+    - ``"300,000원"``·``"300000원"``·``"₩300,000"``·``"300 KRW"`` → 그대로 숫자
+    - ``"30만원"``·``"30만 원"`` → 300000, ``"1.5억원"`` → 150000000, ``"3천만원"`` → 30000000,
+      ``"1천5백만원"`` → 15000000, ``"2만5천원"`` → 25000, ``"9조1800억원"`` → 9180000000000,
+      ``"1억 2천만원"``(큰 단위 뒤 띄어쓰기) → 120000000
+
+    **거부한다:** 한글 수사(``"삼십만원"``), 라틴 크기(``"3.2M원"``), 점·공백 자리 구분
+    (``"3.000.000원"``·``"3 000 000원"``), 어긋난 콤마 마디(``"30,0000원"``), 아래 단위 자리가 만을
+    넘는 표기(``"1억20000만원"``), 소수가 가장 큰 단위가 아닌 곳에 오거나 아래 단위와 섞인 표기
+    (``"1.5억3천만원"``), 정수가 되지 않는 값(``"1.23456만원"``), 0. 모두 한 가지로 읽히지 않거나
+    잘못 읽으면 자릿수가 어긋나는 표기다 — 조회가 엉뚱한 범위로 나가 그럴듯한 답이 되는 것보다 거부해
+    에이전트가 "조건을 적용하지 못했다"고 말하게 하는 편이 낫다.
+    """
+    text = _WON_SUFFIX_RE.sub("", _WON_PREFIX_RE.sub("", value.strip()), count=1)
+    # 큰 단위 뒤 띄어쓰기("1억 2천만원")만 허용한다. 그 밖의 공백은 자리 구분인지 낱말 경계인지 모른다.
+    text = re.sub(r"(?<=[조억만])[ \t]+", "", text)
+    if not text or any(ch.isspace() for ch in text):
+        return None
+
+    if _PLAIN_NUMBER_RE.fullmatch(text):
+        total = Decimal(text.replace(",", ""))
+    else:
+        segments: list[tuple[str, int]] = []
+        rest = text
+        for unit, scale in _BIG_UNITS:
+            head, sep, tail = rest.partition(unit)
+            if sep:
+                if not head:
+                    return None
+                segments.append((head, scale))
+                rest = tail
+        if rest:
+            segments.append((rest, 1))
+        if not segments or (len(segments) == 1 and segments[0][1] == 1 and not any(u in text for u in "천백십")):
+            return None
+        total = Decimal(0)
+        for index, (segment, scale) in enumerate(segments):
+            # 소수는 가장 큰 단위 하나뿐일 때만("1.5억") 받는다.
+            seg_value = _sub_man_value(segment, allow_decimal=(len(segments) == 1))
+            if seg_value is None:
+                return None
+            # 가장 큰 단위 아래 자리는 다음 단위를 넘을 수 없다("1억20000만"은 애매).
+            if index > 0 and seg_value >= 10**4:
+                return None
+            total += seg_value * scale
+
+    if total <= 0 or total != total.to_integral_value():
+        return None
+    return str(int(total))
+
+
+def _merged_request_mapping() -> dict[str, str]:
+    """조회 인자 복원에 쓰는 이 요청의 매핑 — 도구 결과 박스와 사용자 발화 금액을 합친다."""
+    return {**(REQUEST_INPUT_AMOUNTS.get() or {}), **(PII_MAPPING.get() or {})}
+
+
+def mask_lookup_param_echo(text: str, params: Mapping[str, Any] | None) -> str:
+    """KIS 응답이 되비친 조회 조건 인자의 복원값을 다시 자리표시자로 가린다 (#468).
+
+    Kis Trading MCP는 응답 봉투에 받은 ``params``를 그대로 되비친다(``data.params``, 실패 시 오류
+    ``detail``). 순위 TR은 공개 시세라 마스킹하지 않으므로(:data:`PUBLIC_KIS_QUOTE_APIS`), 그대로 두면
+    방금 복원한 사용자 금액(``"fid_input_price_2":"300000"``)이 Observation으로 외부 LLM에 돌아간다.
+
+    판정은 **필드 이름 기준**이다. :data:`_LOOKUP_PARAM_KIND`의 인자 중 값이 이 요청 매핑의 금액을
+    정규화한 값과 같은 것을, 응답 텍스트에서 ``필드 : 값`` 모양으로 나타날 때만 자리표시자로 바꾼다.
+    JSON 중첩 문자열(``\\"fid_input_price_2\\":\\"300000\\"``)과 파이썬 repr도 같은 정규식으로 잡는다.
+    순위 행의 시세(``stck_prpr`` 등)는 필드가 달라 건드리지 않는다 — 공개 시세는 원래 보인다.
+    """
+    if not text or not isinstance(params, Mapping):
+        return text
+    mapping = _merged_request_mapping()
+    if not mapping:
+        return text
+    for field, value in params.items():
+        if str(field).strip().upper() not in _LOOKUP_PARAM_KIND or not isinstance(value, str) or not value:
+            continue
+        placeholder = next(
+            (
+                ph for ph, original in mapping.items()
+                if placeholder_kind(ph) == "AMOUNT" and _as_kis_lookup_amount(original) == value
+            ),
+            None,
+        )
+        if placeholder is None:
+            continue
+        pattern = re.compile(
+            r"(?i)(\b" + re.escape(str(field).strip()) + r"\\*[\"']?\s*[:=]\s*\\*[\"']?)"
+            + re.escape(value) + r"(?![\d.])"
+        )
+        text = pattern.sub(lambda m, ph=placeholder: m.group(1) + ph, text)
+    return text
+
+
 def _restore_one_param(
-    field: str, value: str, box: dict[str, str],
+    field: str, value: str, box: dict[str, str], input_amounts: Mapping[str, str] | None = None,
 ) -> tuple[str, ParamRejection | None]:
     """파라미터 값 하나를 복원한다. 거부하면 *value*를 그대로 돌려주고 사유를 함께 낸다."""
     matches = list(_SCOPED_PLACEHOLDER_RE.finditer(value))
@@ -593,7 +801,8 @@ def _restore_one_param(
 
     placeholder = stripped
     kind = matches[0].group(1)
-    expected = _expected_kind(field)
+    lookup_kind = _LOOKUP_PARAM_KIND.get(field.strip().upper())
+    expected = lookup_kind or _expected_kind(field)
     if expected is None:
         # 위 _PARAM_KIND_BY_SUFFIX 주석의 fail-closed 지점. ``CANO``·``ACNT_PRDT_CD``
         # 같은 계좌 필드도 여기로 떨어진다 — mcp-trading이 ``KIS_ACCOUNT_NO`` env로
@@ -608,6 +817,18 @@ def _restore_one_param(
         return value, ParamRejection(field, f"expected_{expected}_placeholder_got_{kind}", placeholder)
 
     original = box.get(placeholder)
+    if lookup_kind is not None:
+        # 조회 조건 인자는 사용자 발화의 금액도 받는다(#468) — "30만원 이하"의 30만원은 backend가
+        # 가려 NAT 박스에 없고, 이 요청 헤더로 온 상자에만 있다. 이전 턴·다른 요청의 자리표시자는
+        # 두 상자 어디에도 없으므로 아래에서 그대로 거부된다.
+        if original is None:
+            original = (input_amounts or {}).get(placeholder)
+        if original is None:
+            return value, ParamRejection(field, "no_mapping_in_this_request", placeholder)
+        number = _as_kis_lookup_amount(original)
+        if number is None:
+            return value, ParamRejection(field, "restored_value_is_not_a_number", placeholder)
+        return number, None
     if original is None:
         # 낯선 scope(backend가 사용자 발화를 마스킹한 것)이거나 LLM이 지어낸 번호다.
         # 어느 쪽이든 원값이 **이 프로세스에** 없으므로 여기서 복원할 수 없다.
@@ -663,14 +884,32 @@ def restore_params_for_kis(
     *tool_name*·*api_type*은 거부 로그에만 쓴다. 한 요청에서 KIS 호출이 여러 번 나가면
     필드 이름과 사유만으로는 어느 호출이 막혔는지 짚을 수 없다 — 호출자가 이미 아는
     값이므로 받아서 함께 남긴다 (PR #364 리뷰).
+
+    ## 조회 조건 인자 (#468)
+
+    순위 TR의 가격 범위(:data:`_LOOKUP_PARAM_KIND`)는 같은 네 검사를 받되 두 가지가 다르다:
+
+    - 원값을 **사용자 발화 금액 상자**(:data:`REQUEST_INPUT_AMOUNTS`)에서도 찾는다. "30만원 이하
+      반도체 대형주"의 30만원은 backend `llm_chat`이 가려 외부 LLM은 ``<AMOUNT_…>``만 본다. 가리는
+      정책(#230)은 개인 금액 보호라 유지하고, 목적지가 KIS인 조회 인자에서만 되돌린다 — 주문 인자를
+      되돌리는 이 함수의 원칙 그대로다. 상자는 이번 요청의 발화에 나온 자리표시자만 담으므로 이전 턴의
+      것은 거부된다.
+    - 정규화는 :func:`_as_kis_lookup_amount`가 한다. 사용자는 "30만원"처럼 한글 단위로 말하므로
+      ``원``·콤마만 벗기는 주문 쪽 정규화로는 대부분 거부되기 때문이다. 그 함수도 애매한 표기는 거부한다.
+
+    주문 인자는 종전대로 도구 결과 박스(:data:`PII_MAPPING`)만 본다 — 사용자 발화 금액을 주문으로
+    되돌리는 것은 이 이슈의 범위가 아니고, 채팅 주문 자체가 막혀 있다(#380).
+
+    복원한 조회 값이 응답 되비침으로 LLM에 돌아가지 않게 하는 것은 :func:`mask_lookup_param_echo`다.
     """
     restored: dict[str, Any] = {}
     rejections: list[ParamRejection] = []
     box = PII_MAPPING.get() or {}
+    input_amounts = REQUEST_INPUT_AMOUNTS.get() or {}
 
     for field, value in params.items():
         if isinstance(value, str):
-            new_value, rejection = _restore_one_param(field, value, box)
+            new_value, rejection = _restore_one_param(field, value, box, input_amounts)
             if rejection is not None:
                 rejections.append(rejection)
             # 거부된 필드도 원값을 그대로 실어 둔다 — 호출자가 호출을 중단하므로 MCP까지

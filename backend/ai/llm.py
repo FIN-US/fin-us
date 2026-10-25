@@ -28,7 +28,7 @@ from backend.core.config import (
 )
 from backend.pii.egress import EgressPrompt, prepare_egress
 from backend.pii.mask import unmask_pii
-from backend.pii.registry import active_mapping
+from backend.pii.registry import active_mapping, live_values_in
 
 logger = logging.getLogger(__name__)
 
@@ -250,6 +250,33 @@ def _log_nat_response(resp: httpx.Response) -> None:
         )
 
 
+# 사용자 발화에서 가린 금액을 NAT에 넘기는 헤더 (#468). agents/src/finus_agents/pii_guard.py의
+# INPUT_AMOUNTS_HEADER와 같은 문자열이어야 한다(프로세스가 달라 import로 공유하지 않는다).
+NAT_INPUT_AMOUNTS_HEADER = "x-finus-input-amounts"
+
+
+def nat_input_amount_headers(masked_msg: str) -> dict[str, str]:
+    """NAT 요청에 실을 사용자 발화 금액 헤더. 실을 것이 없으면 빈 dict (#468).
+
+    "30만원 이하 반도체 대형주 추천해줘"는 `llm_chat`이 마스킹해 NAT(그리고 외부 LLM)에는
+    ``<AMOUNT_…> 이하 …``로 간다. 에이전트가 그 자리표시자를 순위 조회의 가격 인자에 넣으면 NAT이
+    KIS로 보내기 직전에 원값으로 되돌려야 하는데, 원값은 이 프로세스(`llm_chat` 지역 매핑과
+    등록소)에만 있다. 그래서 **같은 요청**에 원값을 함께 실어 보낸다.
+
+    - 금액 종류만 싣는다. 계좌번호·수량은 조회 조건으로 되돌릴 자리가 없으니 NAT에 넘길 이유도 없다.
+    - 이 발화(*masked_msg*)에 나온, 지금 살아 있는 매핑의 자리표시자만 싣는다(등록소의
+      :func:`live_values_in`). NAT은 이 값을 도구 인자 복원에만 쓰고 LLM 프롬프트에는 넣지 않는다.
+    - 헤더 값은 ASCII JSON이다(HTTP 헤더는 latin-1만 받는다 — 한글은 ``\\uXXXX``로 이스케이프된다).
+
+    NAT은 내부 서비스이고 이 헤더는 외부 LLM 경계를 넘지 않는다. 외부로 나가는 본문은 여전히
+    마스킹된 *masked_msg*뿐이다.
+    """
+    amounts = live_values_in(masked_msg, kind="AMOUNT")
+    if not amounts:
+        return {}
+    return {NAT_INPUT_AMOUNTS_HEADER: json.dumps(amounts, ensure_ascii=True)}
+
+
 async def _llm_nat_chat(user_msg: str, *, conversation_id: str | None = None) -> NatAnswer:
     url = f"{NAT_BASE_URL}/v1/chat/completions"
     cid = (conversation_id or NAT_CONVERSATION_ID).strip()
@@ -262,6 +289,7 @@ async def _llm_nat_chat(user_msg: str, *, conversation_id: str | None = None) ->
     user_id = nat_user_id_for_conversation(cid)
     if user_id is not None:
         headers["x-user-id"] = user_id
+    headers.update(nat_input_amount_headers(user_msg))
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as client:
             resp = await client.post(
