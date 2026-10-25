@@ -19,6 +19,8 @@ functions:
     llm_name: router_openai_llm
     max_history_messages: 12
     history_message_max_chars: 800
+    # router.yml과 같다 — 브랜치 이름을 못 읽으면 조회 전용 news_agent로 보낸다.
+    fallback_branch: news_agent
     branches:
       - name: trading_agent
         function_name: trading_branch_agent
