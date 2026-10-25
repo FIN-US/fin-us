@@ -20,3 +20,4 @@
 | `frontend_build_stamp.sh` | Unity 번들과 소스의 짝을 기록(`write`)·검사(`check`). 사용법은 [frontend/README.md](../frontend/README.md) |
 | `finus-nat-entrypoint.sh` | `finus-nat` 컨테이너 진입점 (MCP 의존성 확인, 메모리 설정에 맞는 config 선택) |
 | `_env.sh`, `_compose_up.sh` | 다른 스크립트가 불러 쓰는 공용 함수 |
+| `demo_rehearsal/` | 시연 영상 리허설. 채팅 장면을 실제 사용자 경로로 N회 돌려 장면별 통과율을 잰다(Python, 주문 가드 포함). 사용법은 [demo_rehearsal/README.md](demo_rehearsal/README.md) |

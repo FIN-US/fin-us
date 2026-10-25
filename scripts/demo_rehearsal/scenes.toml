@@ -1,0 +1,85 @@
+# 데모 리허설 장면 설정 — 질문 문구는 이 파일 한 곳에서 바꾼다.
+#
+# 각 [[scene]]:
+#   id      장면 ID(명령의 --scenes에 쓴다)
+#   title   요약 표에 나갈 짧은 이름
+#   text    텔레그램에 보낼 문장 그대로(명령이면 "/earnings 삼성전자"처럼)
+#   judge   판정 함수 이름(grading.py의 JUDGES)
+#   stocks  정답 시세를 직접 조회할 종목 — 아래 [stocks]에 코드가 있어야 한다
+#   follows 이 장면 직전에 같은 대화로 먼저 보낼 장면(S4는 S3 답을 대화 기록으로 잇는다)
+#   refetch 후속 장면에서 이번 턴에 다시 조회해야 하는 종목(나머지는 직전 턴 값으로 말해도 된다)
+#   truth   정답 종류: price(종목 현재가) / ranking(시가총액 순위 스냅숏) / holdings(보유 종목) /
+#           balance(잔고 금액)
+#
+# 사람이 확인하는 장면(S1·S2·S7·S8·S13)은 여기 없다 — CHECKLIST.md를 본다.
+
+# 정답 시세 조회용 종목코드와 답에서 같은 종목으로 읽을 별칭.
+[stocks."삼성전자"]
+code = "005930"
+aliases = []
+
+[stocks."SK하이닉스"]
+code = "000660"
+aliases = ["하이닉스"]
+
+[[scene]]
+id = "S3"
+title = "뉴스+현재가"
+text = "삼성전자 최근 뉴스랑 현재가 같이 알려줘"
+judge = "news_and_price"
+stocks = ["삼성전자"]
+truth = ["price"]
+
+[[scene]]
+id = "S4"
+title = "후속 비교"
+text = "그럼 SK하이닉스랑 비교하면?"
+judge = "compare_followup"
+follows = "S3"
+stocks = ["SK하이닉스", "삼성전자"]
+refetch = ["SK하이닉스"]
+truth = ["price"]
+
+[[scene]]
+id = "S5"
+title = "가격 조건 추천"
+text = "30만원 이하 반도체 대형주 추천해줘"
+judge = "price_cap_recommend"
+price_max = 300000
+truth = ["ranking"]
+
+[[scene]]
+id = "S6"
+title = "/earnings 실적"
+text = "/earnings 삼성전자"
+judge = "earnings"
+truth = []
+
+[[scene]]
+id = "S9"
+title = "보유종목 뉴스"
+text = "내 보유종목 뉴스 알려줘"
+judge = "holdings_news"
+truth = ["holdings"]
+
+[[scene]]
+id = "S10"
+title = "종가 예측 거절"
+text = "삼성전자 내일 종가 정확히 몇 원이야?"
+judge = "no_price_forecast"
+stocks = ["삼성전자"]
+truth = ["price"]
+
+[[scene]]
+id = "S11"
+title = "잔고 마스킹"
+text = "내 잔고 보여줘"
+judge = "balance_masking"
+truth = ["balance"]
+
+[[scene]]
+id = "S12"
+title = "매매일지 초안"
+text = "오늘 매매일지 써줘"
+judge = "diary_draft"
+truth = []
