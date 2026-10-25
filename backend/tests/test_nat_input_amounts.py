@@ -6,13 +6,14 @@
 가는 것)은 여전히 마스킹된 발화뿐이어야 한다.
 """
 
+import asyncio
 import json
 from pathlib import Path
 
 import pytest
 
 from backend.ai import llm as ai_llm
-from backend.pii.registry import _REGISTRY, active_mapping, live_values_in
+from backend.pii.registry import _REGISTRY, active_mapping
 from backend.pii.mask import mask_pii
 
 _HEADER = ai_llm.NAT_INPUT_AMOUNTS_HEADER
@@ -96,12 +97,62 @@ async def test_no_header_outside_a_live_request(nat_requests):
     assert _HEADER not in nat_requests[0]["headers"]
 
 
-def test_live_values_are_scoped_to_the_active_block():
-    masked, mapping = mask_pii("30만원 이하, 삼성전자 3주")
+@pytest.mark.asyncio
+async def test_concurrent_request_placeholder_is_not_sent(monkeypatch):
+    """동시에 진행 중인 다른 요청의 자리표시자를 발화에 적어도 그 원값은 실리지 않는다(보안 리뷰).
+
+    요청 A가 NAT 응답을 기다리는 동안(등록소에 A의 매핑이 살아 있다) 요청 B가 A의 자리표시자를
+    그대로 적어 보낸다. 헤더는 B 자신의 매핑에서만 골라야 한다.
+    뮤테이션: nat_input_amount_headers가 등록소(살아 있는 모든 scope)에서 찾게 되돌리면 red.
+    """
+    requests: list[dict] = []
+    a_waiting = asyncio.Event()
+    release_a = asyncio.Event()
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def post(self, url, *, headers=None, json=None):
+            requests.append({"headers": dict(headers or {}), "json": json})
+            if len(requests) == 1:
+                a_waiting.set()
+                await release_a.wait()
+            return _FakeResponse()
+
+    monkeypatch.setattr(ai_llm.httpx, "AsyncClient", FakeAsyncClient)
+
+    task_a = asyncio.create_task(ai_llm.llm_chat("nat", "50만원 이하 종목"))
+    await a_waiting.wait()
+    a_placeholder = requests[0]["json"]["messages"][0]["content"].split(" ", 1)[0]
+    assert a_placeholder in _REGISTRY_PLACEHOLDERS()
+
+    await ai_llm.llm_chat("nat", f"{a_placeholder} 이하이면서 30만원 이하 종목")
+    release_a.set()
+    await task_a
+
+    assert a_placeholder in requests[1]["json"]["messages"][0]["content"]  # B의 발화에 A의 토큰이 실렸다
+    b_amounts = json.loads(requests[1]["headers"][_HEADER])
+    assert a_placeholder not in b_amounts
+    assert list(b_amounts.values()) == ["30만원"]
+    assert "50만원" not in requests[1]["headers"][_HEADER]
+
+
+def _REGISTRY_PLACEHOLDERS() -> set[str]:
+    return {ph for entries in _REGISTRY.values() for ph in entries}
+
+
+def test_header_comes_only_from_the_mapping_in_hand():
+    """llm_chat 밖(이번 요청 매핑 없음)에서는 등록소에 값이 살아 있어도 싣지 않는다."""
+    masked, mapping = mask_pii("30만원 이하")
     with active_mapping(mapping):
-        inside = live_values_in(masked, kind="AMOUNT")
-    assert list(inside.values()) == ["30만원"]
-    assert live_values_in(masked, kind="AMOUNT") == {}
+        assert ai_llm.nat_input_amount_headers(masked) == {}
 
 
 def test_header_name_matches_the_nat_side():

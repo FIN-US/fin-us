@@ -26,12 +26,14 @@ from finus_agents.agents import FinusReasoningTraceAgentConfig, finus_reasoning_
 from finus_agents.finus_api import KisTradingMcpCallInput
 from finus_agents.pii_guard import (
     INPUT_AMOUNTS_HEADER,
+    KIS_PASSTHROUGH_TOOL,
     PII_MAPPING,
     REQUEST_INPUT_AMOUNTS,
     _as_kis_lookup_amount,
     input_amounts_from_header,
     install_mapping_box,
     mask_lookup_param_echo,
+    mask_tool_result,
     restore_params_for_kis,
 )
 from finus_agents.pii_mask import mask_pii
@@ -191,9 +193,38 @@ def test_lookup_amount_normalization(original, expected):
     "0원",
     "만원",
     "원",
+    # 보안 리뷰 탐침(r468/probe.py)
+    "1억2천",         # 1억2천만의 줄임말로도 읽힌다 — 글자대로면 100,002,000
+    "1억2천원",
+    "1억2000원",
+    "1조5천원",
+    "３０만원",       # 전각 숫자
+    "٣٠만원",         # 아랍-인도 숫자
+    "3０만원",        # 아스키 숫자 뒤에 전각 숫자가 섞임
+    "00030만원",      # 앞자리 0
+    "1천05만원",
+    "1e5",
+    "30만원 이하",
+    "30 만원",
 ])
 def test_ambiguous_amounts_are_refused(original):
     assert _as_kis_lookup_amount(original) is None
+
+
+@pytest.mark.parametrize(("original", "expected"), [
+    # 만 뒤 꼬리는 만 아래 단위가 없어 줄여 말할 자리가 없다 — 글자대로 읽는다.
+    ("2만5천", "25000"),
+    ("1만5000원", "15000"),
+    ("1억2천만5천원", "120005000"),
+    ("십만원", "100000"),
+    ("₩ 30만", "300000"),
+    ("  30만원  ", "300000"),
+    ("0.5만원", "5000"),
+    ("1.0만원", "10000"),
+    ("1조", "1000000000000"),
+])
+def test_probe_amounts_that_read_one_way(original, expected):
+    assert _as_kis_lookup_amount(original) == expected
 
 
 # ---------------------------------------------------------------------------
@@ -219,6 +250,21 @@ class TestHeader:
     def test_malformed_header_yields_empty_box(self, raw):
         text = " ".join(f"<AMOUNT_abcdef_{i}>" for i in range(1, 40))
         assert input_amounts_from_header(raw, text) == {}
+
+    def test_any_parse_failure_yields_empty_box(self, monkeypatch):
+        """ValueError 밖의 예외(깊은 중첩 JSON의 RecursionError 등)도 요청을 죽이지 않고 빈 상자다.
+
+        뮤테이션: _request_input_amounts의 파싱 부분을 try 밖으로 빼면 RecursionError가 올라와 red.
+        """
+        masked, amounts = _masked_utterance()
+        deep = "[" * 100000 + "]" * 100000
+        monkeypatch.setattr(
+            agents_mod, "Context",
+            SimpleNamespace(get=lambda: SimpleNamespace(metadata=SimpleNamespace(headers={INPUT_AMOUNTS_HEADER: deep}))),
+        )
+        request = ChatRequestOrMessage(messages=[{"role": "user", "content": masked}])
+
+        assert agents_mod._request_input_amounts(request) == {}
 
     async def test_trace_agent_installs_box_from_request_header(self, monkeypatch):
         """최상위 에이전트가 헤더를 읽어 상자를 심고, 요청이 끝나면 걷는다.
@@ -336,6 +382,134 @@ def test_echo_masking_leaves_other_fields_alone(request_boxes):
 
     assert placeholder in out
     assert '\\"stck_prpr\\": \\"300000\\"' in out  # 같은 숫자라도 시세 필드는 공개 데이터라 남는다
+
+
+@pytest.fixture
+def cap_placeholder(request_boxes):
+    _, amounts = request_boxes
+    _, header_amounts = _masked_utterance()
+    amounts.update(header_amounts)
+    return next(iter(header_amounts))
+
+
+class TestEchoForms:
+    """되비침 표기가 달라도 같은 정규화값이면 가리고, 결과 JSON은 유효해야 한다(보안 리뷰 4)."""
+
+    @pytest.mark.parametrize("raw", [
+        {"fid_input_price_2": 300000},          # 숫자 타입 — 따옴표 없이 바꾸면 JSON이 깨진다
+        {"fid_input_price_2": "300000"},
+        {"fid_input_price_2": "300000.0"},
+        {"fid_input_price_2": "300,000"},
+        {"fid_input_price_2": ["300000"]},
+        {"fid_input_price_2": [300000]},
+        {"FID_INPUT_PRICE_2": "300000"},
+    ])
+    def test_json_forms_are_masked_and_stay_valid(self, cap_placeholder, raw):
+        """뮤테이션: 숫자 타입에 따옴표를 씌우지 않으면 json.loads가 실패해 red."""
+        text = json.dumps({"params": raw, "rows": [{"stck_prpr": "300000"}]})
+
+        out = mask_lookup_param_echo(text, {"fid_input_price_2": "300000"})
+
+        parsed = json.loads(out)
+        echoed = next(iter(parsed["params"].values()))
+        assert (echoed[0] if isinstance(echoed, list) else echoed) == cap_placeholder
+        assert parsed["rows"][0]["stck_prpr"] == "300000"  # 시세 필드는 공개 데이터라 남는다
+
+    @pytest.mark.parametrize("raw", [
+        json.dumps({"detail": json.dumps({"params": {"fid_input_price_2": 300000}})}),
+        json.dumps({"detail": json.dumps(json.dumps({"params": {"fid_input_price_2": "300000"}}))}),
+    ])
+    def test_nested_json_strings_stay_valid(self, cap_placeholder, raw):
+        out = mask_lookup_param_echo(raw, {"fid_input_price_2": "300000"})
+
+        inner = json.loads(json.loads(out)["detail"])
+        if isinstance(inner, str):
+            inner = json.loads(inner)
+        assert inner["params"]["fid_input_price_2"] == cap_placeholder
+
+    @pytest.mark.parametrize("raw", [
+        "{'FID_INPUT_PRICE_2': '300000'}",
+        "{'fid_input_price_2': 300000}",
+        "fid_input_price_2=300000&x=1",
+    ])
+    def test_text_forms_are_masked(self, cap_placeholder, raw):
+        out = mask_lookup_param_echo(raw, {"fid_input_price_2": "300000"})
+        assert "300000" not in out and cap_placeholder in out
+
+    def test_different_value_in_the_same_field_is_left_alone(self, cap_placeholder):
+        text = json.dumps({"params": {"fid_input_price_2": "3000000"}})
+        assert mask_lookup_param_echo(text, {"fid_input_price_2": "300000"}) == text
+
+
+class TestEchoOnFailureAndPrivatePaths:
+    """오류 봉투 detail과 비공개 TR 경로에서도 복원값이 되비쳐 나가지 않는다(보안 리뷰 5)."""
+
+    @pytest.mark.parametrize("envelope", [
+        # call_failed — 예제 함수 실행 실패, 서버가 params와 stderr를 되비친다.
+        lambda p: {"ok": True, "data": {"success": False, "api_type": "market_cap", "params": p,
+                                         "error": "TypeError: bad argument"}},
+        # kis_rejected — 성공 봉투인데 data에 KIS 거절 표지가 있다.
+        lambda p: {"ok": True, "data": {"success": True, "api_type": "market_cap", "params": p,
+                                         "data": "Error in response: 200 rt_cd : 1 / msg_cd : OPSQ2002 / msg1 : ERROR INVALID INPUT"}},
+    ])
+    async def test_wrapper_error_detail_is_masked(self, request_boxes, monkeypatch, envelope):
+        _, amounts = request_boxes
+        _, header_amounts = _masked_utterance()
+        amounts.update(header_amounts)
+        placeholder = next(iter(header_amounts))
+
+        async def fake_remote(**kwargs):
+            return json.dumps(envelope(kwargs["arguments"]["params"]), ensure_ascii=False)
+
+        monkeypatch.setattr(finus_api, "_mcp_call_tool_remote", fake_remote)
+
+        observation = await _call_rank({"fid_input_price_2": placeholder})
+
+        error = json.loads(observation)
+        assert error["error"] == "kis_api_failed"
+        assert error["detail"]["params"]["fid_input_price_2"] == placeholder
+        assert "300000" not in observation
+
+    async def test_private_tr_path_is_masked(self, request_boxes, echoing_remote):
+        """공개 시세 목록 밖 TR(volume_power)은 계좌 TR처럼 가리지만, params 되비침은 계좌 필드만 가린다 —
+        그래서 여기서도 재마스킹이 있어야 원값이 남지 않는다."""
+        _, amounts = request_boxes
+        _, header_amounts = _masked_utterance()
+        amounts.update(header_amounts)
+        placeholder = next(iter(header_amounts))
+        config = finus_api.FinusAccountBalanceReadonlyConfig()
+        tool_name, arguments = finus_api._prepare_kis_trading_mcp_call(
+            KisTradingMcpCallInput(tool_name="domestic_stock", api_type="volume_power",
+                                   params={"fid_input_price_2": placeholder}), config,
+        )
+
+        observation = await finus_api._call_kis_mcp_and_record(tool_name, arguments, config)
+
+        assert echoing_remote[0]["params"]["fid_input_price_2"] == "300000"
+        assert json.loads(observation)["data"]["params"]["fid_input_price_2"] == placeholder
+        assert "300000" not in observation
+
+
+class TestRejectedKey:
+    """거부 목록 키는 최상위 래퍼 오류에서만 그대로 둔다(보안 리뷰 1)."""
+
+    def test_rejected_inside_a_kis_row_is_still_masked(self):
+        """뮤테이션: rejected를 _KIS_META_KEYS로 되돌리면 행 안의 숫자가 평문으로 남아 red."""
+        result = json.dumps({"ok": True, "data": {"data": json.dumps([{"rejected": "1234567890"}])}})
+        box = install_mapping_box()
+        token = PII_MAPPING.set(box)
+        try:
+            observation = mask_tool_result(KIS_PASSTHROUGH_TOOL, result, kis_api=("domestic_stock", "inquire_balance"))
+        finally:
+            PII_MAPPING.reset(token)
+        assert "1234567890" not in observation
+
+    async def test_top_level_rejection_list_stays_readable(self, request_boxes, echoing_remote):
+        _, other = _masked_utterance()
+
+        observation = await _call_rank({"fid_input_price_2": next(iter(other))})
+
+        assert json.loads(observation)["rejected"][0]["field"] == "fid_input_price_2"
 
 
 def test_tool_guide_tells_agents_to_pass_placeholders_verbatim():

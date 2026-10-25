@@ -186,13 +186,13 @@ _KIS_ACCOUNT_KEYS = frozenset({"cano", "acnt_prdt_cd", "acnt_no"})
 _KIS_META_KEYS = frozenset({
     "ok", "success", "api_type", "message", "execution_time", "temp_dir", "venv_used",
     "cleanup_success", "tool", "tool_name", "hint",
-    # 자리표시자 복원 거부 목록(finus_api의 kis_param_placeholder_rejected) — 필드 이름과 사유 코드뿐이다.
-    # 가리면 "fid_input_price_2"의 "2"가 자리표시자가 되어 어느 인자가 막혔는지 읽을 수 없다(#468).
-    "rejected",
 })
 # 래퍼(finus_api._kis_envelope_failure, #446)가 만든 최상위 오류 객체에만 있는 분류·HTTP 상태 키.
 # 최상위에서만 건너뛴다 — KIS 응답 행 안의 같은 이름 필드(``{"reason": "12345678"}``)는 계속 가린다.
-_KIS_WRAPPER_ERROR_KEYS = frozenset({"reason", "http_status"})
+# ``rejected``는 자리표시자 복원 거부 목록(finus_api의 kis_param_placeholder_rejected)이다 — 필드 이름과
+# 사유 코드뿐이라 가리면 "fid_input_price_2"의 "2"가 자리표시자가 되어 어느 인자가 막혔는지 읽을 수
+# 없다(#468). 행 안의 같은 이름 필드까지 풀리지 않게 메타 키가 아니라 여기 둔다.
+_KIS_WRAPPER_ERROR_KEYS = frozenset({"reason", "http_status", "rejected"})
 # KIS 메시지 코드(영문 대문자 접두 + 숫자: OPSQ2002, EGW00201, APBK0013 …). 이 모양인 ``msg_cd``만
 # 남긴다 — 텍스트 마스킹에 맡기면 ``OPSQ<AMOUNT_…>``가 되어 유량 초과와 입력 오류를 가를 수 없다.
 _KIS_MSG_CD_KEY = "msg_cd"
@@ -656,11 +656,16 @@ _LOOKUP_PARAM_KIND: dict[str, str] = {
 # 원 표지. 앞표지 ₩·￦·KRW, 뒷표지 원·KRW·₩ — pii_mask의 _CUR_PREFIX·_CUR_SUFFIX와 같은 집합이다.
 _WON_PREFIX_RE = re.compile(r"^(?:[₩￦]|KRW)[ \t]?")
 _WON_SUFFIX_RE = re.compile(r"[ \t]?(?:원|KRW|[₩￦])$")
-# 자리 구분 없는 숫자 또는 3자리 콤마 마디. "30,0000"처럼 마디가 어긋난 콤마는 받지 않는다.
-_PLAIN_NUMBER_RE = re.compile(r"(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?")
-# 만 미만 자리의 한글 단위 체인: "3천", "1천5백", "3천500", "천"(=1천). 단위 앞 숫자는 한 자리다.
-_SUB_MAN_RE = re.compile(r"(?:([1-9])?천)?(?:([1-9])?백)?(?:([1-9])?십)?(\d{1,3})?")
+# 자리 구분 없는 숫자 또는 3자리 콤마 마디. "30,0000"처럼 마디가 어긋난 콤마, "00030"처럼 앞자리 0은
+# 받지 않는다("0.5"는 받는다). re.ASCII — 파이썬 \d는 전각("３０")·아랍 숫자("٣٠")까지 받고 Decimal·int도
+# 그것을 읽으므로, 아라비아 숫자만으로 좁히지 않으면 사람이 보기에 숫자가 아닌 표기가 금액이 된다.
+_PLAIN_NUMBER_RE = re.compile(r"(?:[1-9]\d{0,2}(?:,\d{3})+|[1-9]\d*|0)(?:\.\d+)?", re.ASCII)
+# 만 미만 자리의 한글 단위 체인: "3천", "1천5백", "3천500", "천"(=1천). 단위 앞 숫자는 한 자리, 꼬리는 앞자리 0
+# 없이 세 자리까지다("1천05"는 거부).
+_SUB_MAN_RE = re.compile(r"(?:([1-9])?천)?(?:([1-9])?백)?(?:([1-9])?십)?([1-9]\d{0,2})?", re.ASCII)
 _BIG_UNITS = (("조", 10**12), ("억", 10**8), ("만", 10**4))
+# 되비침에서 찾는 숫자 토큰(콤마·소수 포함). 정규화해 복원값과 같을 때만 가린다.
+_ECHO_NUMBER_RE = r"[0-9][0-9,]*(?:\.[0-9]+)?"
 
 
 def _sub_man_value(segment: str, *, allow_decimal: bool) -> Decimal | None:
@@ -701,7 +706,9 @@ def _as_kis_lookup_amount(value: str) -> str | None:
     **거부한다:** 한글 수사(``"삼십만원"``), 라틴 크기(``"3.2M원"``), 점·공백 자리 구분
     (``"3.000.000원"``·``"3 000 000원"``), 어긋난 콤마 마디(``"30,0000원"``), 아래 단위 자리가 만을
     넘는 표기(``"1억20000만원"``), 소수가 가장 큰 단위가 아닌 곳에 오거나 아래 단위와 섞인 표기
-    (``"1.5억3천만원"``), 정수가 되지 않는 값(``"1.23456만원"``), 0. 모두 한 가지로 읽히지 않거나
+    (``"1.5억3천만원"``), 억·조 바로 뒤 맨 꼬리(``"1억2천"``·``"1억2천원"`` — 1억2천만의 줄임말로도
+    읽힌다), 전각·아랍 숫자(``"３０만원"``), 앞자리 0(``"00030만원"``·``"1천05만원"``), 정수가 되지
+    않는 값(``"1.23456만원"``), 0. 모두 한 가지로 읽히지 않거나
     잘못 읽으면 자릿수가 어긋나는 표기다 — 조회가 엉뚱한 범위로 나가 그럴듯한 답이 되는 것보다 거부해
     에이전트가 "조건을 적용하지 못했다"고 말하게 하는 편이 낫다.
     """
@@ -726,6 +733,11 @@ def _as_kis_lookup_amount(value: str) -> str | None:
         if rest:
             segments.append((rest, 1))
         if not segments or (len(segments) == 1 and segments[0][1] == 1 and not any(u in text for u in "천백십")):
+            return None
+        # 억·조 바로 뒤 맨 꼬리("1억2천"·"1억2000"·"1조5천")는 거부한다. 말로는 "1억2천"이 1억2천만을
+        # 뜻하는 일이 흔해, 글자대로 100,002,000으로 읽으면 자릿수가 어긋난다. 만 뒤 꼬리("2만5천")는
+        # 만 아래 단위가 없어 그렇게 줄여 말할 자리가 없으므로 글자대로 25,000이다.
+        if len(segments) > 1 and segments[-1][1] == 1 and segments[-2][1] != 10**4:
             return None
         total = Decimal(0)
         for index, (segment, scale) in enumerate(segments):
@@ -756,9 +768,14 @@ def mask_lookup_param_echo(text: str, params: Mapping[str, Any] | None) -> str:
     방금 복원한 사용자 금액(``"fid_input_price_2":"300000"``)이 Observation으로 외부 LLM에 돌아간다.
 
     판정은 **필드 이름 기준**이다. :data:`_LOOKUP_PARAM_KIND`의 인자 중 값이 이 요청 매핑의 금액을
-    정규화한 값과 같은 것을, 응답 텍스트에서 ``필드 : 값`` 모양으로 나타날 때만 자리표시자로 바꾼다.
-    JSON 중첩 문자열(``\\"fid_input_price_2\\":\\"300000\\"``)과 파이썬 repr도 같은 정규식으로 잡는다.
-    순위 행의 시세(``stck_prpr`` 등)는 필드가 달라 건드리지 않는다 — 공개 시세는 원래 보인다.
+    정규화한 값과 같은 것을, 응답 텍스트에서 ``필드 : 값``·``필드=값`` 모양으로 나타날 때만 자리표시자로
+    바꾼다. 순위 행의 시세(``stck_prpr`` 등)는 필드가 달라 건드리지 않는다 — 공개 시세는 원래 보인다.
+
+    값 표기는 넓게 본다 — 문자열(``"300000"``)·숫자(``300000``)·콤마(``"300,000"``)·소수(``"300000.0"``)·
+    한 원소 리스트(``["300000"]``)가 모두 정규화해 같은 값이면 가린다. JSON 중첩 문자열
+    (``\\"fid_input_price_2\\":\\"300000\\"``)과 파이썬 repr도 같은 정규식이 잡는다. 따옴표 없는 숫자는
+    **따옴표를 씌운 자리표시자**로 바꾼다 — 그대로 넣으면 JSON이 깨진다. 따옴표는 키를 감싼 것과 같은
+    이스케이프 깊이로 붙인다.
     """
     if not text or not isinstance(params, Mapping):
         return text
@@ -778,11 +795,33 @@ def mask_lookup_param_echo(text: str, params: Mapping[str, Any] | None) -> str:
         if placeholder is None:
             continue
         pattern = re.compile(
-            r"(?i)(\b" + re.escape(str(field).strip()) + r"\\*[\"']?\s*[:=]\s*\\*[\"']?)"
-            + re.escape(value) + r"(?![\d.])"
+            r"(?i)(?P<pre>\b" + re.escape(str(field).strip()) + r"(?P<esc>\\*)(?P<kq>[\"']?)\s*[:=]\s*"
+            r"(?:\[\s*)?)(?P<vq>\\*[\"']?)(?P<num>" + _ECHO_NUMBER_RE + r")(?![\d.])"
         )
-        text = pattern.sub(lambda m, ph=placeholder: m.group(1) + ph, text)
+
+        def _sub(m: re.Match[str], ph: str = placeholder, value: str = value) -> str:
+            if _echo_number(m.group("num")) != value:
+                return m.group(0)
+            if m.group("vq"):
+                return m.group("pre") + m.group("vq") + ph
+            if m.group("kq"):
+                quote = m.group("esc") + m.group("kq")
+                return m.group("pre") + quote + ph + quote
+            return m.group("pre") + ph
+
+        text = pattern.sub(_sub, text)
     return text
+
+
+def _echo_number(token: str) -> str | None:
+    """되비친 숫자 토큰을 원 단위 정수 문자열로. 정수가 아니면 ``None``."""
+    try:
+        number = Decimal(token.replace(",", ""))
+    except ArithmeticError:
+        return None
+    if number != number.to_integral_value():
+        return None
+    return str(int(number))
 
 
 def _restore_one_param(

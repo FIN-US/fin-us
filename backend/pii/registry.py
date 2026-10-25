@@ -295,31 +295,6 @@ def restore_live_placeholders(text: str) -> tuple[str, list[str]]:
     return _SCOPED_PLACEHOLDER_RE.sub(_restore, text), unrestorable
 
 
-def live_values_in(text: str, *, kind: str) -> dict[str, str]:
-    """*text*에 나온 자리표시자 중 *kind* 종류이고 **살아 있는 요청의 것**의 ``{자리표시자: 원값}`` (#468).
-
-    `_llm_nat_chat`이 NAT에 보낼 사용자 발화 금액을 고를 때 쓴다. 그 호출은 `llm_chat`의
-    :func:`active_mapping` 블록 안에서 돌므로, 발화에 나온 자리표시자의 원값이 여기 있다. 등록소에 없는
-    것(충돌로 오염된 scope, 이전 턴 토큰)은 빠진다 — NAT은 그 자리표시자를 되돌리지 못하고 거부한다.
-    """
-    if not text:
-        return {}
-    with _LOCK:
-        snapshot = {
-            scope: _REGISTRY[scope]
-            for scope in {m.group(2) for m in _SCOPED_PLACEHOLDER_RE.finditer(text)}
-            if scope in _REGISTRY
-        }
-    found: dict[str, str] = {}
-    for match in _SCOPED_PLACEHOLDER_RE.finditer(text):
-        if match.group(1) != kind:
-            continue
-        value = snapshot.get(match.group(2), {}).get(match.group(0))
-        if value is not None:
-            found[match.group(0)] = value
-    return found
-
-
 def placeholder_kind(placeholder: str) -> str:
     """자리표시자에서 종류(``ACCOUNT``/``AMOUNT``/``QTY``)를 뽑는다.
 

@@ -829,18 +829,25 @@ def _request_input_amounts(chat_request_or_message: ChatRequestOrMessage) -> dic
     헤더가 없거나(요청 밖 실행, 구버전 backend) 읽을 수 없으면 빈 상자다 — 그때 조회 인자의
     발화 금액 자리표시자는 종전처럼 거부된다.
     """
+    # 어떤 예외든 빈 상자로 떨어진다(fail-closed). 헤더는 다른 프로세스가 보낸 값이라 깊은 중첩 JSON의
+    # RecursionError 같은 ValueError 밖의 예외도 올 수 있고, 여기서 터지면 요청 전체가 죽는다.
     try:
         headers = getattr(Context.get().metadata, "headers", None)
+        raw = headers.get(INPUT_AMOUNTS_HEADER) if headers else None
     except Exception:  # noqa: BLE001 — 요청 밖(nat run 등)에서는 메타데이터가 없을 수 있다.
         return {}
-    raw = headers.get(INPUT_AMOUNTS_HEADER) if headers else None
     if not raw:
         return {}
-    if chat_request_or_message.is_string:
-        user_text = chat_request_or_message.input_message or ""
-    else:
-        user_text = latest_user_plain_text(chat_request_or_message.messages or [])
-    return input_amounts_from_header(raw, user_text)
+    try:
+        if chat_request_or_message.is_string:
+            user_text = chat_request_or_message.input_message or ""
+        else:
+            user_text = latest_user_plain_text(chat_request_or_message.messages or [])
+        return input_amounts_from_header(raw, user_text)
+    except Exception as exc:  # noqa: BLE001
+        # 예외 메시지·값은 남기지 않는다(헤더에 사용자 금액 원문이 있다). 종류만 남긴다.
+        logger.warning("%s 헤더를 읽지 못해 발화 금액 상자를 비웠습니다 (%s)", INPUT_AMOUNTS_HEADER, type(exc).__name__)
+        return {}
 
 
 def nat_chat_extra_headers(conversation_id: str) -> dict[str, str]:

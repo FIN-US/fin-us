@@ -7,6 +7,7 @@
 import httpx
 import json
 import logging
+from contextvars import ContextVar
 from typing import Any, Literal, NamedTuple, overload
 
 from anthropic import AsyncAnthropic
@@ -27,8 +28,8 @@ from backend.core.config import (
     OPENAI_CHAT_MODEL,
 )
 from backend.pii.egress import EgressPrompt, prepare_egress
-from backend.pii.mask import unmask_pii
-from backend.pii.registry import active_mapping, live_values_in
+from backend.pii.mask import _PLACEHOLDER_RE, unmask_pii
+from backend.pii.registry import active_mapping
 
 logger = logging.getLogger(__name__)
 
@@ -254,24 +255,40 @@ def _log_nat_response(resp: httpx.Response) -> None:
 # INPUT_AMOUNTS_HEADER와 같은 문자열이어야 한다(프로세스가 달라 import로 공유하지 않는다).
 NAT_INPUT_AMOUNTS_HEADER = "x-finus-input-amounts"
 
+# `llm_chat`이 지금 처리 중인 **이번 요청의** 마스킹 매핑 (#468). provider 호출 동안만 심는다.
+# `_llm_nat_chat`의 시그니처(user_msg, *, conversation_id)를 바꾸지 않고 매핑을 건네기 위한 통로다 —
+# 기존 테스트와 리허설 도구가 `_llm_nat_chat`을 같은 시그니처의 가짜로 바꿔 끼운다.
+# 프로세스 등록소(`pii_registry`)를 쓰지 않는 이유: 등록소는 **동시에 살아 있는 모든 요청**의 매핑을
+# 담는다. 그것으로 고르면 사용자가 발화에 다른 진행 중 요청의 자리표시자를 그대로 적었을 때 그 요청의
+# 원값이 헤더에 실린다(보안 리뷰). ContextVar는 asyncio 태스크마다 갈리므로 동시 호출이 섞이지 않는다.
+_REQUEST_MAPPING: ContextVar[dict[str, str] | None] = ContextVar("_REQUEST_MAPPING", default=None)
+
 
 def nat_input_amount_headers(masked_msg: str) -> dict[str, str]:
     """NAT 요청에 실을 사용자 발화 금액 헤더. 실을 것이 없으면 빈 dict (#468).
 
     "30만원 이하 반도체 대형주 추천해줘"는 `llm_chat`이 마스킹해 NAT(그리고 외부 LLM)에는
     ``<AMOUNT_…> 이하 …``로 간다. 에이전트가 그 자리표시자를 순위 조회의 가격 인자에 넣으면 NAT이
-    KIS로 보내기 직전에 원값으로 되돌려야 하는데, 원값은 이 프로세스(`llm_chat` 지역 매핑과
-    등록소)에만 있다. 그래서 **같은 요청**에 원값을 함께 실어 보낸다.
+    KIS로 보내기 직전에 원값으로 되돌려야 하는데, 원값은 이 프로세스(`llm_chat` 지역 매핑)에만 있다.
+    그래서 **같은 요청**에 원값을 함께 실어 보낸다.
 
     - 금액 종류만 싣는다. 계좌번호·수량은 조회 조건으로 되돌릴 자리가 없으니 NAT에 넘길 이유도 없다.
-    - 이 발화(*masked_msg*)에 나온, 지금 살아 있는 매핑의 자리표시자만 싣는다(등록소의
-      :func:`live_values_in`). NAT은 이 값을 도구 인자 복원에만 쓰고 LLM 프롬프트에는 넣지 않는다.
+    - 이 발화(*masked_msg*)에 나오고 **이번 요청의 매핑**(:data:`_REQUEST_MAPPING`)에 있는 자리표시자만
+      싣는다. 다른 요청·이전 턴의 자리표시자는 원값이 이 매핑에 없으므로 실리지 않는다.
+      NAT은 이 값을 도구 인자 복원에만 쓰고 LLM 프롬프트에는 넣지 않는다.
     - 헤더 값은 ASCII JSON이다(HTTP 헤더는 latin-1만 받는다 — 한글은 ``\\uXXXX``로 이스케이프된다).
 
     NAT은 내부 서비스이고 이 헤더는 외부 LLM 경계를 넘지 않는다. 외부로 나가는 본문은 여전히
     마스킹된 *masked_msg*뿐이다.
     """
-    amounts = live_values_in(masked_msg, kind="AMOUNT")
+    mapping = _REQUEST_MAPPING.get()
+    if not mapping or not masked_msg:
+        return {}
+    amounts = {
+        m.group(0): mapping[m.group(0)]
+        for m in _PLACEHOLDER_RE.finditer(masked_msg)
+        if m.group(1) == "AMOUNT" and m.group(0) in mapping
+    }
     if not amounts:
         return {}
     return {NAT_INPUT_AMOUNTS_HEADER: json.dumps(amounts, ensure_ascii=True)}
@@ -458,7 +475,12 @@ async def llm_chat(
         elif provider_key == "ollama":
             raw = await _llm_ollama_chat(masked_msg)
         else:
-            raw = await _llm_nat_chat(masked_msg, conversation_id=conversation_id)
+            # 이번 요청의 매핑을 NAT 호출 동안만 심는다 — nat_input_amount_headers가 읽는다(#468).
+            token = _REQUEST_MAPPING.set(mapping)
+            try:
+                raw = await _llm_nat_chat(masked_msg, conversation_id=conversation_id)
+            finally:
+                _REQUEST_MAPPING.reset(token)
 
     return unmask_pii(raw, mapping)
 
