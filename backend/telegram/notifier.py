@@ -507,25 +507,46 @@ class TelegramNotifier:
         if not should_send_telegram_alert(analysis_data, alert_mode=alert_mode):
             return False
 
-        is_urgent = should_send_telegram_alert(analysis_data, alert_mode="urgent")
         try:
             await self._post_parts(
-                render(
-                    self.format_analysis_alert(
-                        stock=stock,
-                        source=source,
-                        analysis_data=analysis_data,
-                    ),
-                    # 배너는 전송 게이트와 같은 판정을 쓴다. "긴급 모드였어도 나갔을
-                    # 알림인가"가 곧 🚨의 뜻이고, 그 판정은 여기 한 번뿐이다.
-                    alert_kind(is_urgent),
-                    level,
+                self.render_analysis_alert(
+                    stock=stock,
+                    source=source,
+                    analysis_data=analysis_data,
+                    level=level,
                 )
             )
             return True
         except Exception as exc:
             logger.error("Telegram alert send failed for %s/%s: %s", source, stock, exc)
             return False
+
+    def render_analysis_alert(
+        self,
+        *,
+        stock: str,
+        source: str,
+        analysis_data: dict[str, Any],
+        level: str = DEFAULT_TELEGRAM_USER_LEVEL,
+    ) -> str:
+        """send_analysis_alert가 실제로 보내는 문장 전체(배너·본문·용어 각주).
+
+        전송과 떼어 둔 이유는 시연용 테스트 스크립트(scripts/send_test_telegram_alert.py)의
+        dry-run이 실제 알림과 같은 경로를 타게 하기 위해서다. 스크립트가 format과 render를
+        따로 불러 조립하면, 이쪽 조립 순서가 바뀌어도 dry-run 출력은 옛 모양으로 남는다.
+        """
+        is_urgent = should_send_telegram_alert(analysis_data, alert_mode="urgent")
+        return render(
+            self.format_analysis_alert(
+                stock=stock,
+                source=source,
+                analysis_data=analysis_data,
+            ),
+            # 배너는 전송 게이트와 같은 판정을 쓴다. "긴급 모드였어도 나갔을
+            # 알림인가"가 곧 🚨의 뜻이고, 그 판정은 여기 한 번뿐이다.
+            alert_kind(is_urgent),
+            level,
+        )
 
     async def send_text(
         self,
