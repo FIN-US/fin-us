@@ -12,6 +12,7 @@ from langchain_core.messages import SystemMessage
 from pydantic import BaseModel
 from pydantic import Field
 from pydantic import field_validator
+from pydantic import model_validator
 
 from nat.builder.builder import Builder
 from nat.builder.context import Context
@@ -545,7 +546,24 @@ class FinusSupervisorAgentConfig(FunctionBaseConfig, name="finus_supervisor_agen
     branches: list[SupervisorBranch] = Field(..., min_length=1)
     max_history_messages: int = Field(default=6, ge=1, le=64)
     history_message_max_chars: int = Field(default=220, ge=60, le=8000)
+    fallback_branch: str | None = Field(
+        default=None,
+        description=(
+            "라우터 출력에서 허용된 브랜치 이름을 하나로 읽지 못할 때 보낼 브랜치. 비우면 종전처럼 "
+            "ValueError로 실패한다. 조회 전용이고 주문 안내·쓰기 도구가 없는 브랜치여야 한다 — "
+            "라우팅이 실패한 턴은 의도를 모르는 턴이다."
+        ),
+    )
     description: str = Field(default="Fin-Us supervisor agent")
+
+    @model_validator(mode="after")
+    def _fallback_branch_is_a_branch(self) -> "FinusSupervisorAgentConfig":
+        if self.fallback_branch is not None and self.fallback_branch not in {b.name for b in self.branches}:
+            raise ValueError(
+                f"fallback_branch {self.fallback_branch!r} is not one of the branches "
+                f"({', '.join(b.name for b in self.branches)})",
+            )
+        return self
 
 
 def _format_history(messages: list[Message], max_msgs: int, per_msg_max: int) -> str:
@@ -568,14 +586,22 @@ def _format_history(messages: list[Message], max_msgs: int, per_msg_max: int) ->
 
 
 def _normalize_branch(raw: str, branches: list[SupervisorBranch]) -> str | None:
+    """라우터 출력에서 브랜치 이름 하나를 읽는다. 하나로 정해지지 않으면 ``None``.
+
+    정확히 일치하지 않으면 출력 안에 들어 있는 이름을 찾되, **서로 다른 브랜치가 둘 이상**
+    들어 있으면 고르지 않는다. 예전에는 설정 순서상 앞선 브랜치를 골라서 "news_agent 또는
+    trading_agent" 같은 출력이 목록 첫 항목인 trading_agent로 조용히 기울었다.
+    """
     text = raw.strip().strip("`'\" \n\t").lower()
     for branch in branches:
         if branch.name.lower() == text or str(branch.function_name).lower() == text:
             return branch.name
-    for branch in branches:
-        if branch.name.lower() in text or str(branch.function_name).lower() in text:
-            return branch.name
-    return None
+    found = {
+        branch.name
+        for branch in branches
+        if branch.name.lower() in text or str(branch.function_name).lower() in text
+    }
+    return found.pop() if len(found) == 1 else None
 
 
 def _supervisor_system_prompt(branches: list[SupervisorBranch]) -> str:
@@ -619,11 +645,21 @@ async def finus_supervisor_agent(config: FinusSupervisorAgentConfig, builder: Bu
         response = await llm.ainvoke([SystemMessage(content=system_prompt), HumanMessage(content=prompt)])
         selected = _normalize_branch(str(response.content), config.branches)
         if selected is None:
-            allowed = ", ".join(b.name for b in config.branches)
-            raise ValueError(
-                "Supervisor LLM must output exactly one allowed branch name "
-                f"({allowed}); got {response.content!r}",
+            if config.fallback_branch is None:
+                allowed = ", ".join(b.name for b in config.branches)
+                raise ValueError(
+                    "Supervisor LLM must output exactly one allowed branch name "
+                    f"({allowed}); got {response.content!r}",
+                )
+            # 라우팅 실패를 사용자 오류로 내보내지 않고 정해 둔 조회 전용 브랜치로 넘긴다.
+            # 예전에는 이 ValueError가 NAT 422 → backend "응답 생성 실패: {...}"로 원문 그대로
+            # 사용자에게 나갔다. 출력은 로그 길이를 묶어 남긴다(라우터 출력은 보통 한 단어다).
+            logger.warning(
+                "Supervisor output is not exactly one allowed branch; falling back to %s (output=%r)",
+                config.fallback_branch,
+                str(response.content)[:80],
             )
+            selected = config.fallback_branch
         logger.info(
             "Supervisor routed to %s (history=%d)",
             selected,

@@ -713,3 +713,61 @@ def test_no_config_can_reach_an_order_capable_tool(config_path: Path):
         if tool not in registered
     )
     assert not dangling, f"등록되지 않은 도구를 참조하는 에이전트: {dangling}"
+
+
+# ---------------------------------------------------------------------------
+# 라우팅 실패 fallback — 의도를 모르는 턴이 주문 안내·쓰기 경로로 가지 않는다
+# ---------------------------------------------------------------------------
+
+# fallback 브랜치의 에이전트가 쓸 수 있는 도구 타입. 조회만 하는 타입이다 — 매매일지 저장
+# (finus_save_diary)은 주문이 아니어서 위 _REVIEWED_NON_ORDER_TYPES에는 있지만 여기에는 없다.
+_FALLBACK_READ_ONLY_TOOL_TYPES = {
+    "finus_account_balance_readonly",
+    "finus_market_news",
+    "finus_disclosure_signal",
+    "finus_earnings_report",
+    "finus_memory_disabled",
+    "finus_user_memory_get",
+    "finus_user_memory_add_refused",
+}
+
+
+@pytest.mark.parametrize("config_path", _ROUTER_PATHS, ids=[p.name for p in _ROUTER_PATHS])
+def test_router_fallback_branch_is_read_only(config_path: Path):
+    """두 라우터 모두 fallback 브랜치를 두고, 그 브랜치는 조회 전용·주문 안내 없음이어야 한다.
+
+    라우터가 브랜치 이름을 못 읽은 턴은 의도를 모르는 턴이다. 그런 턴이 주문을 안내하는
+    react_kis_chat.md(trading·monitoring)나 BUY/SELL 판단(strategy), 일지 저장(diary)으로
+    가면 안 된다.
+
+    뮤테이션: router.yml의 fallback_branch를 지우거나 다른 브랜치로 바꾸면 첫 assert에서 red.
+    첫 assert의 기대값까지 함께 바꿔도 trading_agent는 프롬프트 검사에서, diary_agent는 도구
+    타입 검사에서 red — 기대값을 바꾸는 사람이 이 두 검사를 다시 마주치게 한다.
+    """
+    import yaml
+
+    import finus_agents.register  # noqa: F401
+    from nat.runtime.loader import load_config
+
+    config = load_config(config_path)
+    supervisor = config.functions["router_supervisor_agent"]
+    assert supervisor.fallback_branch == "news_agent", (
+        f"{config_path.name}: fallback_branch가 없거나 검토한 브랜치(news_agent)가 아닙니다: "
+        f"{supervisor.fallback_branch!r}"
+    )
+
+    branch = next(b for b in supervisor.branches if b.name == supervisor.fallback_branch)
+    branch_fn = config.functions[str(branch.function_name)]
+    assert type(branch_fn).static_type() == "fe_branch"
+    agent_name = str(branch_fn.inner_function_name)
+    agent_fn = config.functions[agent_name]
+
+    tool_types = {str(t): type(config.functions[str(t)]).static_type() for t in agent_fn.tool_names}
+    not_read_only = {name: t for name, t in tool_types.items() if t not in _FALLBACK_READ_ONLY_TOOL_TYPES}
+    assert not not_read_only, f"{config_path.name}: fallback 브랜치의 조회 전용이 아닌 도구: {not_read_only}"
+
+    yaml_name = AGENT_YAML[agent_name]
+    raw_prompt = yaml.safe_load((AGENTS_DIR / yaml_name).read_text(encoding="utf-8"))["functions"][agent_name][
+        "system_prompt"
+    ]
+    assert raw_prompt != "file://../prompts/react_kis_chat.md", "fallback 브랜치가 주문 안내 프롬프트를 씁니다"

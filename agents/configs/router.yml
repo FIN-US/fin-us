@@ -42,6 +42,9 @@ functions:
     llm_name: router_openai_llm
     max_history_messages: 6
     history_message_max_chars: 800 # assistant 한도; user 발화는 슈퍼바이저에서 2배(최대 3200자)까지
+    # 라우터 출력에서 브랜치 이름을 하나로 읽지 못하면 이 브랜치로 보낸다(경고 로그). news_agent는
+    # 조회 전용 도구만 쓰고 주문 안내(/buy·/sell)도 매매일지 저장도 없다 — test_agent_configs가 고정한다.
+    fallback_branch: news_agent
     branches:
       - name: trading_agent
         function_name: trading_branch_agent
