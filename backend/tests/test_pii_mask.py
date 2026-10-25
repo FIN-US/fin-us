@@ -1392,10 +1392,16 @@ class TestAmountGeneralRule:
         "2026 10 23",
         "전화 010 1234 5678",
         "버전 3.2.1",
-        # "원"으로 시작하는 낱말이 숫자 뒤에 띄어 오는 표기
+        # "원"으로 시작하는 낱말이 숫자 뒤에 띄어 오는 표기 — 몸통 모양과 무관하게 같은
+        # 경계 규칙(_SPACED_WON)이다. 구분·크기가 있는 몸통도 예외가 아니다(PR #453 리뷰).
         "제3 원칙",
         "코스피 2500 원달러 1300",
+        "코스피 2,500 원달러",
         "주문번호 20240101 원장",
+        "1,000 원칙",
+        "1,234,567 원장",
+        "1 000 원칙",
+        "3.2M 원칙",
         "지금만 원하는 것은",
         # 영단어 안의 KRW
         "XKRW3 토큰",
@@ -1429,12 +1435,111 @@ class TestAmountGeneralRule:
         "300만",            # 표지 없음 ("1만 명"과 구분 불가)
         "$1,234.56",        # 원화가 아님 (F-17 대상 밖, 모듈 주석 참고)
         "1,234.56달러",
-        "15000 원입니다",    # 맨 숫자 + 띄어 쓴 "원" + 한글 ("2500 원달러"와 구분 불가)
+        "15000 원입니다",    # 띄어 쓴 "원" + 한글 ("2500 원달러"와 구분 불가, main도 미탐)
+        "1,234,567 원입니다",  # 같은 규칙 — 몸통이 분명해도 예외를 두지 않는다
         "2026 원년",        # 같은 규칙의 반대편 — 과탐하지 않는다
     ])
     def test_known_gaps_are_pinned(self, text):
         masked, _ = mask_pii(text)
         assert masked == text
+
+    @pytest.mark.parametrize(("text", "expected"), [
+        # 하이픈 계좌 옆에 통화 표지가 와도 계좌가 통째로 ACCOUNT다. 리뷰 전에는 금액이 계좌
+        # 한 조각을 가져가 나머지가 평문이었다("01 KRW"가 금액 -> 앞 8자리 평문).
+        ("계좌 12345678-01 KRW", "계좌 <ACCOUNT_1> KRW"),
+        ("₩12345678-01", "₩<ACCOUNT_1>"),
+        ("KRW 12345678-01", "KRW <ACCOUNT_1>"),
+        # main에도 있던 구멍 — "01원"이 금액이 되고 앞 8자리가 평문이었다.
+        ("12345678-01원", "<ACCOUNT_1>원"),
+        ("12345678-01 원", "<ACCOUNT_1> 원"),
+        ("12345678-01만원", "<ACCOUNT_1>만원"),
+        # 계좌 모양이 **아니면** 종전(main)대로 금액이 뒷조각을 가린다. 단순한 (?<!\d{8}-)는
+        # 이것들까지 막아 전량 평문으로 만들었다(리뷰어 fuzz 실측).
+        ("112345678-01원", "112345678-<AMOUNT_1>"),
+        ("12345678-0100091234000원", "12345678-<AMOUNT_1>"),
+        ("12345678000-9원", "12345678000-<AMOUNT_1>"),
+        # 음수 금액 표기는 그대로다.
+        ("-1,234원", "-<AMOUNT_1>"),
+        # 하이픈 없는 10자리에 통화 표지가 붙으면 금액이다(어느 쪽이든 전체가 가려진다).
+        ("₩1234567801", "<AMOUNT_1>"),
+    ])
+    def test_account_takes_precedence_over_adjacent_currency_marker(self, text, expected):
+        masked, mapping = mask_pii(text)
+        assert _norm(masked) == expected
+        assert unmask_pii(masked, mapping) == text
+
+    @pytest.mark.parametrize(("text", "expected", "original"), [
+        # 라벨이 받는 몸통(공백·단위·K/M)이 넓어진 만큼 수량 배제도 넓다 — 가려지되 QTY다.
+        ("잔고 1만주", "잔고 <QTY_1>주", "1만"),
+        ("잔고 1 000주", "잔고 <QTY_1>주", "1 000"),
+        ("잔고 1 000 000주", "잔고 <QTY_1>주", "1 000 000"),
+        ("잔고 3백주", "잔고 <QTY_1>주", "3백"),
+        ("잔고 1.5M주", "잔고 <QTY_1>주", "1.5M"),
+        ("잔고 1,234주", "잔고 <QTY_1>주", "1,234"),
+        # 라벨 없는 자유 입력도 같은 몸통이다(main: "1만주" 전량 평문, "1 000주" 부분).
+        ("삼성전자 1만주 보유", "삼성전자 <QTY_1>주 보유", "1만"),
+        ("1 000 000주 거래", "<QTY_1>주 거래", "1 000 000"),
+    ])
+    def test_labeled_quantity_stays_quantity(self, text, expected, original):
+        masked, mapping = mask_pii(text)
+        assert _norm(masked) == expected
+        assert _norm_mapping(mapping) == {"<QTY_1>": original}
+        assert unmask_pii(masked, mapping) == text
+
+    def test_labeled_trailing_comma_invariant_still_holds(self):
+        """수량 배제를 _QTY_BODY로 바꿔도 "숫자로 끝나야 배제" 불변식이 그대로다.
+
+        배제가 발동했는데 _QTY_RE가 받지 못하면 그 숫자는 평문이 된다. "잔고 1,234,주"는
+        배제가 발동하지 않아 종전대로 AMOUNT가 가져가야 한다.
+        """
+        masked, mapping = mask_pii("잔고 1,234,주")
+        assert _norm(masked) == "잔고 <AMOUNT_1>,주"
+        assert _norm_mapping(mapping) == {"<AMOUNT_1>": "1,234"}
+
+    @pytest.mark.parametrize(("text", "expected"), [
+        # 환율은 개인정보가 아니지만 fail-closed로 가린다(_CUR_PREFIX 위 주석). main도
+        # "원/달러 1,380원"의 "1,380원"을 이미 가린다.
+        ("USD/KRW 1,380", "USD/<AMOUNT_1>"),
+        ("환율 1 KRW = 0.00072 USD", "환율 <AMOUNT_1> = 0.00072 USD"),
+        ("원/달러 1,380원", "원/달러 <AMOUNT_1>"),
+        ("코스피 2,500 원달러 1,380원", "코스피 2,500 원달러 <AMOUNT_1>"),
+        # KRW 뒤에 숫자가 닿지 않으면 표지가 아니다.
+        ("KRW/USD 0.00072", "KRW/USD 0.00072"),
+    ])
+    def test_exchange_rate_notation_is_pinned(self, text, expected):
+        masked, mapping = mask_pii(text)
+        assert _norm(masked) == expected
+        assert unmask_pii(masked, mapping) == text
+
+    @pytest.mark.parametrize(("text", "expected"), [
+        # 라벨 뒤 부호 — main을 포함해 전량 평문이던 손익 표기. 부호는 남고 크기만 가린다.
+        ("손익 -1,000,000", "손익 -<AMOUNT_1>"),
+        ("손익: +1,234,567", "손익: +<AMOUNT_1>"),
+        ("예수금 - 1,234,567", "예수금 - <AMOUNT_1>"),
+        ("손익 −1,000,000", "손익 −<AMOUNT_1>"),
+    ])
+    def test_signed_labeled_amount_is_masked(self, text, expected):
+        masked, mapping = mask_pii(text)
+        assert _norm(masked) == expected
+        assert unmask_pii(masked, mapping) == text
+
+    @pytest.mark.parametrize(("text", "expected"), [
+        # 리뷰어 fuzz(20만 건 x 6 seed)가 찾은, main보다 덜 가리던 표기들. 각각의 원인은
+        # 모듈 주석(_NUM_GROUPED 콤마 갈래, _PRE_ONLY_END, _UNIT_WON)에 있다.
+        ("KRW12,000000.000원", "KRW12,<AMOUNT_1>"),
+        ("12,1234,000원", "12,<AMOUNT_1>"),
+        ("00012345678,8,000원", "00012345678,<AMOUNT_1>"),
+        ("9억십8,12,000원조", "9억십8,<AMOUNT_1>조"),
+        ("KRW8,0001231234", "KRW8,<ACCOUNT_1>"),
+        ("KRW십12345678-12천십", "KRW십<ACCOUNT_1>천십"),
+        ("예수금 )₩₩1,0001234000", "예수금 )₩₩1,<ACCOUNT_1>"),
+        ("KRW백9,000주K", "KRW백<QTY_1>주K"),
+        ("8만  원억", "<AMOUNT_1>억"),
+    ])
+    def test_fuzz_found_regressions_match_main(self, text, expected):
+        masked, mapping = mask_pii(text)
+        assert _norm(masked) == expected
+        assert unmask_pii(masked, mapping) == text
 
     @pytest.mark.parametrize("hostile", [
         "111 " * 2048,
