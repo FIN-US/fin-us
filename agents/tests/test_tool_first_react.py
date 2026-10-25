@@ -1099,3 +1099,110 @@ def test_every_router_react_agent_is_tool_first(config_name: str):
     vendor_typed = sorted(name for name, fn in react_agents.items()
                           if not isinstance(fn, FinusToolFirstReActAgentConfig))
     assert not vendor_typed, f"벤더 react_agent 타입이 남아 있다: {vendor_typed}"
+
+
+# --- #456: 형식 재시도가 사용자의 질문에 다시 답하게 한다 ------------------------------------------------
+
+NEWS_QUESTION = "삼성전자 최근 뉴스 요약해줘"
+# 실측(#456) 이후 턴의 형식 실패: 이미 한 조회를 텍스트 Action으로 다시 적고 Final Answer까지 한 응답에 썼다.
+MIXED_ACTION_AND_ANSWER = (
+    'Thought: 최신 뉴스부터 다시 확인한다.\nAction: mcp-news-get-market-news\nAction Input: {"stock_name":"삼성전자"}\n'
+    "Thought: I now know the final answer\nFinal Answer: 뉴스 요약"
+)
+# 실측(#456)에서 벤더 교정 발화에 모델이 한 대답 — 형식 없는 직답이라 벤더가 최종 답으로 받는다.
+META_REPLY = "알겠습니다. 이제부터는 도구를 쓸 때 `Action/Action Input`만, 최종 답변은 `Thought/Final Answer`만 쓰겠습니다."
+
+
+class _AnswersTheLastTurn(BaseChatModel):
+    """#456 실측 행동을 흉내 낸다 — 모델은 **마지막 발화**에 대답한다.
+
+    - 강제 첫 턴: 뉴스 조회.
+    - 마지막 발화가 도구 Observation이면 ``bad_output``(형식 실패 응답)을 쓴다.
+    - 마지막 발화가 사용자의 질문을 담은 교정이면 질문에 답한다.
+    - 그 밖의 발화(벤더의 파서 오류 문자열)에는 그 발화에 대한 대답(:data:`META_REPLY`)을 쓴다.
+    """
+
+    bad_output: str = MIXED_ACTION_AND_ANSWER
+    seen: list[list[str]] = Field(default_factory=list)
+
+    @property
+    def _llm_type(self) -> str:
+        return "answers-the-last-turn"
+
+    def bind_tools(self, tools, **kwargs):
+        return self.bind(tools=[t.name for t in tools], **kwargs)
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:
+        self.seen.append([str(m.content) for m in messages])
+        last = str(messages[-1].content)
+        if kwargs.get("tool_choice") == "required":
+            message = AIMessage(content="", tool_calls=[
+                {"name": "mcp-news-get-market-news", "args": {"stock_name": "삼성전자"}, "id": "n"}])
+        elif last == "삼성전자 뉴스 OBS":
+            message = AIMessage(content=self.bad_output)
+        elif NEWS_QUESTION in last:
+            message = AIMessage(content="Thought: I now know the final answer\nFinal Answer: 뉴스 요약")
+        else:
+            message = AIMessage(content=META_REPLY)
+        return ChatResult(generations=[ChatGeneration(message=message)])
+
+
+async def _ask_news_with_format_retry(llm, called) -> ReActGraphState:
+    news, memory = _per_stock_news_tools(called)
+    graph = ToolFirstReActAgentGraph(llm=llm, prompt=_prompt([news, memory]), tools=[news, memory],
+                                     raise_on_parsing_failure=False, first_turn_tools=[news],
+                                     parse_agent_response_max_retries=2)  # news_agent.yml과 같은 값
+    return await _ask(graph, question=NEWS_QUESTION)
+
+
+async def test_vendor_format_retry_turns_a_correction_reply_into_the_final_answer(monkeypatch):
+    """대조군: 벤더 교정 발화(파서 오류 문자열)를 그대로 보내면 #456이 재현된다 — 모델이 그 발화에 한 대답이
+    최종 답이 된다. 이것이 초록이 아니면 아래 테스트는 아무것도 증명하지 않는다."""
+    monkeypatch.setattr(ToolFirstReActAgentGraph, "_with_question_bound_format_retry", lambda self, inputs: inputs)
+    called: list[str] = []
+
+    state = await _ask_news_with_format_retry(_AnswersTheLastTurn(), called)
+
+    assert called == ["삼성전자"]
+    assert state.final_answer == META_REPLY
+
+
+@pytest.mark.parametrize(("bad_output", "reason"), [
+    (MIXED_ACTION_AND_ANSWER, "한 응답에 도구 호출(`Action:`)과 최종 답변(`Final Answer:`)이 함께 있었습니다."),
+    ("Thought: 뉴스를 요약하면 된다.", "`Thought:` 뒤에 `Action:`도 `Final Answer:`도 없었습니다."),
+    # 빈 응답 — 벤더는 오류 뒤에 영어 지시를 덧붙인 발화 하나만 넣는다
+    ("", "`Thought:` 뒤에 `Action:`도 `Final Answer:`도 없었습니다."),
+])
+async def test_format_retry_asks_the_user_question_again(bad_output: str, reason: str, caplog):
+    """#456: 형식 재시도의 교정은 무엇이 잘못됐는지와 사용자의 질문을 함께 적어, 모델이 교정이 아니라 질문에
+    답하게 한다. 도구 Observation과 모델의 실패한 응답은 그대로 둔다.
+
+    뮤테이션: ``_stream_llm``에서 ``_with_question_bound_format_retry`` 호출을 빼면 최종 답이 META_REPLY로 red.
+    ``_vendor_agent_node``에서 ``_SCRATCHPAD_STEPS``를 심지 않으면 교정이 바뀌지 않아 red.
+    교정 경계(``2 * steps``)를 0으로 바꾸면 Observation까지 교정으로 바뀌어 red.
+    ``format_retry_reason``이 원문을 그대로 돌려주면 사유 assert가 red.
+    """
+    called: list[str] = []
+    llm = _AnswersTheLastTurn(bad_output=bad_output)
+
+    with caplog.at_level(logging.WARNING, logger="finus_agents.tool_first_react"):
+        state = await _ask_news_with_format_retry(llm, called)
+
+    assert called == ["삼성전자"]
+    assert state.final_answer == "뉴스 요약"
+    retry = llm.seen[-1]
+    correction = retry[-1]
+    assert NEWS_QUESTION in correction and reason in correction
+    assert "Parsing LLM output" not in correction and "Invalid Format" not in correction
+    # 교정 앞: 강제 첫 턴의 Observation이 그대로 있고, 교정은 하나뿐이다
+    assert "삼성전자 뉴스 OBS" in retry
+    assert sum("[형식 안내" in m for m in retry) == 1
+    if bad_output:
+        assert retry[-2] == bad_output  # 무엇이 잘못됐는지 보이도록 실패한 응답은 남긴다
+    assert any("질문에 묶인 교정" in r.getMessage() for r in caplog.records)
+
+
+def test_format_retry_reason_keeps_unknown_parser_errors_verbatim():
+    from finus_agents.tool_first_react import format_retry_reason
+
+    assert format_retry_reason("Could not parse LLM output") == "Could not parse LLM output"

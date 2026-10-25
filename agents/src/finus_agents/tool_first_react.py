@@ -47,6 +47,15 @@ Observation 경로는 같다. 같은 호출은 한 번만 두고, 상한(:data:`
 **모든 턴에 오늘 날짜(한국 시간)를 넣는다 (#440).** 이후 턴이 조회를 이어가자, 날짜를 모르는 모델이
 기간 인자를 지어내 틀린 수치를 단정했다(52주 최고가를 2024년 한 해로 조회). 날짜는 프롬프트를 포맷할
 때마다 시계에서 읽는다.
+
+**형식 재시도는 사용자의 질문에 다시 답하게 한다 (#456).** 이후 턴의 모델은 가끔 한 응답에 텍스트
+``Action:``과 ``Final Answer:``를 함께 썼고(이미 한 조회를 다시 적은 뒤 답까지 씀), 벤더 파서는 이를 형식
+오류로 거부한다. 벤더 재시도는 그 응답 뒤에 파서 오류 문자열("Parsing LLM output produced both a final
+answer and a parse-able action:")만 사용자 발화 자리에 붙인다. 모델은 그 마지막 발화에 대답했다 —
+"알겠습니다.", "방금 오류는 … 섞여서 발생한 것입니다"처럼 형식에 대한 대답이 ``Final Answer``로, 또는 형식
+없는 직답으로 받아들여져 사용자에게 나갔다. 그래서 벤더 재시도가 붙인 교정 발화를, 무엇이 잘못됐는지와
+**사용자의 질문**을 함께 적고 안내 자체에 대답하지 말라는 교정으로 바꿔 보낸다. 벤더의 재시도 횟수·직답
+수용·scratchpad 경로는 그대로다.
 """
 
 import asyncio
@@ -82,6 +91,9 @@ from nat.plugins.langchain.agent.base import AGENT_LOG_PREFIX
 from nat.plugins.langchain.agent.react_agent.agent import ReActAgentGraph
 from nat.plugins.langchain.agent.react_agent.agent import ReActGraphState
 from nat.plugins.langchain.agent.react_agent.agent import create_react_agent_prompt
+from nat.plugins.langchain.agent.react_agent.output_parser import FINAL_ANSWER_AND_PARSABLE_ACTION_ERROR_MESSAGE
+from nat.plugins.langchain.agent.react_agent.output_parser import MISSING_ACTION_AFTER_THOUGHT_ERROR_MESSAGE
+from nat.plugins.langchain.agent.react_agent.output_parser import MISSING_ACTION_INPUT_AFTER_ACTION_ERROR_MESSAGE
 from nat.plugins.langchain.agent.react_agent.register import ReActAgentWorkflowConfig
 from nat.utils.type_converter import GlobalTypeConverter
 
@@ -109,6 +121,44 @@ _INVALID_TOOL_JSON_RETRY = (
     "직전 도구 호출({name})의 인자 JSON이 깨져 도구를 실행하지 못했습니다({error}). "
     "같은 도구를 올바른 JSON 인자로 다시 호출하세요."
 )
+
+# ---- 형식 재시도 교정 (#456) ----
+# 벤더 재시도가 붙이는 교정 발화는 파서 오류 문자열뿐이다. 모델은 그 문자열을 사용자의 새 질문처럼 받아
+# 오류에 대해 대답했다. 교정은 무엇이 잘못됐는지와 사용자의 질문을 함께 적고, 안내에 대답하지 말라고 못박는다.
+_FORMAT_RETRY_REASONS = (
+    (FINAL_ANSWER_AND_PARSABLE_ACTION_ERROR_MESSAGE,
+     "한 응답에 도구 호출(`Action:`)과 최종 답변(`Final Answer:`)이 함께 있었습니다."),
+    (MISSING_ACTION_AFTER_THOUGHT_ERROR_MESSAGE,
+     "`Thought:` 뒤에 `Action:`도 `Final Answer:`도 없었습니다."),
+    (MISSING_ACTION_INPUT_AFTER_ACTION_ERROR_MESSAGE,
+     "`Action:` 뒤에 `Action Input:`이 없었습니다."),
+)
+FORMAT_RETRY_PROMPT = (
+    "[형식 안내 — 사용자에게 전달되지 않는 시스템 메시지] 직전 응답을 처리하지 못했습니다: {reason}\n"
+    "이 안내에 대답하거나 형식 오류를 설명하지 마세요. 답할 대상은 아래 사용자의 질문입니다.\n"
+    "사용자의 질문: {question}\n"
+    "- 조회가 더 필요하면 도구만 호출하세요. 그 응답에는 `Final Answer:`를 함께 쓰지 않습니다.\n"
+    "- 지금까지 받은 Observation으로 답할 수 있으면 `Thought:` 다음 줄에 `Final Answer:`를 쓰고, "
+    "그 뒤에는 사용자의 질문에 대한 답만 쓰세요."
+)
+
+
+def format_retry_reason(vendor_observation: str) -> str:
+    """벤더 파서 오류 문자열을 모델이 읽을 사유로 옮긴다. 모르는 오류면 원문을 그대로 쓴다.
+
+    빈 응답일 때 벤더는 오류 뒤에 영어 지시("If the available tools cannot answer …")를 덧붙이므로 접두로 맞춘다.
+    """
+    text = vendor_observation.strip()
+    for prefix, reason in _FORMAT_RETRY_REASONS:
+        if text.startswith(prefix):
+            return reason
+    return text
+
+
+# 벤더 agent_node가 이번 턴에 넘긴 scratchpad의 단계 수. 벤더는 단계마다 (모델 발화, Observation) 두 메시지를
+# 만들고 그 뒤에 형식 재시도용 working_state를 잇는다 — 이 수로 둘의 경계를 안다.
+_SCRATCHPAD_STEPS: ContextVar[int | None] = ContextVar("finus_scratchpad_steps", default=None)
+
 
 # ---- 오늘 날짜 주입 (#440) ----
 # 에이전트 입력 어디에도 오늘 날짜가 없어, 기간이 필요한 조회에서 모델이 날짜를 지어냈다(52주 최고가를
@@ -252,13 +302,40 @@ class ToolFirstReActAgentGraph(ReActAgentGraph):
             }
         return output
 
+    def _with_question_bound_format_retry(self, inputs: dict) -> dict:
+        """벤더 형식 재시도의 교정 발화를 질문에 묶인 교정(:data:`FORMAT_RETRY_PROMPT`)으로 바꾼 입력을 돌려준다 (#456).
+
+        벤더 ``agent_node``는 단계마다 (모델 발화, Observation)을 넣은 뒤, 파싱에 실패한 응답과 파서 오류를
+        working_state로 잇는다. :data:`_SCRATCHPAD_STEPS`의 단계 수 뒤에 오는 사용자 발화만 그 교정이다 — 도구
+        Observation은 건드리지 않는다. 모델의 실패한 응답은 그대로 둔다(무엇이 잘못됐는지 보여 준다).
+        단계 수를 모르면(벤더 노드 밖의 호출) 손대지 않는다.
+        """
+        steps = _SCRATCHPAD_STEPS.get()
+        pad = inputs.get("agent_scratchpad") or []
+        if steps is None or len(pad) <= 2 * steps:
+            return inputs
+        question = str(inputs.get("question", ""))
+        retry = [
+            HumanMessage(content=FORMAT_RETRY_PROMPT.format(reason=format_retry_reason(str(message.content)),
+                                                           question=question))
+            if isinstance(message, HumanMessage) else message
+            for message in pad[2 * steps:]
+        ]
+        logger.warning("%s 응답이 ReAct 형식이 아니어서 질문에 묶인 교정으로 다시 요청한다 (#456): %s", AGENT_LOG_PREFIX,
+                       [str(m.content)[:80] for m in pad[2 * steps:] if isinstance(m, HumanMessage)])
+        return {**inputs, "agent_scratchpad": [*pad[:2 * steps], *retry]}
+
     async def _stream_llm(self, runnable, inputs):
         """벤더 ``_stream_llm``을 대신한다 — 도구 호출을 버리지 않고 벤더 파서에 넘긴다.
 
         벤더 구현은 스트림 청크의 ``content``만 이어 붙여 ``tool_calls``를 잃는다. 여기서는 응답을
         통째로 받아, 도구 호출이 있으면 그 호출을 :data:`_NATIVE_CALLS` 상자에 맡기고 상자의 키를
         Action Input으로 쓴 텍스트를 돌려준다. 실제 인자는 :meth:`_vendor_agent_node`가 파싱 뒤에 되돌린다.
+
+        벤더 형식 재시도라면 그 교정 발화를 질문에 묶인 교정으로 바꿔 보낸다(#456,
+        :meth:`_with_question_bound_format_retry`).
         """
+        inputs = self._with_question_bound_format_retry(inputs)
         output = await self._invoke_retrying_broken_tool_json(runnable, inputs)
         additional_kwargs = {}
         reasoning = (output.additional_kwargs or {}).get("reasoning_content")
@@ -285,9 +362,11 @@ class ToolFirstReActAgentGraph(ReActAgentGraph):
         """벤더 ``agent_node``를 돌리고, 네이티브 도구 호출의 자리표시자를 실제 인자로 되돌린다."""
         box: dict[str, tuple[dict, object]] = {}
         token = _NATIVE_CALLS.set(box)
+        steps_token = _SCRATCHPAD_STEPS.set(len(state.agent_scratchpad))
         try:
             state = await super().agent_node(state)
         finally:
+            _SCRATCHPAD_STEPS.reset(steps_token)
             _NATIVE_CALLS.reset(token)
         if box and state.agent_scratchpad:
             last = state.agent_scratchpad[-1]
