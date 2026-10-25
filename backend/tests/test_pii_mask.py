@@ -8,6 +8,8 @@ import pathlib
 import re
 import time
 
+import pytest
+
 from backend.pii.mask import _AMOUNT_UNIT_RE, mask_pii, unmask_pii
 
 _FIXTURE_PATH = (
@@ -395,10 +397,10 @@ class TestAmountRecognizer:
             ("1,234,567원", "<AMOUNT_1>"),
             ("123만원", "<AMOUNT_1>"),
             ("1천5백만원", "<AMOUNT_1>"),
-            # "조"/"억" 뒤에 공백을 두고 이어지는 표기는 여전히 뒤 구간만 잡힌다
-            # ("조"/"억" 뒤에 공백을 둔 금액 표기의 알려진 간극).
-            ("3억 2천만원", "3억 <AMOUNT_1>"),
-            ("9조 1800억원", "9조 <AMOUNT_1>"),
+            # "조"/"억" 뒤에 공백을 두고 이어지는 표기는 #453 전까지 뒤 구간만 잡혔다
+            # ("3억 <AMOUNT_1>"). 마디 사이 공백(_UNIT_JOIN)으로 값 전체가 한 자리표시자다.
+            ("3억 2천만원", "<AMOUNT_1>"),
+            ("9조 1800억원", "<AMOUNT_1>"),
             # "조" 앞이 숫자가 아니면 첫 갈래가 선두 \d+를 요구해 "조" 앞에서 시작하지
             # 못한다. 그래도 뒤 구간은 마스킹돼야 한다 — lookbehind에 "조"를 넣으면
             # 이것마저 막혀 값 전체가 평문이 되므로 넣지 않았다(_AMOUNT_UNIT_RE 주석).
@@ -516,10 +518,10 @@ class TestAmountRecognizer:
             # 매핑 "3조 5000원"). 그래서 "조" 뒤 공백 표기는 알려진 간극으로 남는다.
             ("1조 5000원", "1조 <AMOUNT_1>"),
             ("제3조 5000원 이하의 과태료", "제3조 <AMOUNT_1> 이하의 과태료"),
-            # 공백 뒤가 순수 숫자가 아니라 수사·단위를 가진 마디면 꼬리가 받지 못한다
-            # ("조"/"억" 뒤에 공백을 둔 금액 표기의 알려진 간극 그대로).
-            ("9조 1800억원", "9조 <AMOUNT_1>"),
-            ("3억 2천만원", "3억 <AMOUNT_1>"),
+            # 공백 뒤가 순수 숫자가 아니라 수사·단위를 가진 마디면 꼬리가 아니라 마디
+            # 사이 공백(_UNIT_JOIN, #453)이 받는다 — 종전의 알려진 간극이 닫혔다.
+            ("9조 1800억원", "<AMOUNT_1>"),
+            ("3억 2천만원", "<AMOUNT_1>"),
             # [ \t]는 개행을 넘지 않는다. \s로 두면 줄 끝의 "1만"과 다음 줄 첫머리의
             # "5000원"이 한 자리표시자로 합쳐져, 서로 다른 두 값이었다는 사실이 사라진다.
             ("잔고는 1만\n5000원", "잔고는 1만\n<AMOUNT_1>"),
@@ -1285,3 +1287,274 @@ class TestMaskEmptyInput:
         masked, mapping = mask_pii(None)
         assert masked is None
         assert mapping == {}
+
+
+class TestAmountGeneralRule:
+    """금액 = 숫자 몸통 x 금액 표지 (#453).
+
+    감사 실행에서 "예수금 ₩3,000,000"·"3.2M원"은 전량 평문, "3 000 000원"은
+    "3 000 <AMOUNT_1>"(앞자리 평문)으로 외부 LLM에 나갔다. 표기 형식을 하나씩 덧붙여 온
+    결과라, 몸통(자리 구분 x 크기 접미)과 표지(통화 앞·뒤표지, 라벨)를 축으로 표를 짜서
+    조합 전체를 고정한다. 한 축을 되돌리면 그 축의 행이 한꺼번에 빨개진다.
+    """
+
+    # (입력, 마스킹 결과(nonce 제거), 매핑 원값) — 값 전체가 자리표시자 하나여야 한다.
+    _MASKED = [
+        # 이슈 본문의 세 형식
+        ("예수금 ₩3,000,000", "예수금 <AMOUNT_1>", "₩3,000,000"),
+        ("3.2M원", "<AMOUNT_1>", "3.2M원"),
+        ("3 000 000원", "<AMOUNT_1>", "3 000 000원"),
+        # 자리 구분: 콤마 · 공백 · 점 · 없음
+        ("3,000,000원", "<AMOUNT_1>", "3,000,000원"),
+        ("3.000.000원", "<AMOUNT_1>", "3.000.000원"),
+        ("3000000원", "<AMOUNT_1>", "3000000원"),
+        ("잔고 3 000 000원", "잔고 <AMOUNT_1>", "3 000 000원"),
+        ("1,234,567 원", "<AMOUNT_1>", "1,234,567 원"),
+        ("15000 원 있어요", "<AMOUNT_1> 있어요", "15000 원"),
+        # 한글 단위: 만원 · 억원 · 조원 · 수사 혼합
+        ("300만원", "<AMOUNT_1>", "300만원"),
+        ("300만 원", "<AMOUNT_1>", "300만 원"),
+        ("3백만원", "<AMOUNT_1>", "3백만원"),
+        ("1.5억원", "<AMOUNT_1>", "1.5억원"),
+        ("2조원", "<AMOUNT_1>", "2조원"),
+        # 마디 사이 공백 — 종전에는 뒤 구간만 잡혔다("3억 <AMOUNT_1>")
+        ("3억 2천만원", "<AMOUNT_1>", "3억 2천만원"),
+        ("1억 5,000만원", "<AMOUNT_1>", "1억 5,000만원"),
+        ("2조 3000억원", "<AMOUNT_1>", "2조 3000억원"),
+        # 라틴 크기 접미 K/M/B
+        ("500K원", "<AMOUNT_1>", "500K원"),
+        ("1.5B원", "<AMOUNT_1>", "1.5B원"),
+        ("3.2M 원", "<AMOUNT_1>", "3.2M 원"),
+        ("총자산은 3.2M원이고", "총자산은 <AMOUNT_1>이고", "3.2M원"),
+        # 통화 앞표지 ₩ · ￦ · KRW (뒷표지 없이도 금액)
+        ("₩3,000,000", "<AMOUNT_1>", "₩3,000,000"),
+        ("₩ 3,000,000", "<AMOUNT_1>", "₩ 3,000,000"),
+        ("￦3,000,000", "<AMOUNT_1>", "￦3,000,000"),
+        ("KRW 3,000,000", "<AMOUNT_1>", "KRW 3,000,000"),
+        ("KRW3,000,000", "<AMOUNT_1>", "KRW3,000,000"),
+        ("₩300만", "<AMOUNT_1>", "₩300만"),
+        ("₩3.2M", "<AMOUNT_1>", "₩3.2M"),
+        ("평가금액 ₩12,345,678 입니다", "평가금액 <AMOUNT_1> 입니다", "₩12,345,678"),
+        # 앞표지만 있을 때 뒤 공백을 삼키지 않는다(띄어쓰기 보존)
+        ("₩1만 명", "<AMOUNT_1> 명", "₩1만"),
+        # 통화 뒷표지 KRW · ₩
+        ("3,000,000 KRW", "<AMOUNT_1>", "3,000,000 KRW"),
+        ("3,000,000KRW", "<AMOUNT_1>", "3,000,000KRW"),
+        ("300만 KRW", "<AMOUNT_1>", "300만 KRW"),
+        ("3,000,000₩", "<AMOUNT_1>", "3,000,000₩"),
+        # 라벨이 표지 — 통화 표지 없이 크기 접미·공백·점 구분 몸통
+        ("잔고 300만", "잔고 <AMOUNT_1>", "300만"),
+        ("예수금 3백만", "예수금 <AMOUNT_1>", "3백만"),
+        ("자산 3.2M", "자산 <AMOUNT_1>", "3.2M"),
+        ("잔고 3,000만", "잔고 <AMOUNT_1>", "3,000만"),
+        ("잔고 3 000 000", "잔고 <AMOUNT_1>", "3 000 000"),
+        ("잔고 3.000.000", "잔고 <AMOUNT_1>", "3.000.000"),
+        # 앞쪽 시작이 실패하는 비정상 표기에서도 뒤 금액은 종전대로 잡힌다
+        # (구분 갈래 lookbehind가 맨 숫자 갈래까지 막지 않는다)
+        ("12345 500원", "12345 <AMOUNT_1>", "500원"),
+    ]
+
+    @pytest.mark.parametrize(("text", "expected", "original"), _MASKED)
+    def test_amount_is_masked_as_a_single_placeholder(self, text, expected, original):
+        masked, mapping = mask_pii(text)
+        assert _norm(masked) == expected
+        assert _norm_mapping(mapping) == {"<AMOUNT_1>": original}
+        assert unmask_pii(masked, mapping) == text
+
+    # 금액이 아닌 숫자 — 그대로 남아야 한다(과잉 마스킹 대조군).
+    _UNCHANGED = [
+        # 종목코드 · 날짜 · 시각
+        "삼성전자 005930",
+        "종목코드 005930 매수",
+        "2026-10-23 기준",
+        "2026.10.23 기준",
+        "10월 23일",
+        "14:30 기준",
+        "오후 3시 30분",
+        # 퍼센트 · 배수 · 순위
+        "수익률 3.2%",
+        "등락률 -1.5%",
+        "PER 12.3배",
+        "1위 삼성전자",
+        "거래량 순위 3위",
+        "52주 신고가",
+        # 표지 없는 크기 접미 — "1만 명"·"3M 회사"와 구분되지 않아 잡지 않는다
+        "1만 명",
+        "3M 회사",
+        "M&A 3건",
+        "5G 통신",
+        "이 2024KB 파일",
+        "5Mbps 회선",
+        # 표지 없는 공백 · 점 구분 숫자
+        "3 000 명",
+        "100 200 300",
+        "1 2 3 4",
+        "2026 10 23",
+        "전화 010 1234 5678",
+        "버전 3.2.1",
+        # "원"으로 시작하는 낱말이 숫자 뒤에 띄어 오는 표기 — 몸통 모양과 무관하게 같은
+        # 경계 규칙(_SPACED_WON)이다. 구분·크기가 있는 몸통도 예외가 아니다(PR #453 리뷰).
+        "제3 원칙",
+        "코스피 2500 원달러 1300",
+        "코스피 2,500 원달러",
+        "주문번호 20240101 원장",
+        "1,000 원칙",
+        "1,234,567 원장",
+        "1 000 원칙",
+        "3.2M 원칙",
+        "지금만 원하는 것은",
+        # 영단어 안의 KRW
+        "XKRW3 토큰",
+    ]
+
+    @pytest.mark.parametrize("text", _UNCHANGED)
+    def test_non_amount_numbers_are_left_alone(self, text):
+        masked, mapping = mask_pii(text)
+        assert masked == text
+        assert mapping == {}
+
+    @pytest.mark.parametrize(("text", "expected"), [
+        # 수량 · 계좌는 금액 일반화 뒤에도 제 종류로 남는다
+        ("10주", "<QTY_1>주"),
+        ("잔고 1,234주", "잔고 <QTY_1>주"),
+        ("잔고 12345678-01", "잔고 <ACCOUNT_1>"),
+        ("예수금 1234567890", "예수금 <AMOUNT_1>"),
+        # 법조문 서수사 뒤 공백은 마디로 잇지 않는다(조문 번호가 금액에 삼켜지지 않음)
+        ("제1조 3천원 이하의 벌금", "제1조 <AMOUNT_1> 이하의 벌금"),
+        ("제12조 5억원 이하", "제12조 <AMOUNT_1> 이하"),
+        ("제3조 5000원 이하의 과태료", "제3조 <AMOUNT_1> 이하의 과태료"),
+    ])
+    def test_kinds_and_ordinal_boundaries_are_kept(self, text, expected):
+        masked, mapping = mask_pii(text)
+        assert _norm(masked) == expected
+        assert unmask_pii(masked, mapping) == text
+
+    @pytest.mark.parametrize("text", [
+        # 남은 간극 — 의도적으로 잡지 않는 것과 아직 못 잡는 것. 방향이 바뀌면 알려준다.
+        "3.2M",             # 표지 없음 ("3M 회사"와 구분 불가)
+        "300만",            # 표지 없음 ("1만 명"과 구분 불가)
+        "$1,234.56",        # 원화가 아님 (F-17 대상 밖, 모듈 주석 참고)
+        "1,234.56달러",
+        "15000 원입니다",    # 띄어 쓴 "원" + 한글 ("2500 원달러"와 구분 불가, main도 미탐)
+        "1,234,567 원입니다",  # 같은 규칙 — 몸통이 분명해도 예외를 두지 않는다
+        "2026 원년",        # 같은 규칙의 반대편 — 과탐하지 않는다
+    ])
+    def test_known_gaps_are_pinned(self, text):
+        masked, _ = mask_pii(text)
+        assert masked == text
+
+    @pytest.mark.parametrize(("text", "expected"), [
+        # 하이픈 계좌 옆에 통화 표지가 와도 계좌가 통째로 ACCOUNT다. 리뷰 전에는 금액이 계좌
+        # 한 조각을 가져가 나머지가 평문이었다("01 KRW"가 금액 -> 앞 8자리 평문).
+        ("계좌 12345678-01 KRW", "계좌 <ACCOUNT_1> KRW"),
+        ("₩12345678-01", "₩<ACCOUNT_1>"),
+        ("KRW 12345678-01", "KRW <ACCOUNT_1>"),
+        # main에도 있던 구멍 — "01원"이 금액이 되고 앞 8자리가 평문이었다.
+        ("12345678-01원", "<ACCOUNT_1>원"),
+        ("12345678-01 원", "<ACCOUNT_1> 원"),
+        ("12345678-01만원", "<ACCOUNT_1>만원"),
+        # 계좌 모양이 **아니면** 종전(main)대로 금액이 뒷조각을 가린다. 단순한 (?<!\d{8}-)는
+        # 이것들까지 막아 전량 평문으로 만들었다(리뷰어 fuzz 실측).
+        ("112345678-01원", "112345678-<AMOUNT_1>"),
+        ("12345678-0100091234000원", "12345678-<AMOUNT_1>"),
+        ("12345678000-9원", "12345678000-<AMOUNT_1>"),
+        # 음수 금액 표기는 그대로다.
+        ("-1,234원", "-<AMOUNT_1>"),
+        # 하이픈 없는 10자리에 통화 표지가 붙으면 금액이다(어느 쪽이든 전체가 가려진다).
+        ("₩1234567801", "<AMOUNT_1>"),
+    ])
+    def test_account_takes_precedence_over_adjacent_currency_marker(self, text, expected):
+        masked, mapping = mask_pii(text)
+        assert _norm(masked) == expected
+        assert unmask_pii(masked, mapping) == text
+
+    @pytest.mark.parametrize(("text", "expected", "original"), [
+        # 라벨이 받는 몸통(공백·단위·K/M)이 넓어진 만큼 수량 배제도 넓다 — 가려지되 QTY다.
+        ("잔고 1만주", "잔고 <QTY_1>주", "1만"),
+        ("잔고 1 000주", "잔고 <QTY_1>주", "1 000"),
+        ("잔고 1 000 000주", "잔고 <QTY_1>주", "1 000 000"),
+        ("잔고 3백주", "잔고 <QTY_1>주", "3백"),
+        ("잔고 1.5M주", "잔고 <QTY_1>주", "1.5M"),
+        ("잔고 1,234주", "잔고 <QTY_1>주", "1,234"),
+        # 라벨 없는 자유 입력도 같은 몸통이다(main: "1만주" 전량 평문, "1 000주" 부분).
+        ("삼성전자 1만주 보유", "삼성전자 <QTY_1>주 보유", "1만"),
+        ("1 000 000주 거래", "<QTY_1>주 거래", "1 000 000"),
+    ])
+    def test_labeled_quantity_stays_quantity(self, text, expected, original):
+        masked, mapping = mask_pii(text)
+        assert _norm(masked) == expected
+        assert _norm_mapping(mapping) == {"<QTY_1>": original}
+        assert unmask_pii(masked, mapping) == text
+
+    def test_labeled_trailing_comma_invariant_still_holds(self):
+        """수량 배제를 _QTY_BODY로 바꿔도 "숫자로 끝나야 배제" 불변식이 그대로다.
+
+        배제가 발동했는데 _QTY_RE가 받지 못하면 그 숫자는 평문이 된다. "잔고 1,234,주"는
+        배제가 발동하지 않아 종전대로 AMOUNT가 가져가야 한다.
+        """
+        masked, mapping = mask_pii("잔고 1,234,주")
+        assert _norm(masked) == "잔고 <AMOUNT_1>,주"
+        assert _norm_mapping(mapping) == {"<AMOUNT_1>": "1,234"}
+
+    @pytest.mark.parametrize(("text", "expected"), [
+        # 환율은 개인정보가 아니지만 fail-closed로 가린다(_CUR_PREFIX 위 주석). main도
+        # "원/달러 1,380원"의 "1,380원"을 이미 가린다.
+        ("USD/KRW 1,380", "USD/<AMOUNT_1>"),
+        ("환율 1 KRW = 0.00072 USD", "환율 <AMOUNT_1> = 0.00072 USD"),
+        ("원/달러 1,380원", "원/달러 <AMOUNT_1>"),
+        ("코스피 2,500 원달러 1,380원", "코스피 2,500 원달러 <AMOUNT_1>"),
+        # KRW 뒤에 숫자가 닿지 않으면 표지가 아니다.
+        ("KRW/USD 0.00072", "KRW/USD 0.00072"),
+    ])
+    def test_exchange_rate_notation_is_pinned(self, text, expected):
+        masked, mapping = mask_pii(text)
+        assert _norm(masked) == expected
+        assert unmask_pii(masked, mapping) == text
+
+    @pytest.mark.parametrize(("text", "expected"), [
+        # 라벨 뒤 부호 — main을 포함해 전량 평문이던 손익 표기. 부호는 남고 크기만 가린다.
+        ("손익 -1,000,000", "손익 -<AMOUNT_1>"),
+        ("손익: +1,234,567", "손익: +<AMOUNT_1>"),
+        ("예수금 - 1,234,567", "예수금 - <AMOUNT_1>"),
+        ("손익 −1,000,000", "손익 −<AMOUNT_1>"),
+    ])
+    def test_signed_labeled_amount_is_masked(self, text, expected):
+        masked, mapping = mask_pii(text)
+        assert _norm(masked) == expected
+        assert unmask_pii(masked, mapping) == text
+
+    @pytest.mark.parametrize(("text", "expected"), [
+        # 리뷰어 fuzz(20만 건 x 6 seed)가 찾은, main보다 덜 가리던 표기들. 각각의 원인은
+        # 모듈 주석(_NUM_GROUPED 콤마 갈래, _PRE_ONLY_END, _UNIT_WON)에 있다.
+        ("KRW12,000000.000원", "KRW12,<AMOUNT_1>"),
+        ("12,1234,000원", "12,<AMOUNT_1>"),
+        ("00012345678,8,000원", "00012345678,<AMOUNT_1>"),
+        ("9억십8,12,000원조", "9억십8,<AMOUNT_1>조"),
+        ("KRW8,0001231234", "KRW8,<ACCOUNT_1>"),
+        ("KRW십12345678-12천십", "KRW십<ACCOUNT_1>천십"),
+        ("예수금 )₩₩1,0001234000", "예수금 )₩₩1,<ACCOUNT_1>"),
+        ("KRW백9,000주K", "KRW백<QTY_1>주K"),
+        ("8만  원억", "<AMOUNT_1>억"),
+    ])
+    def test_fuzz_found_regressions_match_main(self, text, expected):
+        masked, mapping = mask_pii(text)
+        assert _norm(masked) == expected
+        assert unmask_pii(masked, mapping) == text
+
+    @pytest.mark.parametrize("hostile", [
+        "111 " * 2048,
+        "1" + ".111" * 2048,
+        "1" + ",111" * 2048,
+    ], ids=["space", "dot", "comma"])
+    def test_grouped_number_run_does_not_blow_up(self, hostile):
+        """구분 숫자 런이 O(n²) 백트래킹을 되살리지 않는다.
+
+        _NUM_GROUPED 각 갈래의 lookbehind가 없으면 마디마다 새 매치가 시작돼 런 끝까지
+        소비했다가 실패한다. 8192자 실측: 공백 597 ms, 점 1298 ms(lookbehind 없음) ->
+        6 ms 안팎. 콤마는 main에서도 148 ms였다. 상한은 test_korean_numeral_run_does_
+        not_blow_up과 같은 0.5 초다.
+        """
+        started = time.perf_counter()
+        mask_pii(hostile)
+        elapsed = time.perf_counter() - started
+        assert elapsed < 0.5, f"구분 숫자 런 {len(hostile)}자에 {elapsed * 1000:.0f} ms"
