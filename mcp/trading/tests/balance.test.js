@@ -588,7 +588,30 @@ test("formatPercent avoids undefined balance rates", () => {
   assert.equal(formatPercent("-1.23"), "🔵 ▼ -1.23%");
   assert.equal(formatPercent("0.00"), "⚪ 0.00%");
   assert.equal(formatPercent("0.02079000"), "🔴 ▲ +0.02%");
-  assert.equal(formatPercent("-0.251"), "🔵 ▼ -0.26%");
+  assert.equal(formatPercent("-0.251"), "🔵 ▼ -0.25%");
+});
+
+// 시연 캡처(매매일지 "총 손익 +0.11% / 보유종목 +0.12%"): 삼성전자 1주를 213,500원에 사고 현재가가
+// 213,750원일 때, 여기서 계산한 계좌 수익률(250 / 213,500 = 0.11709…%)은 내림으로 0.11%, 같은 종목의
+// KIS evlu_pfls_rt는 반올림된 "0.12"였다. 둘 다 반올림해 같은 값으로 보여야 한다.
+// 뮤테이션: roundRate를 Math.floor(numeric * 100) / 100으로 되돌리면 아래 셋이 모두 red.
+test("formatPercent rounds like KIS rate fields instead of flooring", () => {
+  assert.equal(formatPercent("0.29"), "🔴 ▲ +0.29%"); // 부동소수 오차로 0.28%가 되던 값
+  assert.equal(formatPercent(String((250 / 213500) * 100)), "🔴 ▲ +0.12%");
+  assert.equal(formatPercent(String((-250 / 213500) * 100)), "🔵 ▼ -0.12%");
+
+  const text = formatBalanceReport({
+    output1: [{
+      prdt_name: "삼성전자", pdno: "005930", hldg_qty: "1",
+      pchs_avg_pric: "213500", evlu_amt: "213750", evlu_pfls_amt: "250", evlu_pfls_rt: "0.12",
+    }],
+    output2: [{
+      tot_evlu_amt: "9999903", nass_amt: "9999903", pchs_amt_smtl_amt: "213500",
+      evlu_pfls_smtl_amt: "250", dnca_tot_amt: "9999683",
+    }],
+  });
+  assert.match(text, /총 손익: 250원 \(수익률: 🔴 ▲ \+0\.12%\)/);
+  assert.match(text, /손익 \+250원 · 수익률 🔴 ▲ \+0\.12%/);
 });
 
 test("formatBalanceReport displays unsettled cash fields and account return rate", () => {
@@ -631,7 +654,7 @@ test("formatBalanceReport displays unsettled cash fields and account return rate
     `[계좌 잔고 현황]
 - 총 평가금액: 1,210,000원
 - 순자산금액: 1,210,000원
-- 총 손익: 9,000원 (수익률: 🔴 ▲ +2.23%)
+- 총 손익: 9,000원 (수익률: 🔴 ▲ +2.24%)
 - 예수금: 1,000,000원
 - 정산중 금액(가수도): 1,009,000원
 - 익일 정산예정금액: 790,000원

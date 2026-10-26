@@ -280,13 +280,24 @@ export async function fetchAllBalance(fetchPage, {
   return fetchAllPaged(fetchPage, { maxPages, timeBudgetMs, now, label: "잔고 연속조회" });
 }
 
+// 소수 둘째 자리에서 반올림한다(0에서 먼 쪽, KIS가 내려주는 *_rt 필드와 같은 방식).
+// 예전 Math.floor(numeric * 100)은 두 가지로 틀렸다.
+// - 부동소수 오차: KIS가 준 "0.29"가 0.29 * 100 = 28.999…라 0.28%로 찍혔다.
+// - 방향 비대칭: 계좌 수익률처럼 여기서 계산한 값(0.11709…)은 0.11%로 내려가는데, 같은 종목의
+//   KIS 수익률 필드는 반올림된 0.12라 보유 1종목 계좌에서 총 수익률과 종목 수익률이 갈렸다
+//   (시연 캡처의 매매일지 "+0.11% / +0.12%"). 음수는 반대로 -0.251이 -0.26%로 부풀었다.
+function roundRate(numeric) {
+  const rounded = Math.round(Math.abs(numeric) * 100 + 1e-9) / 100;
+  return numeric < 0 ? -rounded : rounded;
+}
+
 export function formatPercent(value) {
   if (value === undefined || value === null || value === "") return "-";
   const numeric = Number(String(value).replace("%", ""));
   if (!Number.isFinite(numeric)) {
     return `${value}%`;
   }
-  const formatted = (Math.floor(numeric * 100) / 100).toFixed(2);
+  const formatted = roundRate(numeric).toFixed(2);
   if (numeric > 0) {
     return `🔴 ▲ +${formatted}%`;
   }

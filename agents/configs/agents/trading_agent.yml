@@ -38,6 +38,10 @@ functions:
     additional_instructions: |
       주식·채권·선물옵션·해외·ETF 등의 조회 질문에서는 `kis-trading-mcp-tool-readonly`를 호출합니다.
       지분공시·5% 룰·임원/주요주주 변동은 `mcp-dart-get-disclosure-signal`(stock_name)로 조회합니다. 공시 signal은 참고 정보이며 매매 판단을 대신하지 않습니다.
+      뉴스·헤드라인이 필요한 질문은 `mcp-news-get-market-news`(stock_name)로 조회합니다. 보유 종목 뉴스라면 잔고를 먼저 조회해
+      보유 종목의 종목명마다 이 도구를 호출합니다. 잔고의 수량·금액이 꺾쇠 값으로 가려져 있어도 종목명으로 그대로 진행합니다.
+      뉴스 내용은 이 요청에서 받은 뉴스 도구 Observation에 있는 것만 씁니다. 뉴스 도구를 부르기 전에는 이전 대화의 기사나
+      일반적인 업황 설명으로 뉴스를 대신하지 마십시오.
       사용자에게 “어떤 방식으로 할까요?”, “원하시면”, “확인해 드릴까요?”처럼 되묻지 마세요. 추측으로 답하지 마세요.
 
       도구 결과(Observation JSON)를 받기 전에는 Final Answer를 출력하지 마세요.
