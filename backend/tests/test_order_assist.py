@@ -9,6 +9,7 @@
 - 승인 시 기존 PendingOrder 경로 합류(확정 버튼 포함)
 """
 
+import re
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 from typing import Any, cast
@@ -45,6 +46,10 @@ from backend.telegram.handlers.texts import ADVISE_COMMAND_HELP
 from backend.trading.orders import ORDER_EXPIRES_AFTER
 
 KST = ZoneInfo("Asia/Seoul")
+
+# backend.pii.mask._PLACEHOLDER_RE와 같은 모양. 테스트가 내부 정규식을 끌어다 쓰면
+# 그 정규식이 바뀔 때 테스트도 같이 바뀌어 회귀를 못 잡으므로 따로 적는다.
+_SCOPED_PLACEHOLDER_RE_FOR_TEST = re.compile(r"<(?:ACCOUNT|AMOUNT|QTY)_[0-9a-f]{6}_\d+>")
 
 # 평일 장중 — is_korean_market_open이 True인 시각.
 MARKET_OPEN_NOW = datetime(2026, 5, 20, 10, 0, tzinfo=KST)
@@ -370,6 +375,197 @@ def test_parse_proposal_treats_hold_as_no_proposal_not_a_parse_failure():
 
     assert proposal is None
     assert "제안하지 않았습니다" in error
+
+
+# ---------------------------------------------------------------------------
+# HOLD 이유 — 전략 에이전트가 "지금은 주문하지 않는다"고 한 까닭을 사용자에게 보인다
+# ---------------------------------------------------------------------------
+
+# 실 스택에서 /v1/propose-order가 돌려준 HOLD 응답의 모양(2026-10-26 실측). rationale에
+# 숫자가 섞여 오고, 필드는 BUY/SELL과 같은 스키마를 그대로 채운다.
+HOLD_JSON_TEMPLATE = (
+    '{{"stock_name":"삼성전자","stock_code":"{code}","side":"HOLD","quantity":0,'
+    '"order_type":"MARKET","price":0,"rationale":{rationale},"confidence":0.78}}'
+)
+
+
+def _hold_json(rationale: str | None, code: str = "005930") -> str:
+    import json as _json
+
+    return HOLD_JSON_TEMPLATE.format(
+        code=code, rationale=_json.dumps(rationale, ensure_ascii=False)
+    )
+
+
+def test_parse_proposal_detail_keeps_the_hold_reason():
+    reason = "최근 외국인 매도가 이어지고 변동성이 커서 지금은 지켜보는 편이 낫습니다."
+
+    parsed = order_assist.parse_proposal_detail(_hold_json(reason))
+
+    assert parsed.proposal is None
+    assert parsed.hold is True
+    assert parsed.error == order_assist.HOLD_MESSAGE
+    assert parsed.hold_reason == reason
+    assert parsed.hold_stock_code == "005930"
+
+
+@pytest.mark.parametrize("rationale", [None, "", "   ", "**  **"], ids=["null", "empty", "blank", "markdown_only"])
+def test_parse_proposal_detail_hold_without_reason_has_empty_reason(rationale):
+    parsed = order_assist.parse_proposal_detail(_hold_json(rationale))
+
+    assert parsed.hold is True
+    assert parsed.hold_reason == ""
+
+
+def test_parse_proposal_detail_reads_reason_key_when_rationale_is_missing():
+    """모델이 키를 reason으로 바꿔 써도 이유를 버리지 않는다."""
+    parsed = order_assist.parse_proposal_detail('{"side": "HOLD", "reason": "뚜렷한 매수 신호가 없습니다."}')
+
+    assert parsed.hold_reason == "뚜렷한 매수 신호가 없습니다."
+
+
+def test_hold_reason_masks_numbers_it_cannot_check_against_a_snapshot():
+    """HOLD는 스냅샷 조회 전에 끝나 이유 속 숫자를 대조할 수 없다 — 숫자는 가리고 흐름은 남긴다.
+
+    실측 응답 그대로다: "현재가가 213,000원으로 …". 이 값이 맞는지 코드가 확인하지 않았으므로
+    사용자 화면에 숫자로 나가지 않는다.
+    """
+    raw = (
+        "현재가가 213,000원으로 최근 고점 대비 약세 흐름이고, 전일 대비 1.16% 하락했습니다. "
+        "지금은 추격 매수보다 관망이 더 적절합니다."
+    )
+
+    result = order_assist.hold_reason(raw)
+
+    assert not any(ch.isdigit() for ch in result)
+    assert "현재가가 [수치]원으로" in result
+    assert "관망이 더 적절합니다." in result
+
+
+def test_hold_reason_falls_back_to_empty_when_only_numbers_remain():
+    assert order_assist.hold_reason("213,000 / 1.16% / 5") == ""
+
+
+def test_hold_reason_truncates_at_a_sentence_boundary():
+    first = "외국인과 기관이 함께 팔고 있어 흐름이 약합니다."
+    long_text = " ".join([first] * 20)
+
+    result = order_assist.hold_reason(long_text)
+
+    assert len(result) <= order_assist.HOLD_REASON_MAX_CHARS
+    assert result.endswith("약합니다.")  # 문장 중간에서 끊지 않는다
+    assert result.startswith(first)
+
+
+def test_hold_reason_truncates_a_single_overlong_sentence_with_an_ellipsis():
+    result = order_assist.hold_reason("가" * 500)
+
+    assert len(result) == order_assist.HOLD_REASON_MAX_CHARS
+    assert result.endswith("…")
+
+
+def test_hold_reason_collapses_newlines_into_one_line():
+    """이유는 거부 메시지의 한 줄로 실린다 — 개행이 섞이면 메시지 모양이 깨진다."""
+    assert order_assist.hold_reason("수급이 약합니다.\n\n지켜보는 편이 낫습니다.") == (
+        "수급이 약합니다. 지켜보는 편이 낫습니다."
+    )
+
+
+@pytest.mark.parametrize(
+    "token",
+    ["<AMOUNT_1>", "<AMOUNT1>", "<QTY_9f2a1c>", "(이전 금액 1)"],
+    ids=["scopeless", "mangled", "no_ordinal", "unmask_fallback"],
+)
+def test_hold_reason_masks_placeholder_traces(token):
+    """unmask_pii가 복원하지 못한 자리표시자 흔적은 값 자리라 [수치]로 가린다."""
+    result = order_assist.hold_reason(f"보유 {token} 기준으로 비중이 이미 큽니다.")
+
+    assert token not in result
+    assert "AMOUNT" not in result and "QTY" not in result
+    assert result == "보유 [수치] 기준으로 비중이 이미 큽니다."
+
+
+@pytest.mark.asyncio
+async def test_hold_reason_goes_through_the_unmask_path_of_request_proposal(monkeypatch):
+    """HOLD 이유의 자리표시자도 기존 응답 복원 경로(request_proposal의 unmask_pii)를 지난다.
+
+    프롬프트에 실린 금액이 자리표시자로 나가고, 모델이 그 자리표시자를 이유에 인용하면
+    unmask_pii가 원값으로 되돌린다. 되돌린 값도 이번 스냅샷과 대조한 값이 아니므로
+    hold_reason이 숫자를 가린다 — 자리표시자 토큰도, 원값도 화면에 나가지 않는다.
+    """
+    sent = []
+
+    async def fake_post(path, payload, timeout):
+        sent.append(payload)
+        found = _SCOPED_PLACEHOLDER_RE_FOR_TEST.search(payload["input_message"])
+        assert found is not None, "프롬프트의 금액이 자리표시자로 나가야 한다"
+        token = found.group(0)
+        return {"value": _hold_json(f"예수금 {token} 기준으로 지금은 무리하지 않는 편이 낫습니다.")}
+
+    monkeypatch.setattr(order_assist, "_post_json", fake_post)
+
+    raw = await order_assist.request_proposal("종목: 삼성전자 예수금 1,000,000원")
+    parsed = order_assist.parse_proposal_detail(raw)
+
+    assert "1,000,000" not in sent[0]["input_message"]
+    assert "1,000,000원" in raw  # 복원 경로를 탔다
+    assert parsed.hold_reason == "예수금 [수치]원 기준으로 지금은 무리하지 않는 편이 낫습니다."
+
+
+@pytest.mark.asyncio
+async def test_advise_hold_shows_the_reason_under_the_fixed_message():
+    reason = "최근 외국인 매도가 이어지고 변동성이 커서 지금은 지켜보는 편이 낫습니다."
+    verify_calls: list = []
+
+    result, _ = await _run(proposal_text=_hold_json(reason), verify_calls=verify_calls)
+
+    assert result.status == "rejected"
+    assert result.message == (
+        "🚫 삼성전자 주문 제안을 보류했습니다.\n"
+        "\n"
+        "- 지금은 주문을 제안하지 않았습니다.\n"
+        "\n"
+        f"판단 이유: {reason}"
+    )
+    assert verify_calls == []  # HOLD는 검증자를 부르지 않는다(주문이 나가지 않는 방향)
+    assert result.order is None
+
+
+@pytest.mark.asyncio
+async def test_advise_hold_without_reason_keeps_the_old_message():
+    result, _ = await _run(proposal_text='{"side": "HOLD"}')
+
+    assert result.message == (
+        "🚫 삼성전자 주문 제안을 보류했습니다.\n\n- 지금은 주문을 제안하지 않았습니다."
+    )
+
+
+@pytest.mark.asyncio
+async def test_advise_hold_reason_for_another_stock_is_dropped():
+    """다른 종목에 대한 이유를 이 종목의 판단처럼 보여 주지 않는다."""
+    result, _ = await _run(proposal_text=_hold_json("이 종목은 실적이 약합니다.", code="000660"))
+
+    assert "판단 이유" not in result.message
+    assert "실적이 약합니다" not in result.message
+    assert "지금은 주문을 제안하지 않았습니다." in result.message
+
+
+def test_proposal_prompt_asks_for_a_short_numberless_hold_reason():
+    """프롬프트가 HOLD 이유를 쉬운 말 한두 문장·숫자 없이 요구한다.
+
+    HOLD 지시 문단에는 숫자를 한 자도 넣지 않는다 — /v1/propose-order의 환각 게이트는
+    프롬프트에 등장한 수치를 화이트리스트로 삼으므로(order_rules 모듈 주석 3번), 지시문에
+    "100자 이내" 같은 숫자를 쓰면 그 수치가 도구 없이도 게이트를 통과하게 된다.
+    """
+    prompt = order_assist.build_proposal_prompt(ProposalTrigger(source="telegram", stock="삼성전자", chat_id="1"))
+    hold_part = prompt[prompt.index('지금 주문할 이유가 없다면'):]
+
+    assert "한두 문장" in hold_part
+    assert "쉬운 말" in hold_part
+    assert "숫자는 쓰지" in hold_part
+    assert not any(ch.isdigit() for ch in hold_part)
+    # BUY/SELL 스키마는 그대로다.
+    assert '"side": "BUY" 또는 "SELL"' in prompt
 
 
 @pytest.mark.parametrize(

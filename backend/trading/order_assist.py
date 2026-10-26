@@ -278,7 +278,9 @@ PROPOSAL_PROMPT_TEMPLATE = """당신은 Fin-Us 주문 제안자입니다. 아래
   "confidence": <0.0~1.0 사이의 확신도>
 }}
 
-지금 주문할 이유가 없다면 side에 "HOLD"를 넣고 rationale에 그 이유를 쓰세요."""
+지금 주문할 이유가 없다면 side에 "HOLD"를 넣고 rationale에 그 이유를 쓰세요.
+HOLD의 rationale은 사용자에게 그대로 보입니다. 처음 투자하는 사람도 알아듣는 쉬운 말로 한두 문장만 쓰고, 가격·수량·비율 같은 숫자는 쓰지 말고 흐름만 설명하세요.
+예: "최근 외국인 매도가 이어지고 변동성이 커서 지금은 지켜보는 편이 낫습니다." """
 
 _SIDES: dict[str, OrderSide] = {"BUY": "BUY", "SELL": "SELL"}
 _ORDER_TYPES: dict[str, OrderType] = {"LIMIT": "LIMIT", "MARKET": "MARKET"}
@@ -331,21 +333,93 @@ def _coerce_float(value: Any) -> float | None:
     return None
 
 
+HOLD_MESSAGE = "지금은 주문을 제안하지 않았습니다."
+# HOLD 이유의 화면 길이 상한. 프롬프트는 한두 문장을 요구하지만 모델이 지키지 않을 수 있고,
+# 이 문장은 거부 메시지 한가운데 그대로 실리므로 코드가 끊는다.
+HOLD_REASON_MAX_CHARS = 160
+
+# 역치환(unmask_pii)을 거친 뒤에도 남는 자리표시자 흔적. 형식이 맞는 자리표시자는
+# request_proposal의 unmask_pii가 원값이나 "(이전 금액 1)" 같은 중립 문구로 바꿔 두지만,
+# 모델이 형식을 변형한 것(<AMOUNT1>, scope 없는 <AMOUNT_1>)은 그 정규식에 걸리지 않아
+# 원문 그대로 온다. 어느 쪽이든 값 자리이므로 숫자와 같이 [수치]로 가린다.
+_PLACEHOLDER_TRACE_RE = re.compile(
+    r"<(?:ACCOUNT|AMOUNT|QTY)[^<>\s]{0,24}>|\(이전 (?:계좌|금액|수량) \d+\)"
+)
+_WHITESPACE_RUN_RE = re.compile(r"\s+")
+# 문장 끝으로 볼 자리 — 잘라야 할 때 여기서 자르면 문장이 중간에 끊기지 않는다.
+_SENTENCE_END_RE = re.compile(r"[.!?。](?=\s|$)")
+
+
+def hold_reason(text: str | None) -> str:
+    """HOLD 응답의 이유 문장을 사용자에게 보일 수 있는 형태로 다듬는다.
+
+    이유가 없거나 쓸 만한 글자가 남지 않으면 빈 문자열이다 — 호출부는 그때 고정 문구만 낸다.
+
+    **숫자는 전부 [수치]로 가린다.** HOLD는 이 시점에 스냅샷(현재가·잔고)을 조회하기 전에
+    끝나므로, 이유 속 "현재가 213,000원"을 코드가 관측한 값과 대조할 수단이 없다. 검증
+    에이전트는 BUY/SELL만 보고(거부 방향 전용) HOLD는 그대로 사용자에게 나간다. 그래서
+    :func:`qualitative_reason`과 같은 원칙 — "사용자에게 보이는 숫자는 코드가 만든 것뿐" —
+    을 따른다. 프롬프트도 숫자 없이 쓰라고 요구하므로 정상 응답에서는 가릴 것이 없고,
+    이 마스킹은 모델이 지시를 어긴 경우의 방어선이다.
+    """
+    cleaned = sanitize_markdown(text or "")
+    cleaned = _WHITESPACE_RUN_RE.sub(" ", cleaned).strip()
+    if not cleaned:
+        return ""
+    masked = _PLACEHOLDER_TRACE_RE.sub(_NUMBER_MASK, cleaned)
+    masked = _NUMBER_RUN_RE.sub(_NUMBER_MASK, masked)
+    masked = _REPEATED_MASK_RE.sub(f"{_NUMBER_MASK} ", masked).strip()
+    if not any(ch.isalnum() for ch in masked.replace(_NUMBER_MASK, "")):
+        return ""
+    if len(masked) <= HOLD_REASON_MAX_CHARS:
+        return masked
+    # 상한 안에서 마지막 문장 끝을 찾는다. 첫 문장조차 상한을 넘으면 글자 수로 끊고 말줄임표를 붙인다.
+    head = masked[:HOLD_REASON_MAX_CHARS]
+    ends = [m.end() for m in _SENTENCE_END_RE.finditer(head)]
+    if ends:
+        return head[: ends[-1]].strip()
+    return head[: HOLD_REASON_MAX_CHARS - 1].rstrip() + "…"
+
+
+@dataclass(frozen=True)
+class ProposalParse:
+    """제안 응답 파싱 결과.
+
+    ``hold``는 모델이 "지금은 주문하지 않는다"고 판단한 정상 응답이다(파싱 실패가 아니다).
+    그때 ``hold_reason``은 :func:`hold_reason`을 거친 문장이고, 이유가 없으면 빈 문자열이다.
+    ``hold_stock_code``는 HOLD 응답이 적은 종목코드다(없으면 빈 문자열) — 다른 종목에 대한
+    이유를 이 종목의 이유로 보여 주지 않도록 호출부가 대조한다.
+    """
+
+    proposal: OrderProposal | None
+    error: str = ""
+    hold: bool = False
+    hold_reason: str = ""
+    hold_stock_code: str = ""
+
+
 def parse_proposal(raw: str) -> tuple[OrderProposal | None, str]:
     """제안 응답 텍스트에서 :class:`OrderProposal`을 뽑는다.
 
     실패 시 ``(None, 사유)``를 돌려준다 — 사유는 사용자에게 그대로 보여도 되는 문장이다.
     성공 시에도 ``stock_code``는 아직 신뢰하지 않는다. 호출부가 MCP로 다시 확인한다.
+    HOLD의 이유까지 필요하면 :func:`parse_proposal_detail`을 쓴다.
     """
+    parsed = parse_proposal_detail(raw)
+    return parsed.proposal, parsed.error
+
+
+def parse_proposal_detail(raw: str) -> ProposalParse:
+    """:func:`parse_proposal`과 같은 판정에 HOLD 여부·이유를 더해 돌려준다."""
     from backend.ai.llm import _json_objects_from_text
 
     text = (raw or "").strip()
     if not text:
-        return None, "제안 응답이 비어 있어 진행하지 않았습니다."
+        return ProposalParse(None, "제안 응답이 비어 있어 진행하지 않았습니다.")
 
     candidates = _json_objects_from_text(text)
     if not candidates:
-        return None, "제안 응답을 해석하지 못해 진행하지 않았습니다."
+        return ProposalParse(None, "제안 응답을 해석하지 못해 진행하지 않았습니다.")
 
     last_error = "제안 응답을 해석하지 못해 진행하지 않았습니다."
     for data in candidates:
@@ -353,7 +427,19 @@ def parse_proposal(raw: str) -> tuple[OrderProposal | None, str]:
         side_key = raw_side.strip().upper() if isinstance(raw_side, str) else ""
         if side_key in ("HOLD", "NONE", "SKIP"):
             # 정상적인 "지금은 주문하지 않는다" 응답이다. 파싱 실패가 아니다.
-            return None, "지금은 주문을 제안하지 않았습니다."
+            # 이유는 프롬프트가 요구하는 rationale을 읽고, 모델이 키를 바꿔 쓴 reason도 받는다.
+            reason_raw = data.get("rationale")
+            if not isinstance(reason_raw, str) or not reason_raw.strip():
+                reason_raw = data.get("reason")
+            reason = hold_reason(reason_raw if isinstance(reason_raw, str) else "")
+            hold_code = data.get("stock_code")
+            return ProposalParse(
+                None,
+                HOLD_MESSAGE,
+                hold=True,
+                hold_reason=reason,
+                hold_stock_code=hold_code.strip().upper() if isinstance(hold_code, str) else "",
+            )
         if side_key not in _SIDES:
             last_error = "제안의 매매 방향을 알 수 없어 진행하지 않았습니다."
             continue
@@ -387,7 +473,7 @@ def parse_proposal(raw: str) -> tuple[OrderProposal | None, str]:
         stock_name = data.get("stock_name")
         rationale = data.get("rationale")
         code = data.get("stock_code")
-        return (
+        return ProposalParse(
             OrderProposal(
                 stock_name=stock_name.strip() if isinstance(stock_name, str) else "",
                 stock_code=code.strip().upper() if isinstance(code, str) else "",
@@ -398,10 +484,9 @@ def parse_proposal(raw: str) -> tuple[OrderProposal | None, str]:
                 rationale=rationale.strip() if isinstance(rationale, str) else "",
                 confidence=confidence,
             ),
-            "",
         )
 
-    return None, last_error
+    return ProposalParse(None, last_error)
 
 
 # ---------------------------------------------------------------------------
@@ -1027,11 +1112,15 @@ def format_rejection_message(
     stock: str,
     violations: tuple[LimitViolation, ...],
     verdict_reason: str = "",
+    hold_reason: str = "",
 ) -> str:
+    """거부 메시지. ``hold_reason``은 :func:`hold_reason`을 이미 거친 문장이어야 한다."""
     lines = [f"🚫 {stock} 주문 제안을 보류했습니다."]
     if violations:
         lines.append("")
         lines.extend(f"- {violation.message}" for violation in violations)
+    if hold_reason:
+        lines.extend(["", f"판단 이유: {hold_reason}"])
     if verdict_reason:
         lines.extend(["", f"검증 의견: {verdict_reason}"])
     return "\n".join(lines)
@@ -1076,6 +1165,7 @@ def _rejected(
     violations: tuple[LimitViolation, ...],
     *,
     verdict_reason: str = "",
+    hold_reason: str = "",
     failure: str | None = None,
     verifier_called: bool = False,
     proposal: OrderProposal | None = None,
@@ -1083,7 +1173,7 @@ def _rejected(
 ) -> OrderAssistResult:
     return OrderAssistResult(
         status="rejected",
-        message=format_rejection_message(stock, violations, verdict_reason),
+        message=format_rejection_message(stock, violations, verdict_reason, hold_reason),
         violations=violations,
         verdict_reason=verdict_reason,
         failure=failure,
@@ -1211,12 +1301,23 @@ async def run_order_assist(
         logger.error("제안 요청 실패: %s", exc)
         return _rejected(stock, (LimitViolation("propose_failed", f"제안을 받지 못했습니다: {short_error(exc)}"),))
 
-    proposal, parse_error = parse_proposal(raw)
+    parsed = parse_proposal_detail(raw)
+    proposal = parsed.proposal
     if proposal is None:
         # 여기서부터는 제안 왕복을 실제로 소비했다 — 같은 종목으로 즉시 재시도해
         # 같은 실패를 반복하지 않도록 냉각을 건다.
         await cooldown.mark(stock_code, trigger.rule_id)
-        return _rejected(stock, (LimitViolation("proposal_parse", parse_error),))
+        reason = parsed.hold_reason
+        if parsed.hold and parsed.hold_stock_code and parsed.hold_stock_code != stock_code:
+            # 다른 종목에 대한 이유를 이 종목의 판단처럼 보여 주지 않는다. HOLD 자체는
+            # 주문이 나가지 않는 방향이라 그대로 두고, 이유만 버려 고정 문구로 떨어진다.
+            logger.warning(
+                "HOLD 응답의 종목코드 불일치 — 이유를 싣지 않는다 (expected=%s, got=%s)",
+                stock_code,
+                parsed.hold_stock_code,
+            )
+            reason = ""
+        return _rejected(stock, (LimitViolation("proposal_parse", parsed.error),), hold_reason=reason)
 
     if proposal.stock_code != stock_code:
         # 제안이 다른 종목을 말한 것이다. 우리가 확인한 코드로 "고쳐서" 진행하면
