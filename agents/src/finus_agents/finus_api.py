@@ -25,6 +25,7 @@ from nat.data_models.function import FunctionBaseConfig
 
 from .order_price_guard import check_order_price_gap
 from .pii_guard import (
+    mask_lookup_param_echo,
     mask_tool_result,
     placeholder_kind,
     restore_for_internal,
@@ -1278,13 +1279,14 @@ def _prepare_kis_trading_mcp_call(
             rejected=[{"field": r.field, "reason": r.reason} for r in rejections],
             hint=(
                 "params에 실린 내부 자리표시자를 그대로 쓸 수 없어 호출하지 않았습니다. "
-                "수량 자리(*_QTY)에는 수량 자리표시자만, 금액·단가 자리(*_UNPR·*_PRPR·*_AMT)에는 "
-                "금액 자리표시자만 넣을 수 있고, 값 전체가 자리표시자 하나여야 합니다. "
+                "수량 자리(*_QTY)에는 수량 자리표시자만, 금액·단가 자리(*_UNPR·*_PRPR·*_AMT)와 "
+                "순위 조회 가격 범위(fid_input_price_1·fid_input_price_2)에는 금액 자리표시자만 넣을 수 "
+                "있고, 값 전체가 자리표시자 하나여야 합니다. "
                 "계좌번호 자리(CANO·ACNT_PRDT_CD)는 서버가 채우므로 넣지 마세요. "
-                "이 요청에서 조회한 잔고·주문 결과에 나온 자리표시자만 이 방식으로 쓸 수 "
-                "있습니다. 사용자가 발화에 적은 금액·수량은 주문 인자로 쓸 수 없고 "
-                "재입력해도 같은 결과이므로, 재질의하지 말고 필요한 값을 잔고·시세 조회 "
-                "도구로 먼저 확인한 뒤 다시 시도하세요."
+                "주문 인자에는 이 요청에서 조회한 잔고·주문 결과에 나온 자리표시자만, 순위 조회 가격 "
+                "범위에는 그것과 이번 사용자 발화에 나온 금액 자리표시자만 쓸 수 있습니다. 이전 대화의 "
+                "자리표시자나 읽을 수 없는 금액 표기는 되돌릴 수 없습니다. 자리표시자의 값을 추측해 숫자로 "
+                "바꿔 넣지 말고, 그 조건 없이 조회했거나 조건을 적용하지 못했다고 사용자에게 밝히세요."
             ),
         )
 
@@ -1321,6 +1323,7 @@ _KIS_TRADING_TOOL_GUIDE = """
 - `env_dv`(모의/실전)는 이 래퍼가 배포 설정에 맞춰 채웁니다. 직접 고르지 마세요.
 - 시가총액 필드는 억원 단위입니다: 시세(`inquire_price` 등)의 `hts_avls`, 시가총액 순위(`market_cap`)의 `stck_avls`. 상장주식수 `lstn_stcn` × 현재가 ÷ 1억과 같습니다. 예: `12481805`는 약 1,248조원입니다.
 - 순위 조회(`market_cap`·`volume_rank`·`fluctuation`·`volume_power`)의 가격 범위: `fid_input_price_1`은 하한(이 가격 이상), `fid_input_price_2`는 상한(이 가격 이하)이고 단위는 원입니다. 비우면 그쪽 제한이 없습니다. 예: 5만원 이상 100만원 이하는 `"fid_input_price_1":"50000","fid_input_price_2":"1000000"`, 상한만 두려면 `fid_input_price_1`을 비우고 `fid_input_price_2`에만 넣습니다. `find_api_detail`의 `(가격 ~)`는 하한, `(~ 가격)`은 상한이라는 뜻이고, `fluctuation`의 "하한가·상한가"도 가격제한폭이 아니라 이 범위입니다. `fid_vol_cnt`는 최소 거래량(이 거래량 이상)입니다.
+- 사용자 조건의 금액이 `<AMOUNT_…>` 같은 꺾쇠 자리표시자로 보이면, 그 자리표시자 문자열을 **그대로** 가격 인자 값으로 넣으세요(예: `"fid_input_price_2":"<AMOUNT_…_1>"`). 이 래퍼가 이번 요청의 원래 금액을 원 단위로 바꿔 KIS에 보냅니다. 자리표시자 안의 영숫자를 숫자로 읽거나 값을 추측해 넣지 마세요. 답변에서도 그 금액은 자리표시자 그대로 쓰면 사용자에게는 원래 금액으로 보입니다. 되돌릴 수 없다는 오류가 오면 조건을 적용하지 못했다고 밝히세요.
 - 알 수 없는 필드, INVALID INPUT, 필드 크기 오류, 필수 파라미터 오류가 나오면 실패로 끝내지 말고 `api_type="find_api_detail"`을 호출해 해당 `api_type`의 필드를 확인한 뒤 같은 사용자 요청을 다시 실행하세요.
 - 성공 조건은 사용자가 요청한 데이터 조회가 정상 Observation으로 돌아오고, 그 Observation을 근거로 최종 답변하는 것입니다.
 """.strip()
@@ -1828,6 +1831,10 @@ async def _call_kis_mcp_and_record(
             arguments=arguments,
             timeout_sec=config.timeout_sec,
         ))
+    # 복원한 조회 조건 금액(#468)을 서버가 되비친 params에서 다시 가린다. 공개 시세 TR은 아래
+    # 마스킹을 건너뛰므로 여기서 하지 않으면 사용자 금액이 Observation으로 외부 LLM에 돌아간다.
+    params = arguments.get("params")
+    result = mask_lookup_param_echo(result, params if isinstance(params, dict) else None)
     kis_api = (tool_name, str(arguments.get("api_type", "")).strip())
     return _record_and_mask(_KIS_BALANCE_LEDGER_NAME, result, kis_api=kis_api)
 

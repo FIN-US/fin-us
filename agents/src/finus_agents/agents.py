@@ -35,7 +35,14 @@ from finus_agents.finus_api import (
     DataToolLedger,
     ReasoningTrace,
 )
-from finus_agents.pii_guard import PII_MAPPING, install_mapping_box, unmask_response
+from finus_agents.pii_guard import (
+    INPUT_AMOUNTS_HEADER,
+    PII_MAPPING,
+    REQUEST_INPUT_AMOUNTS,
+    input_amounts_from_header,
+    install_mapping_box,
+    unmask_response,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -778,6 +785,8 @@ async def finus_reasoning_trace_agent(config: FinusReasoningTraceAgentConfig, bu
         # auto_memory_agent가 끼든 안 끼든) 마스킹의 시작과 끝이 한 쌍으로 맞물린다.
         # 안쪽 도구는 이 dict를 mutate만 한다(finus_agents/pii_guard.py 참고).
         mapping_token = PII_MAPPING.set(install_mapping_box())
+        # 사용자 발화 금액 상자(#468)도 같은 자리에서 심는다. 조회 인자 복원만 이 상자를 읽는다.
+        amounts_token = REQUEST_INPUT_AMOUNTS.set(_request_input_amounts(chat_request_or_message))
         try:
             try:
                 result = await inner_agent.ainvoke(chat_request_or_message)
@@ -808,9 +817,37 @@ async def finus_reasoning_trace_agent(config: FinusReasoningTraceAgentConfig, bu
             restored = unmask_response(body)
             return traced if restored == body else chat_response_with_text(traced, restored)
         finally:
+            REQUEST_INPUT_AMOUNTS.reset(amounts_token)
             PII_MAPPING.reset(mapping_token)
 
     yield FunctionInfo.from_fn(_response_fn, description=config.description)
+
+
+def _request_input_amounts(chat_request_or_message: ChatRequestOrMessage) -> dict[str, str]:
+    """이 HTTP 요청의 :data:`INPUT_AMOUNTS_HEADER`를 최신 사용자 발화에 묶어 읽는다 (#468).
+
+    헤더가 없거나(요청 밖 실행, 구버전 backend) 읽을 수 없으면 빈 상자다 — 그때 조회 인자의
+    발화 금액 자리표시자는 종전처럼 거부된다.
+    """
+    # 어떤 예외든 빈 상자로 떨어진다(fail-closed). 헤더는 다른 프로세스가 보낸 값이라 깊은 중첩 JSON의
+    # RecursionError 같은 ValueError 밖의 예외도 올 수 있고, 여기서 터지면 요청 전체가 죽는다.
+    try:
+        headers = getattr(Context.get().metadata, "headers", None)
+        raw = headers.get(INPUT_AMOUNTS_HEADER) if headers else None
+    except Exception:  # noqa: BLE001 — 요청 밖(nat run 등)에서는 메타데이터가 없을 수 있다.
+        return {}
+    if not raw:
+        return {}
+    try:
+        if chat_request_or_message.is_string:
+            user_text = chat_request_or_message.input_message or ""
+        else:
+            user_text = latest_user_plain_text(chat_request_or_message.messages or [])
+        return input_amounts_from_header(raw, user_text)
+    except Exception as exc:  # noqa: BLE001
+        # 예외 메시지·값은 남기지 않는다(헤더에 사용자 금액 원문이 있다). 종류만 남긴다.
+        logger.warning("%s 헤더를 읽지 못해 발화 금액 상자를 비웠습니다 (%s)", INPUT_AMOUNTS_HEADER, type(exc).__name__)
+        return {}
 
 
 def nat_chat_extra_headers(conversation_id: str) -> dict[str, str]:
