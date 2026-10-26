@@ -584,6 +584,64 @@ def test_agent_references_expected_prompt_file(yaml_name: str, function_name: st
     )
 
 
+# 시연 캡처(2026-10-26)에서 나온 답 두 개가 이 규칙이 없어서 생겼다.
+# - trading_agent: "잔고 응답에는 보유수량·평균단가·평가금액·평가손익이 마스킹되어 있어 개별 뉴스 목록을
+#   종목별로 확정해 전달할 수 없습니다" — 가려진 값을 이유로 뉴스 조회를 거부하고 마스킹을 사용자에게 드러냈다.
+#   종목명은 가려지지 않았다.
+# - news_agent: "잔고 조회에서 output1이 비어 있었고" — 지시문에 적힌 필드 이름이 답에 그대로 나왔다.
+# 어느 에이전트든 계좌 조회 결과를 볼 수 있으므로(trading·monitoring·strategy·news는 KIS 잔고, diary는
+# mcp-trading 잔고) 규칙은 프롬프트 파일 다섯 개 모두에 있어야 한다. 프롬프트마다 그 에이전트가 무엇을
+# 참조하는지는 위 test_agent_references_expected_prompt_file이 고정한다.
+_PROMPT_ANSWER_RULES = {
+    "가려진 값은 정상 데이터": "값만 가린 정상 데이터입니다",
+    "가려진 값으로 거부 금지": "값이 가려졌다는 이유로 조회·분석·답변을 거부하지 마세요",
+    "보유 종목은 종목명으로": "보유 종목은 종목명으로 판단하세요",
+    "마스킹 언급 금지": "답에 마스킹·가림·자리표시자 같은 말을 쓰지 마세요",
+    "필드 이름 노출 금지": "도구 결과의 영문 필드 이름·JSON 키를 답에 쓰지 마세요",
+}
+
+
+@pytest.mark.parametrize("prompt_file", sorted(_EXPECTED_PROMPT_FILES))
+def test_every_prompt_carries_masked_value_and_field_name_rules(prompt_file: str):
+    """가려진 값·필드 이름에 관한 답변 규칙이 모든 에이전트 프롬프트에 있다.
+
+    뮤테이션: 프롬프트 하나에서 규칙 줄을 지우면 그 파일의 경우가 red.
+    """
+    text = (PROMPTS_DIR / prompt_file).read_text(encoding="utf-8")
+    missing = [name for name, needle in _PROMPT_ANSWER_RULES.items() if needle not in text]
+    assert not missing, f"{prompt_file}: 빠진 답변 규칙 {missing}"
+
+
+def test_kis_tool_guide_says_masked_account_values_are_normal():
+    """KIS 도구 설명(모든 KIS 사용 에이전트가 보는 공통 안내)이 가려진 계좌 값을 정상 응답으로 안내한다.
+
+    뮤테이션: ``_KIS_TRADING_TOOL_GUIDE``에서 해당 줄을 지우면 red.
+    """
+    from finus_agents.finus_api import _KIS_TRADING_TOOL_GUIDE
+
+    line = next((ln for ln in _KIS_TRADING_TOOL_GUIDE.splitlines() if "<AMOUNT_" in ln), "")
+    assert "정상 응답" in line and "멈추지 마세요" in line
+    assert "종목명" in line and "답에 쓰지 마세요" in line
+
+
+def test_news_agent_holdings_instruction_keeps_field_names_out_of_answers():
+    """news_agent의 보유종목 뉴스 지시는 필드 이름을 '도구 결과의 필드'로만 가리키고 답에는 쓰지 말라고 한다.
+
+    지시문에 필드 이름(`output1`·`prdt_name`)을 적은 PR #459 뒤로 빈 잔고 답에 "output1이 비어 있었고"가
+    나왔다. 필드 이름은 잔고 JSON에서 보유 종목을 찾는 데 필요하므로 지우지 않고, 답에 쓰지 말라는 규칙을 붙인다.
+    빈 잔고 판정도 필드 이름이 아니라 "목록이 비어 있으면"으로 적는다.
+
+    뮤테이션: 마지막 금지 줄을 지우거나 빈 잔고 문장을 "`output1`이 비어 있으면"으로 되돌리면 red.
+    """
+    import yaml
+
+    raw = yaml.safe_load((AGENTS_DIR / "news_agent.yml").read_text(encoding="utf-8"))
+    instructions = raw["functions"]["news_agent"]["additional_instructions"]
+    assert "답에는 필드 이름(`output1`·`prdt_name` 등)을 쓰지 말고" in instructions
+    assert "`output1`이 비어 있으면" not in instructions
+    assert "목록이 비어 있으면 보유 종목이 없는 것입니다" in instructions
+
+
 # ---------------------------------------------------------------------------
 # #380 전수 스캔 가드 — 어떤 설정도 주문 가능한 도구에 닿지 않는다
 # ---------------------------------------------------------------------------

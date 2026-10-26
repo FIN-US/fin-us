@@ -138,3 +138,25 @@ def test_supervisor_rules_are_one_per_line():
     assert rules and all(rule.startswith("- ") for rule in rules)
     assert [rule for rule in rules if " - " in rule] == []
     assert any(rule.startswith("- 가격, 거래량") and "trading_agent" in rule for rule in rules)
+
+
+def test_supervisor_routes_news_by_information_kind_not_target():
+    """뉴스·공시·실적은 대상이 보유 종목이어도 news_agent로 보낸다는 규칙이 있다.
+
+    시연 캡처(2026-10-26): "내 보유종목 뉴스 알려줘"가 "계좌 잔고, 보유 종목 요청 → trading_agent"
+    규칙에 걸려 trading_agent로 갔고, 보유종목 뉴스 절차(잔고 → 종목별 뉴스)가 없는 그 에이전트가
+    뉴스를 조회하지 않고 답했다. 보유종목 뉴스 절차는 news_agent 지시문에만 있다.
+
+    뮤테이션: 이 규칙 줄을 지우면 red.
+    """
+    branches = [
+        agents.SupervisorBranch(name="trading_agent", function_name="trading_branch_agent", description="조회"),
+        agents.SupervisorBranch(name="news_agent", function_name="news_branch_agent", description="뉴스"),
+    ]
+    rules = agents._supervisor_system_prompt(branches).split("규칙:\n", 1)[1].split("\n\n", 1)[0].splitlines()
+    news_rule = [rule for rule in rules if "원하는 정보의 종류" in rule]
+    assert len(news_rule) == 1
+    assert "대상이 보유 종목이어도 news_agent" in news_rule[0]
+    # 보유 종목 규칙(trading_agent)보다 뒤에 와서 그 예외로 읽혀야 한다.
+    trading_at = next(i for i, rule in enumerate(rules) if rule.startswith("- 가격, 거래량"))
+    assert rules.index(news_rule[0]) > trading_at

@@ -1319,6 +1319,7 @@ _KIS_TRADING_TOOL_GUIDE = """
 - 투자계좌자산현황 `api_type="inquire_account_balance"`는 모의투자에서 지원되지 않습니다. `inqr_dvsn_1`은 기본 `""`이며 `"00"`을 추측해서 넣지 마세요.
 - 현재가 조회는 `{"api_type":"inquire_price","params":{"stock_name":"삼성전자"}}`처럼 종목명만 넣어 한 번에 부르세요. 이 래퍼가 종목코드를 찾아 채웁니다(호가·체결·일별시세·투자자 등 종목 단위 시세도 같음). `find_stock_code`를 먼저 부를 필요가 없고, 종목코드만으로 답을 끝내지 마세요.
 - `env_dv`(모의/실전)는 이 래퍼가 배포 설정에 맞춰 채웁니다. 직접 고르지 마세요.
+- 잔고·주문 같은 계좌 조회 결과의 금액·수량·계좌번호는 `<AMOUNT_…>`·`<QTY_…>`·`<ACCOUNT_…>` 꺾쇠 값으로 가려져 옵니다. 값만 가린 정상 응답이니 오류·누락으로 보고 작업을 멈추지 마세요. 종목명(`prdt_name`)·종목코드(`pdno`)는 가려지지 않으므로 보유 종목은 종목명으로 판단하세요. 이 필드 이름과 가림 여부는 답에 쓰지 마세요.
 - 시가총액 필드는 억원 단위입니다: 시세(`inquire_price` 등)의 `hts_avls`, 시가총액 순위(`market_cap`)의 `stck_avls`. 상장주식수 `lstn_stcn` × 현재가 ÷ 1억과 같습니다. 예: `12481805`는 약 1,248조원입니다.
 - 순위 조회(`market_cap`·`volume_rank`·`fluctuation`·`volume_power`)의 가격 범위: `fid_input_price_1`은 하한(이 가격 이상), `fid_input_price_2`는 상한(이 가격 이하)이고 단위는 원입니다. 비우면 그쪽 제한이 없습니다. 예: 5만원 이상 100만원 이하는 `"fid_input_price_1":"50000","fid_input_price_2":"1000000"`, 상한만 두려면 `fid_input_price_1`을 비우고 `fid_input_price_2`에만 넣습니다. `find_api_detail`의 `(가격 ~)`는 하한, `(~ 가격)`은 상한이라는 뜻이고, `fluctuation`의 "하한가·상한가"도 가격제한폭이 아니라 이 범위입니다. `fid_vol_cnt`는 최소 거래량(이 거래량 이상)입니다.
 - 알 수 없는 필드, INVALID INPUT, 필드 크기 오류, 필수 파라미터 오류가 나오면 실패로 끝내지 말고 `api_type="find_api_detail"`을 호출해 해당 `api_type`의 필드를 확인한 뒤 같은 사용자 요청을 다시 실행하세요.
