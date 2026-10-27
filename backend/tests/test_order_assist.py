@@ -9,6 +9,7 @@
 - 승인 시 기존 PendingOrder 경로 합류(확정 버튼 포함)
 """
 
+import asyncio
 import re
 from datetime import datetime, timedelta
 from types import SimpleNamespace
@@ -1401,6 +1402,83 @@ async def test_orderable_cash_query_failure_is_fail_closed():
 
     assert result.status == "rejected"
     assert [v.code for v in result.violations] == ["snapshot_failed"]
+    assert verify_calls == []
+
+
+@pytest.mark.asyncio
+async def test_snapshot_queries_run_one_at_a_time(monkeypatch):
+    """스냅샷 조회 셋을 동시에 던지면 모의투자 초당 한도(EGW00201)에 걸린다(2026-10-27 실측).
+
+    뮤테이션: asyncio.gather로 되돌리면 동시 실행 수가 3이 되어 red.
+    """
+    in_flight = 0
+    peak = 0
+
+    async def mcp(server_params, tool_name, arguments):
+        nonlocal in_flight, peak
+        if tool_name == "resolve_stock_code":
+            return "삼성전자 (005930, KOSPI)"
+        in_flight += 1
+        peak = max(peak, in_flight)
+        await asyncio.sleep(0)
+        in_flight -= 1
+        return {"get_stock_quote": QUOTE_TEXT, "get_balance": BALANCE_TEXT,
+                "get_orderable_cash": ORDERABLE_TEXT}[tool_name]
+
+    result, _ = await _run(mcp=mcp)
+
+    assert result.status == "approved"
+    assert peak == 1
+
+
+@pytest.mark.asyncio
+async def test_snapshot_query_is_retried_once_after_a_failure(monkeypatch):
+    """한도 초과처럼 일시적인 조회 실패는 한 번 다시 불러 넘긴다. 두 번 실패하면 종전처럼 거부한다.
+
+    뮤테이션: 재시도를 빼면 첫 번째 테스트가 snapshot_failed로 red. 재시도를 두 번 이상 하면 두 번째
+    테스트의 호출 수가 3이 되어 red.
+    """
+    from backend.trading import order_assist
+
+    sleeps: list[float] = []
+
+    async def fake_sleep(sec):
+        sleeps.append(sec)
+
+    monkeypatch.setattr(order_assist.asyncio, "sleep", fake_sleep)
+    quote_calls = 0
+
+    async def flaky(server_params, tool_name, arguments):
+        nonlocal quote_calls
+        if tool_name == "resolve_stock_code":
+            return "삼성전자 (005930, KOSPI)"
+        if tool_name == "get_stock_quote":
+            quote_calls += 1
+            if quote_calls == 1:
+                raise RuntimeError("get_stock_quote 실행 중 에러 발생: Request failed with status code 500")
+            return QUOTE_TEXT
+        return {"get_balance": BALANCE_TEXT, "get_orderable_cash": ORDERABLE_TEXT}[tool_name]
+
+    result, _ = await _run(mcp=flaky)
+    assert result.status == "approved"
+    assert quote_calls == 2
+    assert sleeps == [order_assist.SNAPSHOT_RETRY_DELAY_SECONDS]
+
+    quote_calls = 0
+
+    async def always_fails(server_params, tool_name, arguments):
+        nonlocal quote_calls
+        if tool_name == "resolve_stock_code":
+            return "삼성전자 (005930, KOSPI)"
+        if tool_name == "get_stock_quote":
+            quote_calls += 1
+            raise RuntimeError("Request failed with status code 500")
+        return {"get_balance": BALANCE_TEXT, "get_orderable_cash": ORDERABLE_TEXT}[tool_name]
+
+    result, verify_calls = await _run(mcp=always_fails)
+    assert result.status == "rejected"
+    assert [v.code for v in result.violations] == ["snapshot_failed"]
+    assert quote_calls == 2
     assert verify_calls == []
 
 
