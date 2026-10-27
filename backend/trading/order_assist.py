@@ -1156,6 +1156,21 @@ async def _drop_expired_pending_order(pending_orders: Any, chat_id: str, now: da
         await pending_orders.delete(chat_id)
 
 
+# 스냅샷 조회가 실패했을 때 다시 부르기 전 기다리는 시간. 모의투자 초당 한도(약 2건)의 1초 창을 넘긴다.
+SNAPSHOT_RETRY_DELAY_SECONDS = 1.1
+
+
+async def _snapshot_call(mcp_runner: Any, tool: str, args: dict[str, Any]) -> Any:
+    """스냅샷 조회 하나를 부르고, 실패하면 한 번만 다시 부른다. 조회 전용 도구에만 쓴다."""
+    try:
+        return await mcp_runner(TRADING_MCP_PARAMS, tool, args)
+    except Exception as exc:  # noqa: BLE001 — 두 번째 실패는 호출부가 받는다
+        logger.warning("주문 보조 스냅샷 %s 조회 실패, %.1f초 뒤 한 번 다시 부른다: %s",
+                       tool, SNAPSHOT_RETRY_DELAY_SECONDS, short_error(exc))
+        await asyncio.sleep(SNAPSHOT_RETRY_DELAY_SECONDS)
+        return await mcp_runner(TRADING_MCP_PARAMS, tool, args)
+
+
 def _new_proposal_id(now: datetime) -> str:
     return f"adv-{now.astimezone(KST):%Y%m%d%H%M%S}-{secrets.token_hex(3)}"
 
@@ -1357,12 +1372,14 @@ async def run_order_assist(
     #    기준 주문유형·단가를 넘기지 않는 이유: 우리가 쓰는 것은 계좌 단위 값인
     #    ord_psbl_cash 하나뿐이고, 종목별 가능수량은 읽지 않는다. 기본값(시장가 기준)이면
     #    충분하다.
+    #
+    #    셋을 동시에 던지면 모의투자 초당 한도(약 2건)를 넘어 EGW00201로 거의 매번 실패한다
+    #    (2026-10-27 실측). 차례로 부르고, 실패한 조회만 한 번 다시 부른다 — 셋 다 조회라
+    #    다시 불러도 계좌 상태를 바꾸지 않는다. 계정 단위 호출 조절은 #452에서 다룬다.
     try:
-        quote_text, balance_text, orderable_text = await asyncio.gather(
-            mcp_runner(TRADING_MCP_PARAMS, "get_stock_quote", {"stock_name": stock}),
-            mcp_runner(TRADING_MCP_PARAMS, "get_balance", {}),
-            mcp_runner(TRADING_MCP_PARAMS, "get_orderable_cash", {"stock_name": stock_code}),
-        )
+        quote_text = await _snapshot_call(mcp_runner, "get_stock_quote", {"stock_name": stock})
+        balance_text = await _snapshot_call(mcp_runner, "get_balance", {})
+        orderable_text = await _snapshot_call(mcp_runner, "get_orderable_cash", {"stock_name": stock_code})
     except Exception as exc:  # noqa: BLE001
         await cooldown.mark(stock_code, trigger.rule_id)
         return _rejected(
