@@ -38,7 +38,9 @@ from finus_agents.finus_api import (
 from finus_agents.pii_guard import (
     INPUT_AMOUNTS_HEADER,
     PII_MAPPING,
+    REQUEST_INPUT_AMOUNT_BOUNDS,
     REQUEST_INPUT_AMOUNTS,
+    input_amount_bounds,
     input_amounts_from_header,
     install_mapping_box,
     unmask_response,
@@ -788,7 +790,10 @@ async def finus_reasoning_trace_agent(config: FinusReasoningTraceAgentConfig, bu
         # 안쪽 도구는 이 dict를 mutate만 한다(finus_agents/pii_guard.py 참고).
         mapping_token = PII_MAPPING.set(install_mapping_box())
         # 사용자 발화 금액 상자(#468)도 같은 자리에서 심는다. 조회 인자 복원만 이 상자를 읽는다.
-        amounts_token = REQUEST_INPUT_AMOUNTS.set(_request_input_amounts(chat_request_or_message))
+        amounts = _request_input_amounts(chat_request_or_message)
+        amounts_token = REQUEST_INPUT_AMOUNTS.set(amounts)
+        # 그 금액마다 사용자가 말한 방향("이하"=상한)도 함께 심는다 — 순위 가격 범위 자리 맞춤용.
+        bounds_token = REQUEST_INPUT_AMOUNT_BOUNDS.set(_request_input_amount_bounds(chat_request_or_message, amounts))
         try:
             try:
                 result = await inner_agent.ainvoke(chat_request_or_message)
@@ -819,6 +824,7 @@ async def finus_reasoning_trace_agent(config: FinusReasoningTraceAgentConfig, bu
             restored = unmask_response(body)
             return traced if restored == body else chat_response_with_text(traced, restored)
         finally:
+            REQUEST_INPUT_AMOUNT_BOUNDS.reset(bounds_token)
             REQUEST_INPUT_AMOUNTS.reset(amounts_token)
             PII_MAPPING.reset(mapping_token)
 
@@ -841,14 +847,27 @@ def _request_input_amounts(chat_request_or_message: ChatRequestOrMessage) -> dic
     if not raw:
         return {}
     try:
-        if chat_request_or_message.is_string:
-            user_text = chat_request_or_message.input_message or ""
-        else:
-            user_text = latest_user_plain_text(chat_request_or_message.messages or [])
-        return input_amounts_from_header(raw, user_text)
+        return input_amounts_from_header(raw, _latest_user_text(chat_request_or_message))
     except Exception as exc:  # noqa: BLE001
         # 예외 메시지·값은 남기지 않는다(헤더에 사용자 금액 원문이 있다). 종류만 남긴다.
         logger.warning("%s 헤더를 읽지 못해 발화 금액 상자를 비웠습니다 (%s)", INPUT_AMOUNTS_HEADER, type(exc).__name__)
+        return {}
+
+
+def _latest_user_text(chat_request_or_message: ChatRequestOrMessage) -> str:
+    if chat_request_or_message.is_string:
+        return chat_request_or_message.input_message or ""
+    return latest_user_plain_text(chat_request_or_message.messages or [])
+
+
+def _request_input_amount_bounds(chat_request_or_message: ChatRequestOrMessage, amounts: dict[str, str]) -> dict[str, str]:
+    """발화 금액 상자의 자리표시자마다 사용자가 말한 범위 방향을 읽는다. 실패하면 빈 상자(방향 모름)다."""
+    if not amounts:
+        return {}
+    try:
+        return input_amount_bounds(_latest_user_text(chat_request_or_message), amounts)
+    except Exception as exc:  # noqa: BLE001 — 방향을 모르면 LLM이 고른 자리를 그대로 쓴다(종전 동작).
+        logger.warning("발화 금액 방향을 읽지 못했습니다 (%s)", type(exc).__name__)
         return {}
 
 
