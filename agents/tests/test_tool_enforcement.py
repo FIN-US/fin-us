@@ -43,7 +43,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 _MCP_SOURCES: dict[str, str] = {
     "finus_mcp_trading_today_orders": "mcp/trading/index.js",
     "finus_market_news": "mcp/news/index.js",
-    "finus_earnings_report": "mcp/dart/index.js",
+    "finus_earnings_report": "mcp/dart/earnings.js",
 }
 
 
@@ -593,7 +593,7 @@ def test_record_to_ledger_nonempty_market_news_counts_as_success():
 def test_record_to_ledger_empty_earnings_report_does_not_count_as_success():
     """실적 리포트 조회 성공 + 데이터 없음 → any_success()=False.
 
-    mcp/dart/index.js formatEarningsReport 의 rows.length===0 분기가
+    mcp/dart/earnings.js formatEarningsReport 의 rows.length===0 분기가
     "OpenDART 재무제표 데이터가 없습니다." 리터럴을 출력한다.
     """
     ledger = DataToolLedger()
@@ -890,7 +890,7 @@ def test_record_to_ledger_get_balance_no_holdings_still_counts_as_success():
 def test_record_to_ledger_nonempty_earnings_report_counts_as_success():
     """실적 리포트 조회 성공 + 데이터 있음 → any_success()=True (오탐 없음).
 
-    mcp/dart/index.js formatEarningsReport 의 데이터 있는 분기는
+    mcp/dart/earnings.js formatEarningsReport 의 데이터 있는 분기는
     '[주요 실적]' 블록을 포함한다. 이 응답이 빈 결과로 오판되지 않아야 한다.
     """
     ledger = DataToolLedger()

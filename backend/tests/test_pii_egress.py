@@ -385,6 +385,52 @@ async def test_earnings_command_sends_dart_figures_unmasked(captured_providers):
         assert value in sent, f"/earnings 실적 수치 {value!r}가 마스킹됐다"
 
 
+# mcp/dart get_earnings_report가 금액을 조·억 단위 소수 표기로 적는다(earnings.js formatMoney).
+# 원 단위 15자리 대신 들어온 표기라, 공개 구간에서는 그대로 나가고 개인 구간에 잘못 실렸을 때는
+# 값 전체가 한 자리표시자로 가려지는지(소수점 앞뒤로 쪼개지는 부분 마스킹이 없는지) 고정한다.
+DART_UNIT_AMOUNTS = ("171.50조원", "89.49조원", "3,512.3억원", "99,999,999원")
+DART_EARNINGS_TEXT = (
+    "[주요 실적] 2026년 2분기(4~6월, 3개월) 기준\n"
+    "- 매출: 171.50조원 | YoY +130%\n"
+    "- 영업이익: 89.49조원 | YoY +1813.84%\n"
+    "- 순이익: 3,512.3억원 | YoY N/A\n"
+    "- 기타: 99,999,999원 | YoY N/A"
+)
+
+
+@pytest.mark.asyncio
+async def test_earnings_command_sends_dart_unit_amounts_unmasked(captured_providers):
+    async def mcp_runner(server_params, tool_name, arguments):
+        if tool_name == "get_earnings_report":
+            return DART_EARNINGS_TEXT
+        return "뉴스: 반도체 수요 회복"
+
+    handler = TelegramCommandHandler(
+        notifier=FakeNotifier(),
+        mcp_runner=mcp_runner,
+        llm_runner=ai_llm.llm_chat,
+    )
+
+    await handler.handle_update({"message": {"chat": {"id": 123}, "text": "/earnings 삼성전자"}})
+
+    (sent,) = captured_providers["nat"]
+    for value in DART_UNIT_AMOUNTS:
+        assert value in sent, f"/earnings 실적 수치 {value!r}가 마스킹됐다"
+    assert "2026년 2분기(4~6월, 3개월)" in sent
+
+
+def test_dart_unit_amounts_are_masked_whole_when_unmarked():
+    outgoing, mapping = prepare_egress(DART_EARNINGS_TEXT, label="test")
+
+    assert sorted(mapping.values()) == sorted(DART_UNIT_AMOUNTS)
+    for value in DART_UNIT_AMOUNTS:
+        assert value not in outgoing
+    # 소수점 앞 정수부("171.")나 기간 표기가 평문 조각으로 남지 않는다.
+    assert "171." not in outgoing and "89." not in outgoing
+    assert "2026년 2분기(4~6월, 3개월)" in outgoing
+    assert unmask_pii(outgoing, mapping) == DART_EARNINGS_TEXT
+
+
 @pytest.mark.asyncio
 async def test_score_signal_keeps_public_figures_and_masks_unmarked_text(
     captured_providers,

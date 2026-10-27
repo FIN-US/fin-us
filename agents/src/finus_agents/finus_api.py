@@ -251,7 +251,7 @@ _ERROR_JSON_PREFIX_RE = re.compile(r'^\s*\{"error"')
 #     "- 결과: 해당 조건의 주문·체결이 없습니다."
 #   mcp/news/index.js     fetchMarketNews 함수:
 #     `'${stockName}'에 대한 뉴스를 찾지 못했습니다.`  (종목명 부분 제외한 고정 접미사)
-#   mcp/dart/index.js     formatEarningsReport 함수:
+#   mcp/dart/earnings.js  formatEarningsReport 함수:
 #     "- 조회 결과: OpenDART 재무제표 데이터가 없습니다."
 _EMPTY_RESULT_LITERALS: dict[str, str] = {
     "finus_mcp_trading_today_orders": "해당 조건의 주문·체결이 없습니다.",
