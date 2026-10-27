@@ -405,6 +405,10 @@ def input_amount_bounds(user_text: str, amounts: Mapping[str, str]) -> dict[str,
     "<AMOUNT_…> 이하·미만·까지"는 ``upper``(상한), "이상·초과·부터·넘는"과 범위 앞쪽 "~"은 ``lower``
     (하한)다. "최대 <AMOUNT_…>"·"최소 <AMOUNT_…>"처럼 앞에 오는 표현도 읽는다. 같은 자리표시자가
     두 방향으로 읽히거나 어느 쪽에도 걸리지 않으면 넣지 않는다 — 모르는 방향을 지어내지 않는다.
+
+    비교어 뒤 같은 절의 짧은 꼬리(:func:`_bound_tail`)에 부정·제외·과거형("이상은 빼고"·"이하가 아닌"·
+    "이상이었는데")이 있거나 "까지" 뒤가 도달 동사("까지 오른")면 방향을 비운다. 반대 방향을 확정하면
+    :func:`_align_lookup_price_bounds`가 LLM이 맞게 넣은 자리까지 뒤집는다 — 거부보다 나쁘다.
     """
     bounds: dict[str, str] = {}
     conflicted: set[str] = set()
@@ -413,12 +417,42 @@ def input_amount_bounds(user_text: str, amounts: Mapping[str, str]) -> dict[str,
         if placeholder not in amounts:
             continue
         after, before = user_text[match.end():], user_text[:match.start()]
-        found = {d for d, rx in _BOUND_AFTER if rx.match(after)} | {d for d, rx in _BOUND_BEFORE if rx.search(before)}
+        found: set[str] = set()
+        tail_start = 0
+        reach = False
+        for direction, rx in _BOUND_AFTER:
+            hit = rx.match(after)
+            if hit is not None:
+                found.add(direction)
+                tail_start = max(tail_start, hit.end())
+                reach = reach or hit.group(0).rstrip().endswith("까지")
+        found |= {d for d, rx in _BOUND_BEFORE if rx.search(before)}
+        tail = _bound_tail(after[tail_start:])
+        if _BOUND_NEGATED_TAIL_RE.search(tail) or (reach and _BOUND_REACH_TAIL_RE.match(tail)):
+            conflicted.add(placeholder)
+            continue
         if len(found) != 1 or bounds.get(placeholder, next(iter(found))) != next(iter(found)):
             conflicted.add(placeholder)
             continue
         bounds[placeholder] = next(iter(found))
     return {ph: d for ph, d in bounds.items() if ph not in conflicted}
+
+
+# 비교어 뒤 꼬리 — 같은 절 안의 짧은 구간만 본다(다음 금액·문장 부호에서 끊고, 글자 수 상한).
+# 멀리 있는 말("… 추천했었어")까지 보면 정상 발화도 방향을 잃는다.
+_BOUND_TAIL_MAX_CHARS = 12
+_BOUND_TAIL_STOP_RE = re.compile(r"<[A-Z]+_[0-9a-f]{6}_\d+>|[,.!?;\n，。]")
+# 부정·제외·과거형. "넘지 않"의 "않"은 비교어 안에서 이미 소비되므로 꼬리에 남지 않는다.
+_BOUND_NEGATED_TAIL_RE = re.compile(r"아니|아닌|않|말고|말구|빼고|빼줘|빼서|뺀|제외|외에|외의|였|었")
+# "까지" 뒤 도달 동사 — "30만원까지 오른"은 가격 조건이 아니라 지나온 값이다.
+_BOUND_REACH_TAIL_RE = re.compile(
+    r"[ \t]*(?:오르|오른|올라|올랐|올린|떨어|내려|내린|내렸|빠지|빠진|빠졌|상승|하락|급등|급락|찍|갔|간[ \t]|가서|가더)"
+)
+
+
+def _bound_tail(text: str) -> str:
+    stop = _BOUND_TAIL_STOP_RE.search(text)
+    return (text[: stop.start()] if stop else text)[:_BOUND_TAIL_MAX_CHARS]
 
 
 def mask_tool_result(

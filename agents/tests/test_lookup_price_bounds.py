@@ -105,6 +105,61 @@ def test_reads_the_direction_the_user_said(text, expected):
     assert [bounds.get(ph) for ph in ordered] == expected
 
 
+# 비교어 뒤에 부정·제외·과거형이 오거나 "까지" 뒤가 도달 동사인 발화. 비교어만 보면 원한 것과 반대
+# 방향으로 확정돼, 자리 맞춤이 LLM이 맞게 넣은 자리까지 뒤집는다(PR 리뷰). 방향을 비워야 한다.
+_NEGATED_OR_NOT_A_CONDITION = [
+    "30만원 이상은 빼고 보여줘",
+    "30만원 이상인 건 제외하고",
+    "30만원 넘는 건 빼고",
+    "10만원 이상 아닌 종목",
+    "30만원 이하 말고 대형주",
+    "30만원 이하가 아닌 종목",
+    "30만원 미만은 제외",
+    "30만원 밑으로는 말고",
+    "가격 30만원 미만이 아니라 이상",
+    "30만원 이하 아니고 이상",
+    "작년엔 30만원 이상이었는데 지금 싼 종목",
+    "30만원까지 오른 종목",
+    "30만원까지 올라간 종목",
+    "30만원까지 떨어진 종목",
+]
+
+
+@pytest.mark.parametrize("text", _NEGATED_OR_NOT_A_CONDITION)
+def test_negated_excluded_or_past_comparisons_leave_the_direction_unknown(text):
+    """뮤테이션: 꼬리 검사를 빼면 이 문장들이 비교어 방향으로 확정돼 red."""
+    masked, ordered, header = _masked(text)
+    assert len(ordered) == 1, masked
+
+    assert input_amount_bounds(masked, header) == {}
+
+
+@pytest.mark.parametrize("text", _NEGATED_OR_NOT_A_CONDITION)
+@pytest.mark.parametrize("slot", ["fid_input_price_1", "fid_input_price_2"])
+def test_alignment_keeps_the_agents_slot_when_the_direction_is_unknown(boxes, text, slot):
+    (amount,) = _load(boxes, text)
+    params = {"fid_input_price_1": "", "fid_input_price_2": "", slot: amount}
+
+    restored, rejections = _restore(params)
+
+    assert rejections == []
+    assert restored[slot] == _restore({slot: amount})[0][slot] != ""
+    other = "fid_input_price_2" if slot == "fid_input_price_1" else "fid_input_price_1"
+    assert restored[other] == ""
+
+
+@pytest.mark.parametrize(("text", "expected"), [
+    ("30만원 이하 반도체 대형주 추천해줘", "upper"),  # S5 기본 문장
+    ("30만원까지 살 수 있는 종목", "upper"),  # "까지" 뒤가 도달 동사가 아니면 상한 그대로
+    ("30만원 넘지 않는 종목", "upper"),  # "넘지 않"의 부정은 비교어 자체
+    ("30만원 이하 종목 중 반도체 대형주 추천해줬었는데 다시", "upper"),  # 멀리 있는 과거형은 보지 않는다
+])
+def test_plain_conditions_still_get_a_direction(text, expected):
+    masked, ordered, header = _masked(text)
+
+    assert input_amount_bounds(masked, header) == {ordered[0]: expected}
+
+
 def test_only_amounts_in_the_box_get_a_direction():
     masked, ordered, header = _masked("30만원 이하 종목")
     assert input_amount_bounds(masked, {}) == {}
