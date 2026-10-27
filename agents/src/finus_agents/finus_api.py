@@ -1202,7 +1202,33 @@ def _adjust_domestic_stock_params(api_type: str, params: dict[str, Any]) -> dict
         # 공식 예제는 inqr_dvsn_1 기본 "". LLM이 자주 넣는 "00"은 OPSQ2002 INVALID INPUT_FILED_SIZE 유발.
         if str(out.get("inqr_dvsn_1", "")).strip() == "00":
             out["inqr_dvsn_1"] = ""
+    present = {str(k).strip().lower() for k in out}
+    for key, default in _RANK_TR_DEFAULTS.get(api, {}).items():
+        if key not in present:
+            out[key] = default
     return out
+
+
+# 순위 TR의 "전체" 기본값. Kis Trading MCP는 이 인자들을 모두 필수로 받아(configs/domestic_stock.json
+# required=true, 기본값 없음) LLM이 가격 조건만 넣으면 "market_cap() missing 5 required positional
+# arguments"로 실패한다. 그러면 에이전트가 find_api_detail을 보고 인자를 다시 짜는데, 2026-10-27 실제
+# 텔레그램에서 그 단계에 "30만원 이하"가 하한(fid_input_price_1)으로 뒤바뀌었다(리허설 S5도 매번 이
+# 우회를 탔다). LLM이 넣은 값은 그대로 두고 빠진 것만 채운다. 값의 근거: 같은 설정의 설명
+# ("Unique key( 20174 )"·"( 20168 )", "0 : 전체", "0000:전체", "입력값 없을때 전체")과 #441 실측 호출값
+# (scripts/demo_rehearsal의 정답 조회와 같다). volume_rank·fluctuation은 9·10자리 대상 코드와 정렬·등락률
+# 인자가 더 있어 실측 없이 기본값을 정하지 않는다.
+_RANK_TR_DEFAULTS: dict[str, dict[str, str]] = {
+    "market_cap": {
+        "fid_cond_mrkt_div_code": "J", "fid_cond_scr_div_code": "20174", "fid_div_cls_code": "0",
+        "fid_input_iscd": "0000", "fid_trgt_cls_code": "0", "fid_trgt_exls_cls_code": "0",
+        "fid_input_price_1": "", "fid_input_price_2": "", "fid_vol_cnt": "",
+    },
+    "volume_power": {
+        "fid_cond_mrkt_div_code": "J", "fid_cond_scr_div_code": "20168", "fid_div_cls_code": "0",
+        "fid_input_iscd": "0000", "fid_trgt_cls_code": "0", "fid_trgt_exls_cls_code": "0",
+        "fid_input_price_1": "", "fid_input_price_2": "", "fid_vol_cnt": "",
+    },
+}
 
 
 def _kis_call_payload(inp: KisTradingMcpCallInput) -> tuple[McpCallArguments | None, str | None]:
@@ -1285,7 +1311,9 @@ def _prepare_kis_trading_mcp_call(
                 "계좌번호 자리(CANO·ACNT_PRDT_CD)는 서버가 채우므로 넣지 마세요. "
                 "주문 인자에는 이 요청에서 조회한 잔고·주문 결과에 나온 자리표시자만, 순위 조회 가격 "
                 "범위에는 그것과 이번 사용자 발화에 나온 금액 자리표시자만 쓸 수 있습니다. 이전 대화의 "
-                "자리표시자나 읽을 수 없는 금액 표기는 되돌릴 수 없습니다. 자리표시자의 값을 추측해 숫자로 "
+                "자리표시자나 읽을 수 없는 금액 표기는 되돌릴 수 없습니다. price_bound_direction_mismatch는 "
+                "사용자가 '이하·미만·까지'라고 한 금액은 상한 fid_input_price_2에, '이상·초과·부터'라고 한 금액은 "
+                "하한 fid_input_price_1에 넣고 반대쪽 자리는 비워 다시 부르라는 뜻입니다. 자리표시자의 값을 추측해 숫자로 "
                 "바꿔 넣지 말고, 그 조건 없이 조회했거나 조건을 적용하지 못했다고 사용자에게 밝히세요."
             ),
         )

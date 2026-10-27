@@ -92,6 +92,13 @@ PII_MAPPING: ContextVar[dict[str, str] | None] = ContextVar("PII_MAPPING", defau
 # :func:`restore_params_for_kis`의 "조회 조건 인자" 절.
 REQUEST_INPUT_AMOUNTS: ContextVar[dict[str, str] | None] = ContextVar("REQUEST_INPUT_AMOUNTS", default=None)
 
+# 위 상자의 자리표시자마다 사용자가 발화에서 말한 범위 방향 {자리표시자: "upper"|"lower"}.
+# "30만원 이하"면 상한이다. 최상위 에이전트가 :func:`input_amount_bounds`로 같은 자리에서 심고,
+# :func:`restore_params_for_kis`가 순위 가격 범위의 상·하한 자리를 맞추는 데만 쓴다.
+REQUEST_INPUT_AMOUNT_BOUNDS: ContextVar[dict[str, str] | None] = ContextVar(
+    "REQUEST_INPUT_AMOUNT_BOUNDS", default=None
+)
+
 # backend `_llm_nat_chat`이 위 매핑을 싣는 HTTP 헤더. backend/ai/llm.py의 같은 이름 상수와 짝이다
 # (프로세스가 달라 import로 공유하지 않는다 — 자리표시자 정규식과 같은 제약).
 INPUT_AMOUNTS_HEADER = "x-finus-input-amounts"
@@ -377,6 +384,75 @@ def input_amounts_from_header(raw: str | None, user_text: str) -> dict[str, str]
         if placeholder in present:
             amounts[placeholder] = value
     return amounts
+
+
+# 금액 자리표시자 바로 뒤·앞의 비교 표현 → 사용자가 말한 범위 방향. 발화는 backend가 금액을 통째로
+# 가린 모양("<AMOUNT_…> 이하")이라 자리표시자와 비교 표현이 붙어 있다. 넓게 잡지 않는다 — 어느 쪽에도
+# 걸리지 않으면 방향을 모르는 것으로 두고 :func:`restore_params_for_kis`는 LLM이 고른 자리를 그대로 쓴다.
+_BOUND_AFTER = (
+    ("upper", re.compile(r"[ \t]*(?:원[ \t]*)?(?:이하|미만|이내|까지|아래|밑|안쪽|넘지[ \t]*않)")),
+    ("lower", re.compile(r"[ \t]*(?:원[ \t]*)?(?:이상|초과|부터|넘는|넘게|넘어|넘은|[~∼〜])")),
+)
+_BOUND_BEFORE = (
+    ("upper", re.compile(r"(?:최대|많아야|기껏해야)[ \t]*$")),
+    ("lower", re.compile(r"(?:최소|적어도)[ \t]*$")),
+)
+
+
+def input_amount_bounds(user_text: str, amounts: Mapping[str, str]) -> dict[str, str]:
+    """*amounts*의 자리표시자마다 *user_text*에서 말한 범위 방향을 읽는다.
+
+    "<AMOUNT_…> 이하·미만·까지"는 ``upper``(상한), "이상·초과·부터·넘는"과 범위 앞쪽 "~"은 ``lower``
+    (하한)다. "최대 <AMOUNT_…>"·"최소 <AMOUNT_…>"처럼 앞에 오는 표현도 읽는다. 같은 자리표시자가
+    두 방향으로 읽히거나 어느 쪽에도 걸리지 않으면 넣지 않는다 — 모르는 방향을 지어내지 않는다.
+
+    비교어 뒤 같은 절의 짧은 꼬리(:func:`_bound_tail`)에 부정·제외·과거형("이상은 빼고"·"이하가 아닌"·
+    "이상이었는데")이 있거나 "까지" 뒤가 도달 동사("까지 오른")면 방향을 비운다. 반대 방향을 확정하면
+    :func:`_align_lookup_price_bounds`가 LLM이 맞게 넣은 자리까지 뒤집는다 — 거부보다 나쁘다.
+    """
+    bounds: dict[str, str] = {}
+    conflicted: set[str] = set()
+    for match in _SCOPED_PLACEHOLDER_RE.finditer(user_text or ""):
+        placeholder = match.group(0)
+        if placeholder not in amounts:
+            continue
+        after, before = user_text[match.end():], user_text[:match.start()]
+        found: set[str] = set()
+        tail_start = 0
+        reach = False
+        for direction, rx in _BOUND_AFTER:
+            hit = rx.match(after)
+            if hit is not None:
+                found.add(direction)
+                tail_start = max(tail_start, hit.end())
+                reach = reach or hit.group(0).rstrip().endswith("까지")
+        found |= {d for d, rx in _BOUND_BEFORE if rx.search(before)}
+        tail = _bound_tail(after[tail_start:])
+        if _BOUND_NEGATED_TAIL_RE.search(tail) or (reach and _BOUND_REACH_TAIL_RE.match(tail)):
+            conflicted.add(placeholder)
+            continue
+        if len(found) != 1 or bounds.get(placeholder, next(iter(found))) != next(iter(found)):
+            conflicted.add(placeholder)
+            continue
+        bounds[placeholder] = next(iter(found))
+    return {ph: d for ph, d in bounds.items() if ph not in conflicted}
+
+
+# 비교어 뒤 꼬리 — 같은 절 안의 짧은 구간만 본다(다음 금액·문장 부호에서 끊고, 글자 수 상한).
+# 멀리 있는 말("… 추천했었어")까지 보면 정상 발화도 방향을 잃는다.
+_BOUND_TAIL_MAX_CHARS = 12
+_BOUND_TAIL_STOP_RE = re.compile(r"<[A-Z]+_[0-9a-f]{6}_\d+>|[,.!?;\n，。]")
+# 부정·제외·과거형. "넘지 않"의 "않"은 비교어 안에서 이미 소비되므로 꼬리에 남지 않는다.
+_BOUND_NEGATED_TAIL_RE = re.compile(r"아니|아닌|않|말고|말구|빼고|빼줘|빼서|뺀|제외|외에|외의|였|었")
+# "까지" 뒤 도달 동사 — "30만원까지 오른"은 가격 조건이 아니라 지나온 값이다.
+_BOUND_REACH_TAIL_RE = re.compile(
+    r"[ \t]*(?:오르|오른|올라|올랐|올린|떨어|내려|내린|내렸|빠지|빠진|빠졌|상승|하락|급등|급락|찍|갔|간[ \t]|가서|가더)"
+)
+
+
+def _bound_tail(text: str) -> str:
+    stop = _BOUND_TAIL_STOP_RE.search(text)
+    return (text[: stop.start()] if stop else text)[:_BOUND_TAIL_MAX_CHARS]
 
 
 def mask_tool_result(
@@ -886,6 +962,69 @@ def _restore_one_param(
     return number, None
 
 
+# 순위 가격 범위 인자 → 그 자리가 받는 방향. fid_input_price_1은 하한(이 가격 이상), _2는 상한(이 가격 이하)
+# (finus_api._KIS_TRADING_TOOL_GUIDE의 #441 근거).
+_LOOKUP_PRICE_SLOT_BOUND: dict[str, str] = {"FID_INPUT_PRICE_1": "lower", "FID_INPUT_PRICE_2": "upper"}
+
+
+def _align_lookup_price_bounds(
+    params: Mapping[str, Any], bounds: Mapping[str, str],
+) -> tuple[dict[str, Any], list[ParamRejection]]:
+    """사용자 발화 금액이 말한 방향과 다른 가격 범위 자리에 실렸으면 맞는 자리로 옮긴다.
+
+    2026-10-27 실제 텔레그램에서 "30만원 이하 반도체 대형주"의 자리표시자가 ``fid_input_price_1``
+    (하한)에 실려 KIS가 30만원 **이상** 종목만 돌려줬고, 에이전트는 134만원짜리 SK하이닉스를 1순위로
+    추천했다. 첫 호출은 ``fid_input_price_2``로 맞게 냈는데 필수 인자 누락으로 실패했고, find_api_detail을
+    본 뒤 다시 짠 인자에서 자리가 뒤바뀌었다. 도구 안내(#441)로 방향을 알려 줘도 다시 짜는 단계에서
+    뒤바뀔 수 있어, 사용자가 실제로 말한 방향(:data:`REQUEST_INPUT_AMOUNT_BOUNDS`)으로 코드가 맞춘다.
+
+    - 방향을 아는 발화 금액 자리표시자가 반대 자리에 있고 맞는 자리가 비었으면(없음·빈 문자열) 옮긴다.
+    - 두 자리가 서로 뒤바뀌었거나, 맞는 자리에 방향을 모르는 자리표시자가 있으면 맞바꾼다.
+    - 맞는 자리에 다른 값(숫자 등)이 있어 어느 쪽이 맞는지 모르면 옮기지 않고 거부한다
+      (``price_bound_direction_mismatch``) — 반대 방향 조건으로 조회해 조건 밖 종목을 받는 쪽보다 낫다.
+
+    방향을 모르는 자리표시자·자리표시자가 아닌 값은 손대지 않는다.
+    """
+    out = dict(params)
+    if not bounds:
+        return out, []
+    slot_key: dict[str, str] = {}
+    misplaced: list[tuple[str, str]] = []
+    for key, value in params.items():
+        slot = _LOOKUP_PRICE_SLOT_BOUND.get(str(key).strip().upper())
+        if slot is None:
+            continue
+        slot_key.setdefault(slot, key)
+        want = bounds.get(value.strip()) if isinstance(value, str) else None
+        if want is not None and want != slot:
+            misplaced.append((key, want))
+    if not misplaced:
+        return out, []
+
+    if len(misplaced) == 2:
+        (first, _), (second, _) = misplaced
+        out[first], out[second] = params[second], params[first]
+    else:
+        src, want = misplaced[0]
+        dst = slot_key.get(want) or src[:-1] + ("2" if src.endswith("1") else "1")
+        other = out.get(dst, "")
+        other_text = other.strip() if isinstance(other, str) else other
+        if other_text in ("", None):
+            out[dst], out[src] = out[src], ""
+        elif (
+            isinstance(other_text, str) and _SCOPED_PLACEHOLDER_RE.fullmatch(other_text)
+            and other_text not in bounds
+        ):
+            out[dst], out[src] = out[src], other
+        else:
+            return out, [ParamRejection(src, "price_bound_direction_mismatch", str(params[src]).strip())]
+    logger.warning(
+        "순위 가격 범위 자리가 사용자 발화 방향과 어긋나 옮겼습니다 — %s",
+        [(field, want) for field, want in misplaced],
+    )
+    return out, []
+
+
 def restore_params_for_kis(
     params: Mapping[str, Any], *, tool_name: str, api_type: str,
 ) -> tuple[dict[str, Any], list[ParamRejection]]:
@@ -940,11 +1079,15 @@ def restore_params_for_kis(
     되돌리는 것은 이 이슈의 범위가 아니고, 채팅 주문 자체가 막혀 있다(#380).
 
     복원한 조회 값이 응답 되비침으로 LLM에 돌아가지 않게 하는 것은 :func:`mask_lookup_param_echo`다.
+
+    복원 전에 :func:`_align_lookup_price_bounds`가 발화 금액의 상·하한 자리를 사용자가 말한 방향
+    ("이하"=상한 ``fid_input_price_2``)에 맞춘다. 맞출 수 없으면 ``price_bound_direction_mismatch``로
+    거부한다.
     """
     restored: dict[str, Any] = {}
-    rejections: list[ParamRejection] = []
     box = PII_MAPPING.get() or {}
     input_amounts = REQUEST_INPUT_AMOUNTS.get() or {}
+    params, rejections = _align_lookup_price_bounds(params, REQUEST_INPUT_AMOUNT_BOUNDS.get() or {})
 
     for field, value in params.items():
         if isinstance(value, str):
