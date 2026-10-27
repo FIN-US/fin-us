@@ -305,8 +305,12 @@ async def _monitor_market_task(
         # 예외를 격리하는 이유는 Portfolio 동기화와 같다: 시세 갱신 실패가 뉴스·공시
         # 감시를 멈춰서는 안 된다. 도구 호출 실패 자체는 _refresh_portfolio_prices가
         # 이미 삼키므로, 여기 걸리는 것은 DB 오류처럼 그보다 안쪽의 실패다.
+        #
+        # 잔고 응답을 함께 넘기는 것은 모의투자 배포용이다 — 실현손익 TR이 없어 대체 응답 뒤
+        # 도구를 건너뛰는 주기에는 이번 주기 잔고의 평가금액으로 시세를 채운다(추가 호출 없음).
+        # 잔고 조회가 실패한 주기에는 None을 넘겨 아무것도 쓰지 않는다.
         try:
-            await _refresh_portfolio_prices()
+            await _refresh_portfolio_prices(balance_text if balance_ok else None)
         except Exception as e:
             logger.error("Portfolio 시세 갱신 중 오류 (감시는 계속): %s", e, exc_info=True)
 

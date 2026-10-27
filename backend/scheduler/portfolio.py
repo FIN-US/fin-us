@@ -287,6 +287,42 @@ _paper_fallback_skip_remaining = 0
 _codeless_streak = 0
 _priceless_streak = 0
 
+# ---------------------------------------------------------------------------
+# 모의투자 시세: 잔고 평가금액 ÷ 수량
+# ---------------------------------------------------------------------------
+#
+# 모의투자(openapivts)에서는 실현손익 TR이 없어 위 시세 소스가 영영 비고, current_price가
+# 채워지지 않는다(Unity 파이 차트가 current_price × quantity로 비중을 내므로 아무것도 못
+# 그린다). 그 배포에서 index.js의 getBalanceRlzPl은 get_balance 리포트를 그대로 돌려주는데
+# (_RLZ_PL_PAPER_FALLBACK_MARKER 주석), 그 리포트의 종목 블록에는 "평가금액 {evlu_amt}원"이
+# 있다. KIS inquire-balance의 evlu_amt는 현재가 × 보유수량이므로 수량으로 나누면 현재가다.
+#
+# 종목별 get_stock_quote를 부르는 대안은 고르지 않았다. 종목 수만큼 KIS 호출이 늘고(모의투자
+# 초당 한도, #474처럼 동시에 부르면 EGW00215), #196에서 유지보수자가 이미 거부한 선택지다.
+# 이 경로는 **추가 호출이 0건**이다 — 대체 응답 자체와, 건너뛰는 주기에는 같은 주기의
+# get_balance 응답(monitor_market_task가 이미 받은 것)을 읽을 뿐이다.
+#
+# **모의투자 대체 응답을 받은 배포에서만** 돈다. 실전 계좌의 시세는 여전히 실현손익 TR
+# 하나에서만 온다. 시세를 쓰는 줄(_apply_quotes)은 두 경로가 공유하므로 "price_updated_at을
+# 찍는 곳은 한 줄"이라는 #196의 불변식은 그대로다.
+#
+# 의심스러운 값은 쓰지 않는다(#196과 같은 규율): 잘린 응답, 평가금액이 "-"·0원·소수·
+# 마스킹("*")·쉼표 위치가 어긋난 값, 수량 0, 평가금액이 수량으로 나누어떨어지지 않는 경우
+# (현재가 × 수량이 아니라는 뜻이다), 같은 코드가 서로 다른 값을 내는 경우.
+#
+# 형식은 mcp/trading/balance.js formatBalanceReport()의 종목 블록이고, 공유 픽스처
+# mcp/trading/tests/fixtures/balance_report.json으로 고정한다(test_scheduler.py).
+#   줄1: "- {prdt_name} ({pdno}) · {hldg_qty}주"
+#   줄2: "  평단가 {pchs_avg_pric}원 → 평가금액 {evlu_amt}원"
+# toLocaleString("ko-KR")의 세 자리 쉼표만 허용한다. 줄 끝($)에 고정해 "210,000.5원"처럼
+# 정수부만 잘라 읽는 일이 없게 한다.
+_PAPER_QTY_RE = re.compile(r"\) · (?P<qty>\d{1,3}(?:,\d{3})*)주$")
+_PAPER_EVAL_AMOUNT_RE = re.compile(r" → 평가금액 (?P<amount>\d{1,3}(?:,\d{3})*)원$")
+
+# 평가금액으로 현재가를 얻지 못한 종목 경고의 연속 횟수. _priceless_streak와 같은 이유·규칙
+# (첫 회 + 이후 6회마다)이다 — 데이터 조건이라 한 번 생기면 매 주기 그대로 재현된다.
+_paper_unpriced_streak = 0
+
 
 @dataclass(frozen=True)
 class _BalanceHolding:
@@ -402,7 +438,8 @@ def _sync_portfolio_from_balance(
 
     current_price와 price_updated_at은 이 함수가 **읽지도 쓰지도 않습니다.**
     get_balance(inquire-balance, TTTC8434R) output1에 현재가 필드가 있는지는 여전히
-    미확인이고, 시세를 쓰는 경로는 _sync_portfolio_prices_from_rlz_pl 하나뿐입니다(#196).
+    미확인이고, 시세를 쓰는 경로는 _apply_quotes 하나뿐입니다(#196 — 실전은 실현손익 TR,
+    모의투자는 _sync_portfolio_prices_from_paper_balance가 그리로 모읍니다).
     두 함수가 같은 컬럼을 쓰면 10분 주기마다 시세가 null로 덮이거나, 나이를 모르는
     값에 새 타임스탬프가 찍혀 "모르는데 안다"가 됩니다. 그래서 신규 행은 모델 기본값
     그대로 둘 다 null이고, 기존 행의 값은 손대지 않은 채 보존됩니다.
@@ -511,6 +548,105 @@ def _sync_portfolio_from_balance(
     # 세면 호출처(#229의 PORTFOLIO_UPDATE holdings_count)가 보는 값이 바뀐다.
     logger.info("Portfolio 동기화 완료: %d개 종목", len(holdings))
     return len(holdings)
+
+
+def _parse_paper_balance_quotes(balance_text: str) -> dict[str, float]:
+    """get_balance 텍스트에서 종목코드 → 현재가(평가금액 ÷ 수량)를 파싱합니다.
+
+    모의투자 배포 전용이다(_PAPER_EVAL_AMOUNT_RE 위 주석). 잘림·마커 가드는 호출처
+    (_sync_portfolio_prices_from_paper_balance)가 맡고, 이 함수는 값 검사만 한다.
+
+    값을 얻지 못한 종목은 결과에서 **뺀다** — 0이나 근사값으로 채우지 않는다(#122의
+    "0과 모름 구분"). 평가금액이 수량으로 나누어떨어지지 않으면 그 값은 현재가 × 수량이
+    아니므로 반올림해 쓰지 않는다. 같은 코드가 두 번 나와 값이 엇갈리면 어느 쪽도 쓰지
+    않는다(KIS output1은 pdno가 키라 정상 응답에서는 없는 일이다).
+    """
+    global _paper_unpriced_streak
+
+    quotes: dict[str, float] = {}
+    if _BALANCE_HOLDINGS_MARKER not in balance_text:
+        return quotes
+
+    lines = balance_text.split(_BALANCE_HOLDINGS_MARKER)[1].split("\n")
+    unpriced: list[str] = []
+    conflicted: set[str] = set()
+
+    for i, line in enumerate(lines):
+        if not line.startswith("- "):
+            continue
+        match = STOCK_LINE_RE.match(line)
+        if match is None:
+            # 형식 위반 줄 경고는 같은 텍스트를 먼저 파싱하는 _parse_balance_holdings가 낸다.
+            continue
+        code = match.group("code")
+        name = match.group("name").strip()
+
+        price: float | None = None
+        qty_match = _PAPER_QTY_RE.search(line)
+        amount_match = (
+            _PAPER_EVAL_AMOUNT_RE.search(lines[i + 1]) if i + 1 < len(lines) else None
+        )
+        if qty_match is not None and amount_match is not None:
+            quantity = int(qty_match.group("qty").replace(",", ""))
+            amount = int(amount_match.group("amount").replace(",", ""))
+            if quantity > 0 and amount > 0 and amount % quantity == 0:
+                price = float(amount // quantity)
+
+        if price is None:
+            unpriced.append(name)
+            continue
+        if code in conflicted:
+            continue
+        if code in quotes and quotes[code] != price:
+            del quotes[code]
+            conflicted.add(code)
+            unpriced.append(name)
+            continue
+        quotes[code] = price
+
+    if unpriced:
+        _paper_unpriced_streak += 1
+        if _paper_unpriced_streak == 1 or _paper_unpriced_streak % 6 == 0:
+            logger.warning(
+                "잔고 평가금액으로 현재가를 얻지 못한 종목 %d건은 시세를 갱신하지 않습니다"
+                "(%d회 연속, 예시 최대 3건): %r. 평가금액이 비었거나 0원·소수이거나 수량으로 "
+                "나누어떨어지지 않는 경우입니다.",
+                len(unpriced), _paper_unpriced_streak, unpriced[:3],
+            )
+        else:
+            logger.debug(
+                "평가금액으로 현재가를 얻지 못한 종목 %d건이 %d회 연속됩니다.",
+                len(unpriced), _paper_unpriced_streak,
+            )
+    else:
+        _paper_unpriced_streak = 0
+    return quotes
+
+
+def _sync_portfolio_prices_from_paper_balance(balance_text: str, session: Session) -> int | None:
+    """모의투자 배포에서 get_balance 텍스트의 평가금액으로 Portfolio 시세를 채웁니다.
+
+    호출처는 둘이고 둘 다 모의투자 대체 응답을 받은 뒤에만 부른다:
+      - _sync_portfolio_prices_from_rlz_pl의 대체 응답 분기(대체 응답 본문이 곧 get_balance
+        리포트다)
+      - _refresh_portfolio_prices의 건너뛰는 주기(같은 주기의 get_balance 응답)
+
+    반환값 규칙은 _sync_portfolio_prices_from_rlz_pl과 같다 — int는 갱신한 행 수, None은
+    응답을 믿을 수 없어 아무것도 쓰지 않은 경우. 잘림·마커 부재는 같은 텍스트로 도는 잔고
+    동기화(_sync_portfolio_from_balance, monitor의 잘림 경고)가 이미 warning·error로 알리므로
+    여기서는 debug로만 남긴다.
+    """
+    if is_balance_truncated(balance_text):
+        logger.debug("잔고 연속조회가 잘려 모의투자 시세 갱신을 건너뜁니다.")
+        return None
+    if _BALANCE_HOLDINGS_MARKER not in balance_text:
+        logger.debug("잔고 응답에 보유 종목 섹션이 없어 모의투자 시세 갱신을 건너뜁니다.")
+        return None
+
+    quotes = _parse_paper_balance_quotes(balance_text)
+    if not quotes:
+        return 0
+    return _apply_quotes(quotes, session)
 
 
 def _parse_rlz_pl_quotes(report_text: str) -> dict[str, float]:
@@ -710,6 +846,8 @@ def _sync_portfolio_prices_from_rlz_pl(report_text: str, session: Session) -> in
          게다가 **항상** 오므로 연속 횟수로 억제한다(받은 응답 기준 첫 회와 이후 6회마다).
          억제 강도가 실패 경로보다 높은 것이 맞다 — 실패는 드물고 이쪽은 상시다.
          호출 자체를 줄이는 일은 호출처(_refresh_portfolio_prices)가 맡는다.
+         실현손익 시세는 없지만 대체 응답 본문(get_balance 리포트)의 평가금액 ÷ 수량으로
+         시세를 채운다(_sync_portfolio_prices_from_paper_balance). 그 반환값을 그대로 돌려준다.
       2) 연속조회 잘림 — 부분 응답이라 warning. 얻은 종목만 써도 행이 지워지지는
          않지만, 잘린 응답은 마지막 블록이 중간에서 끊겨 있을 수 있고 "의심스러운
          응답으로는 쓰지 않는다"를 잔고 동기화와 갈라 둘 이유가 없습니다.
@@ -727,15 +865,17 @@ def _sync_portfolio_prices_from_rlz_pl(report_text: str, session: Session) -> in
         # 줄인 뒤 첫 회 + 약 6시간에 한 번이 됩니다.
         if _paper_fallback_streak == 1 or _paper_fallback_streak % 6 == 0:
             logger.info(
-                "모의투자 계좌는 실현손익 TR을 지원하지 않아 이번 주기 시세 갱신을 건너뜁니다 "
-                "(%d회 연속). 기존 시세와 갱신 시각을 유지합니다.",
+                "모의투자 계좌는 실현손익 TR을 지원하지 않아 잔고 평가금액(÷ 수량)으로 시세를 "
+                "채웁니다(%d회 연속).",
                 _paper_fallback_streak,
             )
         else:
             logger.debug(
                 "모의투자 대체 응답이 %d회 연속됩니다.", _paper_fallback_streak
             )
-        return None
+        # 대체 응답 본문은 get_balance 리포트 + 안내 문구다(index.js의 getBalanceRlzPl 첫 분기).
+        # 안내 줄은 "- "로 시작하지 않고 잘림 판별자("조회가 중단되어")도 없어 그대로 넘긴다.
+        return _sync_portfolio_prices_from_paper_balance(report_text, session)
 
     if _paper_fallback_streak:
         logger.info(
@@ -811,6 +951,17 @@ def _sync_portfolio_prices_from_rlz_pl(report_text: str, session: Session) -> in
             )
         return 0
 
+    return _apply_quotes(quotes, session)
+
+
+def _apply_quotes(quotes: dict[str, float], session: Session) -> int:
+    """종목코드 → 현재가를 Portfolio에 쓰고 price_updated_at을 찍습니다 (#196).
+
+    시세를 쓰는 곳은 이 함수 하나다. 실전(_sync_portfolio_prices_from_rlz_pl)과
+    모의투자(_sync_portfolio_prices_from_paper_balance) 경로가 값 검사를 마친 뒤 여기로 모인다 —
+    스탬프를 찍는 줄이 하나여야 "시세를 갱신한 시각"의 뜻이 갈리지 않는다.
+    행을 만들지도 지우지도 않으며, 반환값은 갱신한 행 수다.
+    """
     now = datetime.now(timezone.utc)
     updated = 0
     # pop이 아니라 get으로 읽고 매칭된 코드를 따로 모은다. Portfolio.stock_code에는
@@ -845,7 +996,7 @@ def _sync_portfolio_prices_from_rlz_pl(report_text: str, session: Session) -> in
     if leftover:
         # 잔고 동기화가 아직 넣지 않은 코드입니다. 다음 주기에 행이 생기면 붙습니다.
         logger.info(
-            "실현손익 응답의 %d개 종목이 Portfolio에 없어 건너뛰었습니다: %r",
+            "시세 응답의 %d개 종목이 Portfolio에 없어 건너뛰었습니다: %r",
             len(leftover), leftover[:5],
         )
     # 종목 수가 아니라 **행 수**다. stock_code에 유니크 제약이 없어 같은 코드의 행이
@@ -854,7 +1005,7 @@ def _sync_portfolio_prices_from_rlz_pl(report_text: str, session: Session) -> in
     return updated
 
 
-async def _refresh_portfolio_prices() -> int | None:
+async def _refresh_portfolio_prices(balance_text: str | None = None) -> int | None:
     """get_balance_rlz_pl을 호출해 Portfolio 시세를 갱신합니다 (#196).
 
     도구 호출 실패는 "이번 주기에 시세를 못 얻었다"이지 "시세를 영영 모른다"가
@@ -883,16 +1034,26 @@ async def _refresh_portfolio_prices() -> int | None:
     계좌는 504 타임아웃이 아니라 도구의 잘림 안내를 받고, _sync_portfolio_prices_from_rlz_pl의
     잘림 경고가 사유를 싣습니다. 값의 근거, 18~28초 계좌가 치르는 대가, 페이지 간 지연이
     있을 때의 한도(#210)는 상수 주석에 있습니다.
+
+    balance_text: 같은 주기에 monitor_market_task가 받은 get_balance 응답(실패했으면 None).
+    모의투자 대체 응답 뒤 도구를 건너뛰는 주기에만 읽습니다 — 그 주기에도 잔고 평가금액으로
+    시세를 채워야 price_updated_at이 TTL(30분) 안에 머뭅니다. 건너뛰기는 한 시간에 다섯 주기라
+    이것 없이는 모의투자 시세가 대부분의 시간 "모름"이 됩니다. 추가 KIS 호출은 없습니다.
+    실전 배포에서는 건너뛰는 주기가 없으므로 이 인자를 읽지 않습니다.
     """
     global _quote_failure_streak, _last_quote_error, _paper_fallback_skip_remaining
 
     if _paper_fallback_skip_remaining > 0:
         _paper_fallback_skip_remaining -= 1
         logger.debug(
-            "모의투자 대체 응답을 받은 뒤라 이번 주기 시세 조회를 건너뜁니다(남은 %d주기).",
+            "모의투자 대체 응답을 받은 뒤라 이번 주기 시세 도구 호출을 건너뛰고 같은 주기 "
+            "잔고 평가금액으로 시세를 채웁니다(남은 %d주기).",
             _paper_fallback_skip_remaining,
         )
-        return None
+        if balance_text is None:
+            return None
+        with Session(engine) as session:
+            return _sync_portfolio_prices_from_paper_balance(balance_text, session)
 
     try:
         report_text = await deps.run_mcp_tool(
