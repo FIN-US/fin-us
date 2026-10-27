@@ -25,7 +25,9 @@ class Portfolio(SQLModel, table=True):
     avg_price: float = Field(default=0.0, description="평균 매입가")
     # 이 값을 채우도록 배선된 프로덕션 경로는 get_balance_rlz_pl(inquire-balance-rlz-pl,
     # TTTC8494R)의 텍스트 리포트를 파싱하는 scheduler.portfolio._sync_portfolio_prices_from_rlz_pl
-    # 하나뿐이다(#196). 잔고 동기화(_sync_portfolio_from_balance)는 이 필드를 읽지도
+    # 하나뿐이다(#196). 모의투자 배포는 실현손익 TR이 없어 그 도구의 대체 응답(get_balance
+    # 리포트)에서 평가금액 ÷ 수량으로 채운다(_sync_portfolio_prices_from_paper_balance). 두 경로
+    # 모두 _apply_quotes 한 곳에서 쓴다. 잔고 동기화(_sync_portfolio_from_balance)는 이 필드를 읽지도
     # 쓰지도 않는다 — get_balance(TTTC8434R) output1에 현재가 필드가 있는지가
     # 미확인이라 그쪽에서 채울 근거가 없고, 덮으면 시세 경로가 방금 쓴 값이 10분마다
     # null로 지워진다(위 upsert 참고).

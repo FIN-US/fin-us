@@ -1390,6 +1390,7 @@ def reset_balance_failure_streak(monkeypatch):
     monkeypatch.setattr("backend.scheduler.portfolio._paper_fallback_skip_remaining", 0)
     monkeypatch.setattr("backend.scheduler.portfolio._rlz_truncation_streak", 0)
     monkeypatch.setattr("backend.scheduler.portfolio._last_rlz_truncation_notice", None)
+    monkeypatch.setattr("backend.scheduler.portfolio._paper_unpriced_streak", 0)
 
 
 def _make_balance_failure_mocks(monkeypatch, mock_run_mcp_tool_fn):
@@ -3566,15 +3567,20 @@ def test_sync_portfolio_prices_skips_when_marker_absent(portfolio_session, caplo
     )
 
 
-def test_sync_portfolio_prices_treats_paper_fallback_as_no_quote(portfolio_session, caplog):
-    """모의투자 대체 응답은 error가 아니라 "이번 주기 시세 없음"이다.
+def test_sync_portfolio_prices_fills_paper_fallback_from_balance_eval_amount(
+    portfolio_session, caplog
+):
+    """모의투자 대체 응답은 error가 아니고, 그 본문의 평가금액 ÷ 수량으로 시세를 채운다.
 
     get_balance_rlz_pl은 실전 계좌 전용이라 모의투자에서는 index.js가 get_balance
     요약으로 대체한다. 그 응답에는 [보유 종목] 마커가 없으므로, 이 분기가 없으면
     모의투자 배포에서 10분마다 error가 쌓인다 — 그 배포에서는 정상 동작인데도.
+    전에는 여기서 시세를 건너뛰어 모의투자 current_price가 영원히 비었다(Unity 파이 차트가
+    아무것도 그리지 못했다). 이제 대체 응답 본문의 "평가금액 700,000원"을 10주로 나눠 쓴다.
 
     이 테스트가 잡는 mutation: 모의투자 가드 제거 또는 마커 가드 뒤로 이동 →
-    ERROR 레코드가 생겨 아래 단언이 실패한다.
+    ERROR 레코드가 생겨 아래 단언이 실패한다. 대체 분기에서 평가금액 경로를 부르지 않고
+    None을 돌려주던 이전 동작으로 되돌리면 시세가 60000에 머물러 실패한다.
     """
     import logging
     from sqlmodel import select
@@ -3603,8 +3609,10 @@ def test_sync_portfolio_prices_treats_paper_fallback_as_no_quote(portfolio_sessi
     with caplog.at_level(logging.DEBUG, logger="backend.scheduler"):
         result = _sync_portfolio_prices_from_rlz_pl(paper_text, portfolio_session)
 
-    assert result is None
-    assert portfolio_session.exec(select(Portfolio)).one().current_price == 60000.0
+    assert result == 1
+    row = portfolio_session.exec(select(Portfolio)).one()
+    assert row.current_price == 70000.0
+    assert row.price_updated_at is not None
     assert not [r for r in caplog.records if r.levelno >= logging.ERROR], (
         "모의투자 배포에서는 매 주기의 정상 동작이므로 error가 아니다"
     )
@@ -3649,7 +3657,8 @@ def test_sync_portfolio_prices_suppresses_repeated_paper_fallback_info(
 
     with caplog.at_level(logging.DEBUG, logger="backend.scheduler"):
         for _ in range(7):
-            assert _sync_portfolio_prices_from_rlz_pl(paper_text, portfolio_session) is None
+            # 세션에 행이 없어 갱신한 행은 0이다(응답은 읽었으므로 None이 아니다).
+            assert _sync_portfolio_prices_from_rlz_pl(paper_text, portfolio_session) == 0
 
     infos = [
         r for r in caplog.records
@@ -3686,6 +3695,12 @@ async def test_refresh_portfolio_prices_skips_calls_after_paper_fallback(monkeyp
         return paper_text
 
     monkeypatch.setattr("backend.scheduler.deps.run_mcp_tool", mock_run_mcp_tool)
+    # 대체 응답은 이제 평가금액으로 시세를 쓴다. 이 테스트는 호출 횟수만 보므로 DB에
+    # 닿지 않게 그 경로를 대체한다(잔고를 넘기지 않은 주기는 None).
+    monkeypatch.setattr(
+        "backend.scheduler.portfolio._sync_portfolio_prices_from_paper_balance",
+        lambda balance_text, session: None,
+    )
 
     for _ in range(7):
         assert await _refresh_portfolio_prices() is None
@@ -4098,3 +4113,216 @@ async def test_monitor_market_task_keeps_balance_sync_when_quote_tool_fails(monk
     assert not [r for r in caplog.records if r.levelno >= logging.ERROR], (
         "시세를 못 얻는 것은 감시·주문 어느 것도 막지 않으므로 error가 아니다"
     )
+
+
+# ---------------------------------------------------------------------------
+# 모의투자 시세: 잔고 평가금액 ÷ 수량
+# ---------------------------------------------------------------------------
+
+# get_balance 텍스트 포맷 계약(#137). JS(balance.test.js)는 formatBalanceReport(input) ===
+# expected_text를 검증하므로, 여기서 같은 expected_text를 파싱하면 평가금액 파서가 JS 포맷에
+# 고정된다 — 포맷이 바뀌면 둘 중 한쪽이 red가 된다.
+_BALANCE_FORMAT_CONTRACT = json.loads(
+    (
+        pathlib.Path(__file__).parent.parent.parent
+        / "mcp" / "trading" / "tests" / "fixtures" / "balance_report.json"
+    ).read_text(encoding="utf-8")
+)
+
+
+def test_parse_paper_balance_quotes_reads_shared_balance_fixture():
+    """공유 픽스처의 get_balance 텍스트에서 평가금액 ÷ 수량을 현재가로 읽는다.
+
+    픽스처: 삼성전자 3주 평가금액 210,000원 → 70,000원, NAVER 1주 200,500원 → 200,500원.
+    평단가(67,000·201,000)와 다른 값이어야 평단가를 현재가로 오인하는 회귀가 드러난다.
+
+    이 테스트가 잡는 mutation: _PAPER_EVAL_AMOUNT_RE를 평단가 쪽으로 바꾸거나(67000이 나온다),
+    수량으로 나누지 않는 회귀(210000이 나온다), 쉼표를 지우지 않는 회귀(파싱 0건).
+    """
+    from backend.scheduler.portfolio import _parse_paper_balance_quotes
+
+    quotes = _parse_paper_balance_quotes(_BALANCE_FORMAT_CONTRACT["normal"]["expected_text"])
+
+    assert quotes == {"005930": 70000.0, "035420": 200500.0}
+
+
+def _paper_block(qty: str, amount: str) -> str:
+    return (
+        "[계좌 잔고 현황]\n- 총 평가금액: 0원\n\n[보유 종목 리스트]\n"
+        f"- 삼성전자 (005930) · {qty}주\n"
+        f"  평단가 67,000원 → 평가금액 {amount}\n"
+        "  손익 +0원 · 수익률 ⚪ 0.00%"
+    )
+
+
+@pytest.mark.parametrize(
+    "qty,amount",
+    [
+        ("3", "-"),  # evlu_amt가 비면 formatAmount가 "-"를 낸다
+        ("3", "0원"),  # 0원은 시세가 아니라 "모름"이다(#122)
+        ("3", "210,001원"),  # 나누어떨어지지 않으면 현재가 × 수량이 아니다
+        ("3", "210,000.5원"),  # 소수 평가금액 — 정수부만 잘라 읽지 않는다
+        ("3", "***,***원"),  # 마스킹
+        ("3", "21,0000원"),  # 쉼표 위치가 어긋난 값
+        ("3", "210,000"),  # "원"이 잘린 줄
+        ("0", "210,000원"),  # 수량 0 — 0으로 나누지 않는다
+        ("-", "210,000원"),  # hldg_qty가 비어 formatQuantity가 "-"를 낸 줄
+    ],
+)
+def test_parse_paper_balance_quotes_fails_closed(qty, amount, caplog):
+    """평가금액·수량이 의심스러우면 그 종목은 결과에서 빠진다(쓰지 않는다).
+
+    이 테스트가 잡는 mutation: 나누어떨어짐 검사 제거(210,001 → 70000.33), 0원 검사 제거,
+    정규식 줄 끝 고정($) 제거(210,000.5원의 정수부를 읽는다), 세 자리 쉼표 고정을 [\\d,]+로
+    느슨하게 하는 회귀(21,0000원을 읽는다), 수량 0 검사 제거(ZeroDivisionError).
+    """
+    import logging
+    from backend.scheduler.portfolio import _parse_paper_balance_quotes
+
+    with caplog.at_level(logging.WARNING, logger="backend.scheduler"):
+        quotes = _parse_paper_balance_quotes(_paper_block(qty, amount))
+
+    assert quotes == {}
+    assert any("삼성전자" in r.getMessage() for r in caplog.records), (
+        "값을 버린 종목은 경고로 이름을 불러야 한다"
+    )
+
+
+def test_parse_paper_balance_quotes_drops_conflicting_duplicate_codes():
+    """같은 코드가 서로 다른 현재가를 내면 어느 쪽도 쓰지 않는다. 값이 같으면 쓴다.
+
+    이 테스트가 잡는 mutation: 엇갈림 검사를 지워 처음 값이나 마지막 값을 채택하는 회귀.
+    """
+    from backend.scheduler.portfolio import _parse_paper_balance_quotes
+
+    def block(code: str, qty: int, amount: int) -> str:
+        return f"- 종목 ({code}) · {qty}주\n  평단가 1,000원 → 평가금액 {amount:,}원\n  손익 +0원 · 수익률 -"
+
+    text = "[보유 종목 리스트]\n" + "\n\n".join(
+        [
+            block("005930", 1, 70_000),
+            block("005930", 2, 142_000),  # 71,000 — 엇갈림
+            block("035420", 1, 200_000),
+            block("035420", 2, 400_000),  # 200,000 — 같음
+        ]
+    )
+
+    assert _parse_paper_balance_quotes(text) == {"035420": 200000.0}
+
+
+def test_sync_paper_balance_prices_skips_truncated_or_unreadable(portfolio_session):
+    """잘린 잔고(공유 픽스처의 truncated)나 섹션이 없는 응답으로는 시세를 쓰지 않는다.
+
+    이 테스트가 잡는 mutation: 잘림 가드 제거 → 삼성전자 시세가 70,000으로 덮인다.
+    마커 가드 제거 → 빈 응답에서 None 대신 0이 나온다.
+    """
+    from sqlmodel import select
+    from backend.core.models import Portfolio
+    from backend.scheduler.portfolio import _sync_portfolio_prices_from_paper_balance
+
+    portfolio_session.add(
+        Portfolio(stock_code="005930", stock_name="삼성전자", quantity=3, avg_price=67000, current_price=60000)
+    )
+    portfolio_session.commit()
+
+    text = _BALANCE_FORMAT_CONTRACT["truncated"]["expected_text"]
+    assert _sync_portfolio_prices_from_paper_balance(text, portfolio_session) is None
+    assert _sync_portfolio_prices_from_paper_balance("빈 응답", portfolio_session) is None
+    row = portfolio_session.exec(select(Portfolio)).one()
+    assert row.current_price == 60000.0
+    assert row.price_updated_at is None
+
+
+@pytest.mark.asyncio
+async def test_refresh_portfolio_prices_fills_paper_prices_on_skipped_cycles(monkeypatch):
+    """모의투자에서 도구를 건너뛰는 주기에도 같은 주기 잔고로 시세를 채운다(추가 호출 없음).
+
+    건너뛰기는 한 시간에 다섯 주기라, 대체 응답을 받은 주기에만 쓰면 price_updated_at이
+    TTL(30분)을 넘어 대부분의 시간 price_known=False가 된다. 잔고를 못 받은 주기(None)에는
+    아무것도 쓰지 않는다.
+
+    이 테스트가 잡는 mutation: 건너뛰는 주기에 balance_text를 무시하고 None을 돌려주는 회귀
+    (results가 [1, None, ...]이 된다), 그 주기에 도구를 다시 부르는 회귀(호출이 늘어난다).
+    """
+    from sqlmodel import SQLModel, Session as _Session, create_engine, select
+    from sqlmodel.pool import StaticPool
+    from backend.core.models import Portfolio
+    from backend.scheduler.portfolio import _refresh_portfolio_prices
+
+    eng = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    SQLModel.metadata.create_all(eng)
+    with _Session(eng) as s:
+        s.add(Portfolio(stock_code="005930", stock_name="삼성전자", quantity=1, avg_price=213500))
+        s.commit()
+    monkeypatch.setattr("backend.scheduler.portfolio.engine", eng)
+
+    calls: list[str] = []
+    balance_text = (
+        "[계좌 잔고 현황]\n\n[보유 종목 리스트]\n"
+        "- 삼성전자 (005930) · 1주\n  평단가 213,500원 → 평가금액 213,500원\n  손익 0원 · 수익률 0.00%"
+    )
+
+    async def mock_run_mcp_tool(params, name, args):
+        calls.append(name)
+        return balance_text + _PAPER_FALLBACK_CONTRACT["note"]
+
+    monkeypatch.setattr("backend.scheduler.deps.run_mcp_tool", mock_run_mcp_tool)
+
+    results = [await _refresh_portfolio_prices(balance_text) for _ in range(5)]
+    assert await _refresh_portfolio_prices(None) is None
+
+    # 1주기에 도구 호출(대체 응답으로 갱신), 2~6주기는 건너뛰며 그중 2~5주기는 잔고로 갱신.
+    assert calls == ["get_balance_rlz_pl"], calls
+    assert results == [1, 1, 1, 1, 1], results
+    with _Session(eng) as s:
+        row = s.exec(select(Portfolio)).one()
+    assert row.current_price == 213500.0
+    assert row.price_updated_at is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("balance_fails", [False, True])
+async def test_monitor_market_task_passes_balance_text_to_price_refresh(monkeypatch, balance_fails):
+    """감시 주기는 이번 주기 잔고 응답을 시세 갱신에 넘기고, 잔고가 실패하면 None을 넘긴다.
+
+    이 테스트가 잡는 mutation: 인자 없이 부르는 회귀(모의투자 건너뛰는 주기에 시세가 끊긴다),
+    잔고 실패 때도 무언가를 넘기는 회귀.
+    """
+    from backend.scheduler.monitor import SignalSource, monitor_market_task
+
+    balance_text = _make_balance_text(("삼성전자", "005930", 1, 213500))
+    received: list[object] = []
+
+    @asynccontextmanager
+    async def unavailable_redis_state():
+        raise ConnectionError("redis unavailable")
+        yield
+
+    async def mock_run_mcp_tool(params, name, args):
+        if name == "get_balance":
+            if balance_fails:
+                raise RuntimeError("잔고 실패")
+            return balance_text
+        return "news"
+
+    async def mock_refresh(*args):
+        received.append(args)
+        return None
+
+    async def mock_score_signal(stock, current, last, *, source, provider):
+        return _scored(False)
+
+    monkeypatch.setattr("backend.scheduler.deps.redis_state", unavailable_redis_state)
+    monkeypatch.setattr(
+        "backend.scheduler.monitor.SIGNAL_SOURCES",
+        [SignalSource(name="news", mcp_params=object(), tool_name="get_market_news")],
+    )
+    monkeypatch.setattr("backend.scheduler.deps.run_mcp_tool", mock_run_mcp_tool)
+    monkeypatch.setattr("backend.scheduler.monitor._sync_portfolio_from_balance", lambda *a, **k: 1)
+    monkeypatch.setattr("backend.scheduler.monitor._refresh_portfolio_prices", mock_refresh)
+    monkeypatch.setattr("backend.scheduler.monitor.score_signal", mock_score_signal)
+    monkeypatch.setattr("backend.core.ws_manager.manager.broadcast", _resolved_broadcast_mock())
+
+    await monitor_market_task(watchlist_repo=FakeWatchlistRepo())
+
+    assert received == [(None if balance_fails else balance_text,)]
