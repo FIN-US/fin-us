@@ -932,6 +932,10 @@ async def test_earnings_command_combines_dart_news_and_nat_analysis():
     assert "뉴스: 반도체 수요 회복" in prompt
     assert "컨센서스 대비 서프라이즈/미스" in prompt
     assert "다음 분기 전망" in prompt
+    # 도구가 준 조·억 표기와 기준 기간을 그대로 옮기라고 지시한다 — 원 단위 15자리를 옮기거나
+    # "2026Q2"만 남겨 3개월 값인지 누적인지 모르게 되는 답을 막는다.
+    assert "조·억 단위 표기를 그대로 옮기고 새로 환산하지 말라" in prompt
+    assert "기준 기간(몇 분기·몇 개월 값인지, 연간인지)과 YoY 비교 기준을 적어라" in prompt
     assert "Markdown 문법" in prompt
     assert "호재`, `악재`, `중립" in prompt
     assert notifier.actions == ["typing"]
